@@ -1,5 +1,11 @@
+const express =
+require("express");
+
+const router =
+express.Router();
+
 /* =========================
-   IMPORT AGENTS
+   AGENTS
 ========================= */
 
 const intentAgent =
@@ -11,178 +17,131 @@ require("../agents/planningAgent");
 const builderAgent =
 require("../agents/builderAgent");
 
-const fixAgent =
-require("../agents/fixAgent");
+const masterAgent =
+require("../agents/masterAgent");
 
 const deployAgent =
 require("../agents/deployAgent");
 
 /* =========================
-   AI ROUTER
+   MAIN AI ROUTE
 ========================= */
 
-async function aiRouter(userPrompt){
+router.post(
 
-  try{
+  "/ai",
 
-    /* =========================
-       STEP 1
-       UNDERSTAND INTENT
-    ========================= */
+  async (req,res) => {
 
-    const intent =
-    await intentAgent(
-      userPrompt
-    );
+    try{
 
-    if(
-      !intent.success
-    ){
-
-      return {
-
-        success:false,
-
-        error:
-        "Intent Agent Failed"
-
-      };
-
-    }
-
-    /* =========================
-       INTENT TYPE
-    ========================= */
-
-    const intentType =
-    intent.data.intentType;
-
-    /* =========================
-       BUILD PROJECT
-    ========================= */
-
-    if(
-      intentType ===
-      "build_project"
-    ){
+      const {
+        prompt
+      } = req.body;
 
       /* =========================
-         PLANNING
+         STEP 1
+         INTENT ANALYSIS
+      ========================= */
+
+      const intent =
+      await intentAgent(
+        prompt
+      );
+
+      /* =========================
+         STEP 2
+         PROJECT PLANNING
       ========================= */
 
       const plan =
       await planningAgent(
-        userPrompt
+        intent
       );
 
-      if(
-        !plan.success
-      ){
-
-        return {
-
-          success:false,
-
-          error:
-          "Planning Failed"
-
-        };
-
-      }
-
       /* =========================
-         BUILD
+         STEP 3
+         BUILD PROJECT
       ========================= */
 
       const build =
       await builderAgent(
-        plan.data
+        plan
       );
 
-      return build;
+      /* =========================
+         STEP 4
+         DEPLOY PREPARATION
+      ========================= */
 
-    }
+      const deploy =
+      await deployAgent(
+        build
+      );
 
-    /* =========================
-       FIX CODE
-    ========================= */
+      /* =========================
+         STEP 5
+         MASTER RESPONSE
+      ========================= */
 
-    if(
-      intentType ===
-      "fix_bug"
-    ){
+      const finalResponse =
+      await masterAgent({
 
-      const fixed =
-      await fixAgent({
+        prompt,
+        intent,
+        plan,
+        build,
+        deploy
+      });
 
-        prompt:userPrompt
+      /* =========================
+         SUCCESS RESPONSE
+      ========================= */
+
+      res.json({
+
+        success:true,
+
+        reply:
+
+finalResponse.reply ||
+
+`
+✅ Idea understood
+
+🧠 AI planning completed
+
+⚡ Fullstack architecture generated
+
+🚀 Deployment pipeline prepared
+
+🌐 Ready for cloud deployment
+`
 
       });
 
-      return fixed;
-
     }
 
-    /* =========================
-       DEPLOY
-    ========================= */
+    catch(error){
 
-    if(
-      intentType ===
-      "deploy_project"
-    ){
+      console.log(error);
 
-      const deployed =
-      await deployAgent({
+      res.status(500).json({
 
-        prompt:userPrompt
+        success:false,
+
+        reply:
+`
+❌ AI system failed
+`
 
       });
 
-      return deployed;
-
     }
 
-    /* =========================
-       DEFAULT
-    ========================= */
-
-    return {
-
-      success:true,
-
-      data:{
-
-        message:
-`
-Request analyzed successfully.
-`
-
-      }
-
-    };
-
   }
 
-  catch(error){
-
-    console.log(error);
-
-    return {
-
-      success:false,
-
-      error:error.message
-
-    };
-
-  }
-
-}
-
-/* =========================
-   EXPORT
-========================= */
+);
 
 module.exports =
-aiRouter;
+router;
