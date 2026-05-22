@@ -42,6 +42,8 @@ require("./server/routes/aiRoutes");
 
 const deployRoutes =
 require("./server/routes/deployRoutes");
+const paymentRoutes =
+require("./server/routes/paymentRoutes");
 
 /* =========================
    SERVICES
@@ -75,7 +77,8 @@ app.use(express.urlencoded({
 
   extended:true
 
-}));
+})
+   );
 
 /* =========================
    API ROUTES
@@ -101,6 +104,14 @@ app.use(
   "/api/auth",
 
   authRoutes
+
+);
+
+app.use(
+
+  "/api/payment",
+
+  paymentRoutes
 
 );
 
