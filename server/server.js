@@ -46,6 +46,8 @@ const paymentRoutes =
 require("./server/routes/paymentRoutes");
 const webhookRoutes =
 require("./server/routes/webhookRoutes");
+const subscriptionRoutes =
+require("./server/routes/subscriptionRoutes");
 
 /* =========================
    SERVICES
@@ -122,6 +124,13 @@ app.use(
   "/api/webhook",
 
   webhookRoutes
+
+);
+app.use(
+
+  "/api/subscription",
+
+  subscriptionRoutes
 
 );
 
