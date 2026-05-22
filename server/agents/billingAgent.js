@@ -4,17 +4,21 @@ const plans = [
 
     name:"Starter",
 
-    price:7,
+    price:19,
 
     currency:"USD",
 
-    ram:"1GB",
+    ram:"2GB",
 
     cpu:"1 vCPU",
 
-    storage:"10GB",
+    storage:"25GB",
 
-    bandwidth:"100GB"
+    bandwidth:"250GB",
+
+    aiLevel:"Basic AI",
+
+    support:"Community Support"
 
   },
 
@@ -22,23 +26,27 @@ const plans = [
 
     name:"Pro",
 
-    price:25,
+    price:49,
 
     currency:"USD",
 
-    ram:"4GB",
+    ram:"8GB",
 
-    cpu:"2 vCPU",
+    cpu:"4 vCPU",
 
-    storage:"50GB",
+    storage:"100GB",
 
-    bandwidth:"500GB"
+    bandwidth:"1TB",
+
+    aiLevel:"Advanced AI",
+
+    support:"Priority Support"
 
   },
 
   {
 
-    name:"Enterprise",
+    name:"Business",
 
     price:99,
 
@@ -48,17 +56,21 @@ const plans = [
 
     cpu:"8 vCPU",
 
-    storage:"200GB",
+    storage:"250GB",
 
-    bandwidth:"Unlimited"
+    bandwidth:"Unlimited",
+
+    aiLevel:"Business AI Automation",
+
+    support:"24/7 Premium Support"
 
   },
 
   {
 
-    name:"Ultra Enterprise",
+    name:"Enterprise",
 
-    price:199,
+    price:299,
 
     currency:"USD",
 
@@ -70,9 +82,17 @@ const plans = [
 
     bandwidth:"Unlimited",
 
+    aiLevel:"Enterprise AI Infrastructure",
+
+    support:"Dedicated Success Manager",
+
     prioritySupport:true,
 
-    dedicatedInfrastructure:true
+    dedicatedInfrastructure:true,
+
+    autoScaling:true,
+
+    advancedMonitoring:true
 
   }
 
