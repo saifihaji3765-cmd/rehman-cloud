@@ -35,6 +35,8 @@ const {
    ROUTES
 ========================= */
 
+const authRoutes =
+require("./server/routes/authRoutes");
 const aiRoutes =
 require("./server/routes/aiRoutes");
 
@@ -92,6 +94,13 @@ app.use(
   "/api/deploy",
 
   deployRoutes
+
+);
+app.use(
+
+  "/api/auth",
+
+  authRoutes
 
 );
 
