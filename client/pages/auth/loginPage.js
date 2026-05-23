@@ -1,174 +1,97 @@
-import authService
-from "../../services/authService.js";
+import {
 
-function createLoginPage(){
+  loginUser
 
-  setTimeout(() => {
+} from "../../services/authService.js";
 
-    initializeLogin();
+/* =========================
+   LOGIN PAGE
+========================= */
 
-  },100);
+export default function loginPage(){
 
   return `
 
-    <section class="auth-page">
+  <section class="auth-page">
 
-      <!-- AUTH CARD -->
+    <div class="auth-card">
 
-      <div class="auth-card">
+      <h1>
+        Welcome Back
+      </h1>
 
-        <!-- TOP -->
+      <p>
+        Login to continue building
+        with Rehman AI Cloud
+      </p>
 
-        <div class="auth-top">
+      <!-- FORM -->
 
-          <div class="auth-logo">
+      <form id="loginForm">
 
-            ⚡ VertexCloud
+        <input
 
-          </div>
+          type="email"
 
-          <h2>
+          id="loginEmail"
 
-            Welcome Back
+          placeholder="Email"
 
-          </h2>
+          required
 
-          <p>
+        />
 
-            Login to your AI cloud workspace
+        <input
 
-          </p>
+          type="password"
 
-        </div>
+          id="loginPassword"
 
-        <!-- FORM -->
+          placeholder="Password"
 
-        <form
-          class="auth-form"
-          id="loginForm"
-        >
+          required
 
-          <!-- EMAIL -->
+        />
 
-          <div class="auth-group">
+        <button type="submit">
 
-            <label>
+          Login
 
-              Email Address
+        </button>
 
-            </label>
+      </form>
 
-            <input
-              type="email"
-              id="loginEmail"
-              placeholder="Enter your email"
-              required
-            />
+      <!-- MESSAGE -->
 
-          </div>
+      <div
+        id="loginMessage"
+      ></div>
 
-          <!-- PASSWORD -->
+    </div>
 
-          <div class="auth-group">
-
-            <label>
-
-              Password
-
-            </label>
-
-            <input
-              type="password"
-              id="loginPassword"
-              placeholder="Enter your password"
-              required
-            />
-
-          </div>
-
-          <!-- BUTTON -->
-
-          <button
-            type="submit"
-            class="auth-btn"
-            id="loginBtn"
-          >
-
-            Login
-
-          </button>
-
-        </form>
-
-        <!-- FOOTER -->
-
-        <div class="auth-footer">
-
-          Don’t have an account?
-
-          <span id="openRegister">
-
-            Register
-
-          </span>
-
-        </div>
-
-      </div>
-
-    </section>
+  </section>
 
   `;
 
 }
 
 /* =========================
-   LOGIN INIT
+   INIT LOGIN
 ========================= */
 
-function initializeLogin(){
+export function initLoginPage(){
 
   const form =
-  document.getElementById(
-    "loginForm"
-  );
+
+    document.getElementById(
+      "loginForm"
+    );
 
   if(!form){
 
     return;
 
   }
-
-  /* =========================
-     REGISTER LINK
-  ========================= */
-
-  const registerLink =
-  document.getElementById(
-    "openRegister"
-  );
-
-  if(registerLink){
-
-    registerLink.addEventListener(
-
-      "click",
-
-      () => {
-
-        window.renderPage(
-          "register"
-        );
-
-      }
-
-    );
-
-  }
-
-  /* =========================
-     LOGIN FORM
-  ========================= */
 
   form.addEventListener(
 
@@ -178,33 +101,31 @@ function initializeLogin(){
 
       e.preventDefault();
 
-      /* =========================
-         VALUES
-      ========================= */
-
       const email =
-      document.getElementById(
-        "loginEmail"
-      ).value;
+
+        document.getElementById(
+          "loginEmail"
+        ).value;
 
       const password =
-      document.getElementById(
-        "loginPassword"
-      ).value;
+
+        document.getElementById(
+          "loginPassword"
+        ).value;
+
+      const messageBox =
+
+        document.getElementById(
+          "loginMessage"
+        );
 
       /* =========================
-         BUTTON
+         LOADING
       ========================= */
 
-      const btn =
-      document.getElementById(
-        "loginBtn"
-      );
+      messageBox.innerHTML =
 
-      btn.innerText =
-      "Logging in...";
-
-      btn.disabled = true;
+      "⚡ Logging in...";
 
       /* =========================
          API
@@ -212,13 +133,13 @@ function initializeLogin(){
 
       const result =
 
-      await authService
-      .loginUser({
+        await loginUser({
 
-        email,
-        password
+          email,
 
-      });
+          password
+
+        });
 
       /* =========================
          SUCCESS
@@ -226,21 +147,16 @@ function initializeLogin(){
 
       if(result.success){
 
-        authService.saveAuth(
-          result
-        );
+        messageBox.innerHTML =
 
-        alert(
-          "Login successful"
-        );
+        "✅ Login successful";
 
-        /* =========================
-           REDIRECT
-        ========================= */
+        setTimeout(() => {
 
-        window.renderPage(
-          "dashboard"
-        );
+          window.location.hash =
+          "#dashboard";
+
+        },1000);
 
       }
 
@@ -250,30 +166,14 @@ function initializeLogin(){
 
       else{
 
-        alert(
+        messageBox.innerHTML =
 
-          result.message ||
-
-          "Login failed"
-
-        );
+        `❌ ${result.message}`;
 
       }
-
-      /* =========================
-         RESET BUTTON
-      ========================= */
-
-      btn.innerText =
-      "Login";
-
-      btn.disabled = false;
 
     }
 
   );
 
 }
-
-export default
-createLoginPage;
