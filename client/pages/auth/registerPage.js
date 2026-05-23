@@ -13,6 +13,8 @@ function createRegisterPage(){
 
     <section class="auth-page">
 
+      <!-- AUTH CARD -->
+
       <div class="auth-card">
 
         <!-- TOP -->
@@ -124,7 +126,7 @@ function createRegisterPage(){
 
           Already have an account?
 
-          <span>
+          <span id="openLogin">
 
             Login
 
@@ -156,6 +158,37 @@ function initializeRegister(){
     return;
 
   }
+
+  /* =========================
+     LOGIN LINK
+  ========================= */
+
+  const loginLink =
+  document.getElementById(
+    "openLogin"
+  );
+
+  if(loginLink){
+
+    loginLink.addEventListener(
+
+      "click",
+
+      () => {
+
+        window.renderPage(
+          "login"
+        );
+
+      }
+
+    );
+
+  }
+
+  /* =========================
+     REGISTER FORM
+  ========================= */
 
   form.addEventListener(
 
@@ -214,7 +247,7 @@ function initializeRegister(){
       });
 
       /* =========================
-         RESPONSE
+         SUCCESS
       ========================= */
 
       if(result.success){
@@ -227,7 +260,19 @@ function initializeRegister(){
           "Account created successfully"
         );
 
+        /* =========================
+           REDIRECT
+        ========================= */
+
+        window.renderPage(
+          "dashboard"
+        );
+
       }
+
+      /* =========================
+         FAILED
+      ========================= */
 
       else{
 
