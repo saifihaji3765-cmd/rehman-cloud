@@ -1,19 +1,99 @@
-import api
-from "./api.js";
-
 /* =========================
-   REGISTER
+   API URL
 ========================= */
 
-async function registerUser(data){
+const API_BASE_URL =
 
-  return await api.post(
+"http://localhost:3000/api/auth";
 
-    "/auth/register",
+/* =========================
+   SIGNUP
+========================= */
 
-    data
+export async function signupUser(
 
-  );
+  userData
+
+){
+
+  try{
+
+    const response =
+
+      await fetch(
+
+        `${API_BASE_URL}/signup`,
+
+        {
+
+          method:"POST",
+
+          headers:{
+            "Content-Type":
+            "application/json"
+          },
+
+          body:JSON.stringify(
+            userData
+          )
+
+        }
+
+      );
+
+    const data =
+    await response.json();
+
+    /* =========================
+       SAVE TOKEN
+    ========================= */
+
+    if(
+
+      data.success &&
+
+      data.data?.token
+
+    ){
+
+      localStorage.setItem(
+
+        "token",
+
+        data.data.token
+
+      );
+
+      localStorage.setItem(
+
+        "user",
+
+        JSON.stringify(
+          data.data.user
+        )
+
+      );
+
+    }
+
+    return data;
+
+  }
+
+  catch(error){
+
+    console.log(error);
+
+    return {
+
+      success:false,
+
+      message:
+      "Signup failed"
+
+    };
+
+  }
 
 }
 
@@ -21,15 +101,90 @@ async function registerUser(data){
    LOGIN
 ========================= */
 
-async function loginUser(data){
+export async function loginUser(
 
-  return await api.post(
+  userData
 
-    "/auth/login",
+){
 
-    data
+  try{
 
-  );
+    const response =
+
+      await fetch(
+
+        `${API_BASE_URL}/login`,
+
+        {
+
+          method:"POST",
+
+          headers:{
+            "Content-Type":
+            "application/json"
+          },
+
+          body:JSON.stringify(
+            userData
+          )
+
+        }
+
+      );
+
+    const data =
+    await response.json();
+
+    /* =========================
+       SAVE TOKEN
+    ========================= */
+
+    if(
+
+      data.success &&
+
+      data.data?.token
+
+    ){
+
+      localStorage.setItem(
+
+        "token",
+
+        data.data.token
+
+      );
+
+      localStorage.setItem(
+
+        "user",
+
+        JSON.stringify(
+          data.data.user
+        )
+
+      );
+
+    }
+
+    return data;
+
+  }
+
+  catch(error){
+
+    console.log(error);
+
+    return {
+
+      success:false,
+
+      message:
+      "Login failed"
+
+    };
+
+  }
 
 }
 
@@ -37,7 +192,7 @@ async function loginUser(data){
    LOGOUT
 ========================= */
 
-function logoutUser(){
+export function logoutUser(){
 
   localStorage.removeItem(
     "token"
@@ -47,37 +202,20 @@ function logoutUser(){
     "user"
   );
 
+  window.location.href =
+  "/";
+
 }
 
 /* =========================
-   SAVE AUTH
+   GET TOKEN
 ========================= */
 
-function saveAuth(data){
+export function getToken(){
 
-  if(data.token){
-
-    localStorage.setItem(
-
-      "token",
-
-      data.token
-
-    );
-
-  }
-
-  if(data.user){
-
-    localStorage.setItem(
-
-      "user",
-
-      JSON.stringify(data.user)
-
-    );
-
-  }
+  return localStorage.getItem(
+    "token"
+  );
 
 }
 
@@ -85,36 +223,28 @@ function saveAuth(data){
    GET USER
 ========================= */
 
-function getUser(){
+export function getUser(){
 
   const user =
 
-  localStorage.getItem(
-    "user"
-  );
+    localStorage.getItem(
+      "user"
+    );
 
   return user
-  ?
-  JSON.parse(user)
-  :
-  null;
+    ? JSON.parse(user)
+    : null;
 
 }
 
 /* =========================
-   EXPORT
+   AUTH CHECK
 ========================= */
 
-export default {
+export function isAuthenticated(){
 
-  registerUser,
+  return !!localStorage.getItem(
+    "token"
+  );
 
-  loginUser,
-
-  logoutUser,
-
-  saveAuth,
-
-  getUser
-
-};
+}
