@@ -11,10 +11,12 @@
   />
 
   <title>
+
     VertexCloud AI
+
   </title>
 
-  <!-- FONT -->
+  <!-- GOOGLE FONT -->
 
   <link
     rel="preconnect"
@@ -43,45 +45,79 @@
 
 <body>
 
-  <!-- APP -->
+  <!-- =========================
+       APP
+  ========================== -->
 
   <div class="app">
 
-    <!-- SIDEBAR -->
+    <!-- =========================
+         SIDEBAR
+    ========================== -->
 
     <aside class="sidebar">
 
+      <!-- LOGO -->
+
       <div class="logo">
+
         ⚡ VertexCloud
+
       </div>
+
+      <!-- MENU -->
 
       <div class="menu">
 
-        <div class="menu-item active">
-          💬 AI Workspace
+        <div
+          class="menu-item active"
+          data-page="dashboard"
+        >
+          💬 Dashboard
         </div>
 
-        <div class="menu-item">
-          📁 Projects
-        </div>
-
-        <div class="menu-item">
+        <div
+          class="menu-item"
+          data-page="deployments"
+        >
           🚀 Deployments
         </div>
 
-        <div class="menu-item">
+        <div
+          class="menu-item"
+          data-page="billing"
+        >
           💳 Billing
         </div>
 
-        <div class="menu-item">
+        <div
+          class="menu-item"
+          data-page="settings"
+        >
           ⚙ Settings
+        </div>
+
+        <div
+          class="menu-item"
+          data-page="login"
+        >
+          🔐 Login
+        </div>
+
+        <div
+          class="menu-item"
+          data-page="register"
+        >
+          👤 Register
         </div>
 
       </div>
 
     </aside>
 
-    <!-- MAIN -->
+    <!-- =========================
+         MAIN
+    ========================== -->
 
     <main class="main">
 
@@ -89,129 +125,17 @@
 
       <div id="navbarContainer"></div>
 
-      <!-- HERO -->
+      <!-- DYNAMIC CONTENT -->
 
-      <section class="hero">
-
-        <div class="badge">
-          Autonomous AI Cloud Engineer
-        </div>
-
-        <h1>
-          Build &
-          Deploy
-          <span>
-            With AI
-          </span>
-        </h1>
-
-        <p>
-          Describe your SaaS, app,
-          automation or AI product.
-          VertexCloud will build,
-          deploy and scale it automatically.
-        </p>
-
-      </section>
-
-      <!-- CHAT -->
-
-      <section
-        class="chat-area"
-        id="chatArea"
-      >
-
-        <div class="ai-message">
-
-          <div class="message-label">
-            AI ARCHITECT
-          </div>
-
-          <div class="message-text">
-
-            Welcome Rehman 👋
-
-            <br /><br />
-
-            Your AI cloud operating system
-            is now active.
-
-            <br /><br />
-
-            I can:
-
-            <br /><br />
-
-            ✅ Generate fullstack apps  
-            ✅ Create SaaS platforms  
-            ✅ Deploy to cloud  
-            ✅ Connect domains  
-            ✅ Configure Docker  
-            ✅ Scale infrastructure  
-
-          </div>
-
-        </div>
-
-      </section>
-
-      <!-- INPUT -->
-
-      <section class="input-wrapper">
-
-        <!-- QUICK ACTIONS -->
-
-        <div class="quick-actions">
-
-          <button class="quick-btn">
-            SaaS Platform
-          </button>
-
-          <button class="quick-btn">
-            AI Website
-          </button>
-
-          <button class="quick-btn">
-            Automation Tool
-          </button>
-
-          <button class="quick-btn">
-            AI Chatbot
-          </button>
-
-          <button class="quick-btn">
-            Admin Dashboard
-          </button>
-
-        </div>
-
-        <!-- INPUT -->
-
-        <div class="input-box">
-
-          <textarea
-
-            id="promptInput"
-
-            placeholder="Describe your AI project..."
-
-          ></textarea>
-
-          <button
-            id="sendBtn"
-          >
-            Generate
-          </button>
-
-        </div>
-
-      </section>
+      <div id="mainContent"></div>
 
     </main>
 
   </div>
 
-  <!-- JS -->
+  <!-- =========================
+       JAVASCRIPT
+  ========================== -->
 
   <script
     type="module"
