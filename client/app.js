@@ -19,6 +19,9 @@ from "./pages/deployment/deploymentPage.js";
 import createSettingsPage
 from "./pages/settings/settingsPage.js";
 
+import authService
+from "./services/authService.js";
+
 /* =========================
    NAVBAR
 ========================= */
@@ -109,6 +112,13 @@ function renderPage(page){
 }
 
 /* =========================
+   GLOBAL ROUTER
+========================= */
+
+window.renderPage =
+renderPage;
+
+/* =========================
    SIDEBAR EVENTS
 ========================= */
 
@@ -147,9 +157,28 @@ menuItems.forEach(item => {
 });
 
 /* =========================
-   DEFAULT PAGE
+   AUTO LOGIN CHECK
 ========================= */
 
-renderPage(
-  "dashboard"
-);
+const user =
+authService.getUser();
+
+/* =========================
+   DEFAULT ROUTE
+========================= */
+
+if(user){
+
+  renderPage(
+    "dashboard"
+  );
+
+}
+
+else{
+
+  renderPage(
+    "login"
+  );
+
+}
