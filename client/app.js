@@ -1,6 +1,24 @@
 import createNavbar
 from "./components/navbar.js";
 
+import createDashboardPage
+from "./pages/dashboard/dashboardPage.js";
+
+import createLoginPage
+from "./pages/auth/loginPage.js";
+
+import createRegisterPage
+from "./pages/auth/registerPage.js";
+
+import createBillingPage
+from "./pages/billing/billingPage.js";
+
+import createDeploymentPage
+from "./pages/deployment/deploymentPage.js";
+
+import createSettingsPage
+from "./pages/settings/settingsPage.js";
+
 /* =========================
    NAVBAR
 ========================= */
@@ -14,58 +32,114 @@ navbarContainer.innerHTML =
 createNavbar();
 
 /* =========================
-   ELEMENTS
+   MAIN CONTENT
 ========================= */
 
-const sendBtn =
+const mainContent =
 document.getElementById(
-  "sendBtn"
-);
-
-const promptInput =
-document.getElementById(
-  "promptInput"
-);
-
-const chatArea =
-document.getElementById(
-  "chatArea"
+  "mainContent"
 );
 
 /* =========================
-   AUTO HEIGHT
+   MENU ITEMS
 ========================= */
 
-promptInput.addEventListener(
-  "input",
-  () => {
+const menuItems =
+document.querySelectorAll(
+  ".menu-item"
+);
 
-    promptInput.style.height =
-    "auto";
+/* =========================
+   ROUTER
+========================= */
 
-    promptInput.style.height =
-    promptInput.scrollHeight +
-    "px";
+function renderPage(page){
+
+  switch(page){
+
+    case "dashboard":
+
+      mainContent.innerHTML =
+      createDashboardPage();
+
+    break;
+
+    case "billing":
+
+      mainContent.innerHTML =
+      createBillingPage();
+
+    break;
+
+    case "deployments":
+
+      mainContent.innerHTML =
+      createDeploymentPage();
+
+    break;
+
+    case "settings":
+
+      mainContent.innerHTML =
+      createSettingsPage();
+
+    break;
+
+    case "login":
+
+      mainContent.innerHTML =
+      createLoginPage();
+
+    break;
+
+    case "register":
+
+      mainContent.innerHTML =
+      createRegisterPage();
+
+    break;
+
+    default:
+
+      mainContent.innerHTML =
+      createDashboardPage();
 
   }
-);
+
+}
 
 /* =========================
-   QUICK BUTTONS
+   SIDEBAR EVENTS
 ========================= */
 
-document
-.querySelectorAll(".quick-btn")
-.forEach(btn => {
+menuItems.forEach(item => {
 
-  btn.addEventListener(
+  item.addEventListener(
     "click",
     () => {
 
-      promptInput.value =
-      btn.innerText;
+      /* REMOVE ACTIVE */
 
-      promptInput.focus();
+      menuItems.forEach(el => {
+
+        el.classList.remove(
+          "active"
+        );
+
+      });
+
+      /* ACTIVE */
+
+      item.classList.add(
+        "active"
+      );
+
+      /* PAGE */
+
+      const page =
+      item.dataset.page;
+
+      renderPage(page);
 
     }
   );
@@ -73,284 +147,9 @@ document
 });
 
 /* =========================
-   SEND MESSAGE
+   DEFAULT PAGE
 ========================= */
 
-sendBtn.addEventListener(
-  "click",
-  async () => {
-
-    const prompt =
-    promptInput.value.trim();
-
-    if(!prompt){
-
-      return;
-
-    }
-
-    /* =========================
-       USER MESSAGE
-    ========================= */
-
-    addUserMessage(prompt);
-
-    /* =========================
-       CLEAR
-    ========================= */
-
-    promptInput.value = "";
-
-    promptInput.style.height =
-    "90px";
-
-    /* =========================
-       AI THINKING
-    ========================= */
-
-    const thinkingId =
-    addThinkingMessage();
-
-    try{
-
-      /* =========================
-         API
-      ========================= */
-
-      const response =
-      await fetch(
-
-        "http://localhost:5000/api/ai",
-
-        {
-
-          method:"POST",
-
-          headers:{
-            "Content-Type":
-            "application/json"
-          },
-
-          body:JSON.stringify({
-            prompt
-          })
-
-        }
-
-      );
-
-      const data =
-      await response.json();
-
-      /* =========================
-         REMOVE THINKING
-      ========================= */
-
-      removeThinkingMessage(
-        thinkingId
-      );
-
-      /* =========================
-         AI RESPONSE
-      ========================= */
-
-      addAIMessage(
-
-        data.reply ||
-
-        "AI completed your request."
-
-      );
-
-    }
-
-    catch(error){
-
-      console.log(error);
-
-      removeThinkingMessage(
-        thinkingId
-      );
-
-      addAIMessage(
-
-        "AI server connection failed."
-
-      );
-
-    }
-
-  }
-);
-
-/* =========================
-   USER MESSAGE
-========================= */
-
-function addUserMessage(text){
-
-  const wrapper =
-  document.createElement("div");
-
-  wrapper.className =
-  "user-message-wrapper";
-
-  wrapper.innerHTML = `
-
-    <div class="user-message">
-
-      <div class="message-label">
-        YOU
-      </div>
-
-      <div class="message-text">
-        ${text}
-      </div>
-
-    </div>
-
-  `;
-
-  chatArea.appendChild(
-    wrapper
-  );
-
-  scrollBottom();
-
-}
-
-/* =========================
-   AI MESSAGE
-========================= */
-
-function addAIMessage(text){
-
-  const wrapper =
-  document.createElement("div");
-
-  wrapper.className =
-  "ai-message-wrapper";
-
-  wrapper.innerHTML = `
-
-    <div class="ai-message">
-
-      <div class="message-label">
-        AI ARCHITECT
-      </div>
-
-      <div class="message-text">
-        ${text}
-      </div>
-
-    </div>
-
-  `;
-
-  chatArea.appendChild(
-    wrapper
-  );
-
-  scrollBottom();
-
-}
-
-/* =========================
-   THINKING MESSAGE
-========================= */
-
-function addThinkingMessage(){
-
-  const id =
-  Date.now();
-
-  const wrapper =
-  document.createElement("div");
-
-  wrapper.className =
-  "ai-message-wrapper";
-
-  wrapper.id =
-  "thinking-" + id;
-
-  wrapper.innerHTML = `
-
-    <div class="ai-message">
-
-      <div class="message-label">
-        AI THINKING
-      </div>
-
-      <div class="message-text">
-        ⚡ Understanding your idea...
-        <br /><br />
-        🧠 Planning architecture...
-        <br /><br />
-        🚀 Preparing AI agents...
-      </div>
-
-    </div>
-
-  `;
-
-  chatArea.appendChild(
-    wrapper
-  );
-
-  scrollBottom();
-
-  return id;
-
-}
-
-/* =========================
-   REMOVE THINKING
-========================= */
-
-function removeThinkingMessage(id){
-
-  const el =
-  document.getElementById(
-    "thinking-" + id
-  );
-
-  if(el){
-
-    el.remove();
-
-  }
-
-}
-
-/* =========================
-   SCROLL
-========================= */
-
-function scrollBottom(){
-
-  chatArea.scrollTop =
-  chatArea.scrollHeight;
-
-}
-
-/* =========================
-   ENTER SEND
-========================= */
-
-promptInput.addEventListener(
-  "keydown",
-  (e) => {
-
-    if(
-      e.key === "Enter" &&
-      !e.shiftKey
-    ){
-
-      e.preventDefault();
-
-      sendBtn.click();
-
-    }
-
-  }
+renderPage(
+  "dashboard"
 );
