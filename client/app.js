@@ -1,3 +1,18 @@
+import createNavbar
+from "./components/navbar.js";
+
+/* =========================
+   NAVBAR
+========================= */
+
+const navbarContainer =
+document.getElementById(
+  "navbarContainer"
+);
+
+navbarContainer.innerHTML =
+createNavbar();
+
 /* =========================
    ELEMENTS
 ========================= */
@@ -105,7 +120,7 @@ sendBtn.addEventListener(
       const response =
       await fetch(
 
-        "http://localhost:3000/api/ai",
+        "http://localhost:5000/api/ai",
 
         {
 
