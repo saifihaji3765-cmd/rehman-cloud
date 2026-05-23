@@ -48,6 +48,8 @@ const webhookRoutes =
 require("./server/routes/webhookRoutes");
 const subscriptionRoutes =
 require("./server/routes/subscriptionRoutes");
+const projectRoutes =
+require("./server/routes/projectRoutes");
 
 /* =========================
    SERVICES
@@ -131,6 +133,13 @@ app.use(
   "/api/subscription",
 
   subscriptionRoutes
+
+);
+app.use(
+
+  "/api/projects",
+
+  projectRoutes
 
 );
 
