@@ -4,10 +4,24 @@ from "./components/navbar.js";
 import createDashboardPage
 from "./pages/dashboard/dashboardPage.js";
 
-import createLoginPage
+import createLoginPage,
+
+{
+
+  initLoginPage
+
+}
+
 from "./pages/auth/loginPage.js";
 
-import createRegisterPage
+import createRegisterPage,
+
+{
+
+  initRegisterPage
+
+}
+
 from "./pages/auth/registerPage.js";
 
 import createBillingPage
@@ -19,7 +33,7 @@ from "./pages/deployment/deploymentPage.js";
 import createSettingsPage
 from "./pages/settings/settingsPage.js";
 
-import authService
+import * as authService
 from "./services/authService.js";
 
 /* =========================
@@ -27,11 +41,13 @@ from "./services/authService.js";
 ========================= */
 
 const navbarContainer =
+
 document.getElementById(
   "navbarContainer"
 );
 
 navbarContainer.innerHTML =
+
 createNavbar();
 
 /* =========================
@@ -39,17 +55,9 @@ createNavbar();
 ========================= */
 
 const mainContent =
+
 document.getElementById(
   "mainContent"
-);
-
-/* =========================
-   MENU ITEMS
-========================= */
-
-const menuItems =
-document.querySelectorAll(
-  ".menu-item"
 );
 
 /* =========================
@@ -60,51 +68,102 @@ function renderPage(page){
 
   switch(page){
 
+    /* =========================
+       DASHBOARD
+    ========================= */
+
     case "dashboard":
 
+      if(
+
+        !authService.isAuthenticated()
+
+      ){
+
+        renderPage("login");
+
+        return;
+
+      }
+
       mainContent.innerHTML =
+
       createDashboardPage();
 
     break;
 
+    /* =========================
+       BILLING
+    ========================= */
+
     case "billing":
 
       mainContent.innerHTML =
+
       createBillingPage();
 
     break;
 
+    /* =========================
+       DEPLOYMENTS
+    ========================= */
+
     case "deployments":
 
       mainContent.innerHTML =
+
       createDeploymentPage();
 
     break;
 
+    /* =========================
+       SETTINGS
+    ========================= */
+
     case "settings":
 
       mainContent.innerHTML =
+
       createSettingsPage();
 
     break;
 
+    /* =========================
+       LOGIN
+    ========================= */
+
     case "login":
 
       mainContent.innerHTML =
+
       createLoginPage();
 
+      initLoginPage();
+
     break;
+
+    /* =========================
+       REGISTER
+    ========================= */
 
     case "register":
 
       mainContent.innerHTML =
+
       createRegisterPage();
 
+      initRegisterPage();
+
     break;
+
+    /* =========================
+       DEFAULT
+    ========================= */
 
     default:
 
       mainContent.innerHTML =
+
       createDashboardPage();
 
   }
@@ -116,69 +175,127 @@ function renderPage(page){
 ========================= */
 
 window.renderPage =
+
 renderPage;
 
 /* =========================
    SIDEBAR EVENTS
 ========================= */
 
-menuItems.forEach(item => {
+document.addEventListener(
 
-  item.addEventListener(
-    "click",
-    () => {
+  "click",
 
-      /* REMOVE ACTIVE */
+  (e) => {
 
-      menuItems.forEach(el => {
+    const item =
 
-        el.classList.remove(
-          "active"
-        );
+    e.target.closest(
+      ".menu-item"
+    );
 
-      });
+    if(!item){
 
-      /* ACTIVE */
+      return;
 
-      item.classList.add(
+    }
+
+    /* =========================
+       ACTIVE MENU
+    ========================= */
+
+    document
+
+    .querySelectorAll(
+      ".menu-item"
+    )
+
+    .forEach(el => {
+
+      el.classList.remove(
         "active"
       );
 
-      /* PAGE */
+    });
 
-      const page =
-      item.dataset.page;
+    item.classList.add(
+      "active"
+    );
 
-      renderPage(page);
+    /* =========================
+       PAGE
+    ========================= */
 
-    }
-  );
+    const page =
 
-});
+    item.dataset.page;
+
+    renderPage(page);
+
+  }
+
+);
 
 /* =========================
-   AUTO LOGIN CHECK
+   HASH ROUTER
 ========================= */
 
-const user =
-authService.getUser();
+window.addEventListener(
+
+  "hashchange",
+
+  () => {
+
+    const page =
+
+    window.location.hash
+    .replace("#","");
+
+    renderPage(page);
+
+  }
+
+);
 
 /* =========================
-   DEFAULT ROUTE
+   AUTO ROUTE
 ========================= */
 
-if(user){
+const currentPage =
 
-  renderPage(
-    "dashboard"
-  );
+window.location.hash
+.replace("#","");
+
+/* =========================
+   AUTH CHECK
+========================= */
+
+if(currentPage){
+
+  renderPage(currentPage);
 
 }
 
 else{
 
-  renderPage(
-    "login"
-  );
+  if(
+
+    authService.isAuthenticated()
+
+  ){
+
+    renderPage(
+      "dashboard"
+    );
+
+  }
+
+  else{
+
+    renderPage(
+      "login"
+    );
+
+  }
 
 }
