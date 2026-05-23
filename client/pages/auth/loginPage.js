@@ -106,7 +106,7 @@ function createLoginPage(){
 
           Don’t have an account?
 
-          <span>
+          <span id="openRegister">
 
             Register
 
@@ -138,6 +138,37 @@ function initializeLogin(){
     return;
 
   }
+
+  /* =========================
+     REGISTER LINK
+  ========================= */
+
+  const registerLink =
+  document.getElementById(
+    "openRegister"
+  );
+
+  if(registerLink){
+
+    registerLink.addEventListener(
+
+      "click",
+
+      () => {
+
+        window.renderPage(
+          "register"
+        );
+
+      }
+
+    );
+
+  }
+
+  /* =========================
+     LOGIN FORM
+  ========================= */
 
   form.addEventListener(
 
@@ -190,7 +221,7 @@ function initializeLogin(){
       });
 
       /* =========================
-         RESPONSE
+         SUCCESS
       ========================= */
 
       if(result.success){
@@ -203,7 +234,19 @@ function initializeLogin(){
           "Login successful"
         );
 
+        /* =========================
+           REDIRECT
+        ========================= */
+
+        window.renderPage(
+          "dashboard"
+        );
+
       }
+
+      /* =========================
+         FAILED
+      ========================= */
 
       else{
 
