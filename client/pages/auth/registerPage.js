@@ -1,194 +1,109 @@
-import authService
-from "../../services/authService.js";
+import {
 
-function createRegisterPage(){
+  signupUser
 
-  setTimeout(() => {
+} from "../../services/authService.js";
 
-    initializeRegister();
+/* =========================
+   REGISTER PAGE
+========================= */
 
-  },100);
+export default function registerPage(){
 
   return `
 
-    <section class="auth-page">
+  <section class="auth-page">
 
-      <!-- AUTH CARD -->
+    <div class="auth-card">
 
-      <div class="auth-card">
+      <h1>
+        Create Account
+      </h1>
 
-        <!-- TOP -->
+      <p>
+        Start building AI apps
+        with Rehman AI Cloud
+      </p>
 
-        <div class="auth-top">
+      <!-- FORM -->
 
-          <div class="auth-logo">
+      <form id="registerForm">
 
-            ⚡ VertexCloud
+        <input
 
-          </div>
+          type="text"
 
-          <h2>
+          id="registerName"
 
-            Create Account
+          placeholder="Full Name"
 
-          </h2>
+          required
 
-          <p>
+        />
 
-            Start building with your
-            AI cloud operating system
+        <input
 
-          </p>
+          type="email"
 
-        </div>
+          id="registerEmail"
 
-        <!-- FORM -->
+          placeholder="Email"
 
-        <form
-          class="auth-form"
-          id="registerForm"
-        >
+          required
 
-          <!-- NAME -->
+        />
 
-          <div class="auth-group">
+        <input
 
-            <label>
+          type="password"
 
-              Full Name
+          id="registerPassword"
 
-            </label>
+          placeholder="Password"
 
-            <input
-              type="text"
-              id="registerName"
-              placeholder="Enter your full name"
-              required
-            />
+          required
 
-          </div>
+        />
 
-          <!-- EMAIL -->
+        <button type="submit">
 
-          <div class="auth-group">
+          Create Account
 
-            <label>
+        </button>
 
-              Email Address
+      </form>
 
-            </label>
+      <!-- MESSAGE -->
 
-            <input
-              type="email"
-              id="registerEmail"
-              placeholder="Enter your email"
-              required
-            />
+      <div
+        id="registerMessage"
+      ></div>
 
-          </div>
+    </div>
 
-          <!-- PASSWORD -->
-
-          <div class="auth-group">
-
-            <label>
-
-              Password
-
-            </label>
-
-            <input
-              type="password"
-              id="registerPassword"
-              placeholder="Create password"
-              required
-            />
-
-          </div>
-
-          <!-- BUTTON -->
-
-          <button
-            type="submit"
-            class="auth-btn"
-            id="registerBtn"
-          >
-
-            Create Account
-
-          </button>
-
-        </form>
-
-        <!-- FOOTER -->
-
-        <div class="auth-footer">
-
-          Already have an account?
-
-          <span id="openLogin">
-
-            Login
-
-          </span>
-
-        </div>
-
-      </div>
-
-    </section>
+  </section>
 
   `;
 
 }
 
 /* =========================
-   REGISTER INIT
+   INIT REGISTER
 ========================= */
 
-function initializeRegister(){
+export function initRegisterPage(){
 
   const form =
-  document.getElementById(
-    "registerForm"
-  );
+
+    document.getElementById(
+      "registerForm"
+    );
 
   if(!form){
 
     return;
 
   }
-
-  /* =========================
-     LOGIN LINK
-  ========================= */
-
-  const loginLink =
-  document.getElementById(
-    "openLogin"
-  );
-
-  if(loginLink){
-
-    loginLink.addEventListener(
-
-      "click",
-
-      () => {
-
-        window.renderPage(
-          "login"
-        );
-
-      }
-
-    );
-
-  }
-
-  /* =========================
-     REGISTER FORM
-  ========================= */
 
   form.addEventListener(
 
@@ -198,38 +113,37 @@ function initializeRegister(){
 
       e.preventDefault();
 
-      /* =========================
-         VALUES
-      ========================= */
-
       const name =
-      document.getElementById(
-        "registerName"
-      ).value;
+
+        document.getElementById(
+          "registerName"
+        ).value;
 
       const email =
-      document.getElementById(
-        "registerEmail"
-      ).value;
+
+        document.getElementById(
+          "registerEmail"
+        ).value;
 
       const password =
-      document.getElementById(
-        "registerPassword"
-      ).value;
+
+        document.getElementById(
+          "registerPassword"
+        ).value;
+
+      const messageBox =
+
+        document.getElementById(
+          "registerMessage"
+        );
 
       /* =========================
-         BUTTON
+         LOADING
       ========================= */
 
-      const btn =
-      document.getElementById(
-        "registerBtn"
-      );
+      messageBox.innerHTML =
 
-      btn.innerText =
-      "Creating Account...";
-
-      btn.disabled = true;
+      "⚡ Creating account...";
 
       /* =========================
          API
@@ -237,14 +151,15 @@ function initializeRegister(){
 
       const result =
 
-      await authService
-      .registerUser({
+        await signupUser({
 
-        name,
-        email,
-        password
+          name,
 
-      });
+          email,
+
+          password
+
+        });
 
       /* =========================
          SUCCESS
@@ -252,21 +167,16 @@ function initializeRegister(){
 
       if(result.success){
 
-        authService.saveAuth(
-          result
-        );
+        messageBox.innerHTML =
 
-        alert(
-          "Account created successfully"
-        );
+        "✅ Account created";
 
-        /* =========================
-           REDIRECT
-        ========================= */
+        setTimeout(() => {
 
-        window.renderPage(
-          "dashboard"
-        );
+          window.location.hash =
+          "#dashboard";
+
+        },1000);
 
       }
 
@@ -276,30 +186,14 @@ function initializeRegister(){
 
       else{
 
-        alert(
+        messageBox.innerHTML =
 
-          result.message ||
-
-          "Registration failed"
-
-        );
+        `❌ ${result.message}`;
 
       }
-
-      /* =========================
-         RESET BUTTON
-      ========================= */
-
-      btn.innerText =
-      "Create Account";
-
-      btn.disabled = false;
 
     }
 
   );
 
 }
-
-export default
-createRegisterPage;
