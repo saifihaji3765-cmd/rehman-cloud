@@ -1,12 +1,25 @@
 /* =========================
-   MASTER AGENT
+   PACKAGES
 ========================= */
 
 const OpenAI =
 require("openai");
 
 /* =========================
-   OPENAI
+   OPTIONAL AGENTS
+========================= */
+
+const plannerAgent =
+require("./plannerAgent");
+
+const builderAgent =
+require("./builderAgent");
+
+const deployAgent =
+require("./deployAgent");
+
+/* =========================
+   OPENAI CLIENT
 ========================= */
 
 const openai =
@@ -21,16 +34,109 @@ new OpenAI({
    MASTER AGENT
 ========================= */
 
-async function masterAgent(userPrompt){
+async function masterAgent(
+
+  userPrompt
+
+){
 
   try{
 
+    console.log(
+      "⚡ Master Agent Started"
+    );
+
     /* =========================
-       AI RESPONSE
+       STEP 1
+       PLANNING
+    ========================= */
+
+    let planningResult = null;
+
+    try{
+
+      planningResult =
+
+      await plannerAgent(
+        userPrompt
+      );
+
+    }
+
+    catch(error){
+
+      console.log(
+        "Planner Agent Failed"
+      );
+
+    }
+
+    /* =========================
+       STEP 2
+       BUILDING
+    ========================= */
+
+    let builderResult = null;
+
+    try{
+
+      builderResult =
+
+      await builderAgent(
+        userPrompt
+      );
+
+    }
+
+    catch(error){
+
+      console.log(
+        "Builder Agent Failed"
+      );
+
+    }
+
+    /* =========================
+       STEP 3
+       DEPLOYMENT ANALYSIS
+    ========================= */
+
+    let deploymentResult = null;
+
+    try{
+
+      deploymentResult =
+
+      await deployAgent({
+
+        projectName:
+        "VertexCloud AI Project",
+
+        prompt:
+        userPrompt
+
+      });
+
+    }
+
+    catch(error){
+
+      console.log(
+        "Deploy Agent Failed"
+      );
+
+    }
+
+    /* =========================
+       STEP 4
+       MASTER AI RESPONSE
     ========================= */
 
     const completion =
-    await openai.chat.completions.create({
+
+    await openai
+    .chat.completions
+    .create({
 
       model:
       "gpt-4.1-mini",
@@ -43,23 +149,32 @@ async function masterAgent(userPrompt){
 
           content:`
 
-You are the Master Agent of Rehman AI OS.
+You are the Master Agent of VertexCloud AI OS.
 
-You coordinate all AI agents.
+You are an autonomous senior CTO AI.
 
 Your responsibilities:
 
-- understand user intent
-- decide app architecture
-- decide frontend/backend
-- decide APIs
-- decide deployment flow
-- plan production systems
-- think like a senior CTO
+- understand user goals
+- architect scalable systems
+- coordinate AI agents
+- plan frontend/backend
+- plan databases
+- plan APIs
+- plan AI systems
+- plan DevOps
+- plan deployment infrastructure
+- think like a Silicon Valley CTO
 
-Always think deeply.
+Always respond professionally.
 
-Respond professionally.
+Always optimize systems for:
+
+- scalability
+- security
+- performance
+- maintainability
+- production deployment
 
           `
 
@@ -75,12 +190,14 @@ Respond professionally.
 
       ],
 
-      temperature:0.7
+      temperature:0.7,
+
+      max_tokens:2000
 
     });
 
     /* =========================
-       FINAL REPLY
+       FINAL RESPONSE
     ========================= */
 
     return {
@@ -88,10 +205,24 @@ Respond professionally.
       success:true,
 
       reply:
+
       completion
       .choices[0]
       .message
-      .content
+      .content,
+
+      agents:{
+
+        planner:
+        planningResult,
+
+        builder:
+        builderResult,
+
+        deployment:
+        deploymentResult
+
+      }
 
     };
 
@@ -104,6 +235,9 @@ Respond professionally.
     return {
 
       success:false,
+
+      message:
+      "Master Agent Failed",
 
       error:error.message
 
