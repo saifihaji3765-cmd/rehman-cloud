@@ -4,25 +4,15 @@ from "./components/navbar.js";
 import createDashboardPage
 from "./pages/dashboard/dashboardPage.js";
 
-import createLoginPage,
+import authPage,
 
 {
 
-  initLoginPage
+  initAuthPage
 
 }
 
-from "./pages/auth/loginPage.js";
-
-import createRegisterPage,
-
-{
-
-  initRegisterPage
-
-}
-
-from "./pages/auth/registerPage.js";
+from "./pages/auth/authPage.js";
 
 import createBillingPage
 from "./pages/billing/billingPage.js";
@@ -80,7 +70,7 @@ function renderPage(page){
 
       ){
 
-        renderPage("login");
+        renderPage("auth");
 
         return;
 
@@ -129,30 +119,16 @@ function renderPage(page){
     break;
 
     /* =========================
-       LOGIN
+       AUTH
     ========================= */
 
-    case "login":
+    case "auth":
 
       mainContent.innerHTML =
 
-      createLoginPage();
+      authPage();
 
-      initLoginPage();
-
-    break;
-
-    /* =========================
-       REGISTER
-    ========================= */
-
-    case "register":
-
-      mainContent.innerHTML =
-
-      createRegisterPage();
-
-      initRegisterPage();
+      initAuthPage();
 
     break;
 
@@ -164,7 +140,9 @@ function renderPage(page){
 
       mainContent.innerHTML =
 
-      createDashboardPage();
+      authPage();
+
+      initAuthPage();
 
   }
 
@@ -186,7 +164,7 @@ document.addEventListener(
 
   "click",
 
-  (e) => {
+  (e)=>{
 
     const item =
 
@@ -201,7 +179,7 @@ document.addEventListener(
     }
 
     /* =========================
-       ACTIVE MENU
+       REMOVE ACTIVE
     ========================= */
 
     document
@@ -210,13 +188,17 @@ document.addEventListener(
       ".menu-item"
     )
 
-    .forEach(el => {
+    .forEach(el=>{
 
       el.classList.remove(
         "active"
       );
 
     });
+
+    /* =========================
+       ACTIVE
+    ========================= */
 
     item.classList.add(
       "active"
@@ -244,7 +226,7 @@ window.addEventListener(
 
   "hashchange",
 
-  () => {
+  ()=>{
 
     const page =
 
@@ -258,7 +240,7 @@ window.addEventListener(
 );
 
 /* =========================
-   AUTO ROUTE
+   INITIAL PAGE
 ========================= */
 
 const currentPage =
@@ -267,7 +249,7 @@ window.location.hash
 .replace("#","");
 
 /* =========================
-   AUTH CHECK
+   START APP
 ========================= */
 
 if(currentPage){
@@ -293,7 +275,7 @@ else{
   else{
 
     renderPage(
-      "login"
+      "auth"
     );
 
   }
