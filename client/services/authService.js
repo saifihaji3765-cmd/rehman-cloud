@@ -7,6 +7,32 @@ const API_BASE_URL =
 "http://localhost:3000/api/auth";
 
 /* =========================
+   SAVE SESSION
+========================= */
+
+function saveSession(data){
+
+  localStorage.setItem(
+
+    "token",
+
+    data.token
+
+  );
+
+  localStorage.setItem(
+
+    "user",
+
+    JSON.stringify(
+      data.user
+    )
+
+  );
+
+}
+
+/* =========================
    SIGNUP
 ========================= */
 
@@ -45,7 +71,7 @@ export async function signupUser(
     await response.json();
 
     /* =========================
-       SAVE TOKEN
+       SAVE SESSION
     ========================= */
 
     if(
@@ -56,22 +82,8 @@ export async function signupUser(
 
     ){
 
-      localStorage.setItem(
-
-        "token",
-
-        data.data.token
-
-      );
-
-      localStorage.setItem(
-
-        "user",
-
-        JSON.stringify(
-          data.data.user
-        )
-
+      saveSession(
+        data.data
       );
 
     }
@@ -136,7 +148,7 @@ export async function loginUser(
     await response.json();
 
     /* =========================
-       SAVE TOKEN
+       SAVE SESSION
     ========================= */
 
     if(
@@ -147,22 +159,8 @@ export async function loginUser(
 
     ){
 
-      localStorage.setItem(
-
-        "token",
-
-        data.data.token
-
-      );
-
-      localStorage.setItem(
-
-        "user",
-
-        JSON.stringify(
-          data.data.user
-        )
-
+      saveSession(
+        data.data
       );
 
     }
@@ -202,8 +200,8 @@ export function logoutUser(){
     "user"
   );
 
-  window.location.href =
-  "/";
+  window.location.hash =
+  "#auth";
 
 }
 
