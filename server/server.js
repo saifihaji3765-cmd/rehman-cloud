@@ -4,222 +4,137 @@ require("dotenv").config();
    PACKAGES
 ========================= */
 
-const express =
-require("express");
-
-const cors =
-require("cors");
+const express = require("express");
+const cors = require("cors");
 
 /* =========================
    CONFIG
 ========================= */
 
-const env =
-require("./server/config/env");
-
-const validateEnv =
-require("./server/config/validateEnv");
+const env = require("./server/config/env");
+const validateEnv = require("./server/config/validateEnv");
 
 /* =========================
    DATABASE
 ========================= */
 
-const connectMongo =
-require("./server/database/mongo");
-
-const {
-  connectRedis
-} = require("./server/database/redis");
+const connectMongo = require("./server/database/mongo");
+const { connectRedis } = require("./server/database/redis");
 
 /* =========================
    ROUTES
 ========================= */
 
-const authRoutes =
-require("./server/routes/authRoutes");
-const aiRoutes =
-require("./server/routes/aiRoutes");
-
-const deployRoutes =
-require("./server/routes/deployRoutes");
-const paymentRoutes =
-require("./server/routes/paymentRoutes");
-const webhookRoutes =
-require("./server/routes/webhookRoutes");
-const subscriptionRoutes =
-require("./server/routes/subscriptionRoutes");
-const projectRoutes =
-require("./server/routes/projectRoutes");
+const authRoutes = require("./server/routes/authRoutes");
+const aiRoutes = require("./server/routes/aiRoutes");
+const deployRoutes = require("./server/routes/deployRoutes");
+const paymentRoutes = require("./server/routes/paymentRoutes");
+const webhookRoutes = require("./server/routes/webhookRoutes");
+const subscriptionRoutes = require("./server/routes/subscriptionRoutes");
+const projectRoutes = require("./server/routes/projectRoutes");
 
 /* =========================
    SERVICES
 ========================= */
 
-const logger =
-require("./server/services/loggerService");
+const logger = require("./server/services/loggerService");
 
 /* =========================
-   APP
+   APP INIT
 ========================= */
 
-const app =
-express();
+const app = express();
 
 /* =========================
-   VALIDATE ENV
+   VALIDATION
 ========================= */
 
 validateEnv();
 
 /* =========================
-   MIDDLEWARE
+   SECURITY / MIDDLEWARE
 ========================= */
 
-app.use(cors());
+app.use(
+  cors({
+    origin: "*",
+    credentials: true
+  })
+);
 
-app.use(express.json());
-
-app.use(express.urlencoded({
-
-  extended:true
-
-})
-   );
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
 
 /* =========================
-   API ROUTES
+   ROUTES MOUNT
 ========================= */
 
-app.use(
-
-  "/api/ai",
-
-  aiRoutes
-
-);
-
-app.use(
-
-  "/api/deploy",
-
-  deployRoutes
-
-);
-app.use(
-
-  "/api/auth",
-
-  authRoutes
-
-);
-
-app.use(
-
-  "/api/payment",
-
-  paymentRoutes
-
-);
-
-app.use(
-
-  "/api/webhook",
-
-  webhookRoutes
-
-);
-app.use(
-
-  "/api/subscription",
-
-  subscriptionRoutes
-
-);
-app.use(
-
-  "/api/projects",
-
-  projectRoutes
-
-);
+app.use("/api/auth", authRoutes);
+app.use("/api/ai", aiRoutes);
+app.use("/api/deploy", deployRoutes);
+app.use("/api/payment", paymentRoutes);
+app.use("/api/webhook", webhookRoutes);
+app.use("/api/subscription", subscriptionRoutes);
+app.use("/api/projects", projectRoutes);
 
 /* =========================
    HEALTH CHECK
 ========================= */
 
-app.get(
+app.get("/", (req, res) => {
+  res.json({
+    success: true,
+    message: "🚀 VertexCloud API Running"
+  });
+});
 
-  "/",
+/* =========================
+   404 HANDLER
+========================= */
 
-  (req,res)=>{
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: "Route not found"
+  });
+});
 
-    res.json({
+/* =========================
+   GLOBAL ERROR HANDLER
+========================= */
 
-      success:true,
+app.use((err, req, res, next) => {
+  console.error("Server Error:", err);
 
-      message:
-      "🚀 VertexCloud API Running"
-
-    });
-
-  }
-
-);
+  res.status(500).json({
+    success: false,
+    message: "Internal Server Error",
+    error: err.message
+  });
+});
 
 /* =========================
    START SERVER
 ========================= */
 
-async function startServer(){
-
-  try{
-
-    /* =========================
-       DATABASES
-    ========================= */
-
+async function startServer() {
+  try {
     await connectMongo();
-
     await connectRedis();
 
-    /* =========================
-       SERVER START
-    ========================= */
+    app.listen(env.PORT, () => {
+      console.log(`🚀 Server running on port ${env.PORT}`);
+      logger.success("Server started successfully");
+    });
 
-    app.listen(
-
-      env.PORT,
-
-      ()=>{
-
-        console.log(
-`🚀 VertexCloud Running On Port ${env.PORT}`
-        );
-
-        logger.success(
-          "VertexCloud Server Started"
-        );
-
-      }
-
-    );
-
+  } catch (error) {
+    console.error(error);
+    logger.error(error.message);
   }
-
-  catch(error){
-
-    console.log(error);
-
-    logger.error(
-      error.message
-    );
-
-  }
-
 }
 
 /* =========================
-   START
+   BOOT
 ========================= */
 
 startServer();
