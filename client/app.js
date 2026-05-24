@@ -1,283 +1,129 @@
-import createNavbar
-from "./components/navbar.js";
-
-import createDashboardPage
-from "./pages/dashboard/dashboardPage.js";
-
-import authPage,
-
-{
-
-  initAuthPage
-
-}
-
-from "./pages/auth/authPage.js";
-
-import createBillingPage
-from "./pages/billing/billingPage.js";
-
-import createDeploymentPage
-from "./pages/deployment/deploymentPage.js";
-
-import createSettingsPage
-from "./pages/settings/settingsPage.js";
-
-import * as authService
-from "./services/authService.js";
-
-/* =========================
-   NAVBAR
-========================= */
-
-const navbarContainer =
-
-document.getElementById(
-  "navbarContainer"
-);
-
-navbarContainer.innerHTML =
-
-createNavbar();
-
-/* =========================
-   MAIN CONTENT
-========================= */
-
-const mainContent =
-
-document.getElementById(
-  "mainContent"
-);
-
 /* =========================
    ROUTER
 ========================= */
 
-function renderPage(page){
-
-  switch(page){
-
-    /* =========================
-       DASHBOARD
-    ========================= */
-
-    case "dashboard":
-
-      if(
-
-        !authService.isAuthenticated()
-
-      ){
-
-        renderPage("auth");
-
-        return;
-
-      }
-
-      mainContent.innerHTML =
-
-      createDashboardPage();
-
-    break;
-
-    /* =========================
-       BILLING
-    ========================= */
-
-    case "billing":
-
-      mainContent.innerHTML =
-
-      createBillingPage();
-
-    break;
-
-    /* =========================
-       DEPLOYMENTS
-    ========================= */
-
-    case "deployments":
-
-      mainContent.innerHTML =
-
-      createDeploymentPage();
-
-    break;
-
-    /* =========================
-       SETTINGS
-    ========================= */
-
-    case "settings":
-
-      mainContent.innerHTML =
-
-      createSettingsPage();
-
-    break;
-
-    /* =========================
-       AUTH
-    ========================= */
-
-    case "auth":
-
-      mainContent.innerHTML =
-
-      authPage();
-
-      initAuthPage();
-
-    break;
-
-    /* =========================
-       DEFAULT
-    ========================= */
-
-    default:
-
-      mainContent.innerHTML =
-
-      authPage();
-
-      initAuthPage();
-
-  }
-
-}
+import renderRoute
+from "./app/router/router.js";
 
 /* =========================
-   GLOBAL ROUTER
+   STORE
 ========================= */
 
-window.renderPage =
+import {
 
-renderPage;
+  setUser,
+
+  setToken
+
+} from "./app/store/appStore.js";
 
 /* =========================
-   SIDEBAR EVENTS
+   AUTH SERVICE
 ========================= */
 
-document.addEventListener(
+import {
 
-  "click",
+  getUser,
 
-  (e)=>{
+  getToken,
 
-    const item =
+  isAuthenticated
 
-    e.target.closest(
-      ".menu-item"
-    );
-
-    if(!item){
-
-      return;
-
-    }
-
-    /* =========================
-       REMOVE ACTIVE
-    ========================= */
-
-    document
-
-    .querySelectorAll(
-      ".menu-item"
-    )
-
-    .forEach(el=>{
-
-      el.classList.remove(
-        "active"
-      );
-
-    });
-
-    /* =========================
-       ACTIVE
-    ========================= */
-
-    item.classList.add(
-      "active"
-    );
-
-    /* =========================
-       PAGE
-    ========================= */
-
-    const page =
-
-    item.dataset.page;
-
-    renderPage(page);
-
-  }
-
-);
+} from "./app/services/authService.js";
 
 /* =========================
-   HASH ROUTER
+   GLOBAL STYLES
 ========================= */
 
-window.addEventListener(
-
-  "hashchange",
-
-  ()=>{
-
-    const page =
-
-    window.location.hash
-    .replace("#","");
-
-    renderPage(page);
-
-  }
-
-);
+import "./styles.css";
 
 /* =========================
-   INITIAL PAGE
+   INIT APP
 ========================= */
 
-const currentPage =
+function initializeApp(){
 
-window.location.hash
-.replace("#","");
-
-/* =========================
-   START APP
-========================= */
-
-if(currentPage){
-
-  renderPage(currentPage);
-
-}
-
-else{
+  /* =========================
+     AUTH SESSION
+  ========================= */
 
   if(
 
-    authService.isAuthenticated()
+    isAuthenticated()
 
   ){
 
-    renderPage(
-      "dashboard"
+    const user =
+
+    getUser();
+
+    const token =
+
+    getToken();
+
+    /* =========================
+       SAVE TO STORE
+    ========================= */
+
+    setUser(user);
+
+    setToken(token);
+
+  }
+
+  /* =========================
+     INITIAL ROUTE
+  ========================= */
+
+  const currentRoute =
+
+  window.location.hash
+  .replace("#","");
+
+  if(currentRoute){
+
+    renderRoute(
+      currentRoute
     );
 
   }
 
   else{
 
-    renderPage(
-      "auth"
-    );
+    if(
+
+      isAuthenticated()
+
+    ){
+
+      window.location.hash =
+      "#dashboard";
+
+    }
+
+    else{
+
+      window.location.hash =
+      "#login";
+
+    }
 
   }
 
 }
+
+/* =========================
+   START APPLICATION
+========================= */
+
+document.addEventListener(
+
+  "DOMContentLoaded",
+
+  ()=>{
+
+    initializeApp();
+
+  }
+
+);
