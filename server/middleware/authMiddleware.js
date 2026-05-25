@@ -5,10 +5,12 @@ require("jsonwebtoken");
    AUTH MIDDLEWARE
 ========================= */
 
-function authMiddleware(
+async function authMiddleware(
+
   req,
   res,
   next
+
 ){
 
   try{
@@ -17,27 +19,42 @@ function authMiddleware(
        TOKEN
     ========================= */
 
-    const token =
+    const authHeader =
 
-      req.headers.authorization;
+    req.headers.authorization;
 
     /* =========================
        CHECK TOKEN
     ========================= */
 
-    if(!token){
+    if(
 
-      return res.status(401)
-      .json({
+      !authHeader ||
+
+      !authHeader.startsWith(
+        "Bearer "
+      )
+
+    ){
+
+      return res.status(401).json({
 
         success:false,
 
         message:
-        "Access denied"
+        "Unauthorized"
 
       });
 
     }
+
+    /* =========================
+       EXTRACT TOKEN
+    ========================= */
+
+    const token =
+
+    authHeader.split(" ")[1];
 
     /* =========================
        VERIFY TOKEN
@@ -45,19 +62,23 @@ function authMiddleware(
 
     const decoded =
 
-      jwt.verify(
+    jwt.verify(
 
-        token,
+      token,
 
-        process.env.JWT_SECRET
+      process.env.JWT_SECRET
 
-      );
+    );
 
     /* =========================
-       USER
+       SAVE USER
     ========================= */
 
     req.user = decoded;
+
+    /* =========================
+       NEXT
+    ========================= */
 
     next();
 
@@ -65,8 +86,9 @@ function authMiddleware(
 
   catch(error){
 
-    return res.status(401)
-    .json({
+    console.error(error);
+
+    return res.status(401).json({
 
       success:false,
 
