@@ -1,57 +1,76 @@
-const express =
-require("express");
+/* =========================
+   IMPORTS
+========================= */
+
+import express from "express";
+
+import {
+
+  registerUser,
+
+  loginUser,
+
+  googleLogin,
+
+  githubLogin
+
+}
+
+from "../controllers/authController.js";
+
+/* =========================
+   ROUTER
+========================= */
 
 const router =
+
 express.Router();
 
 /* =========================
-   CONTROLLERS
-========================= */
-
-const {
-
-  signupController,
-
-  loginController
-
-} = require(
-  "../controllers/authController"
-);
-
-/* =========================
-   MIDDLEWARE
-========================= */
-
-const rateLimiter =
-require(
-  "../middleware/rateLimiter"
-);
-
-/* =========================
-   SIGNUP ROUTE
+   REGISTER
 ========================= */
 
 router.post(
 
-  "/signup",
+  "/register",
 
-  rateLimiter,
-
-  signupController
+  registerUser
 
 );
 
 /* =========================
-   LOGIN ROUTE
+   LOGIN
 ========================= */
 
 router.post(
 
   "/login",
 
-  rateLimiter,
+  loginUser
 
-  loginController
+);
+
+/* =========================
+   GOOGLE LOGIN
+========================= */
+
+router.get(
+
+  "/google",
+
+  googleLogin
+
+);
+
+/* =========================
+   GITHUB LOGIN
+========================= */
+
+router.get(
+
+  "/github",
+
+  githubLogin
 
 );
 
@@ -59,5 +78,4 @@ router.post(
    EXPORT
 ========================= */
 
-module.exports =
-router;
+export default router;
