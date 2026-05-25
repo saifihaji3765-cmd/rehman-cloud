@@ -6,542 +6,455 @@ import {
 
   getUser
 
-} from "../../app/services/authService.js";
+} from "../../services/authService.js";
 
 /* =========================
    DASHBOARD PAGE
 ========================= */
 
-function createDashboardPage(){
+export default function createDashboardPage(){
 
   /* =========================
      USER
-  ========================= */
+  ========================== */
 
-  const user = getUser();
+  const user =
+
+    getUser() || {
+
+      name:"Vertex User"
+
+    };
+
+  /* =========================
+     USER NAME
+  ========================== */
 
   const userName =
 
-  user?.name ||
+    user.name ||
 
-  "Developer";
+    user.fullName ||
+
+    "Vertex User";
+
+  /* =========================
+     USER INITIAL
+  ========================== */
+
+  const userInitial =
+
+    userName
+    .charAt(0)
+    .toUpperCase();
+
+  /* =========================
+     TOPBAR UPDATE
+  ========================== */
+
+  setTimeout(()=>{
+
+    const topbarName =
+
+    document.getElementById(
+      "topbarUserName"
+    );
+
+    const avatar =
+
+    document.getElementById(
+      "userAvatar"
+    );
+
+    if(topbarName){
+
+      topbarName.innerText =
+      userName;
+
+    }
+
+    if(avatar){
+
+      avatar.innerText =
+      userInitial;
+
+    }
+
+  },100);
+
+  /* =========================
+     HTML
+  ========================== */
 
   return `
 
-    <div class="dashboard-page">
+  <!-- =========================
+       DASHBOARD PAGE
+  ========================== -->
 
-      <!-- =========================
-           ENTERPRISE HERO
-      ========================== -->
+  <div class="dashboard-page">
 
-      <section class="enterprise-hero">
+    <!-- =========================
+         HERO
+    ========================== -->
 
-        <!-- LEFT -->
+    <section class="dashboard-hero">
 
-        <div class="hero-left">
+      <!-- LEFT -->
 
-          <span class="dashboard-badge">
+      <div class="dashboard-hero-left">
 
-            ⚡ VertexCloud Enterprise AI OS
+        <div class="dashboard-badge">
 
-          </span>
-
-          <h1>
-
-            Welcome,
-            ${userName} 🚀
-
-          </h1>
-
-          <p>
-
-            Manage enterprise infrastructure,
-            AI deployments,
-            autonomous agents,
-            cloud applications,
-            scaling systems
-            and production workloads globally.
-
-          </p>
-
-          <!-- BUTTONS -->
-
-          <div class="hero-buttons">
-
-            <button
-              class="primary-dashboard-btn"
-            >
-
-              🚀 Deploy New App
-
-            </button>
-
-            <button
-              class="secondary-dashboard-btn"
-            >
-
-              🤖 Launch AI Agent
-
-            </button>
-
-            <button
-              class="secondary-dashboard-btn"
-            >
-
-              📂 Upload Project
-
-            </button>
-
-          </div>
+          ⚡ Enterprise AI OS Active
 
         </div>
 
-        <!-- RIGHT -->
+        <h1>
 
-        <div class="hero-right">
+          Welcome back,
+          ${userName}
 
-          <!-- CLOUD STATUS -->
+        </h1>
 
-          <div class="cloud-status-card">
+        <p>
 
-            <div class="cloud-header">
+          Vertex AI Cloud is running
+          successfully.
 
-              <h3>
+          Your AI agents,
+          deployments,
+          automation systems,
+          cloud infrastructure
+          and enterprise workspace
+          are ready.
 
-                ☁ Cloud Infrastructure
+        </p>
 
-              </h3>
+        <!-- ACTIONS -->
 
-              <span class="live-dot">
+        <div class="dashboard-actions">
 
-                ● LIVE
+          <button
+            class=
+            "dashboard-primary-btn"
+          >
 
-              </span>
+            🚀 Create Project
 
-            </div>
+          </button>
 
-            <!-- GRID -->
+          <button
+            class=
+            "dashboard-secondary-btn"
+          >
 
-            <div class="cloud-grid">
+            🤖 Open AI Workspace
 
-              <div class="cloud-box">
-
-                <h2>
-
-                  99.99%
-
-                </h2>
-
-                <p>
-
-                  Uptime
-
-                </p>
-
-              </div>
-
-              <div class="cloud-box">
-
-                <h2>
-
-                  14
-
-                </h2>
-
-                <p>
-
-                  AI Agents
-
-                </p>
-
-              </div>
-
-              <div class="cloud-box">
-
-                <h2>
-
-                  248
-
-                </h2>
-
-                <p>
-
-                  Containers
-
-                </p>
-
-              </div>
-
-              <div class="cloud-box">
-
-                <h2>
-
-                  2.4M
-
-                </h2>
-
-                <p>
-
-                  Requests
-
-                </p>
-
-              </div>
-
-            </div>
-
-          </div>
+          </button>
 
         </div>
 
-      </section>
+      </div>
 
-      <!-- =========================
-           ANALYTICS
-      ========================== -->
+      <!-- RIGHT -->
 
-      <section class="analytics-grid">
+      <div
+        class=
+        "dashboard-hero-right"
+      >
 
-        <!-- CARD -->
+        <div
+          class=
+          "dashboard-ai-status"
+        >
 
-        <div class="analytics-card">
+          <h3>
 
-          <div class="analytics-top">
+            AI System Status
+
+          </h3>
+
+          <!-- ITEM -->
+
+          <div
+            class=
+            "ai-status-item"
+          >
 
             <span>
 
-              🚀
+              Master Agent
 
             </span>
 
-            <span class="growth">
-
-              +12%
-
-            </span>
-
-          </div>
-
-          <h2>
-
-            24
-
-          </h2>
-
-          <p>
-
-            Active Deployments
-
-          </p>
-
-        </div>
-
-        <!-- CARD -->
-
-        <div class="analytics-card">
-
-          <div class="analytics-top">
-
-            <span>
-
-              🤖
-
-            </span>
-
-            <span class="growth">
-
-              LIVE
-
-            </span>
-
-          </div>
-
-          <h2>
-
-            14
-
-          </h2>
-
-          <p>
-
-            AI Agents Running
-
-          </p>
-
-        </div>
-
-        <!-- CARD -->
-
-        <div class="analytics-card">
-
-          <div class="analytics-top">
-
-            <span>
-
-              💰
-
-            </span>
-
-            <span class="growth">
-
-              +28%
-
-            </span>
-
-          </div>
-
-          <h2>
-
-            $12.4K
-
-          </h2>
-
-          <p>
-
-            Monthly Revenue
-
-          </p>
-
-        </div>
-
-        <!-- CARD -->
-
-        <div class="analytics-card">
-
-          <div class="analytics-top">
-
-            <span>
-
-              🌍
-
-            </span>
-
-            <span class="growth">
-
-              GLOBAL
-
-            </span>
-
-          </div>
-
-          <h2>
-
-            18
-
-          </h2>
-
-          <p>
-
-            AWS Regions
-
-          </p>
-
-        </div>
-
-      </section>
-
-      <!-- =========================
-           MAIN GRID
-      ========================== -->
-
-      <section class="dashboard-grid">
-
-        <!-- =========================
-             AI COMMAND CENTER
-        ========================== -->
-
-        <div class="dashboard-panel large-panel">
-
-          <div class="panel-header">
-
-            <div>
-
-              <h2>
-
-                🤖 AI Command Center
-
-              </h2>
-
-              <p>
-
-                GPT-4.1 + Autonomous Agents
-
-              </p>
-
-            </div>
-
-            <span class="panel-live">
-
-              ● ACTIVE
-
-            </span>
-
-          </div>
-
-          <!-- CHAT -->
-
-          <div class="ai-chat-container">
-
-            <div class="ai-message">
-
-              👋 Welcome ${userName},
-              your infrastructure is online.
-
-            </div>
-
-            <div class="ai-message">
-
-              🚀 3 deployments completed
-              successfully in last 2 hours.
-
-            </div>
-
-            <div class="ai-message">
-
-              🤖 AI agents are monitoring
-              infrastructure security
-              and scaling automatically.
-
-            </div>
-
-          </div>
-
-          <!-- INPUT -->
-
-          <div class="ai-command-box">
-
-            <input
-
-              type="text"
-
-              placeholder=
-              "Ask AI to deploy apps, generate APIs, fix missing files, optimize cloud..."
-
-              id="dashboardAIInput"
-
-            />
-
-            <button
-              id="sendAIBtn"
+            <span
+              class=
+              "ai-status-live"
             >
 
-              Execute
+              ● Online
 
-            </button>
+            </span>
+
+          </div>
+
+          <!-- ITEM -->
+
+          <div
+            class=
+            "ai-status-item"
+          >
+
+            <span>
+
+              Frontend Agent
+
+            </span>
+
+            <span
+              class=
+              "ai-status-live"
+            >
+
+              ● Running
+
+            </span>
+
+          </div>
+
+          <!-- ITEM -->
+
+          <div
+            class=
+            "ai-status-item"
+          >
+
+            <span>
+
+              Backend Agent
+
+            </span>
+
+            <span
+              class=
+              "ai-status-live"
+            >
+
+              ● Running
+
+            </span>
+
+          </div>
+
+          <!-- ITEM -->
+
+          <div
+            class=
+            "ai-status-item"
+          >
+
+            <span>
+
+              Deployment Agent
+
+            </span>
+
+            <span
+              class=
+              "ai-status-live"
+            >
+
+              ● Ready
+
+            </span>
 
           </div>
 
         </div>
 
-        <!-- =========================
-             LIVE SYSTEM STATUS
-        ========================== -->
+      </div>
 
-        <div class="dashboard-panel">
+    </section>
 
-          <div class="panel-header">
+    <!-- =========================
+         STATS
+    ========================== -->
 
-            <h2>
+    <section
+      class=
+      "dashboard-stats-grid"
+    >
 
-              📡 Live System
+      <!-- CARD -->
 
-            </h2>
+      <div
+        class=
+        "dashboard-stat-card"
+      >
+
+        <div class="stat-top">
+
+          <div class="stat-icon">
+
+            🚀
 
           </div>
 
-          <div class="system-status-list">
+          <div class="stat-growth">
 
-            <div class="status-item">
-
-              <span>
-
-                AWS Servers
-
-              </span>
-
-              <span class="status-live">
-
-                Online
-
-              </span>
-
-            </div>
-
-            <div class="status-item">
-
-              <span>
-
-                Auto Scaling
-
-              </span>
-
-              <span class="status-live">
-
-                Enabled
-
-              </span>
-
-            </div>
-
-            <div class="status-item">
-
-              <span>
-
-                Security Shield
-
-              </span>
-
-              <span class="status-live">
-
-                Protected
-
-              </span>
-
-            </div>
-
-            <div class="status-item">
-
-              <span>
-
-                AI Monitoring
-
-              </span>
-
-              <span class="status-live">
-
-                Running
-
-              </span>
-
-            </div>
-
-            <div class="status-item">
-
-              <span>
-
-                Database Cluster
-
-              </span>
-
-              <span class="status-live">
-
-                Healthy
-
-              </span>
-
-            </div>
+            +28%
 
           </div>
 
         </div>
 
-      </section>
+        <h2>
+
+          14
+
+        </h2>
+
+        <p>
+
+          Active Projects
+
+        </p>
+
+      </div>
+
+      <!-- CARD -->
+
+      <div
+        class=
+        "dashboard-stat-card"
+      >
+
+        <div class="stat-top">
+
+          <div class="stat-icon">
+
+            🤖
+
+          </div>
+
+          <div class="stat-growth">
+
+            +64%
+
+          </div>
+
+        </div>
+
+        <h2>
+
+          28
+
+        </h2>
+
+        <p>
+
+          AI Agents Running
+
+        </p>
+
+      </div>
+
+      <!-- CARD -->
+
+      <div
+        class=
+        "dashboard-stat-card"
+      >
+
+        <div class="stat-top">
+
+          <div class="stat-icon">
+
+            ☁️
+
+          </div>
+
+          <div class="stat-growth">
+
+            +18%
+
+          </div>
+
+        </div>
+
+        <h2>
+
+          128GB
+
+        </h2>
+
+        <p>
+
+          Cloud Resources
+
+        </p>
+
+      </div>
+
+      <!-- CARD -->
+
+      <div
+        class=
+        "dashboard-stat-card"
+      >
+
+        <div class="stat-top">
+
+          <div class="stat-icon">
+
+            ⚡
+
+          </div>
+
+          <div class="stat-growth">
+
+            +99.9%
+
+          </div>
+
+        </div>
+
+        <h2>
+
+          Stable
+
+        </h2>
+
+        <p>
+
+          Infrastructure Health
+
+        </p>
+
+      </div>
+
+    </section>
+
+    <!-- =========================
+         MAIN GRID
+    ========================== -->
+
+    <section
+      class=
+      "dashboard-main-grid"
+    >
 
       <!-- =========================
-           DEPLOYMENTS
+           PROJECTS
       ========================== -->
 
-      <section class="dashboard-panel">
+      <div
+        class=
+        "dashboard-panel"
+      >
+
+        <!-- HEADER -->
 
         <div class="panel-header">
 
@@ -549,240 +462,317 @@ function createDashboardPage(){
 
             <h2>
 
-              🚀 Enterprise Deployments
+              Enterprise Projects
 
             </h2>
 
             <p>
 
-              Production infrastructure
+              Your latest AI projects
 
             </p>
 
           </div>
 
-          <button class="view-all-btn">
+        </div>
 
-            View All
+        <!-- PROJECTS -->
 
-          </button>
+        <div
+          class=
+          "dashboard-projects"
+        >
+
+          <!-- ITEM -->
+
+          <div class="project-item">
+
+            <div
+              class=
+              "project-left"
+            >
+
+              <div
+                class=
+                "project-icon"
+              >
+
+                🤖
+
+              </div>
+
+              <div
+                class=
+                "project-info"
+              >
+
+                <h3>
+
+                  AI SaaS Platform
+
+                </h3>
+
+                <p>
+
+                  Full stack AI SaaS app
+
+                </p>
+
+              </div>
+
+            </div>
+
+            <div
+              class=
+              "project-status live"
+            >
+
+              LIVE
+
+            </div>
+
+          </div>
+
+          <!-- ITEM -->
+
+          <div class="project-item">
+
+            <div
+              class=
+              "project-left"
+            >
+
+              <div
+                class=
+                "project-icon"
+              >
+
+                🚀
+
+              </div>
+
+              <div
+                class=
+                "project-info"
+              >
+
+                <h3>
+
+                  Deployment System
+
+                </h3>
+
+                <p>
+
+                  AWS multi region deploy
+
+                </p>
+
+              </div>
+
+            </div>
+
+            <div
+              class=
+              "project-status building"
+            >
+
+              BUILDING
+
+            </div>
+
+          </div>
+
+          <!-- ITEM -->
+
+          <div class="project-item">
+
+            <div
+              class=
+              "project-left"
+            >
+
+              <div
+                class=
+                "project-icon"
+              >
+
+                ⚡
+
+              </div>
+
+              <div
+                class=
+                "project-info"
+              >
+
+                <h3>
+
+                  Rehman Business OS
+
+                </h3>
+
+                <p>
+
+                  Enterprise AI automation
+
+                </p>
+
+              </div>
+
+            </div>
+
+            <div
+              class=
+              "project-status live"
+            >
+
+              LIVE
+
+            </div>
+
+          </div>
 
         </div>
 
-        <!-- TABLE -->
-
-        <div class="deployments-table">
-
-          <!-- ROW -->
-
-          <div class="deployment-row">
-
-            <div class="deployment-project">
-
-              AI SaaS Platform
-
-            </div>
-
-            <div>
-
-              Production
-
-            </div>
-
-            <div>
-
-              AWS Mumbai
-
-            </div>
-
-            <div class="status success">
-
-              Live
-
-            </div>
-
-          </div>
-
-          <!-- ROW -->
-
-          <div class="deployment-row">
-
-            <div class="deployment-project">
-
-              Rehman Business OS
-
-            </div>
-
-            <div>
-
-              Enterprise
-
-            </div>
-
-            <div>
-
-              AWS Frankfurt
-
-            </div>
-
-            <div class="status pending">
-
-              Scaling
-
-            </div>
-
-          </div>
-
-          <!-- ROW -->
-
-          <div class="deployment-row">
-
-            <div class="deployment-project">
-
-              AI Video Generator
-
-            </div>
-
-            <div>
-
-              Production
-
-            </div>
-
-            <div>
-
-              AWS Singapore
-
-            </div>
-
-            <div class="status success">
-
-              Live
-
-            </div>
-
-          </div>
-
-        </div>
-
-      </section>
+      </div>
 
       <!-- =========================
-           AI AGENTS
+           ACTIVITY
       ========================== -->
 
-      <section class="agents-grid">
+      <div
+        class=
+        "dashboard-panel"
+      >
 
-        <!-- AGENT -->
+        <!-- HEADER -->
 
-        <div class="agent-card">
+        <div class="panel-header">
 
-          <h3>
+          <div>
 
-            🧠 Master Agent
+            <h2>
 
-          </h3>
+              Activity Feed
 
-          <p>
+            </h2>
 
-            Controls infrastructure,
-            architecture & orchestration.
+            <p>
 
-          </p>
+              AI system activities
 
-          <span class="agent-status">
+            </p>
 
-            ACTIVE
-
-          </span>
-
-        </div>
-
-        <!-- AGENT -->
-
-        <div class="agent-card">
-
-          <h3>
-
-            ⚡ Deployment Agent
-
-          </h3>
-
-          <p>
-
-            Deploys projects globally
-            across AWS clusters.
-
-          </p>
-
-          <span class="agent-status">
-
-            RUNNING
-
-          </span>
+          </div>
 
         </div>
 
-        <!-- AGENT -->
+        <!-- LIST -->
 
-        <div class="agent-card">
+        <div class="activity-list">
 
-          <h3>
+          <!-- ITEM -->
 
-            🔒 Security Agent
+          <div class="activity-item">
 
-          </h3>
+            <div
+              class=
+              "activity-dot"
+            ></div>
 
-          <p>
+            <div
+              class=
+              "activity-content"
+            >
 
-            Detects vulnerabilities,
-            threats and attacks.
+              <h4>
 
-          </p>
+                AI generated new API
 
-          <span class="agent-status">
+              </h4>
 
-            PROTECTED
+              <p>
 
-          </span>
+                Backend agent created
+                authentication routes.
+
+              </p>
+
+            </div>
+
+          </div>
+
+          <!-- ITEM -->
+
+          <div class="activity-item">
+
+            <div
+              class=
+              "activity-dot"
+            ></div>
+
+            <div
+              class=
+              "activity-content"
+            >
+
+              <h4>
+
+                Deployment completed
+
+              </h4>
+
+              <p>
+
+                AWS deployment finished
+                successfully.
+
+              </p>
+
+            </div>
+
+          </div>
+
+          <!-- ITEM -->
+
+          <div class="activity-item">
+
+            <div
+              class=
+              "activity-dot"
+            ></div>
+
+            <div
+              class=
+              "activity-content"
+            >
+
+              <h4>
+
+                AI repaired missing files
+
+              </h4>
+
+              <p>
+
+                System automatically fixed
+                broken imports and configs.
+
+              </p>
+
+            </div>
+
+          </div>
 
         </div>
 
-        <!-- AGENT -->
+      </div>
 
-        <div class="agent-card">
+    </section>
 
-          <h3>
-
-            📈 Scaling Agent
-
-          </h3>
-
-          <p>
-
-            Auto scaling & traffic
-            balancing system.
-
-          </p>
-
-          <span class="agent-status">
-
-            OPTIMIZED
-
-          </span>
-
-        </div>
-
-      </section>
-
-    </div>
+  </div>
 
   `;
 
 }
-
-/* =========================
-   EXPORT
-========================= */
-
-export default createDashboardPage;
