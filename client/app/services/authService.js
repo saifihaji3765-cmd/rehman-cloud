@@ -1,224 +1,33 @@
 /* =========================
-   API URL
+   API BASE URL
 ========================= */
 
 const API_BASE_URL =
 
-"http://localhost:3000/api/auth";
+"http://localhost:5000/api/auth";
 
 /* =========================
-   SAVE SESSION
+   SAVE TOKEN
 ========================= */
 
-function saveSession(data){
+function saveToken(token){
 
   localStorage.setItem(
-
-    "token",
-
-    data.token
-
+    "vertex_token",
+    token
   );
+
+}
+
+/* =========================
+   SAVE USER
+========================= */
+
+function saveUser(user){
 
   localStorage.setItem(
-
-    "user",
-
-    JSON.stringify(
-      data.user
-    )
-
-  );
-
-}
-
-/* =========================
-   SIGNUP
-========================= */
-
-export async function signupUser(
-
-  userData
-
-){
-
-  try{
-
-    const response =
-
-      await fetch(
-
-        `${API_BASE_URL}/signup`,
-
-        {
-
-          method:"POST",
-
-          headers:{
-
-            "Content-Type":
-            "application/json"
-
-          },
-
-          body:JSON.stringify(
-            userData
-          )
-
-        }
-
-      );
-
-    const data =
-
-    await response.json();
-
-    /* =========================
-       SUCCESS
-    ========================= */
-
-    if(
-
-      data.success &&
-
-      data.data?.token
-
-    ){
-
-      saveSession(
-        data.data
-      );
-
-    }
-
-    return data;
-
-  }
-
-  catch(error){
-
-    console.log(error);
-
-    return {
-
-      success:false,
-
-      message:
-      "Signup failed"
-
-    };
-
-  }
-
-}
-
-/* =========================
-   LOGIN
-========================= */
-
-export async function loginUser(
-
-  userData
-
-){
-
-  try{
-
-    const response =
-
-      await fetch(
-
-        `${API_BASE_URL}/login`,
-
-        {
-
-          method:"POST",
-
-          headers:{
-
-            "Content-Type":
-            "application/json"
-
-          },
-
-          body:JSON.stringify(
-            userData
-          )
-
-        }
-
-      );
-
-    const data =
-
-    await response.json();
-
-    /* =========================
-       SUCCESS
-    ========================= */
-
-    if(
-
-      data.success &&
-
-      data.data?.token
-
-    ){
-
-      saveSession(
-        data.data
-      );
-
-    }
-
-    return data;
-
-  }
-
-  catch(error){
-
-    console.log(error);
-
-    return {
-
-      success:false,
-
-      message:
-      "Login failed"
-
-    };
-
-  }
-
-}
-
-/* =========================
-   LOGOUT
-========================= */
-
-export function logoutUser(){
-
-  localStorage.removeItem(
-    "token"
-  );
-
-  localStorage.removeItem(
-    "user"
-  );
-
-  window.location.hash =
-  "#login";
-
-}
-
-/* =========================
-   GET TOKEN
-========================= */
-
-export function getToken(){
-
-  return localStorage.getItem(
-    "token"
+    "vertex_user",
+    JSON.stringify(user)
   );
 
 }
@@ -232,14 +41,24 @@ export function getUser(){
   const user =
 
   localStorage.getItem(
-    "user"
+    "vertex_user"
   );
 
   return user
-
     ? JSON.parse(user)
-
     : null;
+
+}
+
+/* =========================
+   GET TOKEN
+========================= */
+
+export function getToken(){
+
+  return localStorage.getItem(
+    "vertex_token"
+  );
 
 }
 
@@ -249,8 +68,166 @@ export function getUser(){
 
 export function isAuthenticated(){
 
-  return !!localStorage.getItem(
-    "token"
+  return !!getToken();
+
+}
+
+/* =========================
+   LOGOUT
+========================= */
+
+export function logout(){
+
+  localStorage.removeItem(
+    "vertex_token"
   );
+
+  localStorage.removeItem(
+    "vertex_user"
+  );
+
+  window.location.hash =
+
+  "#login";
+
+  window.location.reload();
+
+}
+
+/* =========================
+   REGISTER USER
+========================= */
+
+export async function registerUser(data){
+
+  try{
+
+    const response =
+
+    await fetch(
+
+      `${API_BASE_URL}/register`,
+
+      {
+
+        method:"POST",
+
+        headers:{
+          "Content-Type":
+          "application/json"
+        },
+
+        body:JSON.stringify(data)
+
+      }
+
+    );
+
+    const result =
+
+    await response.json();
+
+    if(!response.ok){
+
+      throw new Error(
+        result.message
+      );
+
+    }
+
+    saveToken(result.token);
+
+    saveUser(result.user);
+
+    return result;
+
+  }
+
+  catch(error){
+
+    throw error;
+
+  }
+
+}
+
+/* =========================
+   LOGIN USER
+========================= */
+
+export async function loginUser(data){
+
+  try{
+
+    const response =
+
+    await fetch(
+
+      `${API_BASE_URL}/login`,
+
+      {
+
+        method:"POST",
+
+        headers:{
+          "Content-Type":
+          "application/json"
+        },
+
+        body:JSON.stringify(data)
+
+      }
+
+    );
+
+    const result =
+
+    await response.json();
+
+    if(!response.ok){
+
+      throw new Error(
+        result.message
+      );
+
+    }
+
+    saveToken(result.token);
+
+    saveUser(result.user);
+
+    return result;
+
+  }
+
+  catch(error){
+
+    throw error;
+
+  }
+
+}
+
+/* =========================
+   GOOGLE LOGIN
+========================= */
+
+export function loginWithGoogle(){
+
+  window.location.href =
+
+  `${API_BASE_URL}/google`;
+
+}
+
+/* =========================
+   GITHUB LOGIN
+========================= */
+
+export function loginWithGithub(){
+
+  window.location.href =
+
+  `${API_BASE_URL}/github`;
 
 }
