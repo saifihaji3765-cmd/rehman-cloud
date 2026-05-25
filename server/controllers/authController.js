@@ -1,29 +1,34 @@
+const bcrypt =
+require("bcryptjs");
+
+const jwt =
+require("jsonwebtoken");
+
 /* =========================
-   IMPORTS
+   MODEL
 ========================= */
 
-import bcrypt from "bcryptjs";
+const User =
+require(
+  "../models/userModel"
+);
 
-import jwt from "jsonwebtoken";
+/* =========================
+   GOOGLE SERVICE
+========================= */
 
-import {
+const {
 
   generateGoogleToken,
 
   verifyGoogleUser
 
-}
-
-from "../services/googleAuthService.js";
-
-/* =========================
-   TEMP USER DATABASE
-========================= */
-
-const users = [];
+} = require(
+  "../services/googleAuthService"
+);
 
 /* =========================
-   GENERATE TOKEN
+   GENERATE JWT
 ========================= */
 
 function generateToken(user){
@@ -32,9 +37,11 @@ function generateToken(user){
 
     {
 
-      id:user.id,
+      id:user._id,
 
-      email:user.email
+      email:user.email,
+
+      role:user.role
 
     },
 
@@ -51,14 +58,12 @@ function generateToken(user){
 }
 
 /* =========================
-   REGISTER
+   REGISTER USER
 ========================= */
 
 async function registerUser(
-
   req,
   res
-
 ){
 
   try{
@@ -100,13 +105,11 @@ async function registerUser(
 
     const existingUser =
 
-    users.find(
+    await User.findOne({
 
-      user=>
+      email
 
-      user.email === email
-
-    );
+    });
 
     if(existingUser){
 
@@ -133,12 +136,12 @@ async function registerUser(
     );
 
     /* =========================
-       NEW USER
+       CREATE USER
     ========================= */
 
-    const newUser = {
+    const user =
 
-      id:Date.now(),
+    await User.create({
 
       name,
 
@@ -149,23 +152,20 @@ async function registerUser(
 
       provider:"email"
 
-    };
-
-    users.push(newUser);
+    });
 
     /* =========================
        TOKEN
     ========================= */
 
     const token =
-
-    generateToken(newUser);
+    generateToken(user);
 
     /* =========================
        RESPONSE
     ========================= */
 
-    return res.json({
+    return res.status(201).json({
 
       success:true,
 
@@ -173,11 +173,15 @@ async function registerUser(
 
       user:{
 
-        id:newUser.id,
+        id:user._id,
 
-        name:newUser.name,
+        name:user.name,
 
-        email:newUser.email
+        email:user.email,
+
+        role:user.role,
+
+        provider:user.provider
 
       }
 
@@ -187,7 +191,7 @@ async function registerUser(
 
   catch(error){
 
-    console.log(error);
+    console.error(error);
 
     return res.status(500).json({
 
@@ -203,14 +207,12 @@ async function registerUser(
 }
 
 /* =========================
-   LOGIN
+   LOGIN USER
 ========================= */
 
 async function loginUser(
-
   req,
   res
-
 ){
 
   try{
@@ -228,13 +230,11 @@ async function loginUser(
 
     const user =
 
-    users.find(
+    await User.findOne({
 
-      user=>
+      email
 
-      user.email === email
-
-    );
+    });
 
     if(!user){
 
@@ -277,11 +277,19 @@ async function loginUser(
     }
 
     /* =========================
+       UPDATE LAST LOGIN
+    ========================= */
+
+    user.lastLogin =
+    new Date();
+
+    await user.save();
+
+    /* =========================
        TOKEN
     ========================= */
 
     const token =
-
     generateToken(user);
 
     /* =========================
@@ -296,11 +304,15 @@ async function loginUser(
 
       user:{
 
-        id:user.id,
+        id:user._id,
 
         name:user.name,
 
-        email:user.email
+        email:user.email,
+
+        role:user.role,
+
+        provider:user.provider
 
       }
 
@@ -310,7 +322,7 @@ async function loginUser(
 
   catch(error){
 
-    console.log(error);
+    console.error(error);
 
     return res.status(500).json({
 
@@ -330,16 +342,14 @@ async function loginUser(
 ========================= */
 
 async function googleLogin(
-
   req,
   res
-
 ){
 
   try{
 
     /* =========================
-       GOOGLE PROFILE
+       TEMP PROFILE
     ========================= */
 
     const googleProfile = {
@@ -355,14 +365,49 @@ async function googleLogin(
     };
 
     /* =========================
-       VERIFY
+       VERIFY USER
     ========================= */
 
-    const user =
+    const profile =
 
     await verifyGoogleUser(
       googleProfile
     );
+
+    /* =========================
+       FIND USER
+    ========================= */
+
+    let user =
+
+    await User.findOne({
+
+      email:profile.email
+
+    });
+
+    /* =========================
+       CREATE USER
+    ========================= */
+
+    if(!user){
+
+      user =
+      await User.create({
+
+        name:profile.name,
+
+        email:profile.email,
+
+        avatar:profile.avatar,
+
+        provider:"google",
+
+        isVerified:true
+
+      });
+
+    }
 
     /* =========================
        TOKEN
@@ -375,7 +420,7 @@ async function googleLogin(
     );
 
     /* =========================
-       REDIRECT
+       RESPONSE
     ========================= */
 
     return res.json({
@@ -392,7 +437,7 @@ async function googleLogin(
 
   catch(error){
 
-    console.log(error);
+    console.error(error);
 
     return res.status(500).json({
 
@@ -412,10 +457,8 @@ async function googleLogin(
 ========================= */
 
 async function githubLogin(
-
   req,
   res
-
 ){
 
   try{
@@ -433,7 +476,7 @@ async function githubLogin(
 
   catch(error){
 
-    console.log(error);
+    console.error(error);
 
     return res.status(500).json({
 
@@ -452,7 +495,7 @@ async function githubLogin(
    EXPORTS
 ========================= */
 
-export {
+module.exports = {
 
   registerUser,
 
