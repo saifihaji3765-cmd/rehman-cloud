@@ -1,36 +1,64 @@
-const User =
-require("../models/userModel");
-
-const {
-
-  hashPassword,
-
-  comparePassword
-
-} = require(
-  "../services/hashService"
-);
-
-const {
-
-  generateToken
-
-} = require(
-  "../services/jwtService"
-);
-
-const formatResponse =
-require(
-  "../utils/formatResponse"
-);
-
 /* =========================
-   SIGNUP
+   IMPORTS
 ========================= */
 
-async function signupController(
+import bcrypt from "bcryptjs";
+
+import jwt from "jsonwebtoken";
+
+import {
+
+  generateGoogleToken,
+
+  verifyGoogleUser
+
+}
+
+from "../services/googleAuthService.js";
+
+/* =========================
+   TEMP USER DATABASE
+========================= */
+
+const users = [];
+
+/* =========================
+   GENERATE TOKEN
+========================= */
+
+function generateToken(user){
+
+  return jwt.sign(
+
+    {
+
+      id:user.id,
+
+      email:user.email
+
+    },
+
+    process.env.JWT_SECRET,
+
+    {
+
+      expiresIn:"7d"
+
+    }
+
+  );
+
+}
+
+/* =========================
+   REGISTER
+========================= */
+
+async function registerUser(
+
   req,
   res
+
 ){
 
   try{
@@ -38,9 +66,7 @@ async function signupController(
     const {
 
       name,
-
       email,
-
       password
 
     } = req.body;
@@ -52,56 +78,46 @@ async function signupController(
     if(
 
       !name ||
-
       !email ||
-
       !password
 
     ){
 
-      return res.status(400)
-      .json(
+      return res.status(400).json({
 
-        formatResponse({
+        success:false,
 
-          success:false,
+        message:
+        "All fields required"
 
-          message:
-          "All fields are required"
-
-        })
-
-      );
+      });
 
     }
 
     /* =========================
-       CHECK USER
+       EXISTING USER
     ========================= */
 
     const existingUser =
 
-      await User.findOne({
+    users.find(
 
-        email
+      user=>
 
-      });
+      user.email === email
+
+    );
 
     if(existingUser){
 
-      return res.status(400)
-      .json(
+      return res.status(400).json({
 
-        formatResponse({
+        success:false,
 
-          success:false,
+        message:
+        "User already exists"
 
-          message:
-          "User already exists"
-
-        })
-
-      );
+      });
 
     }
 
@@ -111,26 +127,31 @@ async function signupController(
 
     const hashedPassword =
 
-      await hashPassword(
-        password
-      );
+    await bcrypt.hash(
+      password,
+      10
+    );
 
     /* =========================
-       CREATE USER
+       NEW USER
     ========================= */
 
-    const user =
+    const newUser = {
 
-      await User.create({
+      id:Date.now(),
 
-        name,
+      name,
 
-        email,
+      email,
 
-        password:
-        hashedPassword
+      password:
+      hashedPassword,
 
-      });
+      provider:"email"
+
+    };
+
+    users.push(newUser);
 
     /* =========================
        TOKEN
@@ -138,58 +159,44 @@ async function signupController(
 
     const token =
 
-      generateToken({
-
-        id:user._id,
-
-        email:user.email
-
-      });
+    generateToken(newUser);
 
     /* =========================
        RESPONSE
     ========================= */
 
-    return res.json(
+    return res.json({
 
-      formatResponse({
+      success:true,
 
-        success:true,
+      token,
 
-        message:
-        "Signup successful",
+      user:{
 
-        data:{
+        id:newUser.id,
 
-          token,
+        name:newUser.name,
 
-          user
+        email:newUser.email
 
-        }
+      }
 
-      })
-
-    );
+    });
 
   }
 
   catch(error){
 
-    return res.status(500)
-    .json(
+    console.log(error);
 
-      formatResponse({
+    return res.status(500).json({
 
-        success:false,
+      success:false,
 
-        message:
-        "Signup failed",
+      message:
+      "Register failed"
 
-        error:error.message
-
-      })
-
-    );
+    });
 
   }
 
@@ -199,9 +206,11 @@ async function signupController(
    LOGIN
 ========================= */
 
-async function loginController(
+async function loginUser(
+
   req,
   res
+
 ){
 
   try{
@@ -209,38 +218,34 @@ async function loginController(
     const {
 
       email,
-
       password
 
     } = req.body;
 
     /* =========================
-       CHECK USER
+       USER
     ========================= */
 
     const user =
 
-      await User.findOne({
+    users.find(
 
-        email
+      user=>
 
-      });
+      user.email === email
+
+    );
 
     if(!user){
 
-      return res.status(404)
-      .json(
+      return res.status(400).json({
 
-        formatResponse({
+        success:false,
 
-          success:false,
+        message:
+        "Invalid credentials"
 
-          message:
-          "User not found"
-
-        })
-
-      );
+      });
 
     }
 
@@ -248,31 +253,26 @@ async function loginController(
        PASSWORD CHECK
     ========================= */
 
-    const isMatch =
+    const validPassword =
 
-      await comparePassword(
+    await bcrypt.compare(
 
-        password,
+      password,
 
-        user.password
+      user.password
 
-      );
+    );
 
-    if(!isMatch){
+    if(!validPassword){
 
-      return res.status(401)
-      .json(
+      return res.status(400).json({
 
-        formatResponse({
+        success:false,
 
-          success:false,
+        message:
+        "Invalid credentials"
 
-          message:
-          "Invalid password"
-
-        })
-
-      );
+      });
 
     }
 
@@ -282,58 +282,167 @@ async function loginController(
 
     const token =
 
-      generateToken({
-
-        id:user._id,
-
-        email:user.email
-
-      });
+    generateToken(user);
 
     /* =========================
        RESPONSE
     ========================= */
 
-    return res.json(
+    return res.json({
 
-      formatResponse({
+      success:true,
 
-        success:true,
+      token,
 
-        message:
-        "Login successful",
+      user:{
 
-        data:{
+        id:user.id,
 
-          token,
+        name:user.name,
 
-          user
+        email:user.email
 
-        }
+      }
 
-      })
-
-    );
+    });
 
   }
 
   catch(error){
 
-    return res.status(500)
-    .json(
+    console.log(error);
 
-      formatResponse({
+    return res.status(500).json({
 
-        success:false,
+      success:false,
 
-        message:
-        "Login failed",
+      message:
+      "Login failed"
 
-        error:error.message
+    });
 
-      })
+  }
 
+}
+
+/* =========================
+   GOOGLE LOGIN
+========================= */
+
+async function googleLogin(
+
+  req,
+  res
+
+){
+
+  try{
+
+    /* =========================
+       GOOGLE PROFILE
+    ========================= */
+
+    const googleProfile = {
+
+      sub:"google123",
+
+      name:"Google User",
+
+      email:"googleuser@gmail.com",
+
+      picture:""
+
+    };
+
+    /* =========================
+       VERIFY
+    ========================= */
+
+    const user =
+
+    await verifyGoogleUser(
+      googleProfile
     );
+
+    /* =========================
+       TOKEN
+    ========================= */
+
+    const token =
+
+    generateGoogleToken(
+      user
+    );
+
+    /* =========================
+       REDIRECT
+    ========================= */
+
+    return res.json({
+
+      success:true,
+
+      token,
+
+      user
+
+    });
+
+  }
+
+  catch(error){
+
+    console.log(error);
+
+    return res.status(500).json({
+
+      success:false,
+
+      message:
+      "Google login failed"
+
+    });
+
+  }
+
+}
+
+/* =========================
+   GITHUB LOGIN
+========================= */
+
+async function githubLogin(
+
+  req,
+  res
+
+){
+
+  try{
+
+    return res.json({
+
+      success:true,
+
+      message:
+      "GitHub login coming soon"
+
+    });
+
+  }
+
+  catch(error){
+
+    console.log(error);
+
+    return res.status(500).json({
+
+      success:false,
+
+      message:
+      "GitHub login failed"
+
+    });
 
   }
 
@@ -343,10 +452,14 @@ async function loginController(
    EXPORTS
 ========================= */
 
-module.exports = {
+export {
 
-  signupController,
+  registerUser,
 
-  loginController
+  loginUser,
+
+  googleLogin,
+
+  githubLogin
 
 };
