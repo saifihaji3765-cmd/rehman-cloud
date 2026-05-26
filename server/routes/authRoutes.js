@@ -1,81 +1,66 @@
-/* =========================
-   IMPORTS
-========================= */
-
-import express from "express";
-
-import {
-
-  registerUser,
-
-  loginUser,
-
-  googleLogin,
-
-  githubLogin
-
-}
-
-from "../controllers/authController.js";
-
-/* =========================
-   ROUTER
-========================= */
+const express =
+require("express");
 
 const router =
-
 express.Router();
 
 /* =========================
-   REGISTER
+CONTROLLERS
+========================= */
+
+const {
+
+registerUser,
+
+loginUser,
+
+googleLogin,
+
+githubLogin
+
+} = require(
+"../controllers/authController"
+);
+
+/* =========================
+REGISTER
 ========================= */
 
 router.post(
-
-  "/register",
-
-  registerUser
-
+"/register",
+registerUser
 );
 
 /* =========================
-   LOGIN
+LOGIN
 ========================= */
 
 router.post(
-
-  "/login",
-
-  loginUser
-
+"/login",
+loginUser
 );
 
 /* =========================
-   GOOGLE LOGIN
+GOOGLE LOGIN
 ========================= */
 
 router.get(
-
-  "/google",
-
-  googleLogin
-
+"/google",
+googleLogin
 );
 
 /* =========================
-   GITHUB LOGIN
+GITHUB LOGIN
 ========================= */
 
 router.get(
-
-  "/github",
-
-  githubLogin
-
+"/github",
+githubLogin
 );
 
 /* =========================
-   EXPORT
+EXPORT
 ========================= */
 
-export default router;
+module.exports =
+router;
