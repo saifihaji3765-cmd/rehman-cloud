@@ -1,74 +1,196 @@
+const { v4:uuidv4 } =
+require("uuid");
+
+/* =========================
+RESERVED SUBDOMAINS
+========================= */
+
+const reservedSubdomains = [
+
+"admin",
+
+"api",
+
+"dashboard",
+
+"root",
+
+"vertexcloud",
+
+"support",
+
+"billing"
+
+];
+
+/* =========================
+DOMAIN AGENT
+========================= */
+
 async function domainAgent(
-  projectData
+projectData
 ){
 
-  try{
+try{
 
-    /* =========================
-       PROJECT NAME
-    ========================= */
+/* =========================
+   PROJECT NAME
+========================= */
 
-    const projectName =
+const projectName =
 
-      projectData.projectName ||
+  projectData.projectName ||
 
-      "vertex-app";
+  "vertex-app";
 
-    /* =========================
-       CLEAN NAME
-    ========================= */
+/* =========================
+   DEPLOYMENT ID
+========================= */
 
-    const cleanName =
+const deploymentId =
 
-      projectName
-      .toLowerCase()
-      .replace(/\s+/g,"-");
+  uuidv4()
+  .split("-")[0];
 
-    /* =========================
-       GENERATED DOMAIN
-    ========================= */
+/* =========================
+   CLEAN NAME
+========================= */
 
-    const domain =
+let cleanName =
 
-`${cleanName}.vertexcloud.app`;
+  projectName
 
-    /* =========================
-       RETURN
-    ========================= */
+  .toLowerCase()
 
-    return {
+  .replace(/[^a-z0-9\s-]/g,"")
 
-      success:true,
+  .replace(/\s+/g,"-")
 
-      subdomain:
-      domain,
+  .trim();
 
-      customDomain:false,
+/* =========================
+   RESERVED CHECK
+========================= */
 
-      sslReady:true,
+if(
 
-      dnsConfigured:true
+  reservedSubdomains.includes(
+    cleanName
+  )
 
-    };
+){
 
-  }
-
-  catch(error){
-
-    return {
-
-      success:false,
-
-      error:error.message
-
-    };
-
-  }
+  cleanName =
+  `${cleanName}-${deploymentId}`;
 
 }
 
 /* =========================
-   EXPORT
+   UNIQUE SUBDOMAIN
+========================= */
+
+const subdomain =
+
+"${cleanName}-${deploymentId}";
+
+/* =========================
+   ROOT DOMAIN
+========================= */
+
+const rootDomain =
+
+  process.env.APP_DOMAIN ||
+
+  "vertexcloud.ai";
+
+/* =========================
+   FULL DOMAIN
+========================= */
+
+const fullDomain =
+
+"https://${subdomain}.${rootDomain}";
+
+/* =========================
+   DNS
+========================= */
+
+const dns = {
+
+  provider:"Route53",
+
+  dnsConfigured:true,
+
+  propagationStatus:
+  "pending"
+
+};
+
+/* =========================
+   SSL
+========================= */
+
+const ssl = {
+
+  enabled:true,
+
+  provider:"AWS ACM",
+
+  sslStatus:"provisioning"
+
+};
+
+/* =========================
+   RETURN
+========================= */
+
+return {
+
+  success:true,
+
+  domain:{
+
+    deploymentId,
+
+    projectName,
+
+    subdomain,
+
+    rootDomain,
+
+    fullDomain,
+
+    customDomain:false,
+
+    ssl,
+
+    dns,
+
+    createdAt:
+    new Date()
+
+  }
+
+};
+
+}
+
+catch(error){
+
+return {
+
+  success:false,
+
+  error:error.message
+
+};
+
+}
+
+}
+
+/* =========================
+EXPORT
 ========================= */
 
 module.exports =
