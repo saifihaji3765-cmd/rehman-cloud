@@ -5,46 +5,119 @@ const router =
 express.Router();
 
 /* =========================
-   CONTROLLER
+CONTROLLERS
 ========================= */
 
-const deployController =
-require(
-  "../controllers/deployController"
+const {
+
+deployProject,
+
+getDeploymentStatus,
+
+getDeploymentLogs,
+
+getDeploymentMonitoring,
+
+triggerScaling
+
+} = require(
+
+"../controllers/deployController"
+
 );
 
 /* =========================
-   MIDDLEWARE
+MIDDLEWARE
 ========================= */
 
 const rateLimiter =
 require(
-  "../middleware/rateLimiter"
+
+"../middleware/rateLimiter"
+
 );
 
 const authMiddleware =
 require(
-  "../middleware/authMiddleware"
+
+"../middleware/authMiddleware"
+
 );
 
 /* =========================
-   DEPLOY ROUTE
+DEPLOY PROJECT
 ========================= */
 
 router.post(
 
-  "/deploy",
+"/deploy",
 
-  authMiddleware,
+authMiddleware,
 
-  rateLimiter,
+rateLimiter,
 
-  deployController
+deployProject
 
 );
 
 /* =========================
-   EXPORT
+DEPLOYMENT STATUS
+========================= */
+
+router.get(
+
+"/status/:deploymentId",
+
+authMiddleware,
+
+getDeploymentStatus
+
+);
+
+/* =========================
+DEPLOYMENT LOGS
+========================= */
+
+router.get(
+
+"/logs/:deploymentId",
+
+authMiddleware,
+
+getDeploymentLogs
+
+);
+
+/* =========================
+MONITORING
+========================= */
+
+router.get(
+
+"/monitoring/:deploymentId",
+
+authMiddleware,
+
+getDeploymentMonitoring
+
+);
+
+/* =========================
+SCALING
+========================= */
+
+router.post(
+
+"/scale/:deploymentId",
+
+authMiddleware,
+
+triggerScaling
+
+);
+
+/* =========================
+EXPORT
 ========================= */
 
 module.exports =
