@@ -5,35 +5,103 @@ const router =
 express.Router();
 
 /* =========================
-   CONTROLLERS
+CONTROLLERS
 ========================= */
 
-const aiController =
-require("../controllers/aiController");
+const {
+
+aiChatController,
+
+aiCodeController,
+
+aiDeployController,
+
+aiThumbnailController
+
+} = require(
+"../controllers/aiController"
+);
 
 /* =========================
-   MIDDLEWARE
+MIDDLEWARE
 ========================= */
 
 const rateLimiter =
-require("../middleware/rateLimiter");
+require(
+"../middleware/rateLimiter"
+);
+
+const authMiddleware =
+require(
+"../middleware/authMiddleware"
+);
 
 /* =========================
-   AI CHAT ROUTE
+AI CHAT
 ========================= */
 
 router.post(
 
-  "/chat",
+"/chat",
 
-  rateLimiter,
+authMiddleware,
 
-  aiController
+rateLimiter,
+
+aiChatController
 
 );
 
 /* =========================
-   EXPORT
+AI CODE GENERATION
+========================= */
+
+router.post(
+
+"/generate-code",
+
+authMiddleware,
+
+rateLimiter,
+
+aiCodeController
+
+);
+
+/* =========================
+AI DEPLOYMENT
+========================= */
+
+router.post(
+
+"/deploy-agent",
+
+authMiddleware,
+
+rateLimiter,
+
+aiDeployController
+
+);
+
+/* =========================
+AI THUMBNAIL
+========================= */
+
+router.post(
+
+"/thumbnail",
+
+authMiddleware,
+
+rateLimiter,
+
+aiThumbnailController
+
+);
+
+/* =========================
+EXPORT
 ========================= */
 
 module.exports =
