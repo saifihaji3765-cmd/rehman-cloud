@@ -5,91 +5,151 @@ const router =
 express.Router();
 
 /* =========================
-   CONTROLLERS
+CONTROLLERS
 ========================= */
 
 const {
 
-  createProjectController,
+createProjectController,
 
-  getProjectsController,
+getProjectsController,
 
-  updateProjectStatusController
+getSingleProjectController,
+
+updateProjectStatusController,
+
+deleteProjectController,
+
+deployProjectController
 
 } = require(
 
-  "../controllers/projectController"
+"../controllers/projectController"
 
 );
 
 /* =========================
-   MIDDLEWARE
+MIDDLEWARE
 ========================= */
 
-const authMiddleware =
-require(
+const {
 
-  "../middleware/authMiddleware"
+authMiddleware
+
+} = require(
+
+"../middleware/authMiddleware"
 
 );
 
-const rateLimiter =
-require(
+const {
 
-  "../middleware/rateLimiter"
+apiLimiter
+
+} = require(
+
+"../middleware/rateLimiter"
 
 );
 
 /* =========================
-   CREATE PROJECT
+CREATE PROJECT
 ========================= */
 
 router.post(
 
-  "/create",
+"/create",
 
-  authMiddleware,
+authMiddleware,
 
-  rateLimiter,
+apiLimiter,
 
-  createProjectController
+createProjectController
 
 );
 
 /* =========================
-   GET USER PROJECTS
+GET MY PROJECTS
 ========================= */
 
 router.get(
 
-  "/:userId",
+"/me",
 
-  authMiddleware,
+authMiddleware,
 
-  rateLimiter,
+apiLimiter,
 
-  getProjectsController
+getProjectsController
 
 );
 
 /* =========================
-   UPDATE PROJECT
+GET SINGLE PROJECT
+========================= */
+
+router.get(
+
+"/:projectId",
+
+authMiddleware,
+
+apiLimiter,
+
+getSingleProjectController
+
+);
+
+/* =========================
+UPDATE PROJECT
 ========================= */
 
 router.put(
 
-  "/update/:projectId",
+"/update/:projectId",
 
-  authMiddleware,
+authMiddleware,
 
-  rateLimiter,
+apiLimiter,
 
-  updateProjectStatusController
+updateProjectStatusController
 
 );
 
 /* =========================
-   EXPORT
+DELETE PROJECT
+========================= */
+
+router.delete(
+
+"/delete/:projectId",
+
+authMiddleware,
+
+apiLimiter,
+
+deleteProjectController
+
+);
+
+/* =========================
+DEPLOY PROJECT
+========================= */
+
+router.post(
+
+"/deploy/:projectId",
+
+authMiddleware,
+
+apiLimiter,
+
+deployProjectController
+
+);
+
+/* =========================
+EXPORT
 ========================= */
 
 module.exports =
