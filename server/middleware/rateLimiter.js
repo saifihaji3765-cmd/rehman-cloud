@@ -2,36 +2,129 @@ const rateLimit =
 require("express-rate-limit");
 
 /* =========================
-   RATE LIMITER
+DEFAULT API LIMITER
 ========================= */
 
-const rateLimiter =
+const apiLimiter =
 
 rateLimit({
 
-  windowMs:
-  15 * 60 * 1000,
+windowMs:
+15 * 60 * 1000,
 
-  max:100,
+max:100,
 
-  message:{
+standardHeaders:true,
 
-    success:false,
+legacyHeaders:false,
 
-    message:
-    "Too many requests. Please try again later."
+message:{
 
-  },
+success:false,
 
-  standardHeaders:true,
+message:
+"Too many API requests"
 
-  legacyHeaders:false
+}
 
 });
 
 /* =========================
-   EXPORT
+AUTH LIMITER
 ========================= */
 
-module.exports =
-rateLimiter;
+const authLimiter =
+
+rateLimit({
+
+windowMs:
+15 * 60 * 1000,
+
+max:10,
+
+standardHeaders:true,
+
+legacyHeaders:false,
+
+message:{
+
+success:false,
+
+message:
+"Too many login attempts"
+
+}
+
+});
+
+/* =========================
+AI LIMITER
+========================= */
+
+const aiLimiter =
+
+rateLimit({
+
+windowMs:
+60 * 1000,
+
+max:20,
+
+standardHeaders:true,
+
+legacyHeaders:false,
+
+message:{
+
+success:false,
+
+message:
+"AI request limit reached"
+
+}
+
+});
+
+/* =========================
+DEPLOY LIMITER
+========================= */
+
+const deployLimiter =
+
+rateLimit({
+
+windowMs:
+60 * 60 * 1000,
+
+max:5,
+
+standardHeaders:true,
+
+legacyHeaders:false,
+
+message:{
+
+success:false,
+
+message:
+"Deployment limit reached"
+
+}
+
+});
+
+/* =========================
+EXPORTS
+========================= */
+
+module.exports = {
+
+apiLimiter,
+
+authLimiter,
+
+aiLimiter,
+
+deployLimiter
+
+};
