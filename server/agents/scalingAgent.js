@@ -1,105 +1,279 @@
+const { v4:uuidv4 } =
+require("uuid");
+
+/* =========================
+SCALING AGENT
+========================= */
+
 async function scalingAgent(
-  appMetrics
+appMetrics
 ){
 
-  try{
+try{
 
-    /* =========================
-       DEFAULT METRICS
-    ========================= */
+/* =========================
+   DEPLOYMENT ID
+========================= */
 
-    const cpuUsage =
+const deploymentId =
 
-      appMetrics.cpuUsage || 20;
+  appMetrics.deploymentId ||
 
-    const ramUsage =
+  uuidv4();
 
-      appMetrics.ramUsage || 30;
+/* =========================
+   METRICS
+========================= */
 
-    /* =========================
-       SCALE DECISION
-    ========================= */
+const cpuUsage =
 
-    let action =
+  Number(
+    appMetrics.cpuUsage || 20
+  );
 
-      "stable";
+const ramUsage =
 
-    let instances = 1;
+  Number(
+    appMetrics.ramUsage || 30
+  );
 
-    /* =========================
-       AUTO SCALE LOGIC
-    ========================= */
+const activeUsers =
 
-    if(
+  Number(
+    appMetrics.activeUsers || 0
+  );
 
-      cpuUsage > 70 ||
+/* =========================
+   LIMITS
+========================= */
 
-      ramUsage > 75
+const minInstances = 1;
 
-    ){
+const maxInstances = 10;
 
-      action = "scale-up";
+/* =========================
+   DEFAULT STATE
+========================= */
 
-      instances = 3;
+let action = "stable";
 
-    }
+let instances = 1;
 
-    if(
+let loadBalancer = false;
 
-      cpuUsage > 90 ||
+let scalingReason =
+  "System stable";
 
-      ramUsage > 90
+/* =========================
+   SCALE UP
+========================= */
 
-    ){
+if(
 
-      action = "high-scale";
+  cpuUsage >= 70 ||
 
-      instances = 5;
+  ramUsage >= 75 ||
 
-    }
+  activeUsers >= 500
 
-    /* =========================
-       RETURN
-    ========================= */
+){
 
-    return {
+  action = "scale-up";
 
-      success:true,
+  instances = 3;
 
-      autoScaling:true,
+  loadBalancer = true;
 
-      action,
-
-      instances,
-
-      metrics:{
-
-        cpuUsage,
-
-        ramUsage
-
-      }
-
-    };
-
-  }
-
-  catch(error){
-
-    return {
-
-      success:false,
-
-      error:error.message
-
-    };
-
-  }
+  scalingReason =
+  "Medium traffic spike detected";
 
 }
 
 /* =========================
-   EXPORT
+   HIGH SCALE
+========================= */
+
+if(
+
+  cpuUsage >= 90 ||
+
+  ramUsage >= 90 ||
+
+  activeUsers >= 2000
+
+){
+
+  action = "high-scale";
+
+  instances = 6;
+
+  loadBalancer = true;
+
+  scalingReason =
+  "High traffic load detected";
+
+}
+
+/* =========================
+   EXTREME SCALE
+========================= */
+
+if(
+
+  cpuUsage >= 95 ||
+
+  ramUsage >= 95 ||
+
+  activeUsers >= 5000
+
+){
+
+  action = "extreme-scale";
+
+  instances = 10;
+
+  loadBalancer = true;
+
+  scalingReason =
+  "Extreme production traffic";
+
+}
+
+/* =========================
+   SCALE DOWN
+========================= */
+
+if(
+
+  cpuUsage <= 20 &&
+
+  ramUsage <= 25 &&
+
+  activeUsers <= 50
+
+){
+
+  action = "scale-down";
+
+  instances = 1;
+
+  scalingReason =
+  "Low resource usage";
+
+}
+
+/* =========================
+   INSTANCE SAFETY
+========================= */
+
+if(
+
+  instances > maxInstances
+
+){
+
+  instances = maxInstances;
+
+}
+
+if(
+
+  instances < minInstances
+
+){
+
+  instances = minInstances;
+
+}
+
+/* =========================
+   COST OPTIMIZATION
+========================= */
+
+const estimatedMonthlyCost =
+
+  instances * 15;
+
+/* =========================
+   ORCHESTRATION
+========================= */
+
+const orchestration = {
+
+  containerEngine:"Docker",
+
+  orchestrationPlatform:
+  "AWS ECS",
+
+  kubernetesReady:true
+
+};
+
+/* =========================
+   RETURN
+========================= */
+
+return {
+
+  success:true,
+
+  scaling:{
+
+    deploymentId,
+
+    autoScaling:true,
+
+    action,
+
+    instances,
+
+    minInstances,
+
+    maxInstances,
+
+    loadBalancer,
+
+    scalingReason,
+
+    estimatedMonthlyCost,
+
+    metrics:{
+
+      cpuUsage,
+
+      ramUsage,
+
+      activeUsers
+
+    },
+
+    orchestration,
+
+    checkedAt:
+    new Date()
+
+  }
+
+};
+
+}
+
+catch(error){
+
+return {
+
+  success:false,
+
+  error:error.message
+
+};
+
+}
+
+}
+
+/* =========================
+EXPORT
 ========================= */
 
 module.exports =
