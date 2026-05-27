@@ -1,114 +1,285 @@
+const { v4:uuidv4 } =
+require("uuid");
+
+/* =========================
+MONITORING AGENT
+========================= */
+
 async function monitoringAgent(
-  appData
+appData
 ){
 
-  try{
+try{
 
-    /* =========================
-       APP INFO
-    ========================= */
+/* =========================
+   APP INFO
+========================= */
 
-    const appName =
+const appName =
 
-      appData.appName ||
+  appData.appName ||
 
-      "vertexcloud-app";
+  "vertexcloud-app";
 
-    /* =========================
-       HEALTH STATUS
-    ========================= */
+const deploymentId =
 
-    const monitoring = {
+  appData.deploymentId ||
 
-      app:appName,
+  uuidv4();
 
-      status:"healthy",
+/* =========================
+   METRICS
+========================= */
 
-      uptime:"99.99%",
+const metrics = {
 
-      cpuUsage:"22%",
+  cpuUsage:
+  Math.floor(
+    Math.random() * 60
+  ) + "%",
 
-      ramUsage:"35%",
+  ramUsage:
+  Math.floor(
+    Math.random() * 70
+  ) + "%",
 
-      activeUsers:120,
+  diskUsage:
+  Math.floor(
+    Math.random() * 50
+  ) + "%",
 
-      responseTime:"120ms",
+  responseTime:
+  Math.floor(
+    Math.random() * 200
+  ) + "ms",
 
-      requestsPerMinute:340,
+  requestsPerMinute:
+  Math.floor(
+    Math.random() * 1000
+  ),
 
-      serverStatus:"online",
+  activeUsers:
+  Math.floor(
+    Math.random() * 500
+  ),
 
-      lastChecked:
-      new Date()
+  uptime:"99.99%"
 
-    };
+};
 
-    /* =========================
-       ALERTS
-    ========================= */
+/* =========================
+   HEALTH SCORE
+========================= */
 
-    const alerts = [];
+let healthScore = 100;
 
-    if(
+if(
 
-      parseInt(
-        monitoring.cpuUsage
-      ) > 80
+  parseInt(
+    metrics.cpuUsage
+  ) > 80
 
-    ){
+){
 
-      alerts.push(
-        "High CPU usage detected"
-      );
+  healthScore -= 20;
 
-    }
+}
 
-    if(
+if(
 
-      parseInt(
-        monitoring.ramUsage
-      ) > 85
+  parseInt(
+    metrics.ramUsage
+  ) > 85
 
-    ){
+){
 
-      alerts.push(
-        "High RAM usage detected"
-      );
-
-    }
-
-    /* =========================
-       RETURN
-    ========================= */
-
-    return {
-
-      success:true,
-
-      monitoring,
-
-      alerts
-
-    };
-
-  }
-
-  catch(error){
-
-    return {
-
-      success:false,
-
-      error:error.message
-
-    };
-
-  }
+  healthScore -= 25;
 
 }
 
 /* =========================
-   EXPORT
+   STATUS
+========================= */
+
+let status = "healthy";
+
+if(
+
+  healthScore < 80
+
+){
+
+  status = "warning";
+
+}
+
+if(
+
+  healthScore < 60
+
+){
+
+  status = "critical";
+
+}
+
+/* =========================
+   ALERTS
+========================= */
+
+const alerts = [];
+
+if(
+
+  parseInt(
+    metrics.cpuUsage
+  ) > 80
+
+){
+
+  alerts.push({
+
+    type:"cpu",
+
+    severity:"high",
+
+    message:
+    "High CPU usage detected"
+
+  });
+
+}
+
+if(
+
+  parseInt(
+    metrics.ramUsage
+  ) > 85
+
+){
+
+  alerts.push({
+
+    type:"memory",
+
+    severity:"critical",
+
+    message:
+    "High RAM usage detected"
+
+  });
+
+}
+
+/* =========================
+   LOGGING
+========================= */
+
+const logs = {
+
+  totalLogs:
+  Math.floor(
+    Math.random() * 10000
+  ),
+
+  errorsToday:
+  Math.floor(
+    Math.random() * 5
+  ),
+
+  warningsToday:
+  Math.floor(
+    Math.random() * 20
+  )
+
+};
+
+/* =========================
+   SECURITY
+========================= */
+
+const security = {
+
+  firewall:true,
+
+  sslActive:true,
+
+  ddosProtection:true,
+
+  suspiciousRequests:
+  Math.floor(
+    Math.random() * 10
+  )
+
+};
+
+/* =========================
+   SCALING
+========================= */
+
+const scalingRecommendation =
+
+  parseInt(
+    metrics.cpuUsage
+  ) > 75
+
+  ? "scale-up"
+
+  : "stable";
+
+/* =========================
+   RETURN
+========================= */
+
+return {
+
+  success:true,
+
+  monitoring:{
+
+    deploymentId,
+
+    appName,
+
+    status,
+
+    healthScore,
+
+    metrics,
+
+    logs,
+
+    security,
+
+    scalingRecommendation,
+
+    monitoredAt:
+    new Date()
+
+  },
+
+  alerts
+
+};
+
+}
+
+catch(error){
+
+return {
+
+  success:false,
+
+  error:error.message
+
+};
+
+}
+
+}
+
+/* =========================
+EXPORT
 ========================= */
 
 module.exports =
