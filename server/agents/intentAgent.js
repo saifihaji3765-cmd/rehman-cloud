@@ -1,143 +1,213 @@
 /* =========================
-   IMPORTS
+IMPORTS
 ========================= */
 
 const OpenAI =
 require("openai");
 
 /* =========================
-   OPENAI
+OPENAI
 ========================= */
 
 const openai =
 new OpenAI({
 
-  apiKey:
-  process.env.OPENAI_API_KEY
+apiKey:
+process.env.OPENAI_API_KEY
 
 });
 
 /* =========================
-   INTENT AGENT
+INTENT AGENT
 ========================= */
 
-async function intentAgent(userPrompt){
+async function intentAgent(
+userPrompt
+){
 
-  try{
+try{
 
-    /* =========================
-       AI ANALYSIS
-    ========================= */
+/* =========================
+   AI ANALYSIS
+========================= */
 
-    const completion =
-    await openai.chat.completions.create({
+const completion =
 
-      model:
-      "gpt-4.1-mini",
+await openai
+.chat.completions
+.create({
 
-      messages:[
+  model:
+  "gpt-4.1-mini",
 
-        {
+  messages:[
 
-          role:"system",
+    {
 
-          content:`
+      role:"system",
 
-You are the Intent Agent of Rehman AI OS.
+      content:`
+
+You are the Intent Detection Agent of VertexCloud AI OS.
 
 Your responsibilities:
 
-- deeply understand user goals
-- detect startup ideas
-- detect SaaS ideas
-- detect app requirements
-- detect frontend/backend needs
-- detect monetization intent
-- detect deployment intent
-- understand messy prompts
-- convert rough ideas into clear plans
+- deeply understand user intent
+- classify SaaS requests
+- classify deployment requests
+- classify AI generation requests
+- classify cloud infrastructure requests
+- classify automation requests
+- classify monetization systems
+- classify scaling systems
+- classify thumbnail/image requests
+- classify debugging/fixing requests
+
+You MUST determine:
+
+- main intent type
+- user business goal
+- required AI agents
+- complexity level
+- infrastructure requirements
+- monetization model
+- scaling requirements
 
 Return ONLY valid JSON.
 
-Format:
+VALID TYPES:
+
+- chat
+- build
+- deploy
+- thumbnail
+- infrastructure
+- scaling
+- billing
+- debugging
+- automation
+
+JSON FORMAT:
 
 {
-  "appType":"",
-  "goal":"",
-  "features":[],
-  "frontendNeeds":[],
-  "backendNeeds":[],
-  "deploymentNeeds":[],
-  "aiFeatures":[],
-  "difficulty":"",
-  "recommendedStack":[]
+"type":"",
+"goal":"",
+"appType":"",
+"difficulty":"",
+"confidence":0,
+"features":[],
+"frontendNeeds":[],
+"backendNeeds":[],
+"deploymentNeeds":[],
+"aiFeatures":[],
+"recommendedStack":[],
+"requiredAgents":[],
+"monetization":"",
+"scalingNeeds":[],
+"cloudProvider":"aws"
 }
 
-          `
+`
 
-        },
+    },
 
-        {
+    {
 
-          role:"user",
+      role:"user",
 
-          content:userPrompt
+      content:userPrompt
 
-        }
+    }
 
-      ],
+  ],
 
-      temperature:0.4
+  temperature:0.2,
 
-    });
+  response_format:{
 
-    /* =========================
-       CLEAN RESPONSE
-    ========================= */
-
-    const raw =
-    completion
-    .choices[0]
-    .message
-    .content;
-
-    const cleaned =
-    raw
-    .replace(/```json/g,"")
-    .replace(/```/g,"")
-    .trim();
-
-    const parsed =
-    JSON.parse(cleaned);
-
-    return {
-
-      success:true,
-
-      data:parsed
-
-    };
+    type:"json_object"
 
   }
 
-  catch(error){
+});
 
-    console.log(error);
+/* =========================
+   RAW RESPONSE
+========================= */
 
-    return {
+const raw =
 
-      success:false,
+completion
+.choices[0]
+.message
+.content;
 
-      error:error.message
+/* =========================
+   PARSE JSON
+========================= */
 
-    };
+const parsed =
+JSON.parse(raw);
 
-  }
+/* =========================
+   FALLBACK TYPE
+========================= */
+
+if(!parsed.type){
+
+  parsed.type =
+  "chat";
 
 }
 
 /* =========================
-   EXPORT
+   FALLBACK CONFIDENCE
+========================= */
+
+if(!parsed.confidence){
+
+  parsed.confidence =
+  80;
+
+}
+
+/* =========================
+   RESPONSE
+========================= */
+
+return {
+
+  success:true,
+
+  type:
+  parsed.type,
+
+  data:parsed
+
+};
+
+}
+
+catch(error){
+
+console.log(error);
+
+return {
+
+  success:false,
+
+  type:"chat",
+
+  error:error.message
+
+};
+
+}
+
+}
+
+/* =========================
+EXPORT
 ========================= */
 
 module.exports =
