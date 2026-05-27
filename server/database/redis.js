@@ -1,56 +1,136 @@
-const redis = require("redis");
+const redis =
+require("redis");
 
 /* =========================
-   REDIS CLIENT
+REDIS CLIENT
 ========================= */
 
-const redisClient = redis.createClient({
+const redisClient =
+redis.createClient({
 
-  url:
-  process.env.REDIS_URL
+url:
+process.env.REDIS_URL
 
 });
 
 /* =========================
-   CONNECT REDIS
+REDIS EVENTS
+========================= */
+
+redisClient.on(
+
+"connect",
+
+()=>{
+
+console.log(
+  "✅ Redis Connected"
+);
+
+}
+
+);
+
+redisClient.on(
+
+"error",
+
+(error)=>{
+
+console.log(
+  "⚠️ Redis Error"
+);
+
+console.log(
+  error.message
+);
+
+}
+
+);
+
+redisClient.on(
+
+"reconnecting",
+
+()=>{
+
+console.log(
+  "🔄 Redis Reconnecting..."
+);
+
+}
+
+);
+
+/* =========================
+CONNECT REDIS
 ========================= */
 
 async function connectRedis(){
 
-  try{
+try{
 
-    await redisClient.connect();
+/* =========================
+   SKIP IF NO URL
+========================= */
 
-    console.log(
-      "✅ Redis Connected"
-    );
+if(
 
-  }
+  !process.env.REDIS_URL
 
-  catch(error){
+){
 
-    console.log(
-      "❌ Redis Connection Failed"
-    );
+  console.log(
 
-    console.log(
-      error.message
-    );
+    "⚠️ Redis Disabled"
 
-    process.exit(1);
+  );
 
-  }
+  return null;
 
 }
 
 /* =========================
-   EXPORTS
+   CONNECT
+========================= */
+
+await redisClient.connect();
+
+return redisClient;
+
+}
+
+catch(error){
+
+console.log(
+
+  "⚠️ Redis Connection Failed"
+
+);
+
+console.log(
+  error.message
+);
+
+/* =========================
+   DO NOT CRASH SERVER
+========================= */
+
+return null;
+
+}
+
+}
+
+/* =========================
+EXPORTS
 ========================= */
 
 module.exports = {
 
-  redisClient,
+redisClient,
 
-  connectRedis
+connectRedis
 
 };
