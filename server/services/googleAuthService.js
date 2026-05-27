@@ -1,77 +1,129 @@
+const jwt =
+require("jsonwebtoken");
+
+const {
+OAuth2Client
+} = require(
+"google-auth-library"
+);
+
 /* =========================
-   GOOGLE AUTH SERVICE
+GOOGLE CLIENT
 ========================= */
 
-import jwt from "jsonwebtoken";
+const client =
+new OAuth2Client(
+process.env.GOOGLE_CLIENT_ID
+);
 
 /* =========================
-   GENERATE JWT TOKEN
+GENERATE JWT TOKEN
 ========================= */
 
 function generateGoogleToken(user){
 
-  return jwt.sign(
+return jwt.sign(
 
-    {
+{
+  id:user._id,
+  name:user.name,
+  email:user.email,
+  provider:"google"
+},
 
-      id:user.id,
+process.env.JWT_SECRET,
 
-      name:user.name,
+{
+  expiresIn:"7d"
+}
 
-      email:user.email,
-
-      provider:"google"
-
-    },
-
-    process.env.JWT_SECRET,
-
-    {
-
-      expiresIn:"7d"
-
-    }
-
-  );
+);
 
 }
 
 /* =========================
-   VERIFY GOOGLE USER
+VERIFY GOOGLE USER
 ========================= */
 
-async function verifyGoogleUser(profile){
+async function verifyGoogleUser(
+token
+){
 
-  /* =========================
-     USER OBJECT
-  ========================= */
+try{
 
-  const user = {
+/* =========================
+   VERIFY TOKEN
+========================= */
 
-    id:profile.sub,
+const ticket =
 
-    name:profile.name,
+await client.verifyIdToken({
 
-    email:profile.email,
+  idToken:token,
 
-    avatar:profile.picture,
+  audience:
+  process.env.GOOGLE_CLIENT_ID
 
-    provider:"google"
+});
 
-  };
+/* =========================
+   PAYLOAD
+========================= */
 
-  return user;
+const payload =
+ticket.getPayload();
+
+/* =========================
+   USER OBJECT
+========================= */
+
+return {
+
+  googleId:
+  payload.sub,
+
+  name:
+  payload.name,
+
+  email:
+  payload.email,
+
+  avatar:
+  payload.picture,
+
+  verified:
+  payload.email_verified,
+
+  provider:
+  "google"
+
+};
+
+}
+
+catch(error){
+
+console.error(
+  "Google Verify Error:",
+  error.message
+);
+
+throw new Error(
+  "Invalid Google Token"
+);
+
+}
 
 }
 
 /* =========================
-   EXPORTS
+EXPORTS
 ========================= */
 
-export {
+module.exports = {
 
-  generateGoogleToken,
+generateGoogleToken,
 
-  verifyGoogleUser
+verifyGoogleUser
 
 };
