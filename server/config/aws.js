@@ -14,6 +14,26 @@ EC2Client
 
 const {
 
+ECSClient
+
+} = require(
+
+"@aws-sdk/client-ecs"
+
+);
+
+const {
+
+ECRClient
+
+} = require(
+
+"@aws-sdk/client-ecr"
+
+);
+
+const {
+
 S3Client
 
 } = require(
@@ -31,6 +51,46 @@ Route53Client
 "@aws-sdk/client-route-53"
 
 );
+
+const {
+
+ACMClient
+
+} = require(
+
+"@aws-sdk/client-acm"
+
+);
+
+const {
+
+CloudWatchClient
+
+} = require(
+
+"@aws-sdk/client-cloudwatch"
+
+);
+
+/* =========================
+ENV VALIDATION
+========================= */
+
+if(
+
+!process.env.AWS_ACCESS_KEY_ID ||
+
+!process.env.AWS_SECRET_ACCESS_KEY ||
+
+!process.env.AWS_REGION
+
+){
+
+console.log(
+"❌ AWS environment variables missing"
+);
+
+}
 
 /* =========================
 AWS CONFIG
@@ -68,6 +128,26 @@ awsConfig
 );
 
 /* =========================
+ECS
+========================= */
+
+const ecs =
+
+new ECSClient(
+awsConfig
+);
+
+/* =========================
+ECR
+========================= */
+
+const ecr =
+
+new ECRClient(
+awsConfig
+);
+
+/* =========================
 S3
 ========================= */
 
@@ -88,6 +168,26 @@ awsConfig
 );
 
 /* =========================
+ACM SSL
+========================= */
+
+const acm =
+
+new ACMClient(
+awsConfig
+);
+
+/* =========================
+CLOUDWATCH
+========================= */
+
+const cloudwatch =
+
+new CloudWatchClient(
+awsConfig
+);
+
+/* =========================
 EXPORTS
 ========================= */
 
@@ -95,8 +195,16 @@ module.exports = {
 
 ec2,
 
+ecs,
+
+ecr,
+
 s3,
 
-route53
+route53,
+
+acm,
+
+cloudwatch
 
 };
