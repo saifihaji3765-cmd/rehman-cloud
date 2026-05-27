@@ -6,8 +6,11 @@ const OpenAI =
 require("openai");
 
 /* =========================
-   OPTIONAL AGENTS
+   AGENTS
 ========================= */
+
+const intentAgent =
+require("./intentAgent");
 
 const plannerAgent =
 require("./plannerAgent");
@@ -17,6 +20,39 @@ require("./builderAgent");
 
 const deployAgent =
 require("./deployAgent");
+
+const awsAgent =
+require("./awsAgent");
+
+const dockerAgent =
+require("./dockerAgent");
+
+const domainAgent =
+require("./domainAgent");
+
+const sslAgent =
+require("./sslAgent");
+
+const monitoringAgent =
+require("./monitoringAgent");
+
+const scalingAgent =
+require("./scalingAgent");
+
+const billingAgent =
+require("./billingAgent");
+
+const subscriptionAgent =
+require("./subscriptionAgent");
+
+const memoryAgent =
+require("./memoryAgent");
+
+const fixAgent =
+require("./fixAgent");
+
+const fileAgent =
+require("./fileAgent");
 
 /* =========================
    OPENAI CLIENT
@@ -35,28 +71,72 @@ new OpenAI({
 ========================= */
 
 async function masterAgent(
-
-  userPrompt
-
+  userPrompt,
+  user = null
 ){
 
   try{
 
     console.log(
-      "⚡ Master Agent Started"
+      "⚡ VertexCloud Master Agent Started"
     );
 
     /* =========================
-       STEP 1
-       PLANNING
+       MEMORY CONTEXT
     ========================= */
 
-    let planningResult = null;
+    let memoryContext = null;
 
     try{
 
-      planningResult =
+      memoryContext =
+      await memoryAgent(
+        userPrompt,
+        user
+      );
 
+    }
+
+    catch(error){
+
+      console.log(
+        "Memory Agent Failed"
+      );
+
+    }
+
+    /* =========================
+       INTENT DETECTION
+    ========================= */
+
+    let intent = null;
+
+    try{
+
+      intent =
+      await intentAgent(
+        userPrompt
+      );
+
+    }
+
+    catch(error){
+
+      console.log(
+        "Intent Agent Failed"
+      );
+
+    }
+
+    /* =========================
+       PLANNING
+    ========================= */
+
+    let planning = null;
+
+    try{
+
+      planning =
       await plannerAgent(
         userPrompt
       );
@@ -72,63 +152,305 @@ async function masterAgent(
     }
 
     /* =========================
-       STEP 2
        BUILDING
     ========================= */
 
-    let builderResult = null;
+    let buildResult = null;
 
-    try{
+    if(
 
-      builderResult =
+      intent &&
+      intent.type === "build"
 
-      await builderAgent(
-        userPrompt
-      );
+    ){
 
-    }
+      try{
 
-    catch(error){
+        buildResult =
+        await builderAgent(
+          userPrompt
+        );
 
-      console.log(
-        "Builder Agent Failed"
-      );
+      }
+
+      catch(error){
+
+        console.log(
+          "Builder Agent Failed"
+        );
+
+      }
 
     }
 
     /* =========================
-       STEP 3
-       DEPLOYMENT ANALYSIS
+       DEPLOYMENT
     ========================= */
 
-    let deploymentResult = null;
+    let deployment = null;
+
+    if(
+
+      intent &&
+      intent.type === "deploy"
+
+    ){
+
+      try{
+
+        deployment =
+        await deployAgent({
+
+          prompt:userPrompt,
+
+          projectName:
+          "VertexCloud App"
+
+        });
+
+      }
+
+      catch(error){
+
+        console.log(
+          "Deploy Agent Failed"
+        );
+
+      }
+
+    }
+
+    /* =========================
+       AWS
+    ========================= */
+
+    let awsResult = null;
 
     try{
 
-      deploymentResult =
-
-      await deployAgent({
-
-        projectName:
-        "VertexCloud AI Project",
-
-        prompt:
+      awsResult =
+      await awsAgent(
         userPrompt
-
-      });
+      );
 
     }
 
     catch(error){
 
       console.log(
-        "Deploy Agent Failed"
+        "AWS Agent Failed"
       );
 
     }
 
     /* =========================
-       STEP 4
+       DOCKER
+    ========================= */
+
+    let dockerResult = null;
+
+    try{
+
+      dockerResult =
+      await dockerAgent(
+        userPrompt
+      );
+
+    }
+
+    catch(error){
+
+      console.log(
+        "Docker Agent Failed"
+      );
+
+    }
+
+    /* =========================
+       DOMAIN
+    ========================= */
+
+    let domainResult = null;
+
+    try{
+
+      domainResult =
+      await domainAgent(
+        userPrompt
+      );
+
+    }
+
+    catch(error){
+
+      console.log(
+        "Domain Agent Failed"
+      );
+
+    }
+
+    /* =========================
+       SSL
+    ========================= */
+
+    let sslResult = null;
+
+    try{
+
+      sslResult =
+      await sslAgent(
+        userPrompt
+      );
+
+    }
+
+    catch(error){
+
+      console.log(
+        "SSL Agent Failed"
+      );
+
+    }
+
+    /* =========================
+       MONITORING
+    ========================= */
+
+    let monitoringResult = null;
+
+    try{
+
+      monitoringResult =
+      await monitoringAgent(
+        userPrompt
+      );
+
+    }
+
+    catch(error){
+
+      console.log(
+        "Monitoring Agent Failed"
+      );
+
+    }
+
+    /* =========================
+       SCALING
+    ========================= */
+
+    let scalingResult = null;
+
+    try{
+
+      scalingResult =
+      await scalingAgent(
+        userPrompt
+      );
+
+    }
+
+    catch(error){
+
+      console.log(
+        "Scaling Agent Failed"
+      );
+
+    }
+
+    /* =========================
+       BILLING
+    ========================= */
+
+    let billingResult = null;
+
+    try{
+
+      billingResult =
+      await billingAgent(
+        userPrompt
+      );
+
+    }
+
+    catch(error){
+
+      console.log(
+        "Billing Agent Failed"
+      );
+
+    }
+
+    /* =========================
+       SUBSCRIPTION
+    ========================= */
+
+    let subscriptionResult = null;
+
+    try{
+
+      subscriptionResult =
+      await subscriptionAgent(
+        userPrompt
+      );
+
+    }
+
+    catch(error){
+
+      console.log(
+        "Subscription Agent Failed"
+      );
+
+    }
+
+    /* =========================
+       FIX AGENT
+    ========================= */
+
+    let fixResult = null;
+
+    try{
+
+      fixResult =
+      await fixAgent(
+        userPrompt
+      );
+
+    }
+
+    catch(error){
+
+      console.log(
+        "Fix Agent Failed"
+      );
+
+    }
+
+    /* =========================
+       FILE AGENT
+    ========================= */
+
+    let fileResult = null;
+
+    try{
+
+      fileResult =
+      await fileAgent(
+        userPrompt
+      );
+
+    }
+
+    catch(error){
+
+      console.log(
+        "File Agent Failed"
+      );
+
+    }
+
+    /* =========================
        MASTER AI RESPONSE
     ========================= */
 
@@ -138,8 +460,7 @@ async function masterAgent(
     .chat.completions
     .create({
 
-      model:
-      "gpt-4.1-mini",
+      model:"gpt-4.1-mini",
 
       messages:[
 
@@ -149,34 +470,28 @@ async function masterAgent(
 
           content:`
 
-You are the Master Agent of VertexCloud AI OS.
+You are VertexCloud Autonomous Master AI.
 
-You are an autonomous senior CTO AI.
+You coordinate multiple AI agents.
 
-Your responsibilities:
+You think like:
 
-- understand user goals
-- architect scalable systems
-- coordinate AI agents
-- plan frontend/backend
-- plan databases
-- plan APIs
-- plan AI systems
-- plan DevOps
-- plan deployment infrastructure
-- think like a Silicon Valley CTO
+- CTO
+- DevOps architect
+- AI engineer
+- SaaS founder
+- Cloud architect
 
-Always respond professionally.
-
-Always optimize systems for:
+You optimize:
 
 - scalability
-- security
-- performance
-- maintainability
-- production deployment
+- automation
+- deployment
+- monetization
+- infrastructure
+- production stability
 
-          `
+`
 
         },
 
@@ -184,7 +499,21 @@ Always optimize systems for:
 
           role:"user",
 
-          content:userPrompt
+          content:`
+
+USER PROMPT:
+${userPrompt}
+
+INTENT:
+${JSON.stringify(intent)}
+
+MEMORY:
+${JSON.stringify(memoryContext)}
+
+PLANNING:
+${JSON.stringify(planning)}
+
+`
 
         }
 
@@ -211,16 +540,37 @@ Always optimize systems for:
       .message
       .content,
 
-      agents:{
+      orchestration:{
 
-        planner:
-        planningResult,
+        intent,
 
-        builder:
-        builderResult,
+        memoryContext,
 
-        deployment:
-        deploymentResult
+        planning,
+
+        buildResult,
+
+        deployment,
+
+        awsResult,
+
+        dockerResult,
+
+        domainResult,
+
+        sslResult,
+
+        monitoringResult,
+
+        scalingResult,
+
+        billingResult,
+
+        subscriptionResult,
+
+        fixResult,
+
+        fileResult
 
       }
 
