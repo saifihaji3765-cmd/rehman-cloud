@@ -5,55 +5,159 @@ const router =
 express.Router();
 
 /* =========================
-   CONTROLLER
+CONTROLLERS
 ========================= */
 
 const {
 
-  createPaymentController
+createPaymentController,
+
+verifyPaymentController,
+
+createSubscriptionController,
+
+billingHistoryController,
+
+creditsController,
+
+stripeWebhookController,
+
+razorpayWebhookController
 
 } = require(
 
-  "../controllers/paymentController"
+"../controllers/paymentController"
 
 );
 
 /* =========================
-   MIDDLEWARE
+MIDDLEWARE
 ========================= */
 
-const authMiddleware =
-require(
+const {
 
-  "../middleware/authMiddleware"
+authMiddleware
+
+} = require(
+
+"../middleware/authMiddleware"
 
 );
 
-const rateLimiter =
-require(
+const {
 
-  "../middleware/rateLimiter"
+apiLimiter
+
+} = require(
+
+"../middleware/rateLimiter"
 
 );
 
 /* =========================
-   CREATE PAYMENT
+CREATE PAYMENT
 ========================= */
 
 router.post(
 
-  "/create-order",
+"/create-order",
 
-  authMiddleware,
+authMiddleware,
 
-  rateLimiter,
+apiLimiter,
 
-  createPaymentController
+createPaymentController
 
 );
 
 /* =========================
-   EXPORT
+VERIFY PAYMENT
+========================= */
+
+router.post(
+
+"/verify-payment",
+
+authMiddleware,
+
+verifyPaymentController
+
+);
+
+/* =========================
+CREATE SUBSCRIPTION
+========================= */
+
+router.post(
+
+"/subscription",
+
+authMiddleware,
+
+createSubscriptionController
+
+);
+
+/* =========================
+BILLING HISTORY
+========================= */
+
+router.get(
+
+"/billing-history",
+
+authMiddleware,
+
+billingHistoryController
+
+);
+
+/* =========================
+USER CREDITS
+========================= */
+
+router.get(
+
+"/credits",
+
+authMiddleware,
+
+creditsController
+
+);
+
+/* =========================
+STRIPE WEBHOOK
+========================= */
+
+router.post(
+
+"/stripe/webhook",
+
+express.raw({
+
+type:"application/json"
+
+}),
+
+stripeWebhookController
+
+);
+
+/* =========================
+RAZORPAY WEBHOOK
+========================= */
+
+router.post(
+
+"/razorpay/webhook",
+
+razorpayWebhookController
+
+);
+
+/* =========================
+EXPORT
 ========================= */
 
 module.exports =
