@@ -4,34 +4,187 @@ require("fs");
 const path =
 require("path");
 
+const { v4:uuidv4 } =
+require("uuid");
+
 /* =========================
-   DOCKER AGENT
+DOCKER AGENT
 ========================= */
 
 async function dockerAgent(
-  projectData
+projectData
 ){
 
-  try{
+try{
 
-    /* =========================
-       PROJECT NAME
-    ========================= */
+/* =========================
+   DEPLOYMENT ID
+========================= */
 
-    const projectName =
+const deploymentId =
 
-      projectData.projectName ||
+uuidv4();
 
-      "vertexcloud-app";
+/* =========================
+   PROJECT
+========================= */
 
-    /* =========================
-       DOCKERFILE
-    ========================= */
+const projectName =
 
-    const dockerfile =
+  projectData.projectName ||
+
+  "vertexcloud-app";
+
+const framework =
+
+  projectData.framework ||
+
+  "node";
+
+/* =========================
+   WORKSPACE
+========================= */
+
+const workspacePath =
+
+  path.join(
+
+    process.cwd(),
+
+    "workspace",
+
+    deploymentId
+
+  );
+
+/* =========================
+   CREATE DIRECTORY
+========================= */
+
+if(
+
+  !fs.existsSync(
+    workspacePath
+  )
+
+){
+
+  fs.mkdirSync(
+
+    workspacePath,
+
+    { recursive:true }
+
+  );
+
+}
+
+/* =========================
+   DOCKERFILE
+========================= */
+
+let dockerfile = "";
+
+/* =========================
+   NODE.JS
+========================= */
+
+if(
+
+  framework === "node"
+
+){
+
+  dockerfile =
 
 `
-FROM node:20
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+
+RUN npm install
+
+COPY . .
+
+EXPOSE 3000
+
+CMD ["npm","start"]
+`;
+
+}
+
+/* =========================
+   NEXT.JS
+========================= */
+
+else if(
+
+  framework === "next"
+
+){
+
+  dockerfile =
+
+`
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+
+RUN npm install
+
+COPY . .
+
+RUN npm run build
+
+EXPOSE 3000
+
+CMD ["npm","start"]
+`;
+
+}
+
+/* =========================
+   PYTHON
+========================= */
+
+else if(
+
+  framework === "python"
+
+){
+
+  dockerfile =
+
+`
+FROM python:3.11
+
+WORKDIR /app
+
+COPY . .
+
+RUN pip install -r requirements.txt
+
+EXPOSE 8000
+
+CMD ["python","app.py"]
+`;
+
+}
+
+/* =========================
+   DEFAULT
+========================= */
+
+else{
+
+  dockerfile =
+
+`
+FROM node:20-alpine
 
 WORKDIR /app
 
@@ -44,64 +197,121 @@ EXPOSE 3000
 CMD ["npm","start"]
 `;
 
-    /* =========================
-       SAVE DOCKERFILE
-    ========================= */
+}
 
-    const dockerPath =
+/* =========================
+   SAVE DOCKERFILE
+========================= */
 
-      path.join(
-        process.cwd(),
-        "workspace",
-        "Dockerfile"
-      );
+const dockerPath =
 
-    fs.writeFileSync(
+  path.join(
 
-      dockerPath,
-      dockerfile
+    workspacePath,
 
-    );
+    "Dockerfile"
 
-    /* =========================
-       RETURN
-    ========================= */
+  );
 
-    return {
+fs.writeFileSync(
 
-      success:true,
+  dockerPath,
 
-      containerized:true,
+  dockerfile
 
-      dockerfileCreated:true,
+);
 
-      runtime:"Node.js",
+/* =========================
+   DOCKERIGNORE
+========================= */
 
-      port:3000,
+const dockerIgnore =
 
-      imageName:
-      `${projectName}:latest`
+"node_modules .env .git npm-debug.log";
 
-    };
+fs.writeFileSync(
+
+  path.join(
+
+    workspacePath,
+
+    ".dockerignore"
+
+  ),
+
+  dockerIgnore
+
+);
+
+/* =========================
+   IMAGE
+========================= */
+
+const imageName =
+
+  `${projectName.toLowerCase()}-${deploymentId}:latest`;
+
+/* =========================
+   RETURN
+========================= */
+
+return {
+
+  success:true,
+
+  docker:{
+
+    deploymentId,
+
+    framework,
+
+    runtime:
+    framework,
+
+    dockerfileCreated:true,
+
+    dockerIgnoreCreated:true,
+
+    workspacePath,
+
+    imageName,
+
+    containerPort:
+
+      framework === "python"
+
+      ? 8000
+
+      : 3000,
+
+    status:
+    "containerized",
+
+    createdAt:
+    new Date()
 
   }
 
-  catch(error){
+};
 
-    return {
+}
 
-      success:false,
+catch(error){
 
-      error:error.message
+return {
 
-    };
+  success:false,
 
-  }
+  error:error.message
+
+};
+
+}
 
 }
 
 /* =========================
-   EXPORT
+EXPORT
 ========================= */
 
 module.exports =
