@@ -5,73 +5,133 @@ const router =
 express.Router();
 
 /* =========================
-   CONTROLLERS
+CONTROLLERS
 ========================= */
 
 const {
 
-  createSubscriptionController,
+createSubscriptionController,
 
-  getSubscriptionsController
+getSubscriptionsController,
+
+cancelSubscriptionController,
+
+upgradeSubscriptionController,
+
+usageController
 
 } = require(
 
-  "../controllers/subscriptionController"
+"../controllers/subscriptionController"
 
 );
 
 /* =========================
-   MIDDLEWARE
+MIDDLEWARE
 ========================= */
 
-const authMiddleware =
-require(
+const {
 
-  "../middleware/authMiddleware"
+authMiddleware
+
+} = require(
+
+"../middleware/authMiddleware"
 
 );
 
-const rateLimiter =
-require(
+const {
 
-  "../middleware/rateLimiter"
+apiLimiter
+
+} = require(
+
+"../middleware/rateLimiter"
 
 );
 
 /* =========================
-   CREATE SUBSCRIPTION
+CREATE SUBSCRIPTION
 ========================= */
 
 router.post(
 
-  "/create",
+"/create",
 
-  authMiddleware,
+authMiddleware,
 
-  rateLimiter,
+apiLimiter,
 
-  createSubscriptionController
+createSubscriptionController
 
 );
 
 /* =========================
-   GET USER SUBSCRIPTIONS
+GET MY SUBSCRIPTION
 ========================= */
 
 router.get(
 
-  "/:userId",
+"/me",
 
-  authMiddleware,
+authMiddleware,
 
-  rateLimiter,
+apiLimiter,
 
-  getSubscriptionsController
+getSubscriptionsController
 
 );
 
 /* =========================
-   EXPORT
+UPGRADE PLAN
+========================= */
+
+router.post(
+
+"/upgrade",
+
+authMiddleware,
+
+apiLimiter,
+
+upgradeSubscriptionController
+
+);
+
+/* =========================
+CANCEL SUBSCRIPTION
+========================= */
+
+router.post(
+
+"/cancel",
+
+authMiddleware,
+
+apiLimiter,
+
+cancelSubscriptionController
+
+);
+
+/* =========================
+USAGE + CREDITS
+========================= */
+
+router.get(
+
+"/usage",
+
+authMiddleware,
+
+apiLimiter,
+
+usageController
+
+);
+
+/* =========================
+EXPORT
 ========================= */
 
 module.exports =
