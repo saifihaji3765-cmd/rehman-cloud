@@ -1,99 +1,337 @@
 const plans = [
 
-  {
+/* =========================
+STARTER
+========================= */
 
-    name:"Starter",
+{
 
-    price:19,
+name:"Starter",
 
-    currency:"USD",
+monthlyPrice:19,
 
-    ram:"2GB",
+currency:"USD",
 
-    cpu:"1 vCPU",
+ram:"2GB",
 
-    storage:"25GB",
+cpu:"1 vCPU",
 
-    bandwidth:"250GB",
+storage:"25GB",
 
-    aiLevel:"Basic AI",
+bandwidth:"250GB",
 
-    support:"Community Support"
+deploymentsLimit:3,
 
-  },
+aiCredits:2000,
 
-  {
+thumbnailCredits:500,
 
-    name:"Pro",
+videoCredits:100,
 
-    price:49,
+customDomain:true,
 
-    currency:"USD",
+autoSSL:true,
 
-    ram:"8GB",
+support:"Community Support",
 
-    cpu:"4 vCPU",
+features:[
 
-    storage:"100GB",
+  "Basic Deployments",
 
-    bandwidth:"1TB",
+  "AI Assistant",
 
-    aiLevel:"Advanced AI",
+  "SSL",
 
-    support:"Priority Support"
+  "Custom Domains"
 
-  },
+]
 
-  {
+},
 
-    name:"Business",
+/* =========================
+PRO
+========================= */
 
-    price:99,
+{
 
-    currency:"USD",
+name:"Pro",
 
-    ram:"16GB",
+monthlyPrice:49,
 
-    cpu:"8 vCPU",
+currency:"USD",
 
-    storage:"250GB",
+ram:"8GB",
 
-    bandwidth:"Unlimited",
+cpu:"4 vCPU",
 
-    aiLevel:"Business AI Automation",
+storage:"100GB",
 
-    support:"24/7 Premium Support"
+bandwidth:"1TB",
 
-  },
+deploymentsLimit:15,
 
-  {
+aiCredits:10000,
 
-    name:"Enterprise",
+thumbnailCredits:5000,
 
-    price:299,
+videoCredits:1000,
 
-    currency:"USD",
+customDomain:true,
 
-    ram:"64GB",
+autoSSL:true,
 
-    cpu:"16 vCPU",
+priorityDeployments:true,
 
-    storage:"1TB",
+support:"Priority Support",
 
-    bandwidth:"Unlimited",
+features:[
 
-    aiLevel:"Enterprise AI Infrastructure",
+  "Advanced AI",
 
-    support:"Dedicated Success Manager",
+  "Priority Deployments",
 
-    prioritySupport:true,
+  "AI Thumbnail Generator",
 
-    dedicatedInfrastructure:true,
+  "Advanced Monitoring"
 
-    autoScaling:true,
+]
 
-    advancedMonitoring:true
+},
+
+/* =========================
+BUSINESS
+========================= */
+
+{
+
+name:"Business",
+
+monthlyPrice:199,
+
+currency:"USD",
+
+ram:"16GB",
+
+cpu:"8 vCPU",
+
+storage:"250GB",
+
+bandwidth:"Unlimited",
+
+deploymentsLimit:100,
+
+aiCredits:50000,
+
+thumbnailCredits:25000,
+
+videoCredits:10000,
+
+customDomain:true,
+
+autoSSL:true,
+
+autoScaling:true,
+
+advancedMonitoring:true,
+
+support:"24/7 Premium Support",
+
+features:[
+
+  "Business AI Automation",
+
+  "Auto Scaling",
+
+  "Advanced Analytics",
+
+  "Team Features"
+
+]
+
+},
+
+/* =========================
+ENTERPRISE
+========================= */
+
+{
+
+name:"Enterprise",
+
+monthlyPrice:299,
+
+currency:"USD",
+
+ram:"64GB",
+
+cpu:"16 vCPU",
+
+storage:"1TB",
+
+bandwidth:"Unlimited",
+
+deploymentsLimit:-1,
+
+aiCredits:-1,
+
+thumbnailCredits:-1,
+
+videoCredits:-1,
+
+customDomain:true,
+
+autoSSL:true,
+
+autoScaling:true,
+
+advancedMonitoring:true,
+
+dedicatedInfrastructure:true,
+
+dedicatedSupport:true,
+
+support:"Dedicated Success Manager",
+
+features:[
+
+  "Unlimited AI",
+
+  "Unlimited Deployments",
+
+  "Dedicated Infrastructure",
+
+  "Enterprise Monitoring",
+
+  "Priority AI Processing"
+
+]
+
+}
+
+];
+
+/* =========================
+GET PLAN
+========================= */
+
+function getPlanByName(
+planName
+){
+
+return plans.find(
+
+plan =>
+
+plan.name
+.toLowerCase()
+
+===
+
+planName
+.toLowerCase()
+
+);
+
+}
+
+/* =========================
+BILLING AGENT
+========================= */
+
+async function billingAgent(
+userData
+){
+
+try{
+
+/* =========================
+   PLAN
+========================= */
+
+const selectedPlan =
+
+getPlanByName(
+
+  userData.plan ||
+
+  "Starter"
+
+);
+
+/* =========================
+   INVALID PLAN
+========================= */
+
+if(!selectedPlan){
+
+  return {
+
+    success:false,
+
+    message:
+    "Invalid plan selected"
+
+  };
+
+}
+
+/* =========================
+   RETURN
+========================= */
+
+return {
+
+  success:true,
+
+  billing:{
+
+    userId:
+    userData.userId ||
+
+    "guest-user",
+
+    selectedPlan,
+
+    billingCycle:
+    "monthly",
+
+    nextBillingDate:
+
+    new Date(
+
+      Date.now() +
+
+      30 * 24 * 60 * 60 * 1000
+
+    ),
+
+    paymentStatus:
+    "pending"
 
   }
 
-];
+};
+
+}
+
+catch(error){
+
+return {
+
+  success:false,
+
+  error:error.message
+
+};
+
+}
+
+}
+
+/* =========================
+EXPORTS
+========================= */
+
+module.exports =
+
+billingAgent;
