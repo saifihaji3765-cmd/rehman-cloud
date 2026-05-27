@@ -1,61 +1,167 @@
-const env = require("./env");
+const env =
+require("./env");
+
+/* =========================
+VALIDATE ENV
+========================= */
 
 function validateEnv(){
 
-  const requiredEnv = [
+/* =========================
+REQUIRED VARIABLES
+========================= */
 
-    "AWS_ACCESS_KEY",
+const requiredEnv = [
 
-    "AWS_SECRET_KEY",
+"PORT",
 
-    "JWT_SECRET"
+"MONGO_URI",
 
-  ];
+"JWT_SECRET",
 
-  const missingEnv = [];
+"OPENAI_API_KEY",
 
-  requiredEnv.forEach((key)=>{
+"AWS_ACCESS_KEY_ID",
 
-    if(
+"AWS_SECRET_ACCESS_KEY",
 
-      !env[key] ||
+"AWS_REGION"
 
-      env[key].trim() === ""
+];
 
-    ){
+/* =========================
+OPTIONAL VARIABLES
+========================= */
 
-      missingEnv.push(key);
+const optionalEnv = [
 
-    }
+"REDIS_URL",
 
-  });
+"STRIPE_SECRET_KEY",
 
-  if(missingEnv.length > 0){
+"RAZORPAY_KEY_ID",
 
-    console.log("\n");
+"RAZORPAY_KEY_SECRET",
 
-    console.log(
-      "❌ Missing Environment Variables:"
-    );
+"GOOGLE_CLIENT_ID",
 
-    missingEnv.forEach((item)=>{
+"GOOGLE_CLIENT_SECRET",
 
-      console.log(
-        `- ${item}`
-      );
+"GITHUB_CLIENT_ID",
 
-    });
+"GITHUB_CLIENT_SECRET"
 
-    console.log("\n");
+];
 
-    process.exit(1);
+/* =========================
+CHECK REQUIRED
+========================= */
+
+const missingEnv = [];
+
+requiredEnv.forEach(
+
+(key)=>{
+
+  if(
+
+    !env[key] ||
+
+    env[key]
+    .toString()
+    .trim() === ""
+
+  ){
+
+    missingEnv.push(key);
 
   }
 
-  console.log(
-    "✅ Environment Validation Passed"
-  );
+}
+
+);
+
+/* =========================
+FAIL IF REQUIRED MISSING
+========================= */
+
+if(
+
+missingEnv.length > 0
+
+){
+
+console.log("\n");
+
+console.log(
+
+  "❌ Missing Required Environment Variables"
+
+);
+
+missingEnv.forEach(
+
+  (item)=>{
+
+    console.log(
+      `- ${item}`
+    );
+
+  }
+
+);
+
+console.log("\n");
+
+process.exit(1);
 
 }
 
-module.exports = validateEnv;
+/* =========================
+OPTIONAL WARNINGS
+========================= */
+
+optionalEnv.forEach(
+
+(key)=>{
+
+  if(
+
+    !env[key] ||
+
+    env[key]
+    .toString()
+    .trim() === ""
+
+  ){
+
+    console.log(
+
+      `⚠️ Optional ENV Missing: ${key}`
+
+    );
+
+  }
+
+}
+
+);
+
+/* =========================
+SUCCESS
+========================= */
+
+console.log(
+
+"✅ Environment Validation Passed"
+
+);
+
+}
+
+/* =========================
+EXPORT
+========================= */
+
+module.exports =
+validateEnv;
