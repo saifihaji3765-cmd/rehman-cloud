@@ -1,7 +1,7 @@
 require("dotenv").config();
 
 /* =========================
-   PACKAGES
+PACKAGES
 ========================= */
 
 const express =
@@ -10,8 +10,17 @@ require("express");
 const cors =
 require("cors");
 
+const helmet =
+require("helmet");
+
+const compression =
+require("compression");
+
+const morgan =
+require("morgan");
+
 /* =========================
-   CONFIG
+CONFIG
 ========================= */
 
 const env =
@@ -21,7 +30,7 @@ const validateEnv =
 require("./server/config/validateEnv");
 
 /* =========================
-   DATABASE
+DATABASE
 ========================= */
 
 const connectMongo =
@@ -29,335 +38,394 @@ require("./server/database/mongo");
 
 const {
 
-  connectRedis
+connectRedis
 
 } = require(
-  "./server/database/redis"
+"./server/database/redis"
 );
 
 /* =========================
-   ROUTES
+ROUTES
 ========================= */
 
 const authRoutes =
 require(
-  "./server/routes/authRoutes"
+"./server/routes/authRoutes"
 );
 
 const aiRoutes =
 require(
-  "./server/routes/aiRoutes"
+"./server/routes/aiRoutes"
 );
 
 const deployRoutes =
 require(
-  "./server/routes/deployRoutes"
+"./server/routes/deployRoutes"
 );
 
 const paymentRoutes =
 require(
-  "./server/routes/paymentRoutes"
+"./server/routes/paymentRoutes"
 );
 
 const webhookRoutes =
 require(
-  "./server/routes/webhookRoutes"
+"./server/routes/webhookRoutes"
 );
 
 const subscriptionRoutes =
 require(
-  "./server/routes/subscriptionRoutes"
+"./server/routes/subscriptionRoutes"
 );
 
 const projectRoutes =
 require(
-  "./server/routes/projectRoutes"
+"./server/routes/projectRoutes"
 );
 
 /* =========================
-   SERVICES
+SERVICES
 ========================= */
 
 const logger =
 require(
-  "./server/services/loggerService"
+"./server/services/loggerService"
 );
 
 /* =========================
-   APP INIT
+APP INIT
 ========================= */
 
 const app =
 express();
 
 /* =========================
-   VALIDATE ENV
+TRUST PROXY
+========================= */
+
+app.set(
+"trust proxy",
+1
+);
+
+/* =========================
+VALIDATE ENV
 ========================= */
 
 validateEnv();
 
 /* =========================
-   SECURITY / MIDDLEWARE
+SECURITY
+========================= */
+
+app.use(
+helmet()
+);
+
+/* =========================
+CORS
 ========================= */
 
 app.use(
 
-  cors({
+cors({
 
-    origin:"*",
+origin:true,
 
-    credentials:true
+credentials:true
 
-  })
-
-);
-
-app.use(
-
-  express.json({
-
-    limit:"10mb"
-
-  })
-
-);
-
-app.use(
-
-  express.urlencoded({
-
-    extended:true
-
-  })
+})
 
 );
 
 /* =========================
-   API ROUTES
+COMPRESSION
+========================= */
+
+app.use(
+compression()
+);
+
+/* =========================
+LOGGER
+========================= */
+
+app.use(
+morgan("dev")
+);
+
+/* =========================
+BODY PARSER
 ========================= */
 
 app.use(
 
-  "/api/auth",
+express.json({
 
-  authRoutes
+limit:"10mb"
 
-);
-
-app.use(
-
-  "/api/ai",
-
-  aiRoutes
+})
 
 );
 
 app.use(
 
-  "/api/deploy",
+express.urlencoded({
 
-  deployRoutes
+extended:true,
 
-);
+limit:"10mb"
 
-app.use(
-
-  "/api/payment",
-
-  paymentRoutes
-
-);
-
-app.use(
-
-  "/api/webhook",
-
-  webhookRoutes
-
-);
-
-app.use(
-
-  "/api/subscription",
-
-  subscriptionRoutes
-
-);
-
-app.use(
-
-  "/api/projects",
-
-  projectRoutes
+})
 
 );
 
 /* =========================
-   ROOT HEALTH CHECK
+API ROUTES
 ========================= */
 
-app.get(
+app.use(
+"/api/auth",
+authRoutes
+);
 
-  "/",
+app.use(
+"/api/ai",
+aiRoutes
+);
 
-  (req,res)=>{
+app.use(
+"/api/deploy",
+deployRoutes
+);
 
-    res.json({
+app.use(
+"/api/payment",
+paymentRoutes
+);
 
-      success:true,
+app.use(
+"/api/webhook",
+webhookRoutes
+);
 
-      message:
-      "🚀 VertexCloud API Running",
+app.use(
+"/api/subscription",
+subscriptionRoutes
+);
 
-      version:"1.0.0",
-
-      status:"online"
-
-    });
-
-  }
-
+app.use(
+"/api/projects",
+projectRoutes
 );
 
 /* =========================
-   API HEALTH
+ROOT HEALTH
 ========================= */
 
 app.get(
 
-  "/api/health",
+"/",
 
-  (req,res)=>{
+(req,res)=>{
 
-    res.json({
+res.json({
 
-      success:true,
+  success:true,
 
-      mongodb:"connected",
+  platform:
+  "VertexCloud",
 
-      redis:"connected",
+  status:
+  "online",
 
-      server:"running"
+  version:
+  "1.0.0"
 
-    });
+});
 
-  }
+}
 
 );
 
 /* =========================
-   404 HANDLER
+API HEALTH
+========================= */
+
+app.get(
+
+"/api/health",
+
+(req,res)=>{
+
+res.json({
+
+  success:true,
+
+  server:"running",
+
+  mongodb:"connected",
+
+  redis:"optional",
+
+  environment:
+  process.env.NODE_ENV
+
+});
+
+}
+
+);
+
+/* =========================
+404 HANDLER
 ========================= */
 
 app.use(
 
-  (req,res)=>{
+(req,res)=>{
 
-    res.status(404).json({
+res.status(404).json({
 
-      success:false,
+  success:false,
 
-      message:"Route not found"
+  message:
+  "Route not found"
 
-    });
+});
 
-  }
+}
 
 );
 
 /* =========================
-   GLOBAL ERROR HANDLER
+GLOBAL ERROR HANDLER
 ========================= */
 
 app.use(
 
-  (
+(
 
-    err,
-    req,
-    res,
-    next
+err,
+req,
+res,
+next
 
-  )=>{
+)=>{
 
-    console.error(
-      "Server Error:",
-      err
-    );
+console.error(
+  err
+);
 
-    res.status(500).json({
+logger.error(
+  err.message
+);
 
-      success:false,
+res.status(500).json({
 
-      message:
-      "Internal Server Error",
+  success:false,
 
-      error:err.message
+  message:
+  "Internal Server Error",
 
-    });
+  error:
+  process.env.NODE_ENV ===
+  "development"
 
-  }
+  ? err.message
+
+  : "Server Error"
+
+});
+
+}
 
 );
 
 /* =========================
-   START SERVER
+START SERVER
 ========================= */
 
 async function startServer(){
 
-  try{
+try{
 
-    /* =========================
-       DATABASES
-    ========================= */
+/* =========================
+   MONGODB
+========================= */
 
-    await connectMongo();
+await connectMongo();
 
-    await connectRedis();
+/* =========================
+   REDIS OPTIONAL
+========================= */
 
-    /* =========================
-       SERVER START
-    ========================= */
+try{
 
-    app.listen(
+  await connectRedis();
 
-      env.PORT,
+  logger.success(
+    "Redis Connected"
+  );
 
-      ()=>{
+}
 
-        console.log(
+catch(redisError){
 
-          `🚀 Server running on port ${env.PORT}`
+  logger.error(
 
-        );
+    "Redis Failed: " +
 
-        logger.success(
+    redisError.message
 
-          "VertexCloud Server Started"
-
-        );
-
-      }
-
-    );
-
-  }
-
-  catch(error){
-
-    console.error(error);
-
-    logger.error(
-      error.message
-    );
-
-  }
+  );
 
 }
 
 /* =========================
-   BOOT SERVER
+   START APP
+========================= */
+
+app.listen(
+
+  env.PORT,
+
+  ()=>{
+
+    console.log(
+
+      `🚀 VertexCloud running on ${env.PORT}`
+
+    );
+
+    logger.success(
+
+      "VertexCloud Server Started"
+
+    );
+
+  }
+
+);
+
+}
+
+catch(error){
+
+console.error(error);
+
+logger.error(
+  error.message
+);
+
+process.exit(1);
+
+}
+
+}
+
+/* =========================
+BOOT SERVER
 ========================= */
 
 startServer();
