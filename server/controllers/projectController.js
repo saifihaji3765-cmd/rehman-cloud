@@ -1,291 +1,536 @@
 const Project =
 require(
 
-  "../models/projectModel"
+"../models/projectModel"
 
 );
 
 const formatResponse =
 require(
 
-  "../utils/formatResponse"
+"../utils/formatResponse"
 
 );
+
+const deployAgent =
+require(
+
+"../agents/deployAgent"
+
+);
+
+/* =========================
+CREATE PROJECT
+========================= */
+
+async function createProjectController(
+
+req,
+
+res
+
+){
+
+try{
+
+const {
+
+  projectName,
+
+  description,
+
+  framework
+
+} = req.body;
+
+/* =========================
+   USER
+========================= */
+
+const userId =
+req.user.id;
+
+/* =========================
+   VALIDATION
+========================= */
+
+if(
+
+  !projectName
+
+){
+
+  return res.status(400)
+  .json(
+
+    formatResponse({
+
+      success:false,
+
+      message:
+      "Project name required"
+
+    })
+
+  );
+
+}
 
 /* =========================
    CREATE PROJECT
 ========================= */
 
-async function createProjectController(
+const project =
 
-  req,
+  await Project.create({
 
-  res
+    userId,
 
-){
+    projectName,
 
-  try{
+    description,
 
-    const {
+    framework,
 
-      userId,
+    status:"draft"
 
-      projectName,
+  });
 
-      description,
+return res.json(
 
-      framework
+  formatResponse({
 
-    } = req.body;
+    success:true,
 
-    /* =========================
-       VALIDATION
-    ========================= */
+    message:
+    "Project created",
 
-    if(
+    data:project
 
-      !userId ||
+  })
 
-      !projectName
+);
 
-    ){
+}
 
-      return res.status(400)
-      .json(
+catch(error){
 
-        formatResponse({
+return res.status(500)
+.json(
 
-          success:false,
+  formatResponse({
 
-          message:
-          "Missing required fields"
+    success:false,
 
-        })
+    message:
+    "Project creation failed",
 
-      );
+    error:error.message
 
-    }
+  })
 
-    /* =========================
-       CREATE PROJECT
-    ========================= */
+);
 
-    const project =
-
-      await Project.create({
-
-        userId,
-
-        projectName,
-
-        description,
-
-        framework
-
-      });
-
-    return res.json(
-
-      formatResponse({
-
-        success:true,
-
-        message:
-        "Project created",
-
-        data:project
-
-      })
-
-    );
-
-  }
-
-  catch(error){
-
-    return res.status(500)
-    .json(
-
-      formatResponse({
-
-        success:false,
-
-        message:
-        "Project creation failed",
-
-        error:error.message
-
-      })
-
-    );
-
-  }
+}
 
 }
 
 /* =========================
-   GET USER PROJECTS
+GET MY PROJECTS
 ========================= */
 
 async function getProjectsController(
 
-  req,
+req,
 
-  res
+res
 
 ){
 
-  try{
+try{
 
-    const {
+const userId =
+req.user.id;
 
-      userId
+const projects =
 
-    } = req.params;
+  await Project.find({
 
-    const projects =
+    userId
 
-      await Project.find({
+  }).sort({
 
-        userId
+    createdAt:-1
 
-      });
+  });
 
-    return res.json(
+return res.json(
 
-      formatResponse({
+  formatResponse({
 
-        success:true,
+    success:true,
 
-        data:projects
+    data:projects
 
-      })
+  })
 
-    );
+);
 
-  }
+}
 
-  catch(error){
+catch(error){
 
-    return res.status(500)
-    .json(
+return res.status(500)
+.json(
 
-      formatResponse({
+  formatResponse({
 
-        success:false,
+    success:false,
 
-        message:
-        "Failed to fetch projects",
+    message:
+    "Failed to fetch projects",
 
-        error:error.message
+    error:error.message
 
-      })
+  })
 
-    );
+);
 
-  }
+}
 
 }
 
 /* =========================
-   UPDATE PROJECT STATUS
+GET SINGLE PROJECT
+========================= */
+
+async function getSingleProjectController(
+
+req,
+
+res
+
+){
+
+try{
+
+const {
+
+  projectId
+
+} = req.params;
+
+const project =
+
+  await Project.findOne({
+
+    _id:projectId,
+
+    userId:req.user.id
+
+  });
+
+if(!project){
+
+  return res.status(404)
+  .json({
+
+    success:false,
+
+    message:
+    "Project not found"
+
+  });
+
+}
+
+return res.json({
+
+  success:true,
+
+  data:project
+
+});
+
+}
+
+catch(error){
+
+return res.status(500)
+.json({
+
+  success:false,
+
+  error:error.message
+
+});
+
+}
+
+}
+
+/* =========================
+UPDATE PROJECT STATUS
 ========================= */
 
 async function updateProjectStatusController(
 
-  req,
+req,
 
-  res
+res
 
 ){
 
-  try{
+try{
 
-    const {
+const {
 
-      projectId
+  projectId
 
-    } = req.params;
+} = req.params;
 
-    const {
+const {
+
+  status,
+
+  deploymentUrl
+
+} = req.body;
+
+const updatedProject =
+
+  await Project.findOneAndUpdate(
+
+    {
+
+      _id:projectId,
+
+      userId:req.user.id
+
+    },
+
+    {
 
       status,
 
       deploymentUrl
 
-    } = req.body;
+    },
 
-    const updatedProject =
+    {
 
-      await Project.findByIdAndUpdate(
+      new:true
 
-        projectId,
+    }
 
-        {
+  );
 
-          status,
+return res.json(
 
-          deploymentUrl
+  formatResponse({
 
-        },
+    success:true,
 
-        {
+    message:
+    "Project updated",
 
-          new:true
+    data:updatedProject
 
-        }
+  })
 
-      );
+);
 
-    return res.json(
+}
 
-      formatResponse({
+catch(error){
 
-        success:true,
+return res.status(500)
+.json(
 
-        message:
-        "Project updated",
+  formatResponse({
 
-        data:updatedProject
+    success:false,
 
-      })
+    message:
+    "Project update failed",
 
-    );
+    error:error.message
 
-  }
+  })
 
-  catch(error){
+);
 
-    return res.status(500)
-    .json(
-
-      formatResponse({
-
-        success:false,
-
-        message:
-        "Project update failed",
-
-        error:error.message
-
-      })
-
-    );
-
-  }
+}
 
 }
 
 /* =========================
-   EXPORTS
+DELETE PROJECT
+========================= */
+
+async function deleteProjectController(
+
+req,
+
+res
+
+){
+
+try{
+
+const {
+
+  projectId
+
+} = req.params;
+
+await Project.findOneAndDelete({
+
+  _id:projectId,
+
+  userId:req.user.id
+
+});
+
+return res.json({
+
+  success:true,
+
+  message:
+  "Project deleted"
+
+});
+
+}
+
+catch(error){
+
+return res.status(500)
+.json({
+
+  success:false,
+
+  error:error.message
+
+});
+
+}
+
+}
+
+/* =========================
+DEPLOY PROJECT
+========================= */
+
+async function deployProjectController(
+
+req,
+
+res
+
+){
+
+try{
+
+const {
+
+  projectId
+
+} = req.params;
+
+const project =
+
+  await Project.findOne({
+
+    _id:projectId,
+
+    userId:req.user.id
+
+  });
+
+if(!project){
+
+  return res.status(404)
+  .json({
+
+    success:false,
+
+    message:
+    "Project not found"
+
+  });
+
+}
+
+/* =========================
+   DEPLOY
+========================= */
+
+const deployment =
+
+  await deployAgent({
+
+    projectName:
+    project.projectName,
+
+    framework:
+    project.framework
+
+  });
+
+/* =========================
+   UPDATE PROJECT
+========================= */
+
+project.status =
+"deployed";
+
+project.deploymentUrl =
+deployment.liveUrl;
+
+await project.save();
+
+return res.json({
+
+  success:true,
+
+  deployment
+
+});
+
+}
+
+catch(error){
+
+return res.status(500)
+.json({
+
+  success:false,
+
+  error:error.message
+
+});
+
+}
+
+}
+
+/* =========================
+EXPORTS
 ========================= */
 
 module.exports = {
 
-  createProjectController,
+createProjectController,
 
-  getProjectsController,
+getProjectsController,
 
-  updateProjectStatusController
+getSingleProjectController,
+
+updateProjectStatusController,
+
+deleteProjectController,
+
+deployProjectController
 
 };
