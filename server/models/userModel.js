@@ -2,185 +2,261 @@ const mongoose =
 require("mongoose");
 
 /* =========================
-   USER SCHEMA
+USER SCHEMA
 ========================= */
 
 const userSchema =
 
 new mongoose.Schema(
 
-  {
+{
 
-    /* =========================
-       NAME
-    ========================= */
+/* =========================
+   NAME
+========================= */
 
-    name:{
+name:{
 
-      type:String,
+  type:String,
 
-      required:true,
+  required:true,
 
-      trim:true
+  trim:true
 
-    },
+},
 
-    /* =========================
-       EMAIL
-    ========================= */
+/* =========================
+   EMAIL
+========================= */
 
-    email:{
+email:{
 
-      type:String,
+  type:String,
 
-      required:true,
+  required:true,
 
-      unique:true,
+  unique:true,
 
-      lowercase:true,
+  lowercase:true,
 
-      trim:true
+  trim:true
 
-    },
+},
 
-    /* =========================
-       PASSWORD
-    ========================= */
+/* =========================
+   PASSWORD
+========================= */
 
-    password:{
+password:{
 
-      type:String,
+  type:String,
 
-      default:null
+  default:null
 
-    },
+},
 
-    /* =========================
-       AVATAR
-    ========================= */
+/* =========================
+   AVATAR
+========================= */
 
-    avatar:{
+avatar:{
 
-      type:String,
+  type:String,
 
-      default:""
+  default:""
 
-    },
+},
 
-    /* =========================
-       PROVIDER
-    ========================= */
+/* =========================
+   PROVIDER
+========================= */
 
-    provider:{
+provider:{
 
-      type:String,
+  type:String,
 
-      enum:[
+  enum:[
 
-        "email",
+    "email",
 
-        "google",
+    "google",
 
-        "github"
+    "github"
 
-      ],
+  ],
 
-      default:"email"
+  default:"email"
 
-    },
+},
 
-    /* =========================
-       ROLE
-    ========================= */
+/* =========================
+   GOOGLE ID
+========================= */
 
-    role:{
+googleId:{
 
-      type:String,
+  type:String,
 
-      enum:[
+  default:null
 
-        "user",
+},
 
-        "admin"
+/* =========================
+   GITHUB ID
+========================= */
 
-      ],
+githubId:{
 
-      default:"user"
+  type:String,
 
-    },
+  default:null
 
-    /* =========================
-       PLAN
-    ========================= */
+},
 
-    subscriptionPlan:{
+/* =========================
+   ROLE
+========================= */
 
-      type:String,
+role:{
 
-      enum:[
+  type:String,
 
-        "free",
+  enum:[
 
-        "pro",
+    "user",
 
-        "enterprise"
+    "admin"
 
-      ],
+  ],
 
-      default:"free"
+  default:"user"
 
-    },
+},
 
-    /* =========================
-       VERIFIED
-    ========================= */
+/* =========================
+   SUBSCRIPTION PLAN
+========================= */
 
-    isVerified:{
+subscriptionPlan:{
 
-      type:Boolean,
+  type:String,
 
-      default:false
+  enum:[
 
-    },
+    "free",
 
-    /* =========================
-       LAST LOGIN
-    ========================= */
+    "starter",
 
-    lastLogin:{
+    "pro",
 
-      type:Date,
+    "business",
 
-      default:null
+    "enterprise"
 
-    }
+  ],
 
-  },
+  default:"free"
 
-  {
+},
 
-    timestamps:true
+/* =========================
+   AI CREDITS
+========================= */
 
-  }
+credits:{
+
+  type:Number,
+
+  default:2000
+
+},
+
+/* =========================
+   DEPLOYMENTS
+========================= */
+
+deploymentsUsed:{
+
+  type:Number,
+
+  default:0
+
+},
+
+/* =========================
+   RAM PLAN
+========================= */
+
+ramPlan:{
+
+  type:String,
+
+  default:"256MB"
+
+},
+
+/* =========================
+   CPU PLAN
+========================= */
+
+cpuPlan:{
+
+  type:String,
+
+  default:"0.1 CPU"
+
+},
+
+/* =========================
+   VERIFIED
+========================= */
+
+isVerified:{
+
+  type:Boolean,
+
+  default:false
+
+},
+
+/* =========================
+   LAST LOGIN
+========================= */
+
+lastLogin:{
+
+  type:Date,
+
+  default:null
+
+}
+
+},
+
+{
+
+timestamps:true
+
+}
 
 );
 
 /* =========================
-   MODEL
+MODEL
 ========================= */
 
 const User =
 
 mongoose.model(
 
-  "User",
+"User",
 
-  userSchema
+userSchema
 
 );
 
 /* =========================
-   EXPORT
+EXPORT
 ========================= */
 
 module.exports = User;
