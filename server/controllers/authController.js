@@ -5,504 +5,560 @@ const jwt =
 require("jsonwebtoken");
 
 /* =========================
-   MODEL
+MODEL
 ========================= */
 
 const User =
 require(
-  "../models/userModel"
+"../models/userModel"
 );
 
 /* =========================
-   GOOGLE SERVICE
+GOOGLE SERVICE
 ========================= */
 
 const {
 
-  generateGoogleToken,
+generateGoogleToken,
 
-  verifyGoogleUser
+verifyGoogleUser
 
 } = require(
-  "../services/googleAuthService"
+"../services/googleAuthService"
 );
 
 /* =========================
-   GENERATE JWT
+GENERATE JWT
 ========================= */
 
 function generateToken(user){
 
-  return jwt.sign(
+return jwt.sign(
 
-    {
+{
 
-      id:user._id,
+  id:user._id,
 
-      email:user.email,
+  email:user.email,
 
-      role:user.role
+  role:user.role
 
-    },
+},
 
-    process.env.JWT_SECRET,
+process.env.JWT_SECRET,
 
-    {
+{
 
-      expiresIn:"7d"
+  expiresIn:"7d"
 
-    }
+}
 
-  );
+);
 
 }
 
 /* =========================
-   REGISTER USER
+REGISTER USER
 ========================= */
 
 async function registerUser(
-  req,
-  res
+req,
+res
 ){
 
-  try{
+try{
 
-    const {
+const {
 
-      name,
-      email,
-      password
+  name,
+  email,
+  password
 
-    } = req.body;
+} = req.body;
 
-    /* =========================
-       VALIDATION
-    ========================= */
+/* =========================
+   VALIDATION
+========================= */
 
-    if(
+if(
 
-      !name ||
-      !email ||
-      !password
+  !name ||
+  !email ||
+  !password
 
-    ){
+){
 
-      return res.status(400).json({
+  return res.status(400).json({
 
-        success:false,
+    success:false,
 
-        message:
-        "All fields required"
+    message:
+    "All fields required"
 
-      });
-
-    }
-
-    /* =========================
-       EXISTING USER
-    ========================= */
-
-    const existingUser =
-
-    await User.findOne({
-
-      email
-
-    });
-
-    if(existingUser){
-
-      return res.status(400).json({
-
-        success:false,
-
-        message:
-        "User already exists"
-
-      });
-
-    }
-
-    /* =========================
-       HASH PASSWORD
-    ========================= */
-
-    const hashedPassword =
-
-    await bcrypt.hash(
-      password,
-      10
-    );
-
-    /* =========================
-       CREATE USER
-    ========================= */
-
-    const user =
-
-    await User.create({
-
-      name,
-
-      email,
-
-      password:
-      hashedPassword,
-
-      provider:"email"
-
-    });
-
-    /* =========================
-       TOKEN
-    ========================= */
-
-    const token =
-    generateToken(user);
-
-    /* =========================
-       RESPONSE
-    ========================= */
-
-    return res.status(201).json({
-
-      success:true,
-
-      token,
-
-      user:{
-
-        id:user._id,
-
-        name:user.name,
-
-        email:user.email,
-
-        role:user.role,
-
-        provider:user.provider
-
-      }
-
-    });
-
-  }
-
-  catch(error){
-
-    console.error(error);
-
-    return res.status(500).json({
-
-      success:false,
-
-      message:
-      "Register failed"
-
-    });
-
-  }
+  });
 
 }
 
 /* =========================
-   LOGIN USER
+   EXISTING USER
+========================= */
+
+const existingUser =
+
+await User.findOne({
+
+  email
+
+});
+
+if(existingUser){
+
+  return res.status(400).json({
+
+    success:false,
+
+    message:
+    "User already exists"
+
+  });
+
+}
+
+/* =========================
+   HASH PASSWORD
+========================= */
+
+const hashedPassword =
+
+await bcrypt.hash(
+  password,
+  10
+);
+
+/* =========================
+   CREATE USER
+========================= */
+
+const user =
+
+await User.create({
+
+  name,
+
+  email,
+
+  password:
+  hashedPassword,
+
+  provider:"email",
+
+  isVerified:true
+
+});
+
+/* =========================
+   TOKEN
+========================= */
+
+const token =
+generateToken(user);
+
+/* =========================
+   RESPONSE
+========================= */
+
+return res.status(201).json({
+
+  success:true,
+
+  token,
+
+  user:{
+
+    id:user._id,
+
+    name:user.name,
+
+    email:user.email,
+
+    role:user.role,
+
+    provider:user.provider
+
+  }
+
+});
+
+}
+
+catch(error){
+
+console.error(error);
+
+return res.status(500).json({
+
+  success:false,
+
+  message:
+  "Register failed"
+
+});
+
+}
+
+}
+
+/* =========================
+LOGIN USER
 ========================= */
 
 async function loginUser(
-  req,
-  res
+req,
+res
 ){
 
-  try{
+try{
 
-    const {
+const {
 
-      email,
-      password
+  email,
+  password
 
-    } = req.body;
+} = req.body;
 
-    /* =========================
-       USER
-    ========================= */
+/* =========================
+   VALIDATION
+========================= */
 
-    const user =
+if(
 
-    await User.findOne({
+  !email ||
+  !password
 
-      email
+){
 
-    });
+  return res.status(400).json({
 
-    if(!user){
+    success:false,
 
-      return res.status(400).json({
+    message:
+    "Email and password required"
 
-        success:false,
-
-        message:
-        "Invalid credentials"
-
-      });
-
-    }
-
-    /* =========================
-       PASSWORD CHECK
-    ========================= */
-
-    const validPassword =
-
-    await bcrypt.compare(
-
-      password,
-
-      user.password
-
-    );
-
-    if(!validPassword){
-
-      return res.status(400).json({
-
-        success:false,
-
-        message:
-        "Invalid credentials"
-
-      });
-
-    }
-
-    /* =========================
-       UPDATE LAST LOGIN
-    ========================= */
-
-    user.lastLogin =
-    new Date();
-
-    await user.save();
-
-    /* =========================
-       TOKEN
-    ========================= */
-
-    const token =
-    generateToken(user);
-
-    /* =========================
-       RESPONSE
-    ========================= */
-
-    return res.json({
-
-      success:true,
-
-      token,
-
-      user:{
-
-        id:user._id,
-
-        name:user.name,
-
-        email:user.email,
-
-        role:user.role,
-
-        provider:user.provider
-
-      }
-
-    });
-
-  }
-
-  catch(error){
-
-    console.error(error);
-
-    return res.status(500).json({
-
-      success:false,
-
-      message:
-      "Login failed"
-
-    });
-
-  }
+  });
 
 }
 
 /* =========================
-   GOOGLE LOGIN
+   FIND USER
+========================= */
+
+const user =
+
+await User.findOne({
+
+  email
+
+});
+
+if(!user){
+
+  return res.status(400).json({
+
+    success:false,
+
+    message:
+    "Invalid credentials"
+
+  });
+
+}
+
+/* =========================
+   PASSWORD CHECK
+========================= */
+
+const validPassword =
+
+await bcrypt.compare(
+
+  password,
+
+  user.password
+
+);
+
+if(!validPassword){
+
+  return res.status(400).json({
+
+    success:false,
+
+    message:
+    "Invalid credentials"
+
+  });
+
+}
+
+/* =========================
+   UPDATE LAST LOGIN
+========================= */
+
+user.lastLogin =
+new Date();
+
+await user.save();
+
+/* =========================
+   TOKEN
+========================= */
+
+const token =
+generateToken(user);
+
+/* =========================
+   RESPONSE
+========================= */
+
+return res.json({
+
+  success:true,
+
+  token,
+
+  user:{
+
+    id:user._id,
+
+    name:user.name,
+
+    email:user.email,
+
+    role:user.role,
+
+    provider:user.provider
+
+  }
+
+});
+
+}
+
+catch(error){
+
+console.error(error);
+
+return res.status(500).json({
+
+  success:false,
+
+  message:
+  "Login failed"
+
+});
+
+}
+
+}
+
+/* =========================
+GOOGLE LOGIN
 ========================= */
 
 async function googleLogin(
-  req,
-  res
+req,
+res
 ){
 
-  try{
+try{
 
-    /* =========================
-       TEMP PROFILE
-    ========================= */
+/* =========================
+   TOKEN
+========================= */
 
-    const googleProfile = {
+const {
+  token
+} = req.body;
 
-      sub:"google123",
+if(!token){
 
-      name:"Google User",
+  return res.status(400).json({
 
-      email:"googleuser@gmail.com",
+    success:false,
 
-      picture:""
+    message:
+    "Google token required"
 
-    };
-
-    /* =========================
-       VERIFY USER
-    ========================= */
-
-    const profile =
-
-    await verifyGoogleUser(
-      googleProfile
-    );
-
-    /* =========================
-       FIND USER
-    ========================= */
-
-    let user =
-
-    await User.findOne({
-
-      email:profile.email
-
-    });
-
-    /* =========================
-       CREATE USER
-    ========================= */
-
-    if(!user){
-
-      user =
-      await User.create({
-
-        name:profile.name,
-
-        email:profile.email,
-
-        avatar:profile.avatar,
-
-        provider:"google",
-
-        isVerified:true
-
-      });
-
-    }
-
-    /* =========================
-       TOKEN
-    ========================= */
-
-    const token =
-
-    generateGoogleToken(
-      user
-    );
-
-    /* =========================
-       RESPONSE
-    ========================= */
-
-    return res.json({
-
-      success:true,
-
-      token,
-
-      user
-
-    });
-
-  }
-
-  catch(error){
-
-    console.error(error);
-
-    return res.status(500).json({
-
-      success:false,
-
-      message:
-      "Google login failed"
-
-    });
-
-  }
+  });
 
 }
 
 /* =========================
-   GITHUB LOGIN
+   VERIFY GOOGLE USER
+========================= */
+
+const profile =
+
+await verifyGoogleUser(
+  token
+);
+
+/* =========================
+   FIND USER
+========================= */
+
+let user =
+
+await User.findOne({
+
+  email:
+  profile.email
+
+});
+
+/* =========================
+   CREATE USER
+========================= */
+
+if(!user){
+
+  user =
+  await User.create({
+
+    name:
+    profile.name,
+
+    email:
+    profile.email,
+
+    avatar:
+    profile.avatar,
+
+    provider:
+    "google",
+
+    isVerified:true
+
+  });
+
+}
+
+/* =========================
+   UPDATE LOGIN
+========================= */
+
+user.lastLogin =
+new Date();
+
+await user.save();
+
+/* =========================
+   GENERATE TOKEN
+========================= */
+
+const jwtToken =
+
+generateGoogleToken(
+  user
+);
+
+/* =========================
+   RESPONSE
+========================= */
+
+return res.json({
+
+  success:true,
+
+  token:
+  jwtToken,
+
+  user:{
+
+    id:user._id,
+
+    name:user.name,
+
+    email:user.email,
+
+    avatar:user.avatar,
+
+    provider:user.provider
+
+  }
+
+});
+
+}
+
+catch(error){
+
+console.error(error);
+
+return res.status(500).json({
+
+  success:false,
+
+  message:
+  "Google login failed"
+
+});
+
+}
+
+}
+
+/* =========================
+GITHUB LOGIN
 ========================= */
 
 async function githubLogin(
-  req,
-  res
+req,
+res
 ){
 
-  try{
+try{
 
-    return res.json({
+return res.status(501).json({
 
-      success:true,
+  success:false,
 
-      message:
-      "GitHub login coming soon"
+  message:
+  "GitHub OAuth not integrated yet"
 
-    });
+});
 
-  }
+}
 
-  catch(error){
+catch(error){
 
-    console.error(error);
+console.error(error);
 
-    return res.status(500).json({
+return res.status(500).json({
 
-      success:false,
+  success:false,
 
-      message:
-      "GitHub login failed"
+  message:
+  "GitHub login failed"
 
-    });
+});
 
-  }
+}
 
 }
 
 /* =========================
-   EXPORTS
+EXPORTS
 ========================= */
 
 module.exports = {
 
-  registerUser,
+registerUser,
 
-  loginUser,
+loginUser,
 
-  googleLogin,
+googleLogin,
 
-  githubLogin
+githubLogin
 
 };
