@@ -1,5 +1,12 @@
 /* =========================
-   AGENTS
+PACKAGES
+========================= */
+
+const { v4:uuidv4 } =
+require("uuid");
+
+/* =========================
+AGENTS
 ========================= */
 
 const dockerAgent =
@@ -27,216 +34,385 @@ const scalingAgent =
 require("./scalingAgent");
 
 /* =========================
-   SERVICES
+SERVICES
 ========================= */
 
 const logger =
 require("../services/loggerService");
 
 /* =========================
-   DEPLOY AGENT
+DEPLOY AGENT
 ========================= */
 
 async function deployAgent(
-  projectData
+projectData
 ){
 
-  try{
+try{
 
-    logger.info(
-      "Deployment Started"
-    );
+logger.info(
+  "🚀 Deployment Started"
+);
 
-    /* =========================
-       STEP 1
-       DOCKER BUILD
-    ========================= */
+/* =========================
+   DEPLOYMENT ID
+========================= */
 
-    const docker =
+const deploymentId =
+uuidv4();
 
-      await dockerAgent(
-        projectData
-      );
+/* =========================
+   VALIDATE PROJECT
+========================= */
 
-    logger.success(
-      "Docker Build Completed"
-    );
+if(
 
-    /* =========================
-       STEP 2
-       AWS DEPLOY
-    ========================= */
+  !projectData.projectName
 
-    const aws =
+){
 
-      await awsAgent(
-        docker
-      );
+  return {
 
-    logger.success(
-      "AWS Deployment Completed"
-    );
+    success:false,
 
-    /* =========================
-       STEP 3
-       DOMAIN SETUP
-    ========================= */
+    message:
+    "Project name required"
 
-    const domain =
-
-      await domainAgent(
-        projectData
-      );
-
-    logger.success(
-      "Domain Generated"
-    );
-
-    /* =========================
-       STEP 4
-       SSL SETUP
-    ========================= */
-
-    const ssl =
-
-      await sslAgent(
-        domain
-      );
-
-    logger.success(
-      "SSL Activated"
-    );
-
-    /* =========================
-       STEP 5
-       BILLING
-    ========================= */
-
-    const billing =
-
-      await billingAgent(
-        projectData
-      );
-
-    logger.success(
-      "Billing Initialized"
-    );
-
-    /* =========================
-       STEP 6
-       SUBSCRIPTION
-    ========================= */
-
-    const subscription =
-
-      await subscriptionAgent(
-        billing
-      );
-
-    logger.success(
-      "Subscription Activated"
-    );
-
-    /* =========================
-       STEP 7
-       MONITORING
-    ========================= */
-
-    const monitoring =
-
-      await monitoringAgent({
-
-        appName:
-        projectData.projectName
-
-      });
-
-    logger.success(
-      "Monitoring Started"
-    );
-
-    /* =========================
-       STEP 8
-       SCALING
-    ========================= */
-
-    const scaling =
-
-      await scalingAgent({
-
-        cpuUsage:20,
-
-        ramUsage:30
-
-      });
-
-    logger.success(
-      "Scaling Initialized"
-    );
-
-    /* =========================
-       FINAL RESPONSE
-    ========================= */
-
-    return {
-
-      success:true,
-
-      message:
-      "🚀 Deployment Successful",
-
-      project:
-
-        projectData.projectName,
-
-      deployment:{
-
-        docker,
-
-        aws,
-
-        domain,
-
-        ssl,
-
-        billing,
-
-        subscription,
-
-        monitoring,
-
-        scaling
-
-      },
-
-      liveUrl:
-
-        ssl.ssl.securedUrl
-
-    };
-
-  }
-
-  catch(error){
-
-    logger.error(
-      error.message
-    );
-
-    return {
-
-      success:false,
-
-      error:error.message
-
-    };
-
-  }
+  };
 
 }
 
 /* =========================
-   EXPORT
+   BILLING
+========================= */
+
+const billing =
+
+await billingAgent({
+
+  userId:
+  projectData.userId,
+
+  plan:
+  projectData.plan ||
+
+  "Starter"
+
+});
+
+if(!billing.success){
+
+  return {
+
+    success:false,
+
+    message:
+    "Billing failed"
+
+  };
+
+}
+
+/* =========================
+   SUBSCRIPTION
+========================= */
+
+const subscription =
+
+await subscriptionAgent({
+
+  userId:
+  projectData.userId,
+
+  plan:
+  projectData.plan ||
+
+  "Starter"
+
+});
+
+if(!subscription.success){
+
+  return {
+
+    success:false,
+
+    message:
+    "Subscription failed"
+
+  };
+
+}
+
+/* =========================
+   DEPLOY LIMIT CHECK
+========================= */
+
+if(
+
+  subscription
+  .subscription
+  .deploymentsLimit === 0
+
+){
+
+  return {
+
+    success:false,
+
+    message:
+    "Deployment limit reached"
+
+  };
+
+}
+
+logger.success(
+  "Subscription Validated"
+);
+
+/* =========================
+   DOCKER BUILD
+========================= */
+
+const docker =
+
+await dockerAgent({
+
+  projectName:
+  projectData.projectName,
+
+  framework:
+  projectData.framework,
+
+  prompt:
+  projectData.prompt
+
+});
+
+logger.success(
+  "Docker Build Completed"
+);
+
+/* =========================
+   AWS DEPLOY
+========================= */
+
+const aws =
+
+await awsAgent({
+
+  deploymentId,
+
+  docker,
+
+  cpu:
+  subscription
+  .subscription
+  .cpu,
+
+  ram:
+  subscription
+  .subscription
+  .ram
+
+});
+
+logger.success(
+  "AWS Deployment Completed"
+);
+
+/* =========================
+   DOMAIN
+========================= */
+
+const domain =
+
+await domainAgent({
+
+  projectName:
+  projectData.projectName
+
+});
+
+logger.success(
+  "Domain Generated"
+);
+
+/* =========================
+   SSL
+========================= */
+
+const ssl =
+
+await sslAgent({
+
+  domain:
+  domain.domain
+
+});
+
+logger.success(
+  "SSL Activated"
+);
+
+/* =========================
+   MONITORING
+========================= */
+
+const monitoring =
+
+await monitoringAgent({
+
+  deploymentId,
+
+  projectName:
+  projectData.projectName
+
+});
+
+logger.success(
+  "Monitoring Enabled"
+);
+
+/* =========================
+   AUTO SCALING
+========================= */
+
+let scaling = null;
+
+if(
+
+  subscription
+  .subscription
+  .autoScaling
+
+){
+
+  scaling =
+
+  await scalingAgent({
+
+    deploymentId,
+
+    cpuThreshold:70,
+
+    ramThreshold:80
+
+  });
+
+}
+
+logger.success(
+  "Scaling Configured"
+);
+
+/* =========================
+   FINAL RESPONSE
+========================= */
+
+return {
+
+  success:true,
+
+  deployment:{
+
+    deploymentId,
+
+    status:"deployed",
+
+    projectName:
+    projectData.projectName,
+
+    framework:
+    projectData.framework ||
+
+    "Node.js",
+
+    liveUrl:
+
+    ssl.securedUrl ||
+
+    domain.domain,
+
+    infrastructure:{
+
+      cpu:
+      subscription
+      .subscription
+      .cpu,
+
+      ram:
+      subscription
+      .subscription
+      .ram,
+
+      storage:
+      subscription
+      .subscription
+      .storage,
+
+      bandwidth:
+      subscription
+      .subscription
+      .bandwidth
+
+    },
+
+    services:{
+
+      docker,
+
+      aws,
+
+      domain,
+
+      ssl,
+
+      monitoring,
+
+      scaling
+
+    },
+
+    billing:
+    billing.billing,
+
+    subscription:
+    subscription.subscription,
+
+    deployedAt:
+    new Date()
+
+  }
+
+};
+
+}
+
+catch(error){
+
+logger.error(
+  error.message
+);
+
+return {
+
+  success:false,
+
+  message:
+  "Deployment failed",
+
+  error:error.message
+
+};
+
+}
+
+}
+
+/* =========================
+EXPORT
 ========================= */
 
 module.exports =
