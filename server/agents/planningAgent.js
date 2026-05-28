@@ -18,6 +18,26 @@ new OpenAI({
 });
 
 /* =========================
+   SAFE JSON PARSER
+========================= */
+
+function safeJsonParse(data){
+
+  try{
+
+    return JSON.parse(data);
+
+  }
+
+  catch(error){
+
+    return null;
+
+  }
+
+}
+
+/* =========================
    PLANNING AGENT
 ========================= */
 
@@ -26,14 +46,36 @@ async function planningAgent(projectIdea){
   try{
 
     /* =========================
+       VALIDATION
+    ========================= */
+
+    if(!projectIdea){
+
+      return {
+
+        success:false,
+
+        error:
+        "Project idea required"
+
+      };
+
+    }
+
+    /* =========================
        AI PLANNING
     ========================= */
 
     const completion =
+
     await openai.chat.completions.create({
 
       model:
       "gpt-4.1-mini",
+
+      response_format:{
+        type:"json_object"
+      },
 
       messages:[
 
@@ -43,24 +85,24 @@ async function planningAgent(projectIdea){
 
           content:`
 
-You are the Planning Agent of Rehman AI OS.
+You are the Planning Agent of VertexCloud AI OS.
 
 Your responsibilities:
 
-- create production architecture
-- decide scalable structure
-- plan frontend/backend
-- plan APIs
-- plan database
+- create production-grade architecture
+- create scalable SaaS structures
+- plan frontend/backend systems
+- design APIs
+- design database systems
 - plan authentication
-- plan deployment
-- plan AI systems
-- plan folders/files
-- think like a senior software architect
+- plan deployment infrastructure
+- plan AI orchestration
+- generate folder/file structures
+- optimize for scalability/security/performance
 
-Return ONLY valid JSON.
+Always return valid JSON.
 
-Format:
+Required JSON format:
 
 {
   "projectName":"",
@@ -75,7 +117,10 @@ Format:
   },
   "database":{
     "type":"",
-    "tables":[]
+    "collections":[]
+  },
+  "authentication":{
+    "providers":[]
   },
   "aiSystems":[],
   "deployment":{
@@ -99,34 +144,76 @@ Format:
 
       ],
 
-      temperature:0.5
+      temperature:0.4,
+
+      max_tokens:2000
 
     });
 
     /* =========================
-       CLEAN RESPONSE
+       RESPONSE
     ========================= */
 
     const raw =
+
     completion
     .choices[0]
     .message
     .content;
 
+    /* =========================
+       CLEAN RESPONSE
+    ========================= */
+
     const cleaned =
+
     raw
     .replace(/```json/g,"")
     .replace(/```/g,"")
     .trim();
 
+    /* =========================
+       PARSE JSON
+    ========================= */
+
     const parsed =
-    JSON.parse(cleaned);
+    safeJsonParse(cleaned);
+
+    if(!parsed){
+
+      return {
+
+        success:false,
+
+        error:
+        "Invalid AI JSON response"
+
+      };
+
+    }
+
+    /* =========================
+       FINAL RESPONSE
+    ========================= */
 
     return {
 
       success:true,
 
-      data:parsed
+      data:parsed,
+
+      metadata:{
+
+        model:
+        "gpt-4.1-mini",
+
+        agent:
+        "planningAgent",
+
+        generatedAt:
+        new Date()
+
+      }
 
     };
 
@@ -134,7 +221,10 @@ Format:
 
   catch(error){
 
-    console.log(error);
+    console.log(
+      "Planning Agent Error:",
+      error.message
+    );
 
     return {
 
