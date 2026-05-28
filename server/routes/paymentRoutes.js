@@ -34,21 +34,15 @@ razorpayWebhookController
 MIDDLEWARE
 ========================= */
 
-const {
-
-authMiddleware
-
-} = require(
+const authMiddleware =
+require(
 
 "../middleware/authMiddleware"
 
 );
 
-const {
-
-apiLimiter
-
-} = require(
+const rateLimiter =
+require(
 
 "../middleware/rateLimiter"
 
@@ -64,7 +58,7 @@ router.post(
 
 authMiddleware,
 
-apiLimiter,
+rateLimiter,
 
 createPaymentController
 
@@ -80,6 +74,8 @@ router.post(
 
 authMiddleware,
 
+rateLimiter,
+
 verifyPaymentController
 
 );
@@ -93,6 +89,8 @@ router.post(
 "/subscription",
 
 authMiddleware,
+
+rateLimiter,
 
 createSubscriptionController
 
@@ -108,6 +106,8 @@ router.get(
 
 authMiddleware,
 
+rateLimiter,
+
 billingHistoryController
 
 );
@@ -121,6 +121,8 @@ router.get(
 "/credits",
 
 authMiddleware,
+
+rateLimiter,
 
 creditsController
 
