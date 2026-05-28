@@ -1,6 +1,9 @@
 const express =
 require("express");
 
+const passport =
+require("passport");
+
 const router =
 express.Router();
 
@@ -14,9 +17,9 @@ registerUser,
 
 loginUser,
 
-googleLogin,
+googleLoginSuccess,
 
-githubLogin
+githubLoginSuccess
 
 } = require(
 "../controllers/authController"
@@ -27,8 +30,11 @@ REGISTER
 ========================= */
 
 router.post(
+
 "/register",
+
 registerUser
+
 );
 
 /* =========================
@@ -36,26 +42,119 @@ LOGIN
 ========================= */
 
 router.post(
+
 "/login",
+
 loginUser
+
 );
 
 /* =========================
-GOOGLE LOGIN
+GOOGLE AUTH
 ========================= */
 
 router.get(
+
 "/google",
-googleLogin
+
+passport.authenticate(
+
+"google",
+
+{
+
+  scope:[
+
+    "profile",
+
+    "email"
+
+  ]
+
+}
+
+)
+
 );
 
 /* =========================
-GITHUB LOGIN
+GOOGLE CALLBACK
 ========================= */
 
 router.get(
+
+"/google/callback",
+
+passport.authenticate(
+
+"google",
+
+{
+
+  session:false,
+
+  failureRedirect:
+  "/login"
+
+}
+
+),
+
+googleLoginSuccess
+
+);
+
+/* =========================
+GITHUB AUTH
+========================= */
+
+router.get(
+
 "/github",
-githubLogin
+
+passport.authenticate(
+
+"github",
+
+{
+
+  scope:[
+
+    "user:email"
+
+  ]
+
+}
+
+)
+
+);
+
+/* =========================
+GITHUB CALLBACK
+========================= */
+
+router.get(
+
+"/github/callback",
+
+passport.authenticate(
+
+"github",
+
+{
+
+  session:false,
+
+  failureRedirect:
+  "/login"
+
+}
+
+),
+
+githubLoginSuccess
+
 );
 
 /* =========================
