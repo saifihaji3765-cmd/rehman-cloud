@@ -1,65 +1,93 @@
+const { v4: uuidv4 } =
+require("uuid");
+
+/* =========================
+BILLING AGENT
+========================= */
+
 const billingAgent =
 require("./billingAgent");
+
+/* =========================
+SERVICES
+========================= */
+
+const logger =
+require("../services/loggerService");
 
 /* =========================
 SUBSCRIPTION AGENT
 ========================= */
 
 async function subscriptionAgent(
-userData
+userData = {}
 ){
 
 try{
 
+logger.info(
+  "Subscription Agent Started"
+);
+
 /* =========================
-   USER PLAN
+PLAN
 ========================= */
 
 const selectedPlan =
 
 userData.plan ||
-
 "Starter";
 
 /* =========================
-   GET BILLING
+USER ID
+========================= */
+
+const userId =
+
+userData.userId ||
+"guest-user";
+
+/* =========================
+BILLING
 ========================= */
 
 const billingResult =
 
 await billingAgent({
 
-  userId:
-  userData.userId,
+userId,
 
-  plan:
-  selectedPlan
+plan:
+selectedPlan
 
 });
 
 /* =========================
-   BILLING FAILED
+BILLING FAILED
 ========================= */
 
-if(
+if(!billingResult.success){
 
-  !billingResult.success
+logger.error(
+"Billing initialization failed"
+);
 
-){
+return {
 
-  return {
+success:false,
 
-    success:false,
+message:
+"Billing initialization failed",
 
-    message:
-    "Billing initialization failed"
+error:
+billingResult.error
 
-  };
+};
 
 }
 
 /* =========================
-   PLAN DATA
+PLAN DATA
 ========================= */
 
 const plan =
@@ -69,145 +97,246 @@ billingResult
 .selectedPlan;
 
 /* =========================
-   UNLIMITED CHECK
+PLAN VALIDATION
+========================= */
+
+if(!plan){
+
+return {
+
+success:false,
+
+message:
+"Invalid subscription plan"
+
+};
+
+}
+
+/* =========================
+UNLIMITED
 ========================= */
 
 const unlimitedAI =
 
-  plan.aiCredits === -1;
+plan.aiCredits === -1;
 
 const unlimitedDeployments =
 
-  plan.deploymentsLimit === -1;
+plan.deploymentsLimit === -1;
 
 /* =========================
-   SUBSCRIPTION OBJECT
+DATES
 ========================= */
 
-const subscription = {
+const startedAt =
+new Date();
 
-  userId:
-  userData.userId ||
+const nextBillingDate =
 
-  "guest-user",
+new Date(
 
-  activePlan:
-  plan.name,
+Date.now() +
 
-  status:"active",
+30 * 24 * 60 * 60 * 1000
 
-  billingCycle:"monthly",
+);
 
-  currency:
-  plan.currency,
+/* =========================
+SUBSCRIPTION ID
+========================= */
 
-  monthlyPrice:
-  plan.monthlyPrice,
+const subscriptionId =
+uuidv4();
 
-  nextBillingDate:
+/* =========================
+USAGE TRACKING
+========================= */
 
-  new Date(
+const usage = {
 
-    Date.now() +
+deploymentsUsed:0,
 
-    30 * 24 * 60 * 60 * 1000
+aiCreditsUsed:0,
 
-  ),
+thumbnailCreditsUsed:0,
 
-  autoRenew:true,
-
-  paymentProvider:
-
-  userData.paymentProvider ||
-
-  "stripe",
-
-  /* =========================
-     DEPLOYMENT LIMITS
-  ========================= */
-
-  deploymentsLimit:
-
-  plan.deploymentsLimit,
-
-  unlimitedDeployments,
-
-  /* =========================
-     AI CREDITS
-  ========================= */
-
-  aiCredits:
-  plan.aiCredits,
-
-  thumbnailCredits:
-  plan.thumbnailCredits,
-
-  videoCredits:
-  plan.videoCredits,
-
-  unlimitedAI,
-
-  /* =========================
-     INFRASTRUCTURE
-  ========================= */
-
-  ram:
-  plan.ram,
-
-  cpu:
-  plan.cpu,
-
-  storage:
-  plan.storage,
-
-  bandwidth:
-  plan.bandwidth,
-
-  /* =========================
-     FEATURES
-  ========================= */
-
-  features:
-  plan.features,
-
-  autoScaling:
-
-  plan.autoScaling ||
-
-  false,
-
-  advancedMonitoring:
-
-  plan.advancedMonitoring ||
-
-  false,
-
-  dedicatedInfrastructure:
-
-  plan.dedicatedInfrastructure ||
-
-  false,
-
-  priorityDeployments:
-
-  plan.priorityDeployments ||
-
-  false,
-
-  support:
-  plan.support
+videoCreditsUsed:0
 
 };
 
 /* =========================
-   RETURN
+LIMITS
+========================= */
+
+const limits = {
+
+deployments:
+plan.deploymentsLimit,
+
+aiCredits:
+plan.aiCredits,
+
+thumbnailCredits:
+plan.thumbnailCredits,
+
+videoCredits:
+plan.videoCredits
+
+};
+
+/* =========================
+FEATURE FLAGS
+========================= */
+
+const featureFlags = {
+
+customDomain:
+plan.customDomain || false,
+
+autoSSL:
+plan.autoSSL || false,
+
+autoScaling:
+plan.autoScaling || false,
+
+advancedMonitoring:
+plan.advancedMonitoring || false,
+
+priorityDeployments:
+plan.priorityDeployments || false,
+
+dedicatedInfrastructure:
+plan.dedicatedInfrastructure || false,
+
+dedicatedSupport:
+plan.dedicatedSupport || false
+
+};
+
+/* =========================
+INFRASTRUCTURE
+========================= */
+
+const infrastructure = {
+
+ram:
+plan.ram,
+
+cpu:
+plan.cpu,
+
+storage:
+plan.storage,
+
+bandwidth:
+plan.bandwidth
+
+};
+
+/* =========================
+SUBSCRIPTION OBJECT
+========================= */
+
+const subscription = {
+
+subscriptionId,
+
+userId,
+
+activePlan:
+plan.name,
+
+status:"active",
+
+billingCycle:"monthly",
+
+currency:
+plan.currency,
+
+monthlyPrice:
+plan.monthlyPrice,
+
+paymentProvider:
+
+userData.paymentProvider ||
+"stripe",
+
+paymentStatus:"active",
+
+startedAt,
+
+nextBillingDate,
+
+autoRenew:true,
+
+/* =========================
+LIMITS
+========================= */
+
+deploymentsLimit:
+plan.deploymentsLimit,
+
+unlimitedDeployments,
+
+unlimitedAI,
+
+limits,
+
+usage,
+
+/* =========================
+INFRASTRUCTURE
+========================= */
+
+infrastructure,
+
+/* =========================
+FEATURES
+========================= */
+
+features:
+plan.features,
+
+featureFlags,
+
+support:
+plan.support,
+
+/* =========================
+METADATA
+========================= */
+
+metadata:{
+
+environment:
+process.env.NODE_ENV,
+
+version:"1.0.0"
+
+},
+
+createdAt:
+startedAt,
+
+updatedAt:
+startedAt
+
+};
+
+logger.success(
+  "Subscription Activated"
+);
+
+/* =========================
+RETURN
 ========================= */
 
 return {
 
-  success:true,
+success:true,
 
-  subscription
+subscription
 
 };
 
@@ -215,11 +344,19 @@ return {
 
 catch(error){
 
+logger.error(
+error.message
+);
+
 return {
 
-  success:false,
+success:false,
 
-  error:error.message
+message:
+"Subscription initialization failed",
+
+error:
+error.message
 
 };
 
