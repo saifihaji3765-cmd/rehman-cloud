@@ -21,18 +21,6 @@ require("./builderAgent");
 const deployAgent =
 require("./deployAgent");
 
-const awsAgent =
-require("./awsAgent");
-
-const dockerAgent =
-require("./dockerAgent");
-
-const domainAgent =
-require("./domainAgent");
-
-const sslAgent =
-require("./sslAgent");
-
 const monitoringAgent =
 require("./monitoringAgent");
 
@@ -55,6 +43,13 @@ const fileAgent =
 require("./fileAgent");
 
 /* =========================
+   SERVICES
+========================= */
+
+const logger =
+require("../services/loggerService");
+
+/* =========================
    OPENAI CLIENT
 ========================= */
 
@@ -72,17 +67,40 @@ new OpenAI({
 
 async function masterAgent(
   userPrompt,
-  user = null
+  user = {}
 ){
 
   try{
 
-    console.log(
+    logger.info(
       "⚡ VertexCloud Master Agent Started"
     );
 
     /* =========================
-       MEMORY CONTEXT
+       VALIDATION
+    ========================= */
+
+    if(
+
+      !userPrompt ||
+
+      typeof userPrompt !== "string"
+
+    ){
+
+      return {
+
+        success:false,
+
+        message:
+        "User prompt required"
+
+      };
+
+    }
+
+    /* =========================
+       MEMORY
     ========================= */
 
     let memoryContext = null;
@@ -90,23 +108,31 @@ async function masterAgent(
     try{
 
       memoryContext =
-      await memoryAgent(
-        userPrompt,
+
+      await memoryAgent({
+
+        prompt:userPrompt,
+
         user
+
+      });
+
+      logger.success(
+        "Memory Agent Completed"
       );
 
     }
 
     catch(error){
 
-      console.log(
+      logger.warning(
         "Memory Agent Failed"
       );
 
     }
 
     /* =========================
-       INTENT DETECTION
+       INTENT
     ========================= */
 
     let intent = null;
@@ -114,15 +140,24 @@ async function masterAgent(
     try{
 
       intent =
-      await intentAgent(
-        userPrompt
+
+      await intentAgent({
+
+        prompt:userPrompt,
+
+        user
+
+      });
+
+      logger.success(
+        "Intent Detected"
       );
 
     }
 
     catch(error){
 
-      console.log(
+      logger.warning(
         "Intent Agent Failed"
       );
 
@@ -137,45 +172,84 @@ async function masterAgent(
     try{
 
       planning =
-      await plannerAgent(
-        userPrompt
+
+      await plannerAgent({
+
+        prompt:userPrompt,
+
+        intent,
+
+        user
+
+      });
+
+      logger.success(
+        "Planning Completed"
       );
 
     }
 
     catch(error){
 
-      console.log(
+      logger.warning(
         "Planner Agent Failed"
       );
 
     }
 
     /* =========================
-       BUILDING
+       RESULTS
     ========================= */
 
     let buildResult = null;
 
+    let deploymentResult = null;
+
+    let monitoringResult = null;
+
+    let scalingResult = null;
+
+    let billingResult = null;
+
+    let subscriptionResult = null;
+
+    let fixResult = null;
+
+    let fileResult = null;
+
+    /* =========================
+       BUILD FLOW
+    ========================= */
+
     if(
 
-      intent &&
-      intent.type === "build"
+      intent?.type === "build"
 
     ){
 
       try{
 
         buildResult =
-        await builderAgent(
-          userPrompt
+
+        await builderAgent({
+
+          prompt:userPrompt,
+
+          plan:planning,
+
+          user
+
+        });
+
+        logger.success(
+          "Builder Agent Completed"
         );
 
       }
 
       catch(error){
 
-        console.log(
+        logger.warning(
           "Builder Agent Failed"
         );
 
@@ -184,35 +258,57 @@ async function masterAgent(
     }
 
     /* =========================
-       DEPLOYMENT
+       DEPLOY FLOW
     ========================= */
-
-    let deployment = null;
 
     if(
 
-      intent &&
-      intent.type === "deploy"
+      intent?.type === "deploy"
 
     ){
 
       try{
 
-        deployment =
+        deploymentResult =
+
         await deployAgent({
+
+          userId:
+          user?.id ||
+
+          "guest-user",
+
+          projectName:
+
+          planning?.projectName ||
+
+          "vertexcloud-app",
+
+          framework:
+
+          planning?.framework ||
+
+          "node",
 
           prompt:userPrompt,
 
-          projectName:
-          "VertexCloud App"
+          plan:
+
+          planning?.plan ||
+
+          "Starter"
 
         });
+
+        logger.success(
+          "Deploy Agent Completed"
+        );
 
       }
 
       catch(error){
 
-        console.log(
+        logger.warning(
           "Deploy Agent Failed"
         );
 
@@ -221,237 +317,261 @@ async function masterAgent(
     }
 
     /* =========================
-       AWS
+       MONITOR FLOW
     ========================= */
 
-    let awsResult = null;
+    if(
 
-    try{
+      intent?.type === "monitor"
 
-      awsResult =
-      await awsAgent(
-        userPrompt
-      );
+    ){
 
-    }
+      try{
 
-    catch(error){
+        monitoringResult =
 
-      console.log(
-        "AWS Agent Failed"
-      );
+        await monitoringAgent({
+
+          deploymentId:
+
+          planning?.deploymentId,
+
+          appName:
+
+          planning?.projectName ||
+
+          "VertexCloud App"
+
+        });
+
+        logger.success(
+          "Monitoring Agent Completed"
+        );
+
+      }
+
+      catch(error){
+
+        logger.warning(
+          "Monitoring Agent Failed"
+        );
+
+      }
 
     }
 
     /* =========================
-       DOCKER
+       SCALING FLOW
     ========================= */
 
-    let dockerResult = null;
+    if(
 
-    try{
+      intent?.type === "scale"
 
-      dockerResult =
-      await dockerAgent(
-        userPrompt
-      );
+    ){
 
-    }
+      try{
 
-    catch(error){
+        scalingResult =
 
-      console.log(
-        "Docker Agent Failed"
-      );
+        await scalingAgent({
+
+          deploymentId:
+
+          planning?.deploymentId,
+
+          cpuUsage:70,
+
+          ramUsage:60,
+
+          activeUsers:500
+
+        });
+
+        logger.success(
+          "Scaling Agent Completed"
+        );
+
+      }
+
+      catch(error){
+
+        logger.warning(
+          "Scaling Agent Failed"
+        );
+
+      }
 
     }
 
     /* =========================
-       DOMAIN
+       BILLING FLOW
     ========================= */
 
-    let domainResult = null;
+    if(
 
-    try{
+      intent?.type === "billing"
 
-      domainResult =
-      await domainAgent(
-        userPrompt
-      );
+    ){
 
-    }
+      try{
 
-    catch(error){
+        billingResult =
 
-      console.log(
-        "Domain Agent Failed"
-      );
+        await billingAgent({
+
+          userId:
+          user?.id ||
+
+          "guest-user",
+
+          plan:
+
+          planning?.plan ||
+
+          "Starter"
+
+        });
+
+        logger.success(
+          "Billing Agent Completed"
+        );
+
+      }
+
+      catch(error){
+
+        logger.warning(
+          "Billing Agent Failed"
+        );
+
+      }
 
     }
 
     /* =========================
-       SSL
+       SUBSCRIPTION FLOW
     ========================= */
 
-    let sslResult = null;
+    if(
 
-    try{
+      intent?.type === "subscription"
 
-      sslResult =
-      await sslAgent(
-        userPrompt
-      );
+    ){
 
-    }
+      try{
 
-    catch(error){
+        subscriptionResult =
 
-      console.log(
-        "SSL Agent Failed"
-      );
+        await subscriptionAgent({
+
+          userId:
+          user?.id ||
+
+          "guest-user",
+
+          plan:
+
+          planning?.plan ||
+
+          "Starter"
+
+        });
+
+        logger.success(
+          "Subscription Agent Completed"
+        );
+
+      }
+
+      catch(error){
+
+        logger.warning(
+          "Subscription Agent Failed"
+        );
+
+      }
 
     }
 
     /* =========================
-       MONITORING
+       FIX FLOW
     ========================= */
 
-    let monitoringResult = null;
+    if(
 
-    try{
+      intent?.type === "fix"
 
-      monitoringResult =
-      await monitoringAgent(
-        userPrompt
-      );
+    ){
 
-    }
+      try{
 
-    catch(error){
+        fixResult =
 
-      console.log(
-        "Monitoring Agent Failed"
-      );
+        await fixAgent({
+
+          prompt:userPrompt,
+
+          user
+
+        });
+
+        logger.success(
+          "Fix Agent Completed"
+        );
+
+      }
+
+      catch(error){
+
+        logger.warning(
+          "Fix Agent Failed"
+        );
+
+      }
 
     }
 
     /* =========================
-       SCALING
+       FILE FLOW
     ========================= */
 
-    let scalingResult = null;
+    if(
 
-    try{
+      intent?.type === "file"
 
-      scalingResult =
-      await scalingAgent(
-        userPrompt
-      );
+    ){
 
-    }
+      try{
 
-    catch(error){
+        fileResult =
 
-      console.log(
-        "Scaling Agent Failed"
-      );
+        await fileAgent({
+
+          prompt:userPrompt,
+
+          user
+
+        });
+
+        logger.success(
+          "File Agent Completed"
+        );
+
+      }
+
+      catch(error){
+
+        logger.warning(
+          "File Agent Failed"
+        );
+
+      }
 
     }
 
     /* =========================
-       BILLING
-    ========================= */
-
-    let billingResult = null;
-
-    try{
-
-      billingResult =
-      await billingAgent(
-        userPrompt
-      );
-
-    }
-
-    catch(error){
-
-      console.log(
-        "Billing Agent Failed"
-      );
-
-    }
-
-    /* =========================
-       SUBSCRIPTION
-    ========================= */
-
-    let subscriptionResult = null;
-
-    try{
-
-      subscriptionResult =
-      await subscriptionAgent(
-        userPrompt
-      );
-
-    }
-
-    catch(error){
-
-      console.log(
-        "Subscription Agent Failed"
-      );
-
-    }
-
-    /* =========================
-       FIX AGENT
-    ========================= */
-
-    let fixResult = null;
-
-    try{
-
-      fixResult =
-      await fixAgent(
-        userPrompt
-      );
-
-    }
-
-    catch(error){
-
-      console.log(
-        "Fix Agent Failed"
-      );
-
-    }
-
-    /* =========================
-       FILE AGENT
-    ========================= */
-
-    let fileResult = null;
-
-    try{
-
-      fileResult =
-      await fileAgent(
-        userPrompt
-      );
-
-    }
-
-    catch(error){
-
-      console.log(
-        "File Agent Failed"
-      );
-
-    }
-
-    /* =========================
-       MASTER AI RESPONSE
+       AI RESPONSE
     ========================= */
 
     const completion =
@@ -472,24 +592,29 @@ async function masterAgent(
 
 You are VertexCloud Autonomous Master AI.
 
-You coordinate multiple AI agents.
+You coordinate AI agents.
 
 You think like:
 
 - CTO
-- DevOps architect
-- AI engineer
-- SaaS founder
-- Cloud architect
+- Cloud Architect
+- DevOps Engineer
+- SaaS Founder
+- AI Infrastructure Engineer
 
-You optimize:
+Your goals:
 
-- scalability
 - automation
-- deployment
+- scalability
+- production safety
+- deployment optimization
+- infrastructure reliability
 - monetization
-- infrastructure
-- production stability
+- performance
+
+Always return clean,
+professional,
+production-ready responses.
 
 `
 
@@ -507,11 +632,11 @@ ${userPrompt}
 INTENT:
 ${JSON.stringify(intent)}
 
-MEMORY:
-${JSON.stringify(memoryContext)}
-
 PLANNING:
 ${JSON.stringify(planning)}
+
+MEMORY:
+${JSON.stringify(memoryContext)}
 
 `
 
@@ -521,7 +646,7 @@ ${JSON.stringify(planning)}
 
       temperature:0.7,
 
-      max_tokens:2000
+      max_tokens:1500
 
     });
 
@@ -544,21 +669,13 @@ ${JSON.stringify(planning)}
 
         intent,
 
-        memoryContext,
-
         planning,
+
+        memoryContext,
 
         buildResult,
 
-        deployment,
-
-        awsResult,
-
-        dockerResult,
-
-        domainResult,
-
-        sslResult,
+        deploymentResult,
 
         monitoringResult,
 
@@ -580,7 +697,9 @@ ${JSON.stringify(planning)}
 
   catch(error){
 
-    console.log(error);
+    logger.error(
+      error.message
+    );
 
     return {
 
@@ -589,7 +708,8 @@ ${JSON.stringify(planning)}
       message:
       "Master Agent Failed",
 
-      error:error.message
+      error:
+      error.message
 
     };
 
