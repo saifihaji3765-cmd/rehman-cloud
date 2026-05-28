@@ -30,15 +30,21 @@ triggerScaling
 MIDDLEWARE
 ========================= */
 
-const rateLimiter =
-require(
+const {
+
+apiLimiter
+
+} = require(
 
 "../middleware/rateLimiter"
 
 );
 
-const authMiddleware =
-require(
+const {
+
+authMiddleware
+
+} = require(
 
 "../middleware/authMiddleware"
 
@@ -54,7 +60,7 @@ router.post(
 
 authMiddleware,
 
-rateLimiter,
+apiLimiter,
 
 deployProject
 
