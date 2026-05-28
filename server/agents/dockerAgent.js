@@ -4,98 +4,170 @@ require("fs");
 const path =
 require("path");
 
-const { v4:uuidv4 } =
+const util =
+require("util");
+
+const exec =
+util.promisify(
+require("child_process").exec
+);
+
+const { v4: uuidv4 } =
 require("uuid");
+
+/* =========================
+SERVICES
+========================= */
+
+const logger =
+require("../services/loggerService");
 
 /* =========================
 DOCKER AGENT
 ========================= */
 
 async function dockerAgent(
-projectData
+projectData = {}
 ){
 
 try{
 
-/* =========================
-   DEPLOYMENT ID
-========================= */
-
-const deploymentId =
-
-uuidv4();
+logger.info(
+  "Docker Agent Started"
+);
 
 /* =========================
-   PROJECT
-========================= */
-
-const projectName =
-
-  projectData.projectName ||
-
-  "vertexcloud-app";
-
-const framework =
-
-  projectData.framework ||
-
-  "node";
-
-/* =========================
-   WORKSPACE
-========================= */
-
-const workspacePath =
-
-  path.join(
-
-    process.cwd(),
-
-    "workspace",
-
-    deploymentId
-
-  );
-
-/* =========================
-   CREATE DIRECTORY
+VALIDATION
 ========================= */
 
 if(
-
-  !fs.existsSync(
-    workspacePath
-  )
-
+  !projectData.projectName
 ){
 
-  fs.mkdirSync(
+  return {
 
-    workspacePath,
+    success:false,
 
-    { recursive:true }
+    message:
+    "Project name required"
 
-  );
+  };
 
 }
 
 /* =========================
-   DOCKERFILE
+DEPLOYMENT ID
+========================= */
+
+const deploymentId =
+
+projectData.deploymentId ||
+
+uuidv4();
+
+/* =========================
+PROJECT
+========================= */
+
+const projectName =
+
+projectData.projectName
+.toLowerCase()
+.replace(/[^a-z0-9-]/g,"-");
+
+const framework =
+
+projectData.framework ||
+"node";
+
+/* =========================
+WORKSPACE
+========================= */
+
+const workspacePath =
+
+path.join(
+
+process.cwd(),
+
+"workspace",
+
+deploymentId
+
+);
+
+/* =========================
+CREATE WORKSPACE
+========================= */
+
+fs.mkdirSync(
+
+workspacePath,
+
+{ recursive:true }
+
+);
+
+/* =========================
+SAVE PROJECT FILES
+========================= */
+
+if(
+
+Array.isArray(
+projectData.files
+)
+
+){
+
+for(const file of projectData.files){
+
+const filePath =
+
+path.join(
+workspacePath,
+file.name
+);
+
+const dir =
+
+path.dirname(
+filePath
+);
+
+fs.mkdirSync(
+
+dir,
+
+{ recursive:true }
+
+);
+
+fs.writeFileSync(
+
+filePath,
+
+file.content || ""
+
+);
+
+}
+
+}
+
+/* =========================
+DOCKERFILE
 ========================= */
 
 let dockerfile = "";
 
 /* =========================
-   NODE.JS
+NODE
 ========================= */
 
-if(
+if(framework === "node"){
 
-  framework === "node"
-
-){
-
-  dockerfile =
+dockerfile =
 
 `
 FROM node:20-alpine
@@ -104,11 +176,14 @@ WORKDIR /app
 
 COPY package*.json ./
 
-RUN npm install
+RUN npm install --production
 
 COPY . .
 
 EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \\
+CMD wget --quiet --tries=1 --spider http://localhost:3000 || exit 1
 
 CMD ["npm","start"]
 `;
@@ -116,16 +191,12 @@ CMD ["npm","start"]
 }
 
 /* =========================
-   NEXT.JS
+NEXT.JS
 ========================= */
 
-else if(
+else if(framework === "next"){
 
-  framework === "next"
-
-){
-
-  dockerfile =
+dockerfile =
 
 `
 FROM node:20-alpine
@@ -148,25 +219,21 @@ CMD ["npm","start"]
 }
 
 /* =========================
-   PYTHON
+PYTHON
 ========================= */
 
-else if(
+else if(framework === "python"){
 
-  framework === "python"
-
-){
-
-  dockerfile =
+dockerfile =
 
 `
-FROM python:3.11
+FROM python:3.11-slim
 
 WORKDIR /app
 
 COPY . .
 
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 EXPOSE 8000
 
@@ -176,12 +243,12 @@ CMD ["python","app.py"]
 }
 
 /* =========================
-   DEFAULT
+DEFAULT
 ========================= */
 
 else{
 
-  dockerfile =
+dockerfile =
 
 `
 FROM node:20-alpine
@@ -190,7 +257,7 @@ WORKDIR /app
 
 COPY . .
 
-RUN npm install
+RUN npm install --production
 
 EXPOSE 3000
 
@@ -200,97 +267,118 @@ CMD ["npm","start"]
 }
 
 /* =========================
-   SAVE DOCKERFILE
+SAVE DOCKERFILE
 ========================= */
-
-const dockerPath =
-
-  path.join(
-
-    workspacePath,
-
-    "Dockerfile"
-
-  );
 
 fs.writeFileSync(
 
-  dockerPath,
+path.join(
+workspacePath,
+"Dockerfile"
+),
 
-  dockerfile
+dockerfile
 
 );
 
 /* =========================
-   DOCKERIGNORE
+DOCKERIGNORE
 ========================= */
 
 const dockerIgnore =
 
-"node_modules .env .git npm-debug.log";
+`
+node_modules
+.env
+.git
+npm-debug.log
+Dockerfile
+.dockerignore
+`;
 
 fs.writeFileSync(
 
-  path.join(
+path.join(
+workspacePath,
+".dockerignore"
+),
 
-    workspacePath,
-
-    ".dockerignore"
-
-  ),
-
-  dockerIgnore
+dockerIgnore
 
 );
 
 /* =========================
-   IMAGE
+IMAGE NAME
 ========================= */
 
 const imageName =
 
-  `${projectName.toLowerCase()}-${deploymentId}:latest`;
+`${projectName}:${deploymentId}`;
 
 /* =========================
-   RETURN
+BUILD DOCKER IMAGE
+========================= */
+
+logger.info(
+  "Building Docker Image"
+);
+
+await exec(
+
+`docker build -t ${imageName} .`,
+
+{
+cwd:workspacePath
+}
+
+);
+
+logger.success(
+  "Docker Image Built"
+);
+
+/* =========================
+RETURN
 ========================= */
 
 return {
 
-  success:true,
+success:true,
 
-  docker:{
+docker:{
 
-    deploymentId,
+deploymentId,
 
-    framework,
+projectName,
 
-    runtime:
-    framework,
+framework,
 
-    dockerfileCreated:true,
+runtime:
+framework,
 
-    dockerIgnoreCreated:true,
+workspacePath,
 
-    workspacePath,
+dockerfileCreated:true,
 
-    imageName,
+dockerIgnoreCreated:true,
 
-    containerPort:
+imageName,
 
-      framework === "python"
+containerPort:
 
-      ? 8000
+framework === "python"
+? 8000
+: 3000,
 
-      : 3000,
+dockerBuild:true,
 
-    status:
-    "containerized",
+status:
+"containerized",
 
-    createdAt:
-    new Date()
+createdAt:
+new Date()
 
-  }
+}
 
 };
 
@@ -298,11 +386,18 @@ return {
 
 catch(error){
 
+logger.error(
+error.message
+);
+
 return {
 
-  success:false,
+success:false,
 
-  error:error.message
+message:
+"Docker build failed",
+
+error:error.message
 
 };
 
