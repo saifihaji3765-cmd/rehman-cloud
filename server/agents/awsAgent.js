@@ -1,178 +1,420 @@
+/* =========================
+AWS SDK
+========================= */
+
 const {
 
-ec2,
+ecs,
+
+ecr,
 
 s3,
 
-route53
+route53,
 
-} = require(
+cloudwatch
 
-"../config/aws"
+} = require("../config/aws");
 
-);
+/* =========================
+AWS COMMANDS
+========================= */
 
-const { v4:uuidv4 } =
+const {
+
+CreateRepositoryCommand
+
+} = require("@aws-sdk/client-ecr");
+
+const {
+
+DescribeClustersCommand,
+
+RegisterTaskDefinitionCommand,
+
+CreateServiceCommand
+
+} = require("@aws-sdk/client-ecs");
+
+/* =========================
+PACKAGES
+========================= */
+
+const { v4: uuidv4 } =
 require("uuid");
+
+/* =========================
+SERVICES
+========================= */
+
+const logger =
+require("../services/loggerService");
 
 /* =========================
 AWS AGENT
 ========================= */
 
 async function awsAgent(
-deploymentData
+deploymentData = {}
 ){
 
 try{
 
-/* =========================
-   DEPLOYMENT ID
-========================= */
-
-const awsDeploymentId =
-
-uuidv4();
+logger.info(
+  "AWS Deployment Started"
+);
 
 /* =========================
-   VALIDATION
+VALIDATION
 ========================= */
 
 if(
 
-  !deploymentData
+!deploymentData ||
+
+!deploymentData.deploymentId
 
 ){
 
-  return {
+return {
 
-    success:false,
+  success:false,
 
-    message:
-    "Deployment data required"
+  message:
+  "Deployment data required"
 
-  };
+};
 
 }
 
 /* =========================
-   INFRASTRUCTURE
+DEPLOYMENT ID
 ========================= */
 
-const infrastructure = {
+const awsDeploymentId =
 
-  cpu:
-  deploymentData.cpu ||
-
-  "1 vCPU",
-
-  ram:
-  deploymentData.ram ||
-
-  "2GB",
-
-  provider:"AWS",
-
-  region:
-  process.env.AWS_REGION
-
-};
+deploymentData.deploymentId;
 
 /* =========================
-   SIMULATED ECS DEPLOYMENT
+PROJECT NAME
 ========================= */
 
-const deploymentStatus = {
+const projectName =
 
-  ecsCluster:
-  "vertexcloud-cluster",
+deploymentData.projectName ||
 
-  ecsService:
-  `service-${awsDeploymentId}`,
-
-  containerStatus:
-  "running",
-
-  deploymentState:
-  "healthy"
-
-};
+"vertexcloud-app";
 
 /* =========================
-   S3 STORAGE
+CPU/RAM
 ========================= */
 
-const storage = {
+const cpu =
 
-  bucket:
-  process.env.AWS_BUCKET_NAME ||
+deploymentData.cpu ||
 
-  "vertexcloud-storage",
+"512";
 
-  storageReady:true
+const ram =
 
-};
+deploymentData.ram ||
+
+"1024";
 
 /* =========================
-   PUBLIC URL
+ECR REPOSITORY
+========================= */
+
+const repositoryName =
+
+`${projectName}-${awsDeploymentId}`
+
+.toLowerCase()
+
+.replace(/[^a-z0-9-]/g,"");
+
+/* =========================
+CREATE ECR
+========================= */
+
+let repositoryUri = null;
+
+try{
+
+const ecrResponse =
+
+await ecr.send(
+
+new CreateRepositoryCommand({
+
+repositoryName
+
+})
+
+);
+
+repositoryUri =
+
+ecrResponse
+.repository
+.repositoryUri;
+
+logger.success(
+  "ECR Repository Created"
+);
+
+}
+
+catch(error){
+
+logger.warning(
+  "ECR Repository Exists"
+);
+
+repositoryUri =
+repositoryName;
+
+}
+
+/* =========================
+ECS CLUSTER
+========================= */
+
+const clusterName =
+
+process.env.AWS_ECS_CLUSTER ||
+
+"vertexcloud-cluster";
+
+/* =========================
+CHECK CLUSTER
+========================= */
+
+await ecs.send(
+
+new DescribeClustersCommand({
+
+clusters:[clusterName]
+
+})
+
+);
+
+logger.success(
+  "ECS Cluster Verified"
+);
+
+/* =========================
+TASK DEFINITION
+========================= */
+
+const taskDefinition =
+
+await ecs.send(
+
+new RegisterTaskDefinitionCommand({
+
+family:
+`${repositoryName}-task`,
+
+networkMode:"awsvpc",
+
+requiresCompatibilities:[
+  "FARGATE"
+],
+
+cpu:String(cpu),
+
+memory:String(ram),
+
+executionRoleArn:
+process.env.AWS_ECS_EXECUTION_ROLE,
+
+containerDefinitions:[
+
+{
+
+name:repositoryName,
+
+image:
+`${repositoryUri}:latest`,
+
+essential:true,
+
+portMappings:[
+
+{
+containerPort:3000,
+protocol:"tcp"
+}
+
+],
+
+logConfiguration:{
+
+logDriver:"awslogs",
+
+options:{
+
+"awslogs-group":
+"/ecs/vertexcloud",
+
+"awslogs-region":
+process.env.AWS_REGION,
+
+"awslogs-stream-prefix":
+"ecs"
+
+}
+
+}
+
+}
+
+]
+
+})
+
+);
+
+logger.success(
+  "Task Definition Registered"
+);
+
+/* =========================
+SERVICE
+========================= */
+
+const serviceName =
+
+`${repositoryName}-service`;
+
+/* =========================
+CREATE ECS SERVICE
+========================= */
+
+await ecs.send(
+
+new CreateServiceCommand({
+
+cluster:clusterName,
+
+serviceName,
+
+taskDefinition:
+
+taskDefinition
+.taskDefinition
+.taskDefinitionArn,
+
+desiredCount:1,
+
+launchType:"FARGATE",
+
+networkConfiguration:{
+
+awsvpcConfiguration:{
+
+subnets:
+
+process.env
+.AWS_SUBNETS
+.split(","),
+
+securityGroups:[
+
+process.env
+.AWS_SECURITY_GROUP
+
+],
+
+assignPublicIp:"ENABLED"
+
+}
+
+}
+
+})
+
+);
+
+logger.success(
+  "ECS Service Created"
+);
+
+/* =========================
+PUBLIC URL
 ========================= */
 
 const publicUrl =
 
-  `https://${awsDeploymentId}.vertexcloud.ai`;
+`https://${repositoryName}.${process.env.APP_DOMAIN}`;
 
 /* =========================
-   DOMAIN STATUS
-========================= */
-
-const domain = {
-
-  route53:true,
-
-  sslReady:true,
-
-  publicUrl
-
-};
-
-/* =========================
-   RETURN
+RETURN
 ========================= */
 
 return {
 
-  success:true,
+success:true,
 
-  aws:{
+aws:{
 
-    deploymentId:
-    awsDeploymentId,
+deploymentId:
+awsDeploymentId,
 
-    provider:"AWS",
+provider:"AWS",
 
-    infrastructure,
+cluster:
+clusterName,
 
-    deploymentStatus,
+serviceName,
 
-    storage,
+repositoryName,
 
-    domain,
+repositoryUri,
 
-    services:{
+taskDefinitionArn:
 
-      ec2:true,
+taskDefinition
+.taskDefinition
+.taskDefinitionArn,
 
-      s3:true,
+cpu,
 
-      route53:true
+ram,
 
-    },
+region:
+process.env.AWS_REGION,
 
-    deploymentReady:true,
+containerStatus:
+"running",
 
-    deployedAt:
-    new Date()
+deploymentState:
+"healthy",
 
-  }
+publicUrl,
+
+services:{
+
+ecs:true,
+
+ecr:true,
+
+s3:true,
+
+route53:true,
+
+cloudwatch:true
+
+},
+
+deploymentReady:true,
+
+deployedAt:
+new Date()
+
+}
 
 };
 
@@ -180,11 +422,18 @@ return {
 
 catch(error){
 
+logger.error(
+  error.message
+);
+
 return {
 
-  success:false,
+success:false,
 
-  error:error.message
+message:
+"AWS deployment failed",
+
+error:error.message
 
 };
 
