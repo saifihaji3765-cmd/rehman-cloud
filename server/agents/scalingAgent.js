@@ -1,5 +1,15 @@
-const { v4:uuidv4 } =
-require("uuid");
+const {
+UpdateServiceCommand,
+DescribeServicesCommand
+} = require(
+"@aws-sdk/client-ecs"
+);
+
+const {
+ecs
+} = require(
+"../config/aws"
+);
 
 /* =========================
 SCALING AGENT
@@ -12,39 +22,103 @@ appMetrics
 try{
 
 /* =========================
-   DEPLOYMENT ID
+VALIDATION
+========================= */
+
+if(
+  !appMetrics.deploymentId
+){
+
+  return {
+
+    success:false,
+
+    message:
+    "Deployment ID required"
+
+  };
+
+}
+
+/* =========================
+DEPLOYMENT
 ========================= */
 
 const deploymentId =
+appMetrics.deploymentId;
 
-  appMetrics.deploymentId ||
+const clusterName =
+process.env.ECS_CLUSTER ||
+"vertexcloud-cluster";
 
-  uuidv4();
+const serviceName =
+`service-${deploymentId}`;
 
 /* =========================
-   METRICS
+GET SERVICE
+========================= */
+
+const serviceResult =
+
+await ecs.send(
+
+new DescribeServicesCommand({
+
+  cluster:
+  clusterName,
+
+  services:[
+    serviceName
+  ]
+
+})
+
+);
+
+const service =
+serviceResult.services?.[0];
+
+/* =========================
+SERVICE CHECK
+========================= */
+
+if(!service){
+
+  return {
+
+    success:false,
+
+    message:
+    "ECS service not found"
+
+  };
+
+}
+
+/* =========================
+METRICS
 ========================= */
 
 const cpuUsage =
 
-  Number(
-    appMetrics.cpuUsage || 20
-  );
+Number(
+appMetrics.cpuUsage || 0
+);
 
 const ramUsage =
 
-  Number(
-    appMetrics.ramUsage || 30
-  );
+Number(
+appMetrics.ramUsage || 0
+);
 
 const activeUsers =
 
-  Number(
-    appMetrics.activeUsers || 0
-  );
+Number(
+appMetrics.activeUsers || 0
+);
 
 /* =========================
-   LIMITS
+LIMITS
 ========================= */
 
 const minInstances = 1;
@@ -52,207 +126,193 @@ const minInstances = 1;
 const maxInstances = 10;
 
 /* =========================
-   DEFAULT STATE
+CURRENT INSTANCES
 ========================= */
+
+let instances =
+service.desiredCount || 1;
 
 let action = "stable";
 
-let instances = 1;
-
-let loadBalancer = false;
-
 let scalingReason =
-  "System stable";
+"System stable";
 
 /* =========================
-   SCALE UP
+SCALE UP
 ========================= */
 
 if(
 
-  cpuUsage >= 70 ||
+cpuUsage >= 70 ||
 
-  ramUsage >= 75 ||
+ramUsage >= 75 ||
 
-  activeUsers >= 500
+activeUsers >= 500
 
 ){
 
-  action = "scale-up";
+action = "scale-up";
 
-  instances = 3;
+instances = 3;
 
-  loadBalancer = true;
-
-  scalingReason =
-  "Medium traffic spike detected";
+scalingReason =
+"Medium traffic spike detected";
 
 }
 
 /* =========================
-   HIGH SCALE
+HIGH SCALE
 ========================= */
 
 if(
 
-  cpuUsage >= 90 ||
+cpuUsage >= 90 ||
 
-  ramUsage >= 90 ||
+ramUsage >= 90 ||
 
-  activeUsers >= 2000
+activeUsers >= 2000
 
 ){
 
-  action = "high-scale";
+action = "high-scale";
 
-  instances = 6;
+instances = 6;
 
-  loadBalancer = true;
-
-  scalingReason =
-  "High traffic load detected";
+scalingReason =
+"High traffic load detected";
 
 }
 
 /* =========================
-   EXTREME SCALE
+EXTREME SCALE
 ========================= */
 
 if(
 
-  cpuUsage >= 95 ||
+cpuUsage >= 95 ||
 
-  ramUsage >= 95 ||
+ramUsage >= 95 ||
 
-  activeUsers >= 5000
+activeUsers >= 5000
 
 ){
 
-  action = "extreme-scale";
+action = "extreme-scale";
 
-  instances = 10;
+instances = 10;
 
-  loadBalancer = true;
-
-  scalingReason =
-  "Extreme production traffic";
+scalingReason =
+"Extreme production traffic";
 
 }
 
 /* =========================
-   SCALE DOWN
+SCALE DOWN
 ========================= */
 
 if(
 
-  cpuUsage <= 20 &&
+cpuUsage <= 20 &&
 
-  ramUsage <= 25 &&
+ramUsage <= 25 &&
 
-  activeUsers <= 50
+activeUsers <= 50
 
 ){
 
-  action = "scale-down";
+action = "scale-down";
 
-  instances = 1;
+instances = 1;
 
-  scalingReason =
-  "Low resource usage";
+scalingReason =
+"Low resource usage";
 
 }
 
 /* =========================
-   INSTANCE SAFETY
+SAFETY
 ========================= */
 
-if(
+if(instances > maxInstances){
 
-  instances > maxInstances
-
-){
-
-  instances = maxInstances;
+instances = maxInstances;
 
 }
 
-if(
+if(instances < minInstances){
 
-  instances < minInstances
-
-){
-
-  instances = minInstances;
+instances = minInstances;
 
 }
 
 /* =========================
-   COST OPTIMIZATION
+UPDATE ECS SERVICE
 ========================= */
 
-const estimatedMonthlyCost =
+await ecs.send(
 
-  instances * 15;
+new UpdateServiceCommand({
 
-/* =========================
-   ORCHESTRATION
-========================= */
+  cluster:
+  clusterName,
 
-const orchestration = {
+  service:
+  serviceName,
 
-  containerEngine:"Docker",
+  desiredCount:
+  instances
 
-  orchestrationPlatform:
-  "AWS ECS",
+})
 
-  kubernetesReady:true
-
-};
+);
 
 /* =========================
-   RETURN
+RETURN
 ========================= */
 
 return {
 
-  success:true,
+success:true,
 
-  scaling:{
+scaling:{
 
-    deploymentId,
+  deploymentId,
 
-    autoScaling:true,
+  autoScaling:true,
 
-    action,
+  action,
 
-    instances,
+  instances,
 
-    minInstances,
+  minInstances,
 
-    maxInstances,
+  maxInstances,
 
-    loadBalancer,
+  scalingReason,
 
-    scalingReason,
+  metrics:{
 
-    estimatedMonthlyCost,
+    cpuUsage,
 
-    metrics:{
+    ramUsage,
 
-      cpuUsage,
+    activeUsers
 
-      ramUsage,
+  },
 
-      activeUsers
+  orchestration:{
 
-    },
+    platform:
+    "AWS ECS",
 
-    orchestration,
+    realScaling:true
 
-    checkedAt:
-    new Date()
+  },
 
-  }
+  updatedAt:
+  new Date()
+
+}
 
 };
 
@@ -262,9 +322,9 @@ catch(error){
 
 return {
 
-  success:false,
+success:false,
 
-  error:error.message
+error:error.message
 
 };
 
