@@ -55,17 +55,12 @@ logger.info(
 );
 
 /* =========================
-   DEPLOYMENT ID
-========================= */
-
-const deploymentId =
-uuidv4();
-
-/* =========================
-   VALIDATE PROJECT
+   VALIDATION
 ========================= */
 
 if(
+
+  !projectData ||
 
   !projectData.projectName
 
@@ -81,6 +76,13 @@ if(
   };
 
 }
+
+/* =========================
+   DEPLOYMENT ID
+========================= */
+
+const deploymentId =
+uuidv4();
 
 /* =========================
    BILLING
@@ -102,16 +104,27 @@ await billingAgent({
 
 if(!billing.success){
 
+  logger.error(
+    "Billing Failed"
+  );
+
   return {
 
     success:false,
 
     message:
-    "Billing failed"
+    "Billing failed",
+
+    error:
+    billing.error
 
   };
 
 }
+
+logger.success(
+  "Billing Validated"
+);
 
 /* =========================
    SUBSCRIPTION
@@ -133,19 +146,26 @@ await subscriptionAgent({
 
 if(!subscription.success){
 
+  logger.error(
+    "Subscription Failed"
+  );
+
   return {
 
     success:false,
 
     message:
-    "Subscription failed"
+    "Subscription failed",
+
+    error:
+    subscription.error
 
   };
 
 }
 
 /* =========================
-   DEPLOY LIMIT CHECK
+   DEPLOYMENT LIMIT
 ========================= */
 
 if(
@@ -155,6 +175,10 @@ if(
   .deploymentsLimit === 0
 
 ){
+
+  logger.warning(
+    "Deployment Limit Reached"
+  );
 
   return {
 
@@ -183,19 +207,41 @@ await dockerAgent({
   projectData.projectName,
 
   framework:
-  projectData.framework,
+  projectData.framework ||
+
+  "node",
 
   prompt:
   projectData.prompt
 
 });
 
+if(!docker.success){
+
+  logger.error(
+    "Docker Build Failed"
+  );
+
+  return {
+
+    success:false,
+
+    message:
+    "Docker build failed",
+
+    error:
+    docker.error
+
+  };
+
+}
+
 logger.success(
   "Docker Build Completed"
 );
 
 /* =========================
-   AWS DEPLOY
+   AWS DEPLOYMENT
 ========================= */
 
 const aws =
@@ -218,12 +264,32 @@ await awsAgent({
 
 });
 
+if(!aws.success){
+
+  logger.error(
+    "AWS Deployment Failed"
+  );
+
+  return {
+
+    success:false,
+
+    message:
+    "AWS deployment failed",
+
+    error:
+    aws.error
+
+  };
+
+}
+
 logger.success(
   "AWS Deployment Completed"
 );
 
 /* =========================
-   DOMAIN
+   DOMAIN GENERATION
 ========================= */
 
 const domain =
@@ -235,22 +301,62 @@ await domainAgent({
 
 });
 
+if(!domain.success){
+
+  logger.error(
+    "Domain Generation Failed"
+  );
+
+  return {
+
+    success:false,
+
+    message:
+    "Domain generation failed",
+
+    error:
+    domain.error
+
+  };
+
+}
+
 logger.success(
   "Domain Generated"
 );
 
 /* =========================
-   SSL
+   SSL ACTIVATION
 ========================= */
 
 const ssl =
 
 await sslAgent({
 
-  domain:
-  domain.domain
+  subdomain:
+  domain.subdomain
 
 });
+
+if(!ssl.success){
+
+  logger.error(
+    "SSL Activation Failed"
+  );
+
+  return {
+
+    success:false,
+
+    message:
+    "SSL activation failed",
+
+    error:
+    ssl.error
+
+  };
+
+}
 
 logger.success(
   "SSL Activated"
@@ -266,10 +372,18 @@ await monitoringAgent({
 
   deploymentId,
 
-  projectName:
+  appName:
   projectData.projectName
 
 });
+
+if(!monitoring.success){
+
+  logger.warning(
+    "Monitoring Failed"
+  );
+
+}
 
 logger.success(
   "Monitoring Enabled"
@@ -293,19 +407,35 @@ if(
 
   await scalingAgent({
 
-    deploymentId,
+    cpuUsage:20,
 
-    cpuThreshold:70,
-
-    ramThreshold:80
+    ramUsage:30
 
   });
+
+  if(!scaling.success){
+
+    logger.warning(
+      "Scaling Failed"
+    );
+
+  }
 
 }
 
 logger.success(
   "Scaling Configured"
 );
+
+/* =========================
+   LIVE URL
+========================= */
+
+const liveUrl =
+
+ssl.ssl.securedUrl ||
+
+domain.subdomain;
 
 /* =========================
    FINAL RESPONSE
@@ -321,6 +451,8 @@ return {
 
     status:"deployed",
 
+    provider:"AWS",
+
     projectName:
     projectData.projectName,
 
@@ -329,11 +461,7 @@ return {
 
     "Node.js",
 
-    liveUrl:
-
-    ssl.securedUrl ||
-
-    domain.domain,
+    liveUrl,
 
     infrastructure:{
 
@@ -403,7 +531,8 @@ return {
   message:
   "Deployment failed",
 
-  error:error.message
+  error:
+  error.message
 
 };
 
