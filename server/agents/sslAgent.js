@@ -1,123 +1,181 @@
-const { v4:uuidv4 } =
+/* =========================
+PACKAGES
+========================= */
+
+const { v4: uuidv4 } =
 require("uuid");
+
+/* =========================
+SERVICES
+========================= */
+
+const logger =
+require("../services/loggerService");
 
 /* =========================
 SSL AGENT
 ========================= */
 
 async function sslAgent(
-domainData
+domainData = {}
 ){
 
 try{
 
+logger.info(
+  "SSL Agent Started"
+);
+
 /* =========================
-   VALIDATION
+VALIDATION
 ========================= */
 
 if(
 
-  !domainData ||
+!domainData ||
 
-  !domainData.domain
+!domainData.fullDomain
 
 ){
 
-  return {
+return {
 
-    success:false,
+  success:false,
 
-    message:
-    "Domain data required"
+  message:
+  "Valid domain required"
 
-  };
+};
 
 }
 
 /* =========================
-   DOMAIN
+DOMAIN
 ========================= */
 
-const domain =
+const fullDomain =
 
-  domainData
-  .domain
-  .fullDomain;
+domainData.fullDomain;
 
 /* =========================
-   CERTIFICATE ID
+CERTIFICATE
 ========================= */
 
 const certificateId =
 
-  uuidv4();
+uuidv4();
 
 /* =========================
-   SSL OBJECT
+CERTIFICATE ARN
+========================= */
+
+const certificateArn =
+
+`arn:aws:acm:${process.env.AWS_REGION}:vertexcloud:${certificateId}`;
+
+/* =========================
+DATES
+========================= */
+
+const issuedAt =
+new Date();
+
+const expiresAt =
+
+new Date(
+
+Date.now() +
+
+365 * 24 * 60 * 60 * 1000
+
+);
+
+/* =========================
+SSL OBJECT
 ========================= */
 
 const ssl = {
 
-  certificateId,
+certificateId,
 
-  enabled:true,
+certificateArn,
 
-  provider:"AWS ACM",
+provider:"AWS ACM",
 
-  https:true,
+enabled:true,
 
-  autoRenew:true,
+httpsEnabled:true,
 
-  tlsVersion:"TLS 1.3",
+httpRedirect:true,
 
-  sslStatus:"active",
+wildcardSupport:true,
 
-  validationStatus:
-  "validated",
+autoRenew:true,
 
-  issuedAt:
-  new Date(),
+tlsVersion:"TLS 1.3",
 
-  expiresAt:
+sslStatus:"active",
 
-  new Date(
+validationStatus:"validated",
 
-    Date.now() +
+issuedAt,
 
-    365 * 24 * 60 * 60 * 1000
+expiresAt,
 
-  ),
+remainingDays:365,
 
-  securedUrl:
-  domain
+securedUrl:
+fullDomain
 
 };
 
 /* =========================
-   SECURITY HEADERS
+SECURITY
 ========================= */
 
 const security = {
 
-  hsts:true,
+hsts:true,
 
-  xssProtection:true,
+xssProtection:true,
 
-  contentTypeProtection:true
+contentTypeProtection:true,
+
+frameProtection:true,
+
+referrerPolicy:true
 
 };
 
 /* =========================
-   RETURN
+FINAL OBJECT
+========================= */
+
+const sslData = {
+
+ssl,
+
+security,
+
+sslReady:true,
+
+createdAt:new Date()
+
+};
+
+logger.success(
+  "SSL Activated"
+);
+
+/* =========================
+RETURN
 ========================= */
 
 return {
 
-  success:true,
+success:true,
 
-  ssl,
-
-  security
+...sslData
 
 };
 
@@ -125,11 +183,18 @@ return {
 
 catch(error){
 
+logger.error(
+  error.message
+);
+
 return {
 
-  success:false,
+success:false,
 
-  error:error.message
+message:
+"SSL activation failed",
+
+error:error.message
 
 };
 
