@@ -5,10 +5,10 @@ const path =
 require("path");
 
 /* =========================
-   LOG FILE PATH
+   LOG DIRECTORY
 ========================= */
 
-const logPath =
+const logsDir =
 
 path.join(
 
@@ -16,7 +16,39 @@ path.join(
 
   "server",
 
-  "logs",
+  "logs"
+
+);
+
+/* =========================
+   CREATE LOG DIR
+========================= */
+
+if(
+
+  !fs.existsSync(logsDir)
+
+){
+
+  fs.mkdirSync(
+
+    logsDir,
+
+    { recursive:true }
+
+  );
+
+}
+
+/* =========================
+   LOG FILE
+========================= */
+
+const logPath =
+
+path.join(
+
+  logsDir,
 
   "vertexcloud.log"
 
@@ -31,21 +63,61 @@ function writeLog(
   message
 ){
 
-  const timestamp =
+  try{
 
-    new Date().toISOString();
+    const timestamp =
 
-  const logMessage =
+    new Date()
+    .toISOString();
+
+    const logMessage =
 
 `[${timestamp}] [${type}] ${message}\n`;
 
-  fs.appendFileSync(
+    /* =========================
+       CONSOLE OUTPUT
+    ========================= */
 
-    logPath,
+    console.log(logMessage);
 
-    logMessage
+    /* =========================
+       FILE LOG
+    ========================= */
 
-  );
+    fs.appendFile(
+
+      logPath,
+
+      logMessage,
+
+      (error)=>{
+
+        if(error){
+
+          console.error(
+
+            "Log Write Error:",
+
+            error.message
+
+          );
+
+        }
+
+      }
+
+    );
+
+  }
+
+  catch(error){
+
+    console.error(
+      "Logger Failure:",
+      error.message
+    );
+
+  }
 
 }
 
@@ -88,6 +160,24 @@ const logger = {
       "WARNING",
       message
     );
+
+  },
+
+  debug:(message)=>{
+
+    if(
+
+      process.env.NODE_ENV ===
+      "development"
+
+    ){
+
+      writeLog(
+        "DEBUG",
+        message
+      );
+
+    }
 
   }
 
