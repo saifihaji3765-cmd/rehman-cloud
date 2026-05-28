@@ -1,5 +1,21 @@
-const { v4:uuidv4 } =
-require("uuid");
+const {
+GetMetricStatisticsCommand
+} = require(
+"@aws-sdk/client-cloudwatch"
+);
+
+const {
+DescribeServicesCommand
+} = require(
+"@aws-sdk/client-ecs"
+);
+
+const {
+cloudwatch,
+ecs
+} = require(
+"../config/aws"
+);
 
 /* =========================
 MONITORING AGENT
@@ -12,130 +28,224 @@ appData
 try{
 
 /* =========================
-   APP INFO
+VALIDATION
 ========================= */
 
-const appName =
+if(
+  !appData.deploymentId
+){
 
-  appData.appName ||
+  return {
 
-  "vertexcloud-app";
+    success:false,
+
+    message:
+    "Deployment ID required"
+
+  };
+
+}
+
+/* =========================
+APP INFO
+========================= */
 
 const deploymentId =
+appData.deploymentId;
 
-  appData.deploymentId ||
+const clusterName =
+process.env.ECS_CLUSTER ||
+"vertexcloud-cluster";
 
-  uuidv4();
+const serviceName =
+`service-${deploymentId}`;
 
 /* =========================
-   METRICS
+ECS STATUS
 ========================= */
 
-const metrics = {
+const ecsResult =
 
-  cpuUsage:
-  Math.floor(
-    Math.random() * 60
-  ) + "%",
+await ecs.send(
 
-  ramUsage:
-  Math.floor(
-    Math.random() * 70
-  ) + "%",
+new DescribeServicesCommand({
 
-  diskUsage:
-  Math.floor(
-    Math.random() * 50
-  ) + "%",
+  cluster:
+  clusterName,
 
-  responseTime:
-  Math.floor(
-    Math.random() * 200
-  ) + "ms",
+  services:[
+    serviceName
+  ]
 
-  requestsPerMinute:
-  Math.floor(
-    Math.random() * 1000
-  ),
+})
 
-  activeUsers:
-  Math.floor(
-    Math.random() * 500
-  ),
+);
 
-  uptime:"99.99%"
-
-};
+const service =
+ecsResult.services?.[0];
 
 /* =========================
-   HEALTH SCORE
+SERVICE CHECK
+========================= */
+
+if(!service){
+
+  return {
+
+    success:false,
+
+    message:
+    "ECS service not found"
+
+  };
+
+}
+
+/* =========================
+CPU METRIC
+========================= */
+
+const cpuMetric =
+
+await cloudwatch.send(
+
+new GetMetricStatisticsCommand({
+
+  Namespace:"AWS/ECS",
+
+  MetricName:"CPUUtilization",
+
+  Dimensions:[
+
+    {
+      Name:"ClusterName",
+      Value:clusterName
+    },
+
+    {
+      Name:"ServiceName",
+      Value:serviceName
+    }
+
+  ],
+
+  StartTime:
+  new Date(Date.now() - 15 * 60 * 1000),
+
+  EndTime:
+  new Date(),
+
+  Period:300,
+
+  Statistics:["Average"]
+
+})
+
+);
+
+/* =========================
+MEMORY METRIC
+========================= */
+
+const memoryMetric =
+
+await cloudwatch.send(
+
+new GetMetricStatisticsCommand({
+
+  Namespace:"AWS/ECS",
+
+  MetricName:"MemoryUtilization",
+
+  Dimensions:[
+
+    {
+      Name:"ClusterName",
+      Value:clusterName
+    },
+
+    {
+      Name:"ServiceName",
+      Value:serviceName
+    }
+
+  ],
+
+  StartTime:
+  new Date(Date.now() - 15 * 60 * 1000),
+
+  EndTime:
+  new Date(),
+
+  Period:300,
+
+  Statistics:["Average"]
+
+})
+
+);
+
+/* =========================
+CPU VALUE
+========================= */
+
+const cpuUsage =
+
+cpuMetric.Datapoints?.[0]
+?.Average || 0;
+
+/* =========================
+RAM VALUE
+========================= */
+
+const ramUsage =
+
+memoryMetric.Datapoints?.[0]
+?.Average || 0;
+
+/* =========================
+HEALTH SCORE
 ========================= */
 
 let healthScore = 100;
 
-if(
-
-  parseInt(
-    metrics.cpuUsage
-  ) > 80
-
-){
+if(cpuUsage > 80){
 
   healthScore -= 20;
 
 }
 
-if(
-
-  parseInt(
-    metrics.ramUsage
-  ) > 85
-
-){
+if(ramUsage > 85){
 
   healthScore -= 25;
 
 }
 
 /* =========================
-   STATUS
+STATUS
 ========================= */
 
 let status = "healthy";
 
-if(
-
-  healthScore < 80
-
-){
+if(healthScore < 80){
 
   status = "warning";
 
 }
 
-if(
-
-  healthScore < 60
-
-){
+if(healthScore < 60){
 
   status = "critical";
 
 }
 
 /* =========================
-   ALERTS
+ALERTS
 ========================= */
 
 const alerts = [];
 
-if(
-
-  parseInt(
-    metrics.cpuUsage
-  ) > 80
-
-){
+if(cpuUsage > 80){
 
   alerts.push({
 
@@ -150,13 +260,7 @@ if(
 
 }
 
-if(
-
-  parseInt(
-    metrics.ramUsage
-  ) > 85
-
-){
+if(ramUsage > 85){
 
   alerts.push({
 
@@ -172,63 +276,19 @@ if(
 }
 
 /* =========================
-   LOGGING
-========================= */
-
-const logs = {
-
-  totalLogs:
-  Math.floor(
-    Math.random() * 10000
-  ),
-
-  errorsToday:
-  Math.floor(
-    Math.random() * 5
-  ),
-
-  warningsToday:
-  Math.floor(
-    Math.random() * 20
-  )
-
-};
-
-/* =========================
-   SECURITY
-========================= */
-
-const security = {
-
-  firewall:true,
-
-  sslActive:true,
-
-  ddosProtection:true,
-
-  suspiciousRequests:
-  Math.floor(
-    Math.random() * 10
-  )
-
-};
-
-/* =========================
-   SCALING
+SCALING
 ========================= */
 
 const scalingRecommendation =
 
-  parseInt(
-    metrics.cpuUsage
-  ) > 75
+cpuUsage > 75
 
-  ? "scale-up"
+? "scale-up"
 
-  : "stable";
+: "stable";
 
 /* =========================
-   RETURN
+RETURN
 ========================= */
 
 return {
@@ -239,17 +299,25 @@ return {
 
     deploymentId,
 
-    appName,
-
     status,
 
     healthScore,
 
-    metrics,
+    metrics:{
 
-    logs,
+      cpuUsage:
+      `${cpuUsage.toFixed(2)}%`,
 
-    security,
+      ramUsage:
+      `${ramUsage.toFixed(2)}%`,
+
+      runningTasks:
+      service.runningCount,
+
+      desiredTasks:
+      service.desiredCount
+
+    },
 
     scalingRecommendation,
 
