@@ -10,6 +10,9 @@ require("express");
 const cors =
 require("cors");
 
+const passport =
+require("passport");
+
 const helmet =
 require("helmet");
 
@@ -34,6 +37,10 @@ require("xss-clean");
 /* =========================
 CONFIG
 ========================= */
+
+require(
+"./server/config/passport"
+);
 
 const env =
 require("./server/config/env");
@@ -212,6 +219,14 @@ cookie:{
 
 })
 
+);
+
+/* =========================
+PASSPORT
+========================= */
+
+app.use(
+passport.initialize()
 );
 
 /* =========================
