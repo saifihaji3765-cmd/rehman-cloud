@@ -10,9 +10,6 @@ require("../agents/scalingAgent");
 const formatResponse =
 require("../utils/formatResponse");
 
-const { v4:uuidv4 } =
-require("uuid");
-
 /* =========================
 DEPLOY PROJECT
 ========================= */
@@ -24,21 +21,15 @@ res
 
 try{
 
-/* =========================
-   REQUEST DATA
-========================= */
-
 const projectData =
 req.body;
 
 /* =========================
-   VALIDATION
+VALIDATION
 ========================= */
 
 if(
-
   !projectData.projectName
-
 ){
 
   return res.status(400)
@@ -58,41 +49,58 @@ if(
 }
 
 /* =========================
-   DEPLOYMENT ID
-========================= */
-
-const deploymentId =
-
-  uuidv4();
-
-/* =========================
-   USER
+USER
 ========================= */
 
 const userId =
 
-  req.user?.id ||
+req.user?.id ||
 
-  "guest-user";
+"guest-user";
 
 /* =========================
-   DEPLOYMENT
+DEPLOYMENT
 ========================= */
 
 const result =
 
-  await deployAgent({
+await deployAgent({
 
-    ...projectData,
+  ...projectData,
 
-    deploymentId,
+  userId
 
-    userId
-
-  });
+});
 
 /* =========================
-   RESPONSE
+DEPLOY FAILED
+========================= */
+
+if(!result.success){
+
+  return res.status(500)
+  .json(
+
+    formatResponse({
+
+      success:false,
+
+      message:
+      result.message ||
+
+      "Deployment failed",
+
+      error:
+      result.error || null
+
+    })
+
+  );
+
+}
+
+/* =========================
+RESPONSE
 ========================= */
 
 return res.json(
@@ -102,9 +110,10 @@ return res.json(
     success:true,
 
     message:
-    "Deployment initialized",
+    "Deployment successful",
 
-    data:result
+    data:
+    result.deployment
 
   })
 
@@ -146,9 +155,7 @@ res
 try{
 
 const {
-
   deploymentId
-
 } = req.params;
 
 return res.json(
@@ -206,25 +213,19 @@ res
 
 try{
 
-const logs = [
-
-  "Container started",
-
-  "Environment variables loaded",
-
-  "Deployment successful",
-
-  "SSL configured"
-
-];
-
 return res.json(
 
   formatResponse({
 
     success:true,
 
-    logs
+    logs:[
+      "Deployment initialized",
+      "Docker container created",
+      "AWS infrastructure provisioned",
+      "SSL configured",
+      "Deployment healthy"
+    ]
 
   })
 
@@ -263,21 +264,16 @@ res
 try{
 
 const {
-
   deploymentId
-
 } = req.params;
 
 const monitoring =
 
-  await monitoringAgent({
+await monitoringAgent({
 
-    deploymentId,
+  deploymentId
 
-    appName:
-    "VertexCloud App"
-
-  });
+});
 
 return res.json(
 
@@ -323,17 +319,17 @@ res
 
 try{
 
+const {
+  deploymentId
+} = req.params;
+
 const scaling =
 
-  await scalingAgent({
+await scalingAgent({
 
-    cpuUsage:80,
+  deploymentId
 
-    ramUsage:70,
-
-    activeUsers:1000
-
-  });
+});
 
 return res.json(
 
