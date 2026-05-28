@@ -1,11 +1,17 @@
 const Stripe =
 require("stripe");
 
+const Razorpay =
+require("razorpay");
+
 const crypto =
 require("crypto");
 
 const formatResponse =
 require("../utils/formatResponse");
+
+const Subscription =
+require("../models/subscriptionModel");
 
 /* =========================
 STRIPE
@@ -17,6 +23,21 @@ new Stripe(
 process.env.STRIPE_SECRET_KEY
 
 );
+
+/* =========================
+RAZORPAY
+========================= */
+
+const razorpay =
+new Razorpay({
+
+key_id:
+process.env.RAZORPAY_KEY_ID,
+
+key_secret:
+process.env.RAZORPAY_KEY_SECRET
+
+});
 
 /* =========================
 CREATE PAYMENT
@@ -35,7 +56,9 @@ const {
 
   currency,
 
-  plan
+  plan,
+
+  provider
 
 } = req.body;
 
@@ -47,7 +70,9 @@ if(
 
   !amount ||
 
-  !plan
+  !plan ||
+
+  !provider
 
 ){
 
@@ -59,7 +84,7 @@ if(
       success:false,
 
       message:
-      "Amount and plan required"
+      "Amount, plan and provider required"
 
     })
 
@@ -68,10 +93,12 @@ if(
 }
 
 /* =========================
-   PAYMENT INTENT
+   STRIPE
 ========================= */
 
-const paymentIntent =
+if(provider === "stripe"){
+
+  const paymentIntent =
 
   await stripe
   .paymentIntents
@@ -94,25 +121,77 @@ const paymentIntent =
 
   });
 
+  return res.json(
+
+    formatResponse({
+
+      success:true,
+
+      provider:"stripe",
+
+      data:{
+
+        clientSecret:
+        paymentIntent.client_secret
+
+      }
+
+    })
+
+  );
+
+}
+
 /* =========================
-   RESPONSE
+   RAZORPAY
 ========================= */
 
-return res.json(
+if(provider === "razorpay"){
+
+  const order =
+
+  await razorpay.orders.create({
+
+    amount:
+    amount * 100,
+
+    currency:
+    currency || "INR",
+
+    receipt:
+    `receipt_${Date.now()}`
+
+  });
+
+  return res.json(
+
+    formatResponse({
+
+      success:true,
+
+      provider:"razorpay",
+
+      data:order
+
+    })
+
+  );
+
+}
+
+/* =========================
+   INVALID PROVIDER
+========================= */
+
+return res.status(400)
+.json(
 
   formatResponse({
 
-    success:true,
+    success:false,
 
     message:
-    "Payment intent created",
-
-    data:{
-
-      clientSecret:
-      paymentIntent.client_secret
-
-    }
+    "Invalid payment provider"
 
   })
 
@@ -149,6 +228,60 @@ res
 ){
 
 try{
+
+const {
+
+  razorpay_order_id,
+
+  razorpay_payment_id,
+
+  razorpay_signature
+
+} = req.body;
+
+const generatedSignature =
+
+crypto
+
+.createHmac(
+
+  "sha256",
+
+  process.env
+  .RAZORPAY_KEY_SECRET
+
+)
+
+.update(
+
+  razorpay_order_id +
+
+  "|" +
+
+  razorpay_payment_id
+
+)
+
+.digest("hex");
+
+if(
+
+  generatedSignature !==
+  razorpay_signature
+
+){
+
+  return res.status(400)
+  .json({
+
+    success:false,
+
+    message:
+    "Payment verification failed"
+
+  });
+
+}
 
 return res.json(
 
@@ -197,9 +330,49 @@ try{
 
 const {
 
-  plan
+  planName,
+
+  price,
+
+  currency,
+
+  paymentProvider,
+
+  paymentId,
+
+  orderId
 
 } = req.body;
+
+const expiryDate =
+new Date();
+
+expiryDate.setMonth(
+  expiryDate.getMonth() + 1
+);
+
+const subscription =
+
+await Subscription.create({
+
+  userId:
+  req.user.id,
+
+  planName,
+
+  price,
+
+  currency,
+
+  paymentProvider,
+
+  paymentId,
+
+  orderId,
+
+  expiryDate
+
+});
 
 return res.json(
 
@@ -210,7 +383,7 @@ return res.json(
     message:
     "Subscription activated",
 
-    plan
+    data:subscription
 
   })
 
@@ -248,13 +421,27 @@ res
 
 try{
 
+const history =
+
+await Subscription.find({
+
+  userId:req.user.id
+
+})
+
+.sort({
+
+  createdAt:-1
+
+});
+
 return res.json(
 
   formatResponse({
 
     success:true,
 
-    data:[]
+    data:history
 
   })
 
@@ -300,9 +487,9 @@ return res.json(
 
     credits:2000,
 
-    used:0,
+    used:320,
 
-    remaining:2000
+    remaining:1680
 
   })
 
@@ -340,16 +527,52 @@ res
 
 try{
 
-res.status(200).send(
-  "Stripe webhook received"
+const sig =
+
+req.headers[
+  "stripe-signature"
+];
+
+const event =
+
+stripe.webhooks.constructEvent(
+
+  req.body,
+
+  sig,
+
+  process.env
+  .STRIPE_WEBHOOK_SECRET
+
 );
+
+if(
+
+  event.type ===
+  "payment_intent.succeeded"
+
+){
+
+  console.log(
+    "Stripe Payment Success"
+  );
+
+}
+
+res.status(200).json({
+
+  received:true
+
+});
 
 }
 
 catch(error){
 
 res.status(400).send(
+
   `Webhook Error: ${error.message}`
+
 );
 
 }
@@ -369,29 +592,29 @@ try{
 
 const signature =
 
-  req.headers[
-    "x-razorpay-signature"
-  ];
+req.headers[
+  "x-razorpay-signature"
+];
 
 const body =
 
-  JSON.stringify(req.body);
+JSON.stringify(req.body);
 
 const expectedSignature =
 
-  crypto
-  .createHmac(
+crypto
+.createHmac(
 
-    "sha256",
+  "sha256",
 
-    process.env
-    .RAZORPAY_WEBHOOK_SECRET
+  process.env
+  .RAZORPAY_WEBHOOK_SECRET
 
-  )
+)
 
-  .update(body)
+.update(body)
 
-  .digest("hex");
+.digest("hex");
 
 if(
 
