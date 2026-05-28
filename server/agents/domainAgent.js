@@ -1,5 +1,16 @@
-const { v4:uuidv4 } =
+/* =========================
+PACKAGES
+========================= */
+
+const { v4: uuidv4 } =
 require("uuid");
+
+/* =========================
+SERVICES
+========================= */
+
+const logger =
+require("../services/loggerService");
 
 /* =========================
 RESERVED SUBDOMAINS
@@ -19,157 +30,221 @@ const reservedSubdomains = [
 
 "support",
 
-"billing"
+"billing",
+
+"mail",
+
+"ftp",
+
+"app",
+
+"www"
 
 ];
+
+/* =========================
+CLEAN DOMAIN NAME
+========================= */
+
+function cleanDomainName(
+name = ""
+){
+
+return name
+
+.toLowerCase()
+
+.replace(/[^a-z0-9-]/g,"-")
+
+.replace(/-+/g,"-")
+
+.replace(/^-|-$/g,"")
+
+.substring(0,40);
+
+}
 
 /* =========================
 DOMAIN AGENT
 ========================= */
 
 async function domainAgent(
-projectData
+projectData = {}
 ){
 
 try{
 
+logger.info(
+  "Domain Agent Started"
+);
+
 /* =========================
-   PROJECT NAME
+PROJECT NAME
 ========================= */
 
 const projectName =
 
-  projectData.projectName ||
+projectData.projectName ||
 
-  "vertex-app";
+"vertex-app";
 
 /* =========================
-   DEPLOYMENT ID
+DEPLOYMENT ID
 ========================= */
 
 const deploymentId =
 
-  uuidv4()
-  .split("-")[0];
+uuidv4()
+.split("-")[0];
 
 /* =========================
-   CLEAN NAME
+CLEAN NAME
 ========================= */
 
 let cleanName =
 
+cleanDomainName(
   projectName
-
-  .toLowerCase()
-
-  .replace(/[^a-z0-9\s-]/g,"")
-
-  .replace(/\s+/g,"-")
-
-  .trim();
+);
 
 /* =========================
-   RESERVED CHECK
+FALLBACK
 ========================= */
 
-if(
+if(!cleanName){
 
-  reservedSubdomains.includes(
-    cleanName
-  )
-
-){
-
-  cleanName =
-  `${cleanName}-${deploymentId}`;
+cleanName = "vertex-app";
 
 }
 
 /* =========================
-   UNIQUE SUBDOMAIN
+RESERVED CHECK
+========================= */
+
+if(
+
+reservedSubdomains.includes(
+  cleanName
+)
+
+){
+
+cleanName =
+`${cleanName}-${deploymentId}`;
+
+}
+
+/* =========================
+SUBDOMAIN
 ========================= */
 
 const subdomain =
 
-"${cleanName}-${deploymentId}";
+`${cleanName}-${deploymentId}`;
 
 /* =========================
-   ROOT DOMAIN
+ROOT DOMAIN
 ========================= */
 
 const rootDomain =
 
-  process.env.APP_DOMAIN ||
+process.env.APP_DOMAIN ||
 
-  "vertexcloud.ai";
+"vertexcloud.ai";
 
 /* =========================
-   FULL DOMAIN
+FULL DOMAIN
 ========================= */
 
 const fullDomain =
 
-"https://${subdomain}.${rootDomain}";
+`https://${subdomain}.${rootDomain}`;
 
 /* =========================
-   DNS
+CUSTOM DOMAIN
+========================= */
+
+const customDomain =
+
+projectData.customDomain ||
+
+null;
+
+/* =========================
+DNS CONFIG
 ========================= */
 
 const dns = {
 
-  provider:"Route53",
+provider:"AWS Route53",
 
-  dnsConfigured:true,
+dnsConfigured:true,
 
-  propagationStatus:
-  "pending"
+recordType:"A",
+
+propagationStatus:"pending",
+
+verificationRequired:false
 
 };
 
 /* =========================
-   SSL
+SSL CONFIG
 ========================= */
 
 const ssl = {
 
-  enabled:true,
+enabled:true,
 
-  provider:"AWS ACM",
+provider:"AWS ACM",
 
-  sslStatus:"provisioning"
+sslStatus:"provisioning",
+
+httpsEnabled:true
 
 };
 
 /* =========================
-   RETURN
+DOMAIN OBJECT
+========================= */
+
+const domainData = {
+
+deploymentId,
+
+projectName,
+
+subdomain,
+
+rootDomain,
+
+fullDomain,
+
+customDomain,
+
+ssl,
+
+dns,
+
+domainReady:true,
+
+createdAt:new Date()
+
+};
+
+logger.success(
+  "Domain Generated"
+);
+
+/* =========================
+RETURN
 ========================= */
 
 return {
 
-  success:true,
+success:true,
 
-  domain:{
-
-    deploymentId,
-
-    projectName,
-
-    subdomain,
-
-    rootDomain,
-
-    fullDomain,
-
-    customDomain:false,
-
-    ssl,
-
-    dns,
-
-    createdAt:
-    new Date()
-
-  }
+domain:domainData
 
 };
 
@@ -177,11 +252,18 @@ return {
 
 catch(error){
 
+logger.error(
+  error.message
+);
+
 return {
 
-  success:false,
+success:false,
 
-  error:error.message
+message:
+"Domain generation failed",
+
+error:error.message
 
 };
 
