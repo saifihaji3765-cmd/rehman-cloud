@@ -1,3 +1,21 @@
+/* =========================
+PACKAGES
+========================= */
+
+const { v4: uuidv4 } =
+require("uuid");
+
+/* =========================
+SERVICES
+========================= */
+
+const logger =
+require("../services/loggerService");
+
+/* =========================
+PLANS
+========================= */
+
 const plans = [
 
 /* =========================
@@ -5,47 +23,53 @@ STARTER
 ========================= */
 
 {
+  name:"Starter",
 
-name:"Starter",
+  monthlyPrice:19,
 
-monthlyPrice:19,
+  yearlyPrice:190,
 
-currency:"USD",
+  currency:"USD",
 
-ram:"2GB",
+  ram:"2GB",
 
-cpu:"1 vCPU",
+  cpu:"1 vCPU",
 
-storage:"25GB",
+  storage:"25GB",
 
-bandwidth:"250GB",
+  bandwidth:"250GB",
 
-deploymentsLimit:3,
+  deploymentsLimit:3,
 
-aiCredits:2000,
+  aiCredits:2000,
 
-thumbnailCredits:500,
+  thumbnailCredits:500,
 
-videoCredits:100,
+  videoCredits:100,
 
-customDomain:true,
+  customDomain:true,
 
-autoSSL:true,
+  autoSSL:true,
 
-support:"Community Support",
+  autoScaling:false,
 
-features:[
+  advancedMonitoring:false,
 
-  "Basic Deployments",
+  dedicatedInfrastructure:false,
 
-  "AI Assistant",
+  support:"Community Support",
 
-  "SSL",
+  features:[
 
-  "Custom Domains"
+    "Basic Deployments",
 
-]
+    "AI Assistant",
 
+    "SSL",
+
+    "Custom Domains"
+
+  ]
 },
 
 /* =========================
@@ -53,49 +77,53 @@ PRO
 ========================= */
 
 {
+  name:"Pro",
 
-name:"Pro",
+  monthlyPrice:49,
 
-monthlyPrice:49,
+  yearlyPrice:490,
 
-currency:"USD",
+  currency:"USD",
 
-ram:"8GB",
+  ram:"8GB",
 
-cpu:"4 vCPU",
+  cpu:"4 vCPU",
 
-storage:"100GB",
+  storage:"100GB",
 
-bandwidth:"1TB",
+  bandwidth:"1TB",
 
-deploymentsLimit:15,
+  deploymentsLimit:15,
 
-aiCredits:10000,
+  aiCredits:10000,
 
-thumbnailCredits:5000,
+  thumbnailCredits:5000,
 
-videoCredits:1000,
+  videoCredits:1000,
 
-customDomain:true,
+  customDomain:true,
 
-autoSSL:true,
+  autoSSL:true,
 
-priorityDeployments:true,
+  autoScaling:true,
 
-support:"Priority Support",
+  advancedMonitoring:true,
 
-features:[
+  dedicatedInfrastructure:false,
 
-  "Advanced AI",
+  support:"Priority Support",
 
-  "Priority Deployments",
+  features:[
 
-  "AI Thumbnail Generator",
+    "Advanced AI",
 
-  "Advanced Monitoring"
+    "Priority Deployments",
 
-]
+    "AI Thumbnail Generator",
 
+    "Advanced Monitoring"
+
+  ]
 },
 
 /* =========================
@@ -103,51 +131,53 @@ BUSINESS
 ========================= */
 
 {
+  name:"Business",
 
-name:"Business",
+  monthlyPrice:199,
 
-monthlyPrice:199,
+  yearlyPrice:1990,
 
-currency:"USD",
+  currency:"USD",
 
-ram:"16GB",
+  ram:"16GB",
 
-cpu:"8 vCPU",
+  cpu:"8 vCPU",
 
-storage:"250GB",
+  storage:"250GB",
 
-bandwidth:"Unlimited",
+  bandwidth:"Unlimited",
 
-deploymentsLimit:100,
+  deploymentsLimit:100,
 
-aiCredits:50000,
+  aiCredits:50000,
 
-thumbnailCredits:25000,
+  thumbnailCredits:25000,
 
-videoCredits:10000,
+  videoCredits:10000,
 
-customDomain:true,
+  customDomain:true,
 
-autoSSL:true,
+  autoSSL:true,
 
-autoScaling:true,
+  autoScaling:true,
 
-advancedMonitoring:true,
+  advancedMonitoring:true,
 
-support:"24/7 Premium Support",
+  dedicatedInfrastructure:false,
 
-features:[
+  support:"24/7 Premium Support",
 
-  "Business AI Automation",
+  features:[
 
-  "Auto Scaling",
+    "Business AI Automation",
 
-  "Advanced Analytics",
+    "Auto Scaling",
 
-  "Team Features"
+    "Advanced Analytics",
 
-]
+    "Team Features"
 
+  ]
 },
 
 /* =========================
@@ -155,57 +185,57 @@ ENTERPRISE
 ========================= */
 
 {
+  name:"Enterprise",
 
-name:"Enterprise",
+  monthlyPrice:299,
 
-monthlyPrice:299,
+  yearlyPrice:2990,
 
-currency:"USD",
+  currency:"USD",
 
-ram:"64GB",
+  ram:"64GB",
 
-cpu:"16 vCPU",
+  cpu:"16 vCPU",
 
-storage:"1TB",
+  storage:"1TB",
 
-bandwidth:"Unlimited",
+  bandwidth:"Unlimited",
 
-deploymentsLimit:-1,
+  deploymentsLimit:-1,
 
-aiCredits:-1,
+  aiCredits:-1,
 
-thumbnailCredits:-1,
+  thumbnailCredits:-1,
 
-videoCredits:-1,
+  videoCredits:-1,
 
-customDomain:true,
+  customDomain:true,
 
-autoSSL:true,
+  autoSSL:true,
 
-autoScaling:true,
+  autoScaling:true,
 
-advancedMonitoring:true,
+  advancedMonitoring:true,
 
-dedicatedInfrastructure:true,
+  dedicatedInfrastructure:true,
 
-dedicatedSupport:true,
+  dedicatedSupport:true,
 
-support:"Dedicated Success Manager",
+  support:"Dedicated Success Manager",
 
-features:[
+  features:[
 
-  "Unlimited AI",
+    "Unlimited AI",
 
-  "Unlimited Deployments",
+    "Unlimited Deployments",
 
-  "Dedicated Infrastructure",
+    "Dedicated Infrastructure",
 
-  "Enterprise Monitoring",
+    "Enterprise Monitoring",
 
-  "Priority AI Processing"
+    "Priority AI Processing"
 
-]
-
+  ]
 }
 
 ];
@@ -218,17 +248,21 @@ function getPlanByName(
 planName
 ){
 
+if(!planName){
+
+  return null;
+
+}
+
 return plans.find(
 
-plan =>
+(plan)=>
 
-plan.name
-.toLowerCase()
+plan.name.toLowerCase()
 
 ===
 
-planName
-.toLowerCase()
+planName.toLowerCase()
 
 );
 
@@ -239,13 +273,40 @@ BILLING AGENT
 ========================= */
 
 async function billingAgent(
-userData
+userData = {}
 ){
 
 try{
 
+logger.info(
+  "Billing Agent Started"
+);
+
 /* =========================
-   PLAN
+VALIDATION
+========================= */
+
+if(
+
+  !userData ||
+
+  typeof userData !== "object"
+
+){
+
+  return {
+
+    success:false,
+
+    message:
+    "Invalid billing payload"
+
+  };
+
+}
+
+/* =========================
+PLAN
 ========================= */
 
 const selectedPlan =
@@ -259,7 +320,7 @@ getPlanByName(
 );
 
 /* =========================
-   INVALID PLAN
+INVALID PLAN
 ========================= */
 
 if(!selectedPlan){
@@ -276,39 +337,123 @@ if(!selectedPlan){
 }
 
 /* =========================
-   RETURN
+BILLING CYCLE
+========================= */
+
+const billingCycle =
+
+userData.billingCycle ===
+"yearly"
+
+? "yearly"
+
+: "monthly";
+
+/* =========================
+PRICE
+========================= */
+
+const finalPrice =
+
+billingCycle === "yearly"
+
+? selectedPlan.yearlyPrice
+
+: selectedPlan.monthlyPrice;
+
+/* =========================
+BILLING DATES
+========================= */
+
+const now =
+new Date();
+
+const nextBillingDate =
+new Date(
+
+billingCycle === "yearly"
+
+? now.getTime() +
+365 * 24 * 60 * 60 * 1000
+
+: now.getTime() +
+30 * 24 * 60 * 60 * 1000
+
+);
+
+/* =========================
+UNLIMITED HANDLER
+========================= */
+
+const normalizedDeployments =
+
+selectedPlan.deploymentsLimit === -1
+
+? "Unlimited"
+
+: selectedPlan.deploymentsLimit;
+
+/* =========================
+BILLING OBJECT
+========================= */
+
+const billingData = {
+
+  billingId:
+  uuidv4(),
+
+  userId:
+  userData.userId ||
+
+  "guest-user",
+
+  selectedPlan:{
+
+    ...selectedPlan,
+
+    deploymentsLimit:
+    normalizedDeployments
+
+  },
+
+  billingCycle,
+
+  amount:
+  finalPrice,
+
+  currency:
+  selectedPlan.currency,
+
+  paymentStatus:
+  "pending",
+
+  invoiceStatus:
+  "unpaid",
+
+  subscriptionStatus:
+  "inactive",
+
+  nextBillingDate,
+
+  createdAt:now,
+
+  updatedAt:now
+
+};
+
+logger.success(
+  "Billing Generated"
+);
+
+/* =========================
+RETURN
 ========================= */
 
 return {
 
   success:true,
 
-  billing:{
-
-    userId:
-    userData.userId ||
-
-    "guest-user",
-
-    selectedPlan,
-
-    billingCycle:
-    "monthly",
-
-    nextBillingDate:
-
-    new Date(
-
-      Date.now() +
-
-      30 * 24 * 60 * 60 * 1000
-
-    ),
-
-    paymentStatus:
-    "pending"
-
-  }
+  billing:billingData
 
 };
 
@@ -316,9 +461,16 @@ return {
 
 catch(error){
 
+logger.error(
+  error.message
+);
+
 return {
 
   success:false,
+
+  message:
+  "Billing agent failed",
 
   error:error.message
 
