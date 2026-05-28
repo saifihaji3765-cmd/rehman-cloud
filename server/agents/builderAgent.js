@@ -18,6 +18,26 @@ new OpenAI({
 });
 
 /* =========================
+   SAFE JSON PARSER
+========================= */
+
+function safeJsonParse(data){
+
+  try{
+
+    return JSON.parse(data);
+
+  }
+
+  catch(error){
+
+    return null;
+
+  }
+
+}
+
+/* =========================
    BUILDER AGENT
 ========================= */
 
@@ -26,14 +46,36 @@ async function builderAgent(projectPlan){
   try{
 
     /* =========================
+       VALIDATION
+    ========================= */
+
+    if(!projectPlan){
+
+      return {
+
+        success:false,
+
+        error:
+        "Project plan required"
+
+      };
+
+    }
+
+    /* =========================
        AI BUILD
     ========================= */
 
     const completion =
+
     await openai.chat.completions.create({
 
       model:
       "gpt-4.1-mini",
+
+      response_format:{
+        type:"json_object"
+      },
 
       messages:[
 
@@ -43,46 +85,42 @@ async function builderAgent(projectPlan){
 
           content:`
 
-You are the Builder Agent of Rehman AI OS.
+You are the Builder Agent of VertexCloud AI OS.
 
 Your responsibilities:
 
 - generate production-ready code
-- generate frontend
-- generate backend
+- generate frontend/backend
 - generate APIs
-- generate scalable folder structures
-- generate authentication systems
+- generate scalable architectures
 - generate databases
-- generate deployment-ready projects
-- generate clean modern UI
-- generate real-world applications
+- generate authentication systems
+- generate deployment-ready applications
+- generate clean maintainable code
+- generate modern SaaS systems
 
-IMPORTANT:
+IMPORTANT RULES:
 
-Return ONLY valid JSON.
+- ALWAYS return valid JSON
+- NEVER explain anything
+- NEVER use markdown
+- NEVER use triple backticks
+- ALWAYS return raw JSON
+- ALWAYS generate complete files
+- ALWAYS generate production-grade systems
 
-FORMAT:
+JSON FORMAT:
 
 {
   "projectName":"",
+  "framework":"",
   "files":[
     {
-      "name":"",
+      "path":"",
       "content":""
     }
   ]
 }
-
-RULES:
-
-- never explain
-- never use markdown
-- never use triple backticks
-- always return raw JSON
-- always generate complete code
-- always generate multiple files
-- generate production-ready systems
 
           `
 
@@ -92,40 +130,111 @@ RULES:
 
           role:"user",
 
-          content:JSON.stringify(projectPlan)
+          content:
+          JSON.stringify(projectPlan)
 
         }
 
       ],
 
-      temperature:0.4
+      temperature:0.3,
+
+      max_tokens:4000
 
     });
 
     /* =========================
-       CLEAN RESPONSE
+       RAW RESPONSE
     ========================= */
 
     const raw =
+
     completion
     .choices[0]
     .message
     .content;
 
+    /* =========================
+       CLEAN RESPONSE
+    ========================= */
+
     const cleaned =
+
     raw
     .replace(/```json/g,"")
     .replace(/```/g,"")
     .trim();
 
+    /* =========================
+       PARSE RESPONSE
+    ========================= */
+
     const parsed =
-    JSON.parse(cleaned);
+    safeJsonParse(cleaned);
+
+    if(!parsed){
+
+      return {
+
+        success:false,
+
+        error:
+        "Invalid AI JSON response"
+
+      };
+
+    }
+
+    /* =========================
+       FILE VALIDATION
+    ========================= */
+
+    if(
+
+      !parsed.files ||
+
+      !Array.isArray(
+        parsed.files
+      )
+
+    ){
+
+      return {
+
+        success:false,
+
+        error:
+        "Invalid files structure"
+
+      };
+
+    }
+
+    /* =========================
+       FINAL RESPONSE
+    ========================= */
 
     return {
 
       success:true,
 
-      data:parsed
+      data:parsed,
+
+      metadata:{
+
+        agent:
+        "builderAgent",
+
+        model:
+        "gpt-4.1-mini",
+
+        totalFiles:
+        parsed.files.length,
+
+        generatedAt:
+        new Date()
+
+      }
 
     };
 
@@ -133,7 +242,10 @@ RULES:
 
   catch(error){
 
-    console.log(error);
+    console.log(
+      "Builder Agent Error:",
+      error.message
+    );
 
     return {
 
