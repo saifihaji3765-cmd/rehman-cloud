@@ -19,6 +19,18 @@ require("compression");
 const morgan =
 require("morgan");
 
+const cookieParser =
+require("cookie-parser");
+
+const session =
+require("express-session");
+
+const mongoSanitize =
+require("express-mongo-sanitize");
+
+const xssClean =
+require("xss-clean");
+
 /* =========================
 CONFIG
 ========================= */
@@ -139,22 +151,6 @@ credentials:true
 );
 
 /* =========================
-COMPRESSION
-========================= */
-
-app.use(
-compression()
-);
-
-/* =========================
-LOGGER
-========================= */
-
-app.use(
-morgan("dev")
-);
-
-/* =========================
 BODY PARSER
 ========================= */
 
@@ -178,6 +174,72 @@ limit:"10mb"
 
 })
 
+);
+
+/* =========================
+COOKIE PARSER
+========================= */
+
+app.use(
+cookieParser()
+);
+
+/* =========================
+SESSION
+========================= */
+
+app.use(
+
+session({
+
+secret:
+process.env.JWT_SECRET,
+
+resave:false,
+
+saveUninitialized:false,
+
+cookie:{
+
+  secure:false,
+
+  httpOnly:true,
+
+  maxAge:
+  7 * 24 * 60 * 60 * 1000
+
+}
+
+})
+
+);
+
+/* =========================
+SECURITY SANITIZE
+========================= */
+
+app.use(
+mongoSanitize()
+);
+
+app.use(
+xssClean()
+);
+
+/* =========================
+COMPRESSION
+========================= */
+
+app.use(
+compression()
+);
+
+/* =========================
+LOGGER
+========================= */
+
+app.use(
+morgan("dev")
 );
 
 /* =========================
@@ -220,7 +282,7 @@ projectRoutes
 );
 
 /* =========================
-ROOT HEALTH
+ROOT
 ========================= */
 
 app.get(
@@ -256,7 +318,7 @@ app.get(
 
 "/api/health",
 
-(req,res)=>{
+async(req,res)=>{
 
 res.json({
 
@@ -266,10 +328,13 @@ res.json({
 
   mongodb:"connected",
 
-  redis:"optional",
+  redis:"connected",
 
   environment:
-  process.env.NODE_ENV
+  process.env.NODE_ENV,
+
+  uptime:
+  process.uptime()
 
 });
 
@@ -313,9 +378,7 @@ next
 
 )=>{
 
-console.error(
-  err
-);
+console.error(err);
 
 logger.error(
   err.message
@@ -329,6 +392,7 @@ res.status(500).json({
   "Internal Server Error",
 
   error:
+
   process.env.NODE_ENV ===
   "development"
 
@@ -356,8 +420,12 @@ try{
 
 await connectMongo();
 
+logger.success(
+  "MongoDB Connected"
+);
+
 /* =========================
-   REDIS OPTIONAL
+   REDIS
 ========================= */
 
 try{
