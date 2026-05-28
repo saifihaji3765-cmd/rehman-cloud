@@ -2,7 +2,7 @@
 PACKAGES
 ========================= */
 
-const { v4:uuidv4 } =
+const { v4: uuidv4 } =
 require("uuid");
 
 /* =========================
@@ -45,7 +45,7 @@ DEPLOY AGENT
 ========================= */
 
 async function deployAgent(
-projectData
+projectData = {}
 ){
 
 try{
@@ -55,464 +55,513 @@ logger.info(
 );
 
 /* =========================
-   VALIDATION
+VALIDATION
 ========================= */
 
 if(
-
-  !projectData ||
-
-  !projectData.projectName
-
+!projectData.projectName
 ){
 
-  return {
+return {
 
-    success:false,
+  success:false,
 
-    message:
-    "Project name required"
+  message:
+  "Project name required"
 
-  };
+};
 
 }
 
 /* =========================
-   DEPLOYMENT ID
+DEPLOYMENT ID
 ========================= */
 
 const deploymentId =
 uuidv4();
 
 /* =========================
-   BILLING
+DEFAULTS
+========================= */
+
+const framework =
+
+projectData.framework ||
+"node";
+
+const selectedPlan =
+
+projectData.plan ||
+"Starter";
+
+/* =========================
+BILLING
 ========================= */
 
 const billing =
 
 await billingAgent({
 
-  userId:
-  projectData.userId,
+userId:
+projectData.userId,
 
-  plan:
-  projectData.plan ||
-
-  "Starter"
+plan:
+selectedPlan
 
 });
 
 if(!billing.success){
 
-  logger.error(
-    "Billing Failed"
-  );
+logger.error(
+"Billing Failed"
+);
 
-  return {
+return {
 
-    success:false,
+success:false,
 
-    message:
-    "Billing failed",
+message:
+"Billing failed",
 
-    error:
-    billing.error
+error:
+billing.error
 
-  };
+};
 
 }
 
 logger.success(
-  "Billing Validated"
+"Billing Validated"
 );
 
 /* =========================
-   SUBSCRIPTION
+SUBSCRIPTION
 ========================= */
 
 const subscription =
 
 await subscriptionAgent({
 
-  userId:
-  projectData.userId,
+userId:
+projectData.userId,
 
-  plan:
-  projectData.plan ||
-
-  "Starter"
+plan:
+selectedPlan
 
 });
 
 if(!subscription.success){
 
-  logger.error(
-    "Subscription Failed"
-  );
+logger.error(
+"Subscription Failed"
+);
 
-  return {
+return {
 
-    success:false,
+success:false,
 
-    message:
-    "Subscription failed",
+message:
+"Subscription failed",
 
-    error:
-    subscription.error
+error:
+subscription.error
 
-  };
+};
 
 }
 
 /* =========================
-   DEPLOYMENT LIMIT
+DEPLOY LIMIT
 ========================= */
 
 if(
 
-  subscription
-  .subscription
-  .deploymentsLimit === 0
+subscription
+.subscription
+.deploymentsLimit === 0
 
 ){
 
-  logger.warning(
-    "Deployment Limit Reached"
-  );
+logger.warning(
+"Deployment limit reached"
+);
 
-  return {
+return {
 
-    success:false,
+success:false,
 
-    message:
-    "Deployment limit reached"
+message:
+"Deployment limit reached"
 
-  };
+};
 
 }
 
 logger.success(
-  "Subscription Validated"
+"Subscription Validated"
 );
 
 /* =========================
-   DOCKER BUILD
+DOCKER BUILD
 ========================= */
 
 const docker =
 
 await dockerAgent({
 
-  projectName:
-  projectData.projectName,
+deploymentId,
 
-  framework:
-  projectData.framework ||
+projectName:
+projectData.projectName,
 
-  "node",
+framework,
 
-  prompt:
-  projectData.prompt
+files:
+projectData.files || [],
+
+prompt:
+projectData.prompt
 
 });
 
 if(!docker.success){
 
-  logger.error(
-    "Docker Build Failed"
-  );
+logger.error(
+"Docker Build Failed"
+);
 
-  return {
+return {
 
-    success:false,
+success:false,
 
-    message:
-    "Docker build failed",
+message:
+"Docker build failed",
 
-    error:
-    docker.error
+error:
+docker.error
 
-  };
+};
 
 }
 
 logger.success(
-  "Docker Build Completed"
+"Docker Build Completed"
 );
 
 /* =========================
-   AWS DEPLOYMENT
+AWS DEPLOYMENT
 ========================= */
 
 const aws =
 
 await awsAgent({
 
-  deploymentId,
+deploymentId,
 
-  docker,
+projectName:
+projectData.projectName,
 
-  cpu:
-  subscription
-  .subscription
-  .cpu,
+docker:
+docker.docker,
 
-  ram:
-  subscription
-  .subscription
-  .ram
+cpu:
+subscription
+.subscription
+.cpu,
+
+ram:
+subscription
+.subscription
+.ram
 
 });
 
 if(!aws.success){
 
-  logger.error(
-    "AWS Deployment Failed"
-  );
+logger.error(
+"AWS Deployment Failed"
+);
 
-  return {
+return {
 
-    success:false,
+success:false,
 
-    message:
-    "AWS deployment failed",
+message:
+"AWS deployment failed",
 
-    error:
-    aws.error
+error:
+aws.error
 
-  };
+};
 
 }
 
 logger.success(
-  "AWS Deployment Completed"
+"AWS Deployment Completed"
 );
 
 /* =========================
-   DOMAIN GENERATION
+DOMAIN
 ========================= */
 
 const domain =
 
 await domainAgent({
 
-  projectName:
-  projectData.projectName
+projectName:
+projectData.projectName
 
 });
 
 if(!domain.success){
 
-  logger.error(
-    "Domain Generation Failed"
-  );
+logger.error(
+"Domain Generation Failed"
+);
 
-  return {
+return {
 
-    success:false,
+success:false,
 
-    message:
-    "Domain generation failed",
+message:
+"Domain generation failed",
 
-    error:
-    domain.error
+error:
+domain.error
 
-  };
+};
 
 }
 
 logger.success(
-  "Domain Generated"
+"Domain Generated"
 );
 
 /* =========================
-   SSL ACTIVATION
+SSL
 ========================= */
 
 const ssl =
 
 await sslAgent({
 
-  subdomain:
-  domain.subdomain
+domain:
+domain.domain
 
 });
 
 if(!ssl.success){
 
-  logger.error(
-    "SSL Activation Failed"
-  );
+logger.error(
+"SSL Activation Failed"
+);
 
-  return {
+return {
 
-    success:false,
+success:false,
 
-    message:
-    "SSL activation failed",
+message:
+"SSL activation failed",
 
-    error:
-    ssl.error
+error:
+ssl.error
 
-  };
+};
 
 }
 
 logger.success(
-  "SSL Activated"
+"SSL Activated"
 );
 
 /* =========================
-   MONITORING
+MONITORING
 ========================= */
 
-const monitoring =
+let monitoring = null;
+
+try{
+
+monitoring =
 
 await monitoringAgent({
 
-  deploymentId,
+deploymentId,
 
-  appName:
-  projectData.projectName
+appName:
+projectData.projectName
 
 });
 
-if(!monitoring.success){
-
-  logger.warning(
-    "Monitoring Failed"
-  );
+logger.success(
+"Monitoring Enabled"
+);
 
 }
 
-logger.success(
-  "Monitoring Enabled"
+catch(error){
+
+logger.warning(
+"Monitoring Failed"
 );
 
+}
+
 /* =========================
-   AUTO SCALING
+AUTO SCALING
 ========================= */
 
 let scaling = null;
 
 if(
 
-  subscription
-  .subscription
-  .autoScaling
+subscription
+.subscription
+.autoScaling
 
 ){
 
-  scaling =
+try{
 
-  await scalingAgent({
+scaling =
 
-    cpuUsage:20,
+await scalingAgent({
 
-    ramUsage:30
+deploymentId,
 
-  });
+cpuUsage:20,
 
-  if(!scaling.success){
+ramUsage:30,
 
-    logger.warning(
-      "Scaling Failed"
-    );
+activeUsers:0
 
-  }
+});
+
+logger.success(
+"Scaling Configured"
+);
 
 }
 
-logger.success(
-  "Scaling Configured"
+catch(error){
+
+logger.warning(
+"Scaling Failed"
 );
 
+}
+
+}
+
 /* =========================
-   LIVE URL
+LIVE URL
 ========================= */
 
 const liveUrl =
 
-ssl.ssl.securedUrl ||
+ssl.ssl?.securedUrl ||
 
-domain.subdomain;
+domain.domain?.fullDomain ||
+
+aws.aws?.publicUrl;
 
 /* =========================
-   FINAL RESPONSE
+FINAL RESPONSE
 ========================= */
 
 return {
 
-  success:true,
+success:true,
 
-  deployment:{
+deployment:{
 
-    deploymentId,
+deploymentId,
 
-    status:"deployed",
+status:"deployed",
 
-    provider:"AWS",
+health:"healthy",
 
-    projectName:
-    projectData.projectName,
+provider:"AWS",
 
-    framework:
-    projectData.framework ||
+projectName:
+projectData.projectName,
 
-    "Node.js",
+framework,
 
-    liveUrl,
+liveUrl,
 
-    infrastructure:{
+infrastructure:{
 
-      cpu:
-      subscription
-      .subscription
-      .cpu,
+cpu:
+subscription
+.subscription
+.cpu,
 
-      ram:
-      subscription
-      .subscription
-      .ram,
+ram:
+subscription
+.subscription
+.ram,
 
-      storage:
-      subscription
-      .subscription
-      .storage,
+storage:
+subscription
+.subscription
+.storage,
 
-      bandwidth:
-      subscription
-      .subscription
-      .bandwidth
+bandwidth:
+subscription
+.subscription
+.bandwidth
 
-    },
+},
 
-    services:{
+services:{
 
-      docker,
+docker:
+docker.docker,
 
-      aws,
+aws:
+aws.aws,
 
-      domain,
+domain:
+domain.domain,
 
-      ssl,
+ssl:
+ssl.ssl,
 
-      monitoring,
+monitoring:
+monitoring?.monitoring ||
 
-      scaling
+null,
 
-    },
+scaling:
+scaling?.scaling ||
 
-    billing:
-    billing.billing,
+null
 
-    subscription:
-    subscription.subscription,
+},
 
-    deployedAt:
-    new Date()
+billing:
+billing.billing,
 
-  }
+subscription:
+subscription.subscription,
+
+metadata:{
+
+environment:
+process.env.NODE_ENV,
+
+region:
+process.env.AWS_REGION,
+
+version:"1.0.0"
+
+},
+
+deployedAt:
+new Date()
+
+}
 
 };
 
@@ -521,18 +570,18 @@ return {
 catch(error){
 
 logger.error(
-  error.message
+error.message
 );
 
 return {
 
-  success:false,
+success:false,
 
-  message:
-  "Deployment failed",
+message:
+"Deployment failed",
 
-  error:
-  error.message
+error:
+error.message
 
 };
 
