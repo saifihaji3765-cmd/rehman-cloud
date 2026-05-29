@@ -1,31 +1,115 @@
 /* =========================
-IMPORTS
+   PACKAGES
 ========================= */
 
 const OpenAI =
 require("openai");
 
 /* =========================
-OPENAI
+   SERVICES
+========================= */
+
+const logger =
+require("../services/loggerService");
+
+/* =========================
+   OPENAI
 ========================= */
 
 const openai =
 new OpenAI({
 
-apiKey:
-process.env.OPENAI_API_KEY
+  apiKey:
+  process.env.OPENAI_API_KEY
 
 });
 
 /* =========================
-INTENT AGENT
+   VALID INTENTS
+========================= */
+
+const VALID_INTENTS = [
+
+  "chat",
+
+  "build",
+
+  "deploy",
+
+  "monitor",
+
+  "scale",
+
+  "billing",
+
+  "subscription",
+
+  "fix",
+
+  "file",
+
+  "automation",
+
+  "infrastructure",
+
+  "thumbnail"
+
+];
+
+/* =========================
+   INTENT AGENT
 ========================= */
 
 async function intentAgent(
-userPrompt
+data = {}
 ){
 
 try{
+
+/* =========================
+   INPUT
+========================= */
+
+const prompt =
+
+  data.prompt ||
+
+  "";
+
+/* =========================
+   VALIDATION
+========================= */
+
+if(
+
+  !prompt ||
+
+  typeof prompt !== "string"
+
+){
+
+  return {
+
+    success:false,
+
+    message:
+    "Prompt required",
+
+    type:"chat"
+
+  };
+
+}
+
+/* =========================
+   TRUNCATE
+========================= */
+
+const cleanPrompt =
+
+  prompt
+  .trim()
+  .slice(0,4000);
 
 /* =========================
    AI ANALYSIS
@@ -37,97 +121,87 @@ await openai
 .chat.completions
 .create({
 
-  model:
-  "gpt-4.1-mini",
+model:
+"gpt-4.1-mini",
 
-  messages:[
+temperature:0.1,
 
-    {
+response_format:{
 
-      role:"system",
+  type:"json_object"
 
-      content:`
+},
 
-You are the Intent Detection Agent of VertexCloud AI OS.
+messages:[
 
-Your responsibilities:
+{
 
-- deeply understand user intent
-- classify SaaS requests
-- classify deployment requests
-- classify AI generation requests
-- classify cloud infrastructure requests
-- classify automation requests
-- classify monetization systems
-- classify scaling systems
-- classify thumbnail/image requests
-- classify debugging/fixing requests
+role:"system",
 
-You MUST determine:
+content:`
 
-- main intent type
-- user business goal
+You are the Intent Detection Agent
+of VertexCloud AI OS.
+
+Your ONLY responsibility is
+intent classification.
+
+You must determine:
+
+- main intent
+- user goal
+- complexity
 - required AI agents
-- complexity level
-- infrastructure requirements
-- monetization model
-- scaling requirements
 
 Return ONLY valid JSON.
 
-VALID TYPES:
+VALID INTENTS:
 
 - chat
 - build
 - deploy
-- thumbnail
-- infrastructure
-- scaling
+- monitor
+- scale
 - billing
-- debugging
+- subscription
+- fix
+- file
 - automation
+- infrastructure
+- thumbnail
 
 JSON FORMAT:
 
 {
 "type":"",
 "goal":"",
-"appType":"",
-"difficulty":"",
+"complexity":"",
 "confidence":0,
-"features":[],
-"frontendNeeds":[],
-"backendNeeds":[],
-"deploymentNeeds":[],
-"aiFeatures":[],
-"recommendedStack":[],
-"requiredAgents":[],
-"monetization":"",
-"scalingNeeds":[],
-"cloudProvider":"aws"
+"requiredAgents":[]
 }
+
+Rules:
+
+- confidence must be 0-100
+- requiredAgents must be array
+- type must match valid intents
+- no explanations
+- no markdown
+- no extra text
 
 `
 
-    },
+},
 
-    {
+{
 
-      role:"user",
+role:"user",
 
-      content:userPrompt
+content:cleanPrompt
 
-    }
+}
 
-  ],
-
-  temperature:0.2,
-
-  response_format:{
-
-    type:"json_object"
-
-  }
+]
 
 });
 
@@ -146,30 +220,260 @@ completion
    PARSE JSON
 ========================= */
 
-const parsed =
+let parsed = {};
+
+try{
+
+parsed =
 JSON.parse(raw);
 
-/* =========================
-   FALLBACK TYPE
-========================= */
+}
 
-if(!parsed.type){
+catch(error){
 
-  parsed.type =
-  "chat";
+logger.warning(
+  "Intent JSON Parse Failed"
+);
+
+parsed = {
+
+  type:"chat",
+
+  goal:"general conversation",
+
+  complexity:"low",
+
+  confidence:50,
+
+  requiredAgents:[]
+
+};
 
 }
 
 /* =========================
-   FALLBACK CONFIDENCE
+   TYPE VALIDATION
 ========================= */
 
-if(!parsed.confidence){
+if(
 
-  parsed.confidence =
-  80;
+!parsed.type ||
+
+!VALID_INTENTS.includes(
+parsed.type
+)
+
+){
+
+parsed.type =
+"chat";
 
 }
+
+/* =========================
+   GOAL VALIDATION
+========================= */
+
+if(
+
+!parsed.goal ||
+
+typeof parsed.goal !==
+"string"
+
+){
+
+parsed.goal =
+"general interaction";
+
+}
+
+/* =========================
+   COMPLEXITY VALIDATION
+========================= */
+
+if(
+
+!parsed.complexity
+
+){
+
+parsed.complexity =
+"medium";
+
+}
+
+/* =========================
+   CONFIDENCE VALIDATION
+========================= */
+
+if(
+
+parsed.confidence ===
+undefined ||
+
+typeof parsed.confidence
+!== "number"
+
+){
+
+parsed.confidence = 70;
+
+}
+
+/* =========================
+   CONFIDENCE LIMIT
+========================= */
+
+if(
+
+parsed.confidence > 100
+
+){
+
+parsed.confidence = 100;
+
+}
+
+if(
+
+parsed.confidence < 0
+
+){
+
+parsed.confidence = 0;
+
+}
+
+/* =========================
+   REQUIRED AGENTS
+========================= */
+
+if(
+
+!Array.isArray(
+parsed.requiredAgents
+)
+
+){
+
+parsed.requiredAgents =
+[];
+
+}
+
+/* =========================
+   FALLBACK AGENTS
+========================= */
+
+if(
+
+parsed.requiredAgents
+.length === 0
+
+){
+
+switch(parsed.type){
+
+case "build":
+
+parsed.requiredAgents = [
+
+  "plannerAgent",
+
+  "builderAgent"
+
+];
+
+break;
+
+case "deploy":
+
+parsed.requiredAgents = [
+
+  "deployAgent"
+
+];
+
+break;
+
+case "monitor":
+
+parsed.requiredAgents = [
+
+  "monitoringAgent"
+
+];
+
+break;
+
+case "scale":
+
+parsed.requiredAgents = [
+
+  "scalingAgent"
+
+];
+
+break;
+
+case "billing":
+
+parsed.requiredAgents = [
+
+  "billingAgent"
+
+];
+
+break;
+
+case "subscription":
+
+parsed.requiredAgents = [
+
+  "subscriptionAgent"
+
+];
+
+break;
+
+case "fix":
+
+parsed.requiredAgents = [
+
+  "fixAgent"
+
+];
+
+break;
+
+case "file":
+
+parsed.requiredAgents = [
+
+  "fileAgent"
+
+];
+
+break;
+
+default:
+
+parsed.requiredAgents = [];
+
+}
+
+}
+
+/* =========================
+   SUCCESS LOG
+========================= */
+
+logger.success(
+
+`Intent Detected: ${parsed.type}`
+
+);
 
 /* =========================
    RESPONSE
@@ -177,12 +481,12 @@ if(!parsed.confidence){
 
 return {
 
-  success:true,
+success:true,
 
-  type:
-  parsed.type,
+type:
+parsed.type,
 
-  data:parsed
+data:parsed
 
 };
 
@@ -190,15 +494,36 @@ return {
 
 catch(error){
 
-console.log(error);
+logger.error(
+error.message
+);
+
+/* =========================
+   SAFE FALLBACK
+========================= */
 
 return {
 
-  success:false,
+success:false,
+
+type:"chat",
+
+data:{
 
   type:"chat",
 
-  error:error.message
+  goal:
+  "general interaction",
+
+  complexity:"low",
+
+  confidence:40,
+
+  requiredAgents:[]
+
+},
+
+error:error.message
 
 };
 
@@ -207,7 +532,7 @@ return {
 }
 
 /* =========================
-EXPORT
+   EXPORT
 ========================= */
 
 module.exports =
