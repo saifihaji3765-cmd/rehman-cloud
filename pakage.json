@@ -1,7 +1,10 @@
 {
 "name": "vertexcloud",
 "version": "1.0.0",
-"description": "VertexCloud AI Cloud Platform",
+"engines": {
+  "node": "20.x"
+}
+  "description": "VertexCloud AI Cloud Platform",
 "main": "server.js",
 "type": "commonjs",
 
