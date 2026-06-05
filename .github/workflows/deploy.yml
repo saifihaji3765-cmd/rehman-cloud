@@ -1,36 +1,36 @@
 name: Build and Push to ECR
 
 on:
-push:
-branches:
-- main
+  push:
+    branches:
+      - main
 
 jobs:
-build:
-runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-latest
 
-steps:
-  - name: Checkout Source
-    uses: actions/checkout@v4
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
 
-  - name: Configure AWS Credentials
-    uses: aws-actions/configure-aws-credentials@v4
-    with:
-      aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      aws-region: ap-south-1
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
 
-  - name: Login to Amazon ECR
-    id: login-ecr
-    uses: aws-actions/amazon-ecr-login@v2
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-  - name: Build Docker Image
-    run: docker build -t vertexcloud .
+      - name: Build Docker Image
+        run: docker build -t vertexcloud .
 
-  - name: Tag Docker Image
-    run: |
-      docker tag vertexcloud:latest 387512138534.dkr.ecr.ap-south-1.amazonaws.com/vertexcloud:latest
+      - name: Tag Docker Image
+        run: |
+          docker tag vertexcloud:latest 387512138534.dkr.ecr.ap-south-1.amazonaws.com/vertexcloud:latest
 
-  - name: Push Docker Image
-    run: |
-      docker push 387512138534.dkr.ecr.ap-south-1.amazonaws.com/vertexcloud:latest
+      - name: Push Docker Image
+        run: |
+          docker push 387512138534.dkr.ecr.ap-south-1.amazonaws.com/vertexcloud:latest
