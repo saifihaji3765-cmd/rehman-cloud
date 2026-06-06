@@ -31,10 +31,8 @@ require(
 "../middleware/rateLimiter"
 );
 
-const authMiddleware =
-require(
-"../middleware/authMiddleware"
-);
+const { authMiddleware } =
+require("../middleware/authMiddleware");
 
 /* =========================
 AI CHAT
