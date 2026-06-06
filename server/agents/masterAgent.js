@@ -13,7 +13,7 @@ const intentAgent =
 require("./intentAgent");
 
 const plannerAgent =
-require("./plannerAgent");
+require("./planningAgent");
 
 const builderAgent =
 require("./builderAgent");
