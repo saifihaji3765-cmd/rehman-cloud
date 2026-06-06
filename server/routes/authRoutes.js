@@ -1,40 +1,26 @@
-const express =
-require("express");
+const express = require("express");
+const passport = require("passport");
 
-const passport =
-require("passport");
-
-const router =
-express.Router();
+const router = express.Router();
 
 /* =========================
 CONTROLLERS
 ========================= */
 
 const {
-
 registerUser,
-
 loginUser,
-
-googleLoginSuccess,
-
-githubLoginSuccess
-
-} = require(
-"../controllers/authController"
-);
+googleLogin,
+githubLogin
+} = require("../controllers/authController");
 
 /* =========================
 REGISTER
 ========================= */
 
 router.post(
-
 "/register",
-
 registerUser
-
 );
 
 /* =========================
@@ -42,11 +28,8 @@ LOGIN
 ========================= */
 
 router.post(
-
 "/login",
-
 loginUser
-
 );
 
 /* =========================
@@ -54,27 +37,16 @@ GOOGLE AUTH
 ========================= */
 
 router.get(
-
 "/google",
-
 passport.authenticate(
-
 "google",
-
 {
-
-  scope:[
-
-    "profile",
-
-    "email"
-
-  ]
-
+scope:[
+"profile",
+"email"
+]
 }
-
 )
-
 );
 
 /* =========================
@@ -82,26 +54,15 @@ GOOGLE CALLBACK
 ========================= */
 
 router.get(
-
 "/google/callback",
-
 passport.authenticate(
-
 "google",
-
 {
-
-  session:false,
-
-  failureRedirect:
-  "/login"
-
+session:false,
+failureRedirect:"/login"
 }
-
 ),
-
-googleLoginSuccess
-
+googleLogin
 );
 
 /* =========================
@@ -109,25 +70,15 @@ GITHUB AUTH
 ========================= */
 
 router.get(
-
 "/github",
-
 passport.authenticate(
-
 "github",
-
 {
-
-  scope:[
-
-    "user:email"
-
-  ]
-
+scope:[
+"user:email"
+]
 }
-
 )
-
 );
 
 /* =========================
@@ -135,31 +86,19 @@ GITHUB CALLBACK
 ========================= */
 
 router.get(
-
 "/github/callback",
-
 passport.authenticate(
-
 "github",
-
 {
-
-  session:false,
-
-  failureRedirect:
-  "/login"
-
+session:false,
+failureRedirect:"/login"
 }
-
 ),
-
-githubLoginSuccess
-
+githubLogin
 );
 
 /* =========================
 EXPORT
 ========================= */
 
-module.exports =
-router;
+module.exports = router;
