@@ -17,19 +17,49 @@ require("../models/subscriptionModel");
 STRIPE
 ========================= */
 
-const stripe =
-new Stripe(
+let stripe = null;
 
+if (
+process.env.STRIPE_SECRET_KEY &&
+process.env.STRIPE_SECRET_KEY.trim() !== ""
+){
+
+stripe = new Stripe(
 process.env.STRIPE_SECRET_KEY
-
 );
+
+}
 
 /* =========================
 RAZORPAY
 ========================= */
 
-const razorpay =
-new Razorpay({
+let stripe = null;
+
+if (
+process.env.STRIPE_SECRET_KEY &&
+process.env.STRIPE_SECRET_KEY.trim() !== ""
+){
+
+stripe = new Stripe(
+process.env.STRIPE_SECRET_KEY
+);
+
+}
+
+let razorpay = null;
+
+if (
+
+process.env.RAZORPAY_KEY_ID &&
+process.env.RAZORPAY_KEY_SECRET &&
+
+process.env.RAZORPAY_KEY_ID.trim() !== "" &&
+process.env.RAZORPAY_KEY_SECRET.trim() !== ""
+
+){
+
+razorpay = new Razorpay({
 
 key_id:
 process.env.RAZORPAY_KEY_ID,
@@ -39,10 +69,17 @@ process.env.RAZORPAY_KEY_SECRET
 
 });
 
+}
+
 /* =========================
 CREATE PAYMENT
 ========================= */
-
+if (!razorpay) {
+  return res.status(503).json({
+    success:false,
+    message:"Razorpay not configured"
+  });
+}
 async function createPaymentController(
 req,
 res
@@ -95,7 +132,12 @@ if(
 /* =========================
    STRIPE
 ========================= */
-
+if (!stripe) {
+  return res.status(503).json({
+    success:false,
+    message:"Stripe not configured"
+  });
+}
 if(provider === "stripe"){
 
   const paymentIntent =
