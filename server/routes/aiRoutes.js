@@ -26,13 +26,23 @@ aiThumbnailController
 MIDDLEWARE
 ========================= */
 
-const rateLimiter =
-require(
+const {
+
+aiLimiter,
+
+deployLimiter
+
+} = require(
 "../middleware/rateLimiter"
 );
 
-const { authMiddleware } =
-require("../middleware/authMiddleware");
+const {
+
+authMiddleware
+
+} = require(
+"../middleware/authMiddleware"
+);
 
 /* =========================
 AI CHAT
@@ -44,7 +54,7 @@ router.post(
 
 authMiddleware,
 
-rateLimiter,
+aiLimiter,
 
 aiChatController
 
@@ -60,7 +70,7 @@ router.post(
 
 authMiddleware,
 
-rateLimiter,
+aiLimiter,
 
 aiCodeController
 
@@ -76,7 +86,7 @@ router.post(
 
 authMiddleware,
 
-rateLimiter,
+deployLimiter,
 
 aiDeployController
 
@@ -92,7 +102,7 @@ router.post(
 
 authMiddleware,
 
-rateLimiter,
+aiLimiter,
 
 aiThumbnailController
 
