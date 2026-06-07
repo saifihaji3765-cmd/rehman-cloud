@@ -61,12 +61,6 @@ process.env.RAZORPAY_KEY_SECRET
 /* =========================
 CREATE PAYMENT
 ========================= */
-if (!razorpay) {
-  return res.status(503).json({
-    success:false,
-    message:"Razorpay not configured"
-  });
-}
 async function createPaymentController(
 req,
 res
@@ -119,12 +113,6 @@ if(
 /* =========================
    STRIPE
 ========================= */
-if (!stripe) {
-  return res.status(503).json({
-    success:false,
-    message:"Stripe not configured"
-  });
-}
 if(provider === "stripe"){
 
   const paymentIntent =
