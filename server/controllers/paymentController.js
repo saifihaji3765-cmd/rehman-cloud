@@ -32,20 +32,7 @@ process.env.STRIPE_SECRET_KEY
 
 /* =========================
 RAZORPAY
-========================= */
-
-let stripe = null;
-
-if (
-process.env.STRIPE_SECRET_KEY &&
-process.env.STRIPE_SECRET_KEY.trim() !== ""
-){
-
-stripe = new Stripe(
-process.env.STRIPE_SECRET_KEY
-);
-
-}
+============================
 
 let razorpay = null;
 
