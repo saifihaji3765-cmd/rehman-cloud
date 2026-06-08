@@ -21,10 +21,10 @@ const API_CONFIG = {
 
   production:{
 
-    API_BASE_URL:
-    "https://api.vertexcloud.ai/api"
+API_BASE_URL:
+"http://13.235.27.76:5000/api"
 
-  }
+},
 
 };
 
@@ -63,7 +63,7 @@ export const API_ENDPOINTS = {
   `${API_BASE_URL}/auth/login`,
 
   SIGNUP:
-  `${API_BASE_URL}/auth/signup`,
+`${API_BASE_URL}/auth/register`,
 
   GOOGLE_AUTH:
   `${API_BASE_URL}/auth/google`,
