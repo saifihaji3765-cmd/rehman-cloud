@@ -2,10 +2,8 @@
    SERVICES
 ========================= */
 
-import {
-
-  signupUser
-
+ import {
+  registerUser
 } from "../../app/services/authService.js";
 
 /* =========================
@@ -287,7 +285,7 @@ export function initRegisterPage(){
 
         const result =
 
-        await signupUser({
+await registerUser({
 
           name,
 
