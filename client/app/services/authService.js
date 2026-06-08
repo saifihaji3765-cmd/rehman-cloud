@@ -3,8 +3,7 @@
 ========================= */
 
 const API_BASE_URL =
-
-"http://localhost:5000/api/auth";
+"http://13.235.27.76:5000/api/auth";
 
 /* =========================
    SAVE TOKEN
