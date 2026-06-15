@@ -35,7 +35,7 @@ import {
    GLOBAL STYLES
 ========================= */
 
-import "./styles.css";
+// import "./styles.css";
 
 /* =========================
    INIT APP
