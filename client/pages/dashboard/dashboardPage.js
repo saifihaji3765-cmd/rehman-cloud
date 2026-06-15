@@ -3,10 +3,8 @@
 ========================= */
 
 import {
-
   getUser
-
-} from "../../services/authService.js";
+} from "../../app/services/authService.js";
 
 /* =========================
    DASHBOARD PAGE
