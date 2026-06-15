@@ -22,7 +22,7 @@ const API_CONFIG = {
   production:{
 
 API_BASE_URL:
-"http://13.235.27.76:5000/api"
+   "https://api.zyrionos.com/api"
 
 },
 
