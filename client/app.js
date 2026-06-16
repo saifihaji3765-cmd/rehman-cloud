@@ -1,36 +1,20 @@
-alert("APP JS LOADED");
-/* =========================
-   ROUTER
-========================= */
+/* ROUTER */
+import renderRoute from "./app/router/router.js";
 
-import renderRoute
-from "./app/router/router.js";
-
-/* =========================
-   STORE
-========================= */
-
+/* STORE */
 import {
-
   setUser,
-
   setToken
-
 } from "./app/store/appStore.js";
 
-/* =========================
-   AUTH SERVICE
-========================= */
-
+/* AUTH */
 import {
-
   getUser,
-
   getToken,
-
   isAuthenticated
-
 } from "./app/services/authService.js";
+
+alert("APP JS LOADED");
 
 /* =========================
    GLOBAL STYLES
