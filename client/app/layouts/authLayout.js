@@ -12,37 +12,15 @@ function authLayout(content){
            LEFT SIDE
       ========================== -->
 
+      function authLayout(content){
+
+  return `
+
+    <div class="auth-page">
+
+      <!-- LEFT HERO -->
+
       <div class="auth-left">
-
-        <div class="auth-brand">
-
-          <h1>
-
-            VertexCloud
-
-          </h1>
-
-          <p>
-
-            AI Cloud Operating System
-
-          </p>
-
-        </div>
-
-        <div class="auth-content">
-
-          ${content}
-
-        </div>
-
-      </div>
-
-      <!-- =========================
-           RIGHT SIDE
-      ========================== -->
-
-      <div class="auth-right">
 
         <div class="auth-hero">
 
@@ -67,10 +45,6 @@ function authLayout(content){
             globally with autonomous AI agents.
 
           </p>
-
-          <!-- =========================
-               STATS
-          ========================== -->
 
           <div class="hero-stats">
 
@@ -104,14 +78,19 @@ function authLayout(content){
 
       </div>
 
+      <!-- RIGHT LOGIN -->
+
+      <div class="auth-right">
+
+        ${content}
+
+      </div>
+
     </div>
 
   `;
 
 }
 
-/* =========================
-   EXPORT
-========================= */
-
 export default authLayout;
+
