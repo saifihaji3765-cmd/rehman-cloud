@@ -6,7 +6,7 @@ function authLayout(content){
 
   return `
 
-    <div class="auth-layout">
+    <div class="auth-page">
 
       <!-- =========================
            LEFT SIDE
