@@ -75,6 +75,18 @@ app.use(
 );
 
 /* =========================
+   AUTH ROUTES
+========================= */
+
+const authRoutes =
+require("./routes/authRoutes");
+
+app.use(
+  "/api/auth",
+  authRoutes
+);
+
+/* =========================
    HEALTH ROUTE
 ========================= */
 
