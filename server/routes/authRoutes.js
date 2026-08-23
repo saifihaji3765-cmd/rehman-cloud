@@ -44,7 +44,8 @@ passport.authenticate(
 scope:[
 "profile",
 "email"
-]
+],
+session:false
 }
 )
 );
