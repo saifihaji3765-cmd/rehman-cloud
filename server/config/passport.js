@@ -1,283 +1,233 @@
-const passport =
-require("passport");
+require("dotenv").config();
 
+const passport = require("passport");
 const GoogleStrategy =
-require("passport-google-oauth20").Strategy;
-
+  require("passport-google-oauth20").Strategy;
 const GitHubStrategy =
-require("passport-github2").Strategy;
+  require("passport-github2").Strategy;
 
-const User =
-require("../models/userModel");
+const User = require("../models/userModel");
 
-/* =========================
-GOOGLE STRATEGY
-========================= */
-
-passport.use(
-
-new GoogleStrategy(
-
-{
-
-clientID:
-process.env.GOOGLE_CLIENT_ID,
-
-clientSecret:
-process.env.GOOGLE_CLIENT_SECRET,
-
-callbackURL:
-process.env.GOOGLE_CALLBACK_URL
-
-},
-
-async (
-
-accessToken,
-refreshToken,
-profile,
-done
-
-)=>{
-
-try{
-
-let user =
-
-await User.findOne({
-
-email:
-profile.emails[0].value
-
-});
-
-/* =========================
-CREATE USER
-========================= */
-
-if(!user){
-
-user =
-
-await User.create({
-
-name:
-profile.displayName,
-
-email:
-profile.emails[0].value,
-
-avatar:
-profile.photos[0].value,
-
-googleId:
-profile.id,
-
-provider:
-"google",
-
-isVerified:true
-
-});
-
-}
-
-/* =========================
-UPDATE LOGIN
-========================= */
-
-user.lastLogin =
-new Date();
-
-await user.save();
-
-return done(
-null,
-user
-);
-
-}
-
-catch(error){
-
-return done(
-error,
-null
-);
-
-}
-
-}
-
-)
-
-);
-
-/* =========================
-GITHUB STRATEGY
-========================= */
+/* =========================================================
+   GOOGLE STRATEGY
+========================================================= */
 
 passport.use(
+  new GoogleStrategy(
+    {
+      clientID: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      callbackURL: process.env.GOOGLE_CALLBACK_URL
+    },
 
-new GitHubStrategy(
+    async (
+      accessToken,
+      refreshToken,
+      profile,
+      done
+    ) => {
+      try {
+        const email =
+          profile.emails?.[0]?.value?.toLowerCase();
 
-{
+        if (!email) {
+          return done(
+            new Error("Google account email unavailable"),
+            null
+          );
+        }
 
-clientID:
-process.env.GITHUB_CLIENT_ID,
+        const name =
+          profile.displayName ||
+          profile.name?.givenName ||
+          "Google User";
 
-clientSecret:
-process.env.GITHUB_CLIENT_SECRET,
+        const avatar =
+          profile.photos?.[0]?.value || "";
 
-callbackURL:
-process.env.GITHUB_CALLBACK_URL,
+        let user = await User.findOne({ email });
 
-scope:[
-"user:email"
-]
+        /* =================================================
+           CREATE USER
+        ================================================= */
 
-},
+        if (!user) {
+          user = await User.create({
+            name,
+            email,
+            avatar,
+            googleId: profile.id,
+            provider: "google",
+            isVerified: true
+          });
+        } else {
+          /* ===============================================
+             LINK GOOGLE ACCOUNT
+          =============================================== */
 
-async (
+          if (!user.googleId) {
+            user.googleId = profile.id;
+          }
 
-accessToken,
-refreshToken,
-profile,
-done
+          if (!user.avatar && avatar) {
+            user.avatar = avatar;
+          }
 
-)=>{
+          user.isVerified = true;
+        }
 
-try{
+        /* =================================================
+           UPDATE LOGIN
+        ================================================= */
 
-const email =
+        user.lastLogin = new Date();
 
-profile.emails &&
-profile.emails[0]
+        await user.save();
 
-? profile.emails[0].value
+        return done(null, user);
+      } catch (error) {
+        console.error(
+          "Google Passport Error:",
+          error
+        );
 
-: `${profile.username}@github.com`;
-
-let user =
-
-await User.findOne({
-
-email
-
-});
-
-/* =========================
-CREATE USER
-========================= */
-
-if(!user){
-
-user =
-
-await User.create({
-
-name:
-profile.displayName ||
-profile.username,
-
-email,
-
-avatar:
-profile.photos[0].value,
-
-githubId:
-profile.id,
-
-provider:
-"github",
-
-isVerified:true
-
-});
-
-}
-
-/* =========================
-UPDATE LOGIN
-========================= */
-
-user.lastLogin =
-new Date();
-
-await user.save();
-
-return done(
-null,
-user
+        return done(error, null);
+      }
+    }
+  )
 );
 
-}
+/* =========================================================
+   GITHUB STRATEGY
+========================================================= */
 
-catch(error){
+passport.use(
+  new GitHubStrategy(
+    {
+      clientID: process.env.GITHUB_CLIENT_ID,
+      clientSecret: process.env.GITHUB_CLIENT_SECRET,
+      callbackURL: process.env.GITHUB_CALLBACK_URL
+    },
 
-return done(
-error,
-null
+    async (
+      accessToken,
+      refreshToken,
+      profile,
+      done
+    ) => {
+      try {
+        const email =
+          profile.emails?.[0]?.value?.toLowerCase();
+
+        /* =================================================
+           REAL EMAIL REQUIRED
+        ================================================= */
+
+        if (!email) {
+          return done(
+            new Error(
+              "GitHub account email unavailable"
+            ),
+            null
+          );
+        }
+
+        const name =
+          profile.displayName ||
+          profile.username ||
+          "GitHub User";
+
+        const avatar =
+          profile.photos?.[0]?.value || "";
+
+        let user = await User.findOne({ email });
+
+        /* =================================================
+           CREATE USER
+        ================================================= */
+
+        if (!user) {
+          user = await User.create({
+            name,
+            email,
+            avatar,
+            githubId: profile.id,
+            provider: "github",
+            isVerified: true
+          });
+        } else {
+          /* ===============================================
+             LINK GITHUB ACCOUNT
+          =============================================== */
+
+          if (!user.githubId) {
+            user.githubId = profile.id;
+          }
+
+          if (!user.avatar && avatar) {
+            user.avatar = avatar;
+          }
+
+          user.isVerified = true;
+        }
+
+        /* =================================================
+           UPDATE LOGIN
+        ================================================= */
+
+        user.lastLogin = new Date();
+
+        await user.save();
+
+        return done(null, user);
+      } catch (error) {
+        console.error(
+          "GitHub Passport Error:",
+          error
+        );
+
+        return done(error, null);
+      }
+    }
+  )
 );
 
-}
-
-}
-
-)
-
-);
-
-/* =========================
-SERIALIZE
-========================= */
+/* =========================================================
+   SESSION SERIALIZATION
+========================================================= */
 
 passport.serializeUser(
-
-(user,done)=>{
-
-done(
-null,
-user.id
+  (user, done) => {
+    done(null, user.id);
+  }
 );
 
-}
-
-);
-
-/* =========================
-DESERIALIZE
-========================= */
+/* =========================================================
+   SESSION DESERIALIZATION
+========================================================= */
 
 passport.deserializeUser(
+  async (id, done) => {
+    try {
+      const user =
+        await User.findById(id);
 
-async(id,done)=>{
+      if (!user) {
+        return done(
+          new Error("User not found"),
+          null
+        );
+      }
 
-try{
-
-const user =
-
-await User.findById(id);
-
-done(
-null,
-user
+      done(null, user);
+    } catch (error) {
+      done(error, null);
+    }
+  }
 );
 
-}
+/* =========================================================
+   EXPORT
+========================================================= */
 
-catch(error){
-
-done(
-error,
-null
-);
-
-}
-
-}
-
-);
-
-module.exports =
-passport;
+module.exports = passport;
