@@ -365,186 +365,170 @@ return res.status(500).json({
 GOOGLE LOGIN
 ========================= */
 
-async function googleLogin(
-req,
-res
-){
+async function googleLogin(req, res) {
 
-try{
+  try {
 
-/* =========================
-   TOKEN
-========================= */
+    const user = req.user;
 
-const {
-  token
-} = req.body;
+    if (!user) {
 
-if(!token){
+      return res.status(401).json({
 
-  return res.status(400).json({
+        success: false,
 
-    success:false,
+        message: "Google authentication failed"
 
-    message:
-    "Google token required"
+      });
 
-  });
+    }
 
-}
+    const token =
+      generateToken(user);
 
-/* =========================
-   VERIFY GOOGLE USER
-========================= */
+    return res.json({
 
-const profile =
+      success: true,
 
-await verifyGoogleUser(
-  token
-);
+      token,
 
-/* =========================
-   FIND USER
-========================= */
+      user: {
 
-let user =
+        id: user._id,
 
-await User.findOne({
+        name: user.name,
 
-  email:
-  profile.email
+        email: user.email,
 
-});
+        avatar: user.avatar,
 
-/* =========================
-   CREATE USER
-========================= */
+        role: user.role,
 
-if(!user){
+        provider: user.provider
 
-  user =
-  await User.create({
+      }
 
-    name:
-    profile.name,
-
-    email:
-    profile.email,
-
-    avatar:
-    profile.avatar,
-
-    provider:
-    "google",
-
-    isVerified:true
-
-  });
-
-}
-
-/* =========================
-   UPDATE LOGIN
-========================= */
-
-user.lastLogin =
-new Date();
-
-await user.save();
-
-/* =========================
-   GENERATE TOKEN
-========================= */
-
-const jwtToken =
-
-generateGoogleToken(
-  user
-);
-
-/* =========================
-   RESPONSE
-========================= */
-
-return res.json({
-
-  success:true,
-
-  token:
-  jwtToken,
-
-  user:{
-
-    id:user._id,
-
-    name:user.name,
-
-    email:user.email,
-
-    avatar:user.avatar,
-
-    provider:user.provider
+    });
 
   }
 
-});
+  catch (error) {
 
-}
+    console.error(
+      "Google login error:",
+      error
+    );
 
-catch(error){
+    return res.status(500).json({
 
-console.error(error);
+      success: false,
 
-return res.status(500).json({
+      message: "Google login failed"
 
-  success:false,
+    });
 
-  message:
-  "Google login failed"
-
-});
-
-}
+  }
 
 }
 
 /* =========================
-GITHUB LOGIN
+   GITHUB LOGIN
 ========================= */
 
-async function githubLogin(
-req,
-res
-){
+async function githubLogin(req, res) {
 
-try{
+  try {
 
-return res.status(501).json({
+    /* =========================
+       AUTHENTICATED USER
+    ========================= */
 
-  success:false,
+    const user = req.user;
 
-  message:
-  "GitHub OAuth not integrated yet"
+    if (!user) {
 
-});
+      return res.status(401).json({
+
+        success: false,
+
+        message: "GitHub authentication failed"
+
+      });
+
+    }
+
+    /* =========================
+       UPDATE LAST LOGIN
+    ========================= */
+
+    user.lastLogin = new Date();
+
+    await user.save();
+
+    /* =========================
+       GENERATE APPLICATION JWT
+    ========================= */
+
+    const token =
+      generateToken(user);
+
+    /* =========================
+       RESPONSE
+    ========================= */
+
+    return res.status(200).json({
+
+      success: true,
+
+      token,
+
+      user: {
+
+        id: user._id,
+
+        name: user.name,
+
+        email: user.email,
+
+        avatar: user.avatar,
+
+        role: user.role,
+
+        provider: user.provider,
+
+        subscriptionPlan:
+          user.subscriptionPlan,
+
+        credits:
+          user.credits,
+
+        deploymentsUsed:
+          user.deploymentsUsed
+
+      }
+
+    });
+
+  }
+
+  catch (error) {
+
+    console.error(
+      "GitHub login error:",
+      error
+    );
+
+    return res.status(500).json({
+
+      success: false,
+
+      message: "GitHub login failed"
+
+    });
+
+  }
 
 }
-
-catch(error){
-
-console.error(error);
-
-return res.status(500).json({
-
-  success:false,
-
-  message:
-  "GitHub login failed"
-
-});
-
-}
-
 }
 
 /* =========================
