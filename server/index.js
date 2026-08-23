@@ -12,7 +12,9 @@ require("cors");
 
 const path =
 require("path");
+const passport = require("passport");
 
+require("./config/passport");
 /* =========================
    EXPRESS
 ========================= */
@@ -30,7 +32,7 @@ process.env.PORT || 3000;
 /* =========================
    MIDDLEWARE
 ========================= */
-
+app.use(passport.initialize());
 app.use(cors());
 
 app.use(
