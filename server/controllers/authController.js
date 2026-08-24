@@ -529,7 +529,6 @@ async function githubLogin(req, res) {
   }
 
 }
-}
 
 /* =========================
 EXPORTS
