@@ -366,73 +366,44 @@ GOOGLE LOGIN
 ========================= */
 
 async function googleLogin(req, res) {
-
   try {
-
     const user = req.user;
 
     if (!user) {
-
       return res.status(401).json({
-
         success: false,
-
         message: "Google authentication failed"
-
       });
-
     }
 
-    const token =
-      generateToken(user);
+    // Generate application JWT
+    const token = generateToken(user);
 
-    return res.json({
-
-      success: true,
-
-      token,
-
-      user: {
-
-        id: user._id,
-
-        name: user.name,
-
-        email: user.email,
-
-        avatar: user.avatar,
-
-        role: user.role,
-
-        provider: user.provider
-
-      }
-
+    // Store JWT in secure HTTP-only cookie
+    res.cookie("access_token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: "/"
     });
 
-  }
-
-  catch (error) {
-
-    console.error(
-      "Google login error:",
-      error
+    // Redirect user to frontend dashboard
+    return res.redirect(
+      `${process.env.FRONTEND_URL}/dashboard`
     );
 
+  } catch (error) {
+    console.error("Google login error:", error);
+
     return res.status(500).json({
-
       success: false,
-
       message: "Google login failed"
-
     });
-
   }
-
 }
 
-/* =========================
-   GITHUB LOGIN
+     GITHUB LOGIN
 ========================= */
 
 async function githubLogin(req, res) {
