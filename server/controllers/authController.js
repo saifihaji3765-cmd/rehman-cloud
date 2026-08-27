@@ -403,8 +403,9 @@ async function googleLogin(req, res) {
   }
 }
 
-     GITHUB LOGIN
-========================= */
+ /* =========================================================
+   GITHUB LOGIN
+========================================================= */
 
 async function githubLogin(req, res) {
 
