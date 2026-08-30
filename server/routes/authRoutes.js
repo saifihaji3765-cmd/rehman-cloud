@@ -12,6 +12,7 @@ registerUser,
 loginUser,
 googleLogin,
 githubLogin
+getCurrentUser
 } = require("../controllers/authController");
 
 /* =========================
@@ -30,6 +31,16 @@ LOGIN
 router.post(
 "/login",
 loginUser
+);
+
+/* =========================
+GET CURRENT USER
+========================= */
+
+router.get(
+  "/me",
+  authMiddleware,
+  getCurrentUser
 );
 
 /* =========================
