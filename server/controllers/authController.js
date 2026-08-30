@@ -503,6 +503,45 @@ async function githubLogin(req, res) {
 }
 
 /* =========================
+GET CURRENT USER
+========================= */
+
+async function getCurrentUser(req, res) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: "Not authenticated"
+      });
+    }
+
+    return res.json({
+      success: true,
+
+      user: {
+        id: req.user.id,
+        name: req.user.name,
+        email: req.user.email,
+        role: req.user.role,
+        provider: req.user.provider,
+        subscriptionPlan:
+          req.user.subscriptionPlan
+      }
+    });
+
+  } catch (error) {
+    console.error(
+      "Get current user error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to get current user"
+    });
+  }
+}
+/* =========================
 EXPORTS
 ========================= */
 
@@ -515,5 +554,7 @@ loginUser,
 googleLogin,
 
 githubLogin
+
+getCurrentUser
 
 };
