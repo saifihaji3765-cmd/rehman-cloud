@@ -146,15 +146,14 @@ CORS
 ========================= */
 
 app.use(
+  cors({
+    origin:
+      process.env.FRONTEND_URL ||
+      process.env.CLIENT_URL ||
+      "https://zyrionos.com",
 
-cors({
-
-origin:true,
-
-credentials:true
-
-})
-
+    credentials: true
+  })
 );
 
 /* =========================
@@ -206,15 +205,11 @@ resave:false,
 
 saveUninitialized:false,
 
-cookie:{
-
-  secure:false,
-
-  httpOnly:true,
-
-  maxAge:
-  7 * 24 * 60 * 60 * 1000
-
+cookie: {
+  secure: process.env.NODE_ENV === "production",
+  httpOnly: true,
+  sameSite: "lax",
+  maxAge: 7 * 24 * 60 * 60 * 1000
 }
 
 })
