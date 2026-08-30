@@ -12,7 +12,7 @@ const {
   loginUser,
   googleLogin,
   githubLogin,
-  getCurrentUser
+  getCurrentUser,
 } = require("../controllers/authController");
 
 /* =========================
