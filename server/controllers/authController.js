@@ -553,8 +553,8 @@ loginUser,
 
 googleLogin,
 
-githubLogin
+githubLogin,
 
-getCurrentUser
+getCurrentUser,
 
 };
