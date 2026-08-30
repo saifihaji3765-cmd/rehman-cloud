@@ -4,113 +4,96 @@ const passport = require("passport");
 const router = express.Router();
 
 /* =========================
-CONTROLLERS
+   CONTROLLERS
 ========================= */
 
 const {
-registerUser,
-loginUser,
-googleLogin,
-githubLogin
-getCurrentUser
+  registerUser,
+  loginUser,
+  googleLogin,
+  githubLogin,
+  getCurrentUser
 } = require("../controllers/authController");
 
 /* =========================
-REGISTER
+   REGISTER
 ========================= */
 
 router.post(
-"/register",
-registerUser
+  "/register",
+  registerUser
 );
 
 /* =========================
-LOGIN
+   LOGIN
 ========================= */
 
 router.post(
-"/login",
-loginUser
+  "/login",
+  loginUser
 );
 
 /* =========================
-GET CURRENT USER
+   CURRENT USER
 ========================= */
 
 router.get(
   "/me",
-  authMiddleware,
   getCurrentUser
 );
 
 /* =========================
-GOOGLE AUTH
+   GOOGLE AUTH
 ========================= */
 
 router.get(
-"/google",
-passport.authenticate(
-"google",
-{
-scope:[
-"profile",
-"email"
-],
-session:false
-}
-)
+  "/google",
+  passport.authenticate("google", {
+    scope: ["profile", "email"],
+    session: false
+  })
 );
 
 /* =========================
-GOOGLE CALLBACK
+   GOOGLE CALLBACK
 ========================= */
 
 router.get(
-"/google/callback",
-passport.authenticate(
-"google",
-{
-session:false,
-failureRedirect:"/login"
-}
-),
-googleLogin
+  "/google/callback",
+  passport.authenticate("google", {
+    session: false,
+    failureRedirect: "/login"
+  }),
+  googleLogin
 );
 
 /* =========================
-GITHUB AUTH
+   GITHUB AUTH
 ========================= */
 
 router.get(
-"/github",
-passport.authenticate(
-"github",
-{
-scope:[
-"user:email"
-]
-}
-)
+  "/github",
+  passport.authenticate("github", {
+    scope: ["user:email"],
+    session: false
+  })
 );
 
 /* =========================
-GITHUB CALLBACK
+   GITHUB CALLBACK
 ========================= */
 
 router.get(
-"/github/callback",
-passport.authenticate(
-"github",
-{
-session:false,
-failureRedirect:"/login"
-}
-),
-githubLogin
+  "/github/callback",
+  passport.authenticate("github", {
+    session: false,
+    failureRedirect: "/login"
+  }),
+  githubLogin
 );
 
 /* =========================
-EXPORT
+   EXPORT
 ========================= */
 
 module.exports = router;
