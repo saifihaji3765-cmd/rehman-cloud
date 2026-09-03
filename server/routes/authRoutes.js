@@ -1,6 +1,10 @@
 const express = require("express");
 const passport = require("passport");
 
+const {
+  authMiddleware
+} = require("../middleware/authMiddleware");
+
 const router = express.Router();
 
 /* =========================
@@ -39,6 +43,7 @@ router.post(
 
 router.get(
   "/me",
+  authMiddleware,
   getCurrentUser
 );
 
