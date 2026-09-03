@@ -390,8 +390,8 @@ async function googleLogin(req, res) {
 
     // Redirect user to frontend dashboard
     return res.redirect(
-      `${process.env.FRONTEND_URL}/dashboard`
-    );
+  `${process.env.CLIENT_URL}/dashboard`
+);
 
   } catch (error) {
     console.error("Google login error:", error);
@@ -444,6 +444,13 @@ async function githubLogin(req, res) {
     const token =
       generateToken(user);
 
+    res.cookie("access_token", token, {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "lax",
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+  path: "/"
+});
     /* =========================
        RESPONSE
     ========================= */
