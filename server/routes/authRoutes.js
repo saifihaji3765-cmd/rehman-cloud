@@ -1,14 +1,10 @@
 const express = require("express");
 const passport = require("passport");
 
-const {
-  authMiddleware
-} = require("../middleware/authMiddleware");
-
 const router = express.Router();
 
 /* =========================
-   CONTROLLERS
+CONTROLLERS
 ========================= */
 
 const {
@@ -17,10 +13,19 @@ const {
   googleLogin,
   githubLogin,
   getCurrentUser,
+  logoutUser
 } = require("../controllers/authController");
 
 /* =========================
-   REGISTER
+AUTH MIDDLEWARE
+========================= */
+
+const {
+  authMiddleware
+} = require("../middleware/authMiddleware");
+
+/* =========================
+REGISTER
 ========================= */
 
 router.post(
@@ -29,7 +34,7 @@ router.post(
 );
 
 /* =========================
-   LOGIN
+LOGIN
 ========================= */
 
 router.post(
@@ -38,7 +43,7 @@ router.post(
 );
 
 /* =========================
-   CURRENT USER
+CURRENT USER
 ========================= */
 
 router.get(
@@ -48,57 +53,85 @@ router.get(
 );
 
 /* =========================
-   GOOGLE AUTH
+LOGOUT
+========================= */
+
+router.post(
+  "/logout",
+  logoutUser
+);
+
+/* =========================
+GOOGLE AUTH
 ========================= */
 
 router.get(
   "/google",
-  passport.authenticate("google", {
-    scope: ["profile", "email"],
-    session: false
-  })
+  passport.authenticate(
+    "google",
+    {
+      scope: [
+        "profile",
+        "email"
+      ],
+      session: false
+    }
+  )
 );
 
 /* =========================
-   GOOGLE CALLBACK
+GOOGLE CALLBACK
 ========================= */
 
 router.get(
   "/google/callback",
-  passport.authenticate("google", {
-    session: false,
-    failureRedirect: "/login"
-  }),
+  passport.authenticate(
+    "google",
+    {
+      session: false,
+      failureRedirect:
+        `${process.env.FRONTEND_URL}/login`
+    }
+  ),
   googleLogin
 );
 
 /* =========================
-   GITHUB AUTH
+GITHUB AUTH
 ========================= */
 
 router.get(
   "/github",
-  passport.authenticate("github", {
-    scope: ["user:email"],
-    session: false
-  })
+  passport.authenticate(
+    "github",
+    {
+      scope: [
+        "user:email"
+      ],
+      session: false
+    }
+  )
 );
 
 /* =========================
-   GITHUB CALLBACK
+GITHUB CALLBACK
 ========================= */
 
 router.get(
   "/github/callback",
-  passport.authenticate("github", {
-    session: false,
-    failureRedirect: "/login"
-  }),
+  passport.authenticate(
+    "github",
+    {
+      session: false,
+      failureRedirect:
+        `${process.env.FRONTEND_URL}/login`
+    }
+  ),
   githubLogin
 );
 
 /* =========================
-   EXPORT
+EXPORT
 ========================= */
 
 module.exports = router;
