@@ -1,167 +1,138 @@
-const env =
-require("./env");
+const env = require("./env");
 
-/* =========================
-VALIDATE ENV
-========================= */
+/* =========================================================
+   VALIDATE ENVIRONMENT
+========================================================= */
 
-function validateEnv(){
+function validateEnv() {
 
-/* =========================
-REQUIRED VARIABLES
-========================= */
+  /* =======================================================
+     REQUIRED VARIABLES
+  ======================================================= */
 
-const requiredEnv = [
+  const requiredEnv = [
 
-"PORT",
+    "PORT",
 
-"MONGO_URI",
+    "MONGO_URI",
 
-"JWT_SECRET",
+    "JWT_SECRET",
 
-"OPENAI_API_KEY",
+    "OPENAI_API_KEY",
 
-"AWS_ACCESS_KEY_ID",
+    "AWS_ACCESS_KEY_ID",
 
-"AWS_SECRET_ACCESS_KEY",
+    "AWS_SECRET_ACCESS_KEY",
 
-"AWS_REGION"
+    "AWS_REGION",
 
-];
+    "FRONTEND_URL",
 
-/* =========================
-OPTIONAL VARIABLES
-========================= */
+    "GOOGLE_CLIENT_ID",
 
-const optionalEnv = [
+    "GOOGLE_CLIENT_SECRET",
 
-"REDIS_URL",
+    "GOOGLE_CALLBACK_URL",
 
-"STRIPE_SECRET_KEY",
+    "GITHUB_CLIENT_ID",
 
-"RAZORPAY_KEY_ID",
+    "GITHUB_CLIENT_SECRET",
 
-"RAZORPAY_KEY_SECRET",
+    "GITHUB_CALLBACK_URL"
 
-"GOOGLE_CLIENT_ID",
+  ];
 
-"GOOGLE_CLIENT_SECRET",
+  /* =======================================================
+     CHECK REQUIRED VARIABLES
+  ======================================================= */
 
-"GITHUB_CLIENT_ID",
+  const missingEnv = [];
 
-"GITHUB_CLIENT_SECRET"
+  requiredEnv.forEach((key) => {
 
-];
+    if (
+      !env[key] ||
+      env[key].toString().trim() === ""
+    ) {
 
-/* =========================
-CHECK REQUIRED
-========================= */
+      missingEnv.push(key);
 
-const missingEnv = [];
+    }
 
-requiredEnv.forEach(
+  });
 
-(key)=>{
+  /* =======================================================
+     FAIL IF REQUIRED VARIABLE IS MISSING
+  ======================================================= */
 
-  if(
+  if (missingEnv.length > 0) {
 
-    !env[key] ||
-
-    env[key]
-    .toString()
-    .trim() === ""
-
-  ){
-
-    missingEnv.push(key);
-
-  }
-
-}
-
-);
-
-/* =========================
-FAIL IF REQUIRED MISSING
-========================= */
-
-if(
-
-missingEnv.length > 0
-
-){
-
-console.log("\n");
-
-console.log(
-
-  "❌ Missing Required Environment Variables"
-
-);
-
-missingEnv.forEach(
-
-  (item)=>{
-
+    console.log("\n");
     console.log(
-      `- ${item}`
+      "❌ Missing Required Environment Variables"
     );
 
-  }
+    missingEnv.forEach((item) => {
 
-);
+      console.log(
+        `- ${item}`
+      );
 
-console.log("\n");
+    });
 
-process.exit(1);
+    console.log("\n");
 
-}
-
-/* =========================
-OPTIONAL WARNINGS
-========================= */
-
-optionalEnv.forEach(
-
-(key)=>{
-
-  if(
-
-    !env[key] ||
-
-    env[key]
-    .toString()
-    .trim() === ""
-
-  ){
-
-    console.log(
-
-      `⚠️ Optional ENV Missing: ${key}`
-
-    );
+    process.exit(1);
 
   }
 
+  /* =======================================================
+     OPTIONAL VARIABLES
+  ======================================================= */
+
+  const optionalEnv = [
+
+    "REDIS_URL",
+
+    "STRIPE_SECRET_KEY",
+
+    "RAZORPAY_KEY_ID",
+
+    "RAZORPAY_KEY_SECRET"
+
+  ];
+
+  /* =======================================================
+     OPTIONAL WARNINGS
+  ======================================================= */
+
+  optionalEnv.forEach((key) => {
+
+    if (
+      !env[key] ||
+      env[key].toString().trim() === ""
+    ) {
+
+      console.log(
+        `⚠️ Optional ENV Missing: ${key}`
+      );
+
+    }
+
+  });
+
+  /* =======================================================
+     SUCCESS
+  ======================================================= */
+
+  console.log(
+    "✅ Environment Validation Passed"
+  );
+
 }
 
-);
+/* =========================================================
+   EXPORT
+========================================================= */
 
-/* =========================
-SUCCESS
-========================= */
-
-console.log(
-
-"✅ Environment Validation Passed"
-
-);
-
-}
-
-/* =========================
-EXPORT
-========================= */
-
-module.exports =
-validateEnv;
+module.exports = validateEnv;
