@@ -25,6 +25,14 @@ const {
 } = require("../middleware/authMiddleware");
 
 /* =========================================================
+   FRONTEND URL
+========================================================= */
+
+const FRONTEND_URL =
+  process.env.FRONTEND_URL ||
+  "https://zyrionos.com";
+
+/* =========================================================
    REGISTER
 ========================================================= */
 
@@ -90,7 +98,7 @@ router.get(
     {
       session: false,
       failureRedirect:
-        `${process.env.CLIENT_URL}/login`
+        `${FRONTEND_URL}/login`
     }
   ),
   googleLogin
@@ -124,7 +132,7 @@ router.get(
     {
       session: false,
       failureRedirect:
-        `${process.env.CLIENT_URL}/login`
+        `${FRONTEND_URL}/login`
     }
   ),
   githubLogin
