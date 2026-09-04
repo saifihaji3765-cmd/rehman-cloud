@@ -316,37 +316,39 @@ async function googleLogin(req, res) {
     await user.save();
 
     /* =========================
-       APPLICATION JWT
-    ========================= */
+   APPLICATION JWT
+========================= */
 
-    const token =
-      generateToken(user);
+const token =
+  generateToken(user);
 
-    /* =========================
-       HTTP-ONLY COOKIE
-    ========================= */
+/* =========================
+   HTTP-ONLY COOKIE
+========================= */
 
-    setAuthCookie(res, token);
+setAuthCookie(res, token);
 
-    /* =========================
-       FRONTEND REDIRECT
-    ========================= */
+/* =========================
+   FRONTEND REDIRECT
+========================= */
 
-    if (!process.env.CLIENT_URL) {
-      console.error(
-        "CLIENT_URL is missing"
-      );
+if (!env.FRONTEND_URL) {
 
-      return res.status(500).json({
-        success: false,
-        message:
-          "Frontend URL configuration missing"
-      });
-    }
+  console.error(
+    "FRONTEND_URL is missing"
+  );
 
-    return res.redirect(
-      `${process.env.CLIENT_URL}/dashboard`
-    );
+  return res.status(500).json({
+    success: false,
+    message:
+      "Frontend URL configuration missing"
+  });
+
+}
+
+return res.redirect(
+  `${env.FRONTEND_URL}/dashboard`
+);
 
   } catch (error) {
     console.error(
