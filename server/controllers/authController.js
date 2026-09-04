@@ -1,432 +1,246 @@
-const bcrypt =
-require("bcryptjs");
-
-const jwt =
-require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 
 /* =========================
 MODEL
 ========================= */
 
-const User =
-require(
-"../models/userModel"
-);
+const User = require("../models/userModel");
 
 /* =========================
-GOOGLE SERVICE
+GENERATE APPLICATION JWT
 ========================= */
 
-const {
-
-generateGoogleToken,
-
-verifyGoogleUser
-
-} = require(
-"../services/googleAuthService"
-);
-
-/* =========================
-GENERATE JWT
-========================= */
-
-function generateToken(user){
-
-return jwt.sign(
-
-{
-
-  id:user._id,
-
-  email:user.email,
-
-  role:user.role
-
-},
-
-process.env.JWT_SECRET,
-
-{
-
-  expiresIn:"7d"
-
-}
-
-);
-
-}
-
-/* =========================
-REGISTER USER
-========================= */
-
-async function registerUser(
-req,
-res
-){
-
-try{
-
-const {
-
-  name,
-  email,
-  password
-
-} = req.body;
-
-/* =========================
-   VALIDATION
-========================= */
-
-if(
-
-  !name ||
-  !email ||
-  !password
-
-){
-
-  return res.status(400).json({
-
-    success:false,
-
-    message:
-    "All fields required"
-
-  });
-
-}
-
-/* =========================
-   EXISTING USER
-========================= */
-
-const existingUser =
-
-await User.findOne({
-
-  email
-
-});
-
-if(existingUser){
-
-  return res.status(400).json({
-
-    success:false,
-
-    message:
-    "User already exists"
-
-  });
-
-}
-
-/* =========================
-   HASH PASSWORD
-========================= */
-
-const hashedPassword =
-
-await bcrypt.hash(
-  password,
-  10
-);
-
-/* =========================
-   CREATE USER
-========================= */
-
-const user =
-
-await User.create({
-
-  name,
-
-  email,
-
-  password:
-  hashedPassword,
-
-  provider:"email",
-
-  isVerified:true
-
-});
-
-/* =========================
-   TOKEN
-========================= */
-
-const token =
-generateToken(user);
-
-/* =========================
-   RESPONSE
-========================= */
-
-return res.status(201).json({
-
-  success:true,
-
-  token,
-
-  user:{
-
-    id:user._id,
-
-    name:user.name,
-
-    email:user.email,
-
-    role:user.role,
-
-    provider:user.provider
-
+function generateToken(user) {
+  if (!process.env.JWT_SECRET) {
+    throw new Error("JWT_SECRET is missing");
   }
 
-});
-
-}
-
-catch(error){
-
-console.error(error);
-
-return res.status(500).json({
-
-  success:false,
-
-  message:
-  "Register failed"
-
-});
-
-}
-
+  return jwt.sign(
+    {
+      id: user._id,
+      email: user.email,
+      role: user.role
+    },
+    process.env.JWT_SECRET,
+    {
+      expiresIn: "7d"
+    }
+  );
 }
 
 /* =========================
-LOGIN USER
+SET AUTH COOKIE
 ========================= */
 
-async function loginUser(
-req,
-res
-){
-
-try{
-
-const {
-
-  email,
-  password
-
-} = req.body;
-
-/* =========================
-   VALIDATION
-========================= */
-
-if(
-
-  !email ||
-  !password
-
-){
-
-  return res.status(400).json({
-
-    success:false,
-
-    message:
-    "Email and password required"
-
+function setAuthCookie(res, token) {
+  res.cookie("access_token", token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    path: "/"
   });
-
 }
 
 /* =========================
-   FIND USER
+USER RESPONSE
 ========================= */
 
-const user =
-
-await User.findOne({
-
-  email
-
-});
-
-if(!user){
-
-  return res.status(400).json({
-
-    success:false,
-
-    message:
-    "Invalid credentials"
-
-  });
-
+function formatUser(user) {
+  return {
+    id: user._id,
+    name: user.name,
+    email: user.email,
+    avatar: user.avatar,
+    role: user.role,
+    provider: user.provider,
+    subscriptionPlan: user.subscriptionPlan,
+    credits: user.credits,
+    deploymentsUsed: user.deploymentsUsed
+  };
 }
 
-/* =========================
-   PASSWORD CHECK
-========================= */
+/* =========================================================
+   REGISTER USER
+========================================================= */
 
-const validPassword =
-
-await bcrypt.compare(
-
-  password,
-
-  user.password
-
-);
-
-if(!validPassword){
-
-  return res.status(400).json({
-
-    success:false,
-
-    message:
-    "Invalid credentials"
-
-  });
-
-}
-
-/* =========================
-   UPDATE LAST LOGIN
-========================= */
-
-user.lastLogin =
-new Date();
-
-await user.save();
-
-/* =========================
-   TOKEN
-========================= */
-
-const token =
-generateToken(user);
-
-/* =========================
-   RESPONSE
-========================= */
-
-return res.json({
-
-  success:true,
-
-  token,
-
-  user:{
-
-    id:user._id,
-
-    name:user.name,
-
-    email:user.email,
-
-    role:user.role,
-
-    provider:user.provider
-
-  }
-
-});
-
-}
-
-catch(error){
-
-console.error(error);
-
-return res.status(500).json({
-
-  success:false,
-
-  message:
-  "Login failed"
-
-});
-
-}
-
-}
-
-/* =========================
-GOOGLE LOGIN
-========================= */
-
-async function googleLogin(req, res) {
+async function registerUser(req, res) {
   try {
-    const user = req.user;
+    const {
+      name,
+      email,
+      password
+    } = req.body;
 
-    if (!user) {
-      return res.status(401).json({
+    /* =========================
+       VALIDATION
+    ========================= */
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
         success: false,
-        message: "Google authentication failed"
+        message: "All fields required"
       });
     }
 
-    // Generate application JWT
-    const token = generateToken(user);
+    const normalizedEmail =
+      email.trim().toLowerCase();
 
-    // Store JWT in secure HTTP-only cookie
-    res.cookie("access_token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-      path: "/"
+    /* =========================
+       EXISTING USER
+    ========================= */
+
+    const existingUser =
+      await User.findOne({
+        email: normalizedEmail
+      });
+
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: "User already exists"
+      });
+    }
+
+    /* =========================
+       HASH PASSWORD
+    ========================= */
+
+    const hashedPassword =
+      await bcrypt.hash(password, 10);
+
+    /* =========================
+       CREATE USER
+    ========================= */
+
+    const user = await User.create({
+      name: name.trim(),
+      email: normalizedEmail,
+      password: hashedPassword,
+      provider: "email",
+      isVerified: true
     });
 
-    // Redirect user to frontend dashboard
-    return res.redirect(
-  `${process.env.CLIENT_URL}/dashboard`
-);
+    /* =========================
+       GENERATE JWT
+    ========================= */
+
+    const token =
+      generateToken(user);
+
+    /* =========================
+       AUTH COOKIE
+    ========================= */
+
+    setAuthCookie(res, token);
+
+    /* =========================
+       RESPONSE
+    ========================= */
+
+    return res.status(201).json({
+      success: true,
+      token,
+      user: formatUser(user)
+    });
 
   } catch (error) {
-    console.error("Google login error:", error);
+    console.error(
+      "Register error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Google login failed"
+      message: "Register failed"
     });
   }
 }
 
- /* =========================================================
-   GITHUB LOGIN
+/* =========================================================
+   LOGIN USER
 ========================================================= */
 
-async function githubLogin(req, res) {
-
+async function loginUser(req, res) {
   try {
+    const {
+      email,
+      password
+    } = req.body;
 
     /* =========================
-       AUTHENTICATED USER
+       VALIDATION
     ========================= */
 
-    const user = req.user;
-
-    if (!user) {
-
-      return res.status(401).json({
-
+    if (!email || !password) {
+      return res.status(400).json({
         success: false,
+        message:
+          "Email and password required"
+      });
+    }
 
-        message: "GitHub authentication failed"
+    const normalizedEmail =
+      email.trim().toLowerCase();
 
+    /* =========================
+       FIND USER
+    ========================= */
+
+    const user =
+      await User.findOne({
+        email: normalizedEmail
       });
 
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid credentials"
+      });
+    }
+
+    /* =========================
+       PASSWORD USER CHECK
+    ========================= */
+
+    if (!user.password) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "This account uses social login"
+      });
+    }
+
+    /* =========================
+       PASSWORD CHECK
+    ========================= */
+
+    const validPassword =
+      await bcrypt.compare(
+        password,
+        user.password
+      );
+
+    if (!validPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid credentials"
+      });
+    }
+
+    /* =========================
+       EMAIL VERIFICATION
+    ========================= */
+
+    if (
+      user.isVerified === false &&
+      user.provider === "email"
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Account not verified"
+      });
     }
 
     /* =========================
@@ -438,80 +252,192 @@ async function githubLogin(req, res) {
     await user.save();
 
     /* =========================
-       GENERATE APPLICATION JWT
+       GENERATE JWT
     ========================= */
 
     const token =
       generateToken(user);
 
-    res.cookie("access_token", token, {
-  httpOnly: true,
-  secure: process.env.NODE_ENV === "production",
-  sameSite: "lax",
-  maxAge: 7 * 24 * 60 * 60 * 1000,
-  path: "/"
-});
+    /* =========================
+       AUTH COOKIE
+    ========================= */
+
+    setAuthCookie(res, token);
+
     /* =========================
        RESPONSE
     ========================= */
 
     return res.status(200).json({
-
       success: true,
-
       token,
-
-      user: {
-
-        id: user._id,
-
-        name: user.name,
-
-        email: user.email,
-
-        avatar: user.avatar,
-
-        role: user.role,
-
-        provider: user.provider,
-
-        subscriptionPlan:
-          user.subscriptionPlan,
-
-        credits:
-          user.credits,
-
-        deploymentsUsed:
-          user.deploymentsUsed
-
-      }
-
+      user: formatUser(user)
     });
 
+  } catch (error) {
+    console.error(
+      "Login error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Login failed"
+    });
   }
+}
 
-  catch (error) {
+/* =========================================================
+   GOOGLE LOGIN
+========================================================= */
 
+async function googleLogin(req, res) {
+  try {
+    /* =========================
+       PASSPORT USER
+    ========================= */
+
+    const user = req.user;
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message:
+          "Google authentication failed"
+      });
+    }
+
+    /* =========================
+       UPDATE LAST LOGIN
+    ========================= */
+
+    user.lastLogin = new Date();
+
+    await user.save();
+
+    /* =========================
+       APPLICATION JWT
+    ========================= */
+
+    const token =
+      generateToken(user);
+
+    /* =========================
+       HTTP-ONLY COOKIE
+    ========================= */
+
+    setAuthCookie(res, token);
+
+    /* =========================
+       FRONTEND REDIRECT
+    ========================= */
+
+    if (!process.env.CLIENT_URL) {
+      console.error(
+        "CLIENT_URL is missing"
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          "Frontend URL configuration missing"
+      });
+    }
+
+    return res.redirect(
+      `${process.env.CLIENT_URL}/dashboard`
+    );
+
+  } catch (error) {
+    console.error(
+      "Google login error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Google login failed"
+    });
+  }
+}
+
+/* =========================================================
+   GITHUB LOGIN
+========================================================= */
+
+async function githubLogin(req, res) {
+  try {
+    /* =========================
+       PASSPORT USER
+    ========================= */
+
+    const user = req.user;
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message:
+          "GitHub authentication failed"
+      });
+    }
+
+    /* =========================
+       UPDATE LAST LOGIN
+    ========================= */
+
+    user.lastLogin = new Date();
+
+    await user.save();
+
+    /* =========================
+       APPLICATION JWT
+    ========================= */
+
+    const token =
+      generateToken(user);
+
+    /* =========================
+       HTTP-ONLY COOKIE
+    ========================= */
+
+    setAuthCookie(res, token);
+
+    /* =========================
+       FRONTEND REDIRECT
+    ========================= */
+
+    if (!process.env.CLIENT_URL) {
+      console.error(
+        "CLIENT_URL is missing"
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          "Frontend URL configuration missing"
+      });
+    }
+
+    return res.redirect(
+      `${process.env.CLIENT_URL}/dashboard`
+    );
+
+  } catch (error) {
     console.error(
       "GitHub login error:",
       error
     );
 
     return res.status(500).json({
-
       success: false,
-
       message: "GitHub login failed"
-
     });
-
   }
-
 }
 
-/* =========================
-GET CURRENT USER
-========================= */
+/* =========================================================
+   GET CURRENT USER
+========================================================= */
 
 async function getCurrentUser(req, res) {
   try {
@@ -522,17 +448,21 @@ async function getCurrentUser(req, res) {
       });
     }
 
-    return res.json({
+    return res.status(200).json({
       success: true,
-
       user: {
         id: req.user.id,
         name: req.user.name,
         email: req.user.email,
+        avatar: req.user.avatar,
         role: req.user.role,
         provider: req.user.provider,
         subscriptionPlan:
-          req.user.subscriptionPlan
+          req.user.subscriptionPlan,
+        credits:
+          req.user.credits,
+        deploymentsUsed:
+          req.user.deploymentsUsed
       }
     });
 
@@ -544,24 +474,65 @@ async function getCurrentUser(req, res) {
 
     return res.status(500).json({
       success: false,
-      message: "Failed to get current user"
+      message:
+        "Failed to get current user"
     });
   }
 }
-/* =========================
-EXPORTS
-========================= */
+
+/* =========================================================
+   LOGOUT USER
+========================================================= */
+
+async function logoutUser(req, res) {
+  try {
+    /* =========================
+       CLEAR AUTH COOKIE
+    ========================= */
+
+    res.clearCookie(
+      "access_token",
+      {
+        httpOnly: true,
+        secure:
+          process.env.NODE_ENV ===
+          "production",
+        sameSite: "lax",
+        path: "/"
+      }
+    );
+
+    /* =========================
+       RESPONSE
+    ========================= */
+
+    return res.status(200).json({
+      success: true,
+      message: "Logged out successfully"
+    });
+
+  } catch (error) {
+    console.error(
+      "Logout error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Logout failed"
+    });
+  }
+}
+
+/* =========================================================
+   EXPORTS
+========================================================= */
 
 module.exports = {
-
-registerUser,
-
-loginUser,
-
-googleLogin,
-
-githubLogin,
-
-getCurrentUser,
-
+  registerUser,
+  loginUser,
+  googleLogin,
+  githubLogin,
+  getCurrentUser,
+  logoutUser
 };
