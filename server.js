@@ -149,7 +149,6 @@ app.use(
   cors({
     origin:
       process.env.FRONTEND_URL ||
-      process.env.CLIENT_URL ||
       "https://zyrionos.com",
 
     credentials: true
