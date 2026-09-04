@@ -332,7 +332,7 @@ setAuthCookie(res, token);
    FRONTEND REDIRECT
 ========================= */
 
-if (!env.FRONTEND_URL) {
+if (!process.env.FRONTEND_URL) {
 
   console.error(
     "FRONTEND_URL is missing"
@@ -347,7 +347,7 @@ if (!env.FRONTEND_URL) {
 }
 
 return res.redirect(
-  `${env.FRONTEND_URL}/dashboard`
+  `${process.env.FRONTEND_URL}/dashboard`
 );
 
   } catch (error) {
