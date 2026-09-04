@@ -1,131 +1,155 @@
 require("dotenv").config();
 
-/* =========================
-ENV CONFIG
-========================= */
+/* =========================================================
+   ENV CONFIG
+========================================================= */
 
 const env = {
 
-/* =========================
-SERVER
-========================= */
+  /* =======================================================
+     SERVER
+  ======================================================= */
 
-PORT:
-process.env.PORT || 5000,
+  PORT:
+    process.env.PORT || 5000,
 
-NODE_ENV:
-process.env.NODE_ENV || "production",
+  NODE_ENV:
+    process.env.NODE_ENV || "production",
 
-/* =========================
-DATABASE
-========================= */
 
-MONGO_URI:
-process.env.MONGO_URI || "",
+  /* =======================================================
+     FRONTEND / API
+  ======================================================= */
 
-REDIS_URL:
-process.env.REDIS_URL || "",
+  FRONTEND_URL:
+    process.env.FRONTEND_URL ||
+    "https://zyrionos.com",
 
-/* =========================
-JWT
-========================= */
+  API_URL:
+    process.env.API_URL ||
+    "https://api.zyrionos.com",
 
-JWT_SECRET:
-process.env.JWT_SECRET || "",
 
-JWT_EXPIRE:
-process.env.JWT_EXPIRE || "7d",
+  /* =======================================================
+     DATABASE
+  ======================================================= */
 
-/* =========================
-OPENAI
-========================= */
+  MONGO_URI:
+    process.env.MONGO_URI || "",
 
-OPENAI_API_KEY:
-process.env.OPENAI_API_KEY || "",
+  REDIS_URL:
+    process.env.REDIS_URL || "",
 
-/* =========================
-AWS
-========================= */
 
-AWS_ACCESS_KEY_ID:
-process.env.AWS_ACCESS_KEY_ID || "",
+  /* =======================================================
+     JWT
+  ======================================================= */
 
-AWS_SECRET_ACCESS_KEY:
-process.env.AWS_SECRET_ACCESS_KEY || "",
+  JWT_SECRET:
+    process.env.JWT_SECRET || "",
 
-AWS_REGION:
-process.env.AWS_REGION || "ap-south-1",
+  JWT_EXPIRE:
+    process.env.JWT_EXPIRE || "7d",
 
-AWS_BUCKET_NAME:
-process.env.AWS_BUCKET_NAME || "",
 
-/* =========================
-GOOGLE OAUTH
-========================= */
+  /* =======================================================
+     OPENAI
+  ======================================================= */
 
-GOOGLE_CLIENT_ID:
-process.env.GOOGLE_CLIENT_ID || "",
+  OPENAI_API_KEY:
+    process.env.OPENAI_API_KEY || "",
 
-GOOGLE_CLIENT_SECRET:
-process.env.GOOGLE_CLIENT_SECRET || "",
 
-/* =========================
-GITHUB OAUTH
-========================= */
+  /* =======================================================
+     AWS
+  ======================================================= */
 
-GITHUB_CLIENT_ID:
-process.env.GITHUB_CLIENT_ID || "",
+  AWS_ACCESS_KEY_ID:
+    process.env.AWS_ACCESS_KEY_ID || "",
 
-GITHUB_CLIENT_SECRET:
-process.env.GITHUB_CLIENT_SECRET || "",
+  AWS_SECRET_ACCESS_KEY:
+    process.env.AWS_SECRET_ACCESS_KEY || "",
 
-/* =========================
-STRIPE
-========================= */
+  AWS_REGION:
+    process.env.AWS_REGION ||
+    "ap-south-1",
 
-STRIPE_SECRET_KEY:
-process.env.STRIPE_SECRET_KEY || "",
+  AWS_BUCKET_NAME:
+    process.env.AWS_BUCKET_NAME || "",
 
-STRIPE_WEBHOOK_SECRET:
-process.env.STRIPE_WEBHOOK_SECRET || "",
 
-/* =========================
-RAZORPAY
-========================= */
+  /* =======================================================
+     GOOGLE OAUTH
+  ======================================================= */
 
-RAZORPAY_KEY_ID:
-process.env.RAZORPAY_KEY_ID || "",
+  GOOGLE_CLIENT_ID:
+    process.env.GOOGLE_CLIENT_ID || "",
 
-RAZORPAY_KEY_SECRET:
-process.env.RAZORPAY_KEY_SECRET || "",
+  GOOGLE_CLIENT_SECRET:
+    process.env.GOOGLE_CLIENT_SECRET || "",
 
-RAZORPAY_WEBHOOK_SECRET:
-process.env.RAZORPAY_WEBHOOK_SECRET || "",
+  GOOGLE_CALLBACK_URL:
+    process.env.GOOGLE_CALLBACK_URL ||
+    "https://api.zyrionos.com/api/auth/google/callback",
 
-/* =========================
-DOMAINS
-========================= */
 
-APP_DOMAIN:
-process.env.APP_DOMAIN ||
-"zyrionos.com",
+  /* =======================================================
+     GITHUB OAUTH
+  ======================================================= */
 
-API_DOMAIN:
-process.env.API_DOMAIN ||
-"api.zyrionos.com",
+  GITHUB_CLIENT_ID:
+    process.env.GITHUB_CLIENT_ID || "",
 
-CLIENT_URL:
-process.env.CLIENT_URL ||
-"https://zyrionos.com",
+  GITHUB_CLIENT_SECRET:
+    process.env.GITHUB_CLIENT_SECRET || "",
 
-API_URL:
-process.env.API_URL ||
-"https://api.zyrionos.com"
+  GITHUB_CALLBACK_URL:
+    process.env.GITHUB_CALLBACK_URL ||
+    "https://api.zyrionos.com/api/auth/github/callback",
+
+
+  /* =======================================================
+     STRIPE
+  ======================================================= */
+
+  STRIPE_SECRET_KEY:
+    process.env.STRIPE_SECRET_KEY || "",
+
+  STRIPE_WEBHOOK_SECRET:
+    process.env.STRIPE_WEBHOOK_SECRET || "",
+
+
+  /* =======================================================
+     RAZORPAY
+  ======================================================= */
+
+  RAZORPAY_KEY_ID:
+    process.env.RAZORPAY_KEY_ID || "",
+
+  RAZORPAY_KEY_SECRET:
+    process.env.RAZORPAY_KEY_SECRET || "",
+
+  RAZORPAY_WEBHOOK_SECRET:
+    process.env.RAZORPAY_WEBHOOK_SECRET || "",
+
+
+  /* =======================================================
+     DOMAINS
+  ======================================================= */
+
+  APP_DOMAIN:
+    process.env.APP_DOMAIN ||
+    "zyrionos.com",
+
+  API_DOMAIN:
+    process.env.API_DOMAIN ||
+    "api.zyrionos.com"
 
 };
 
-/* =========================
-EXPORT
-========================= */
+
+/* =========================================================
+   EXPORT
+========================================================= */
 
 module.exports = env;
