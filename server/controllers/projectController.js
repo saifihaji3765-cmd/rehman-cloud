@@ -12,9 +12,19 @@ const deployAgent =
 /* =========================================================
    ZYRION OS — ENTERPRISE PROJECT CONTROLLER
    =========================================================
-   Core Project + Files + Settings + Activity + Environment
-   Builds + Deployments + Members + Logs + Versions
+   Project lifecycle
+   Files
+   AI generated files
+   Settings
+   Activity
+   Environment
+   Builds
+   Deployments
+   Members
+   Logs
+   Versions
    ========================================================= */
+
 
 /* =========================================================
    HELPERS
@@ -24,13 +34,19 @@ function getUserId(req) {
   return req?.user?.id || req?.user?._id;
 }
 
+
 function isValidObjectId(id) {
-  return mongoose.Types.ObjectId.isValid(id);
+  return Boolean(
+    id &&
+    mongoose.Types.ObjectId.isValid(id)
+  );
 }
+
 
 function objectId(id) {
   return new mongoose.Types.ObjectId(id);
 }
+
 
 function normalizeFramework(framework) {
   const allowed = [
@@ -47,6 +63,7 @@ function normalizeFramework(framework) {
     : "Node.js";
 }
 
+
 function publicProject(project) {
   if (!project) return null;
 
@@ -58,11 +75,13 @@ function publicProject(project) {
   return data;
 }
 
+
 function cleanString(value, max = 5000) {
-  return String(value || "")
+  return String(value ?? "")
     .trim()
     .slice(0, max);
 }
+
 
 function parsePagination(req) {
   const page = Math.max(
@@ -85,11 +104,13 @@ function parsePagination(req) {
   };
 }
 
+
 function getResourceCollection() {
   return mongoose.connection.collection(
     "project_resources"
   );
 }
+
 
 async function getOwnedProject(
   projectId,
@@ -109,6 +130,7 @@ async function getOwnedProject(
   });
 }
 
+
 function sendError(
   res,
   status,
@@ -122,6 +144,155 @@ function sendError(
   );
 }
 
+
+/* =========================================================
+   NORMALIZE GENERATED FILE
+   ========================================================= */
+
+function normalizeProjectFile(file = {}) {
+  const path =
+    cleanString(file.path, 500);
+
+  const name =
+    cleanString(
+      file.name ||
+      path.split("/").pop() ||
+      "file",
+      200
+    );
+
+  const content =
+    String(file.content ?? "");
+
+  return {
+    path,
+
+    name,
+
+    type:
+      cleanString(
+        file.type || "file",
+        100
+      ),
+
+    language:
+      cleanString(
+        file.language || "",
+        50
+      ),
+
+    content,
+
+    size:
+      Buffer.byteLength(
+        content,
+        "utf8"
+      ),
+
+    hash:
+      cleanString(
+        file.hash || "",
+        200
+      ),
+
+    isEntryPoint:
+      Boolean(
+        file.isEntryPoint
+      ),
+
+    isGenerated:
+      file.isGenerated === undefined
+        ? true
+        : Boolean(file.isGenerated)
+  };
+}
+
+
+/* =========================================================
+   NORMALIZE FILE COLLECTION
+   ========================================================= */
+
+function normalizeProjectFiles(files) {
+  if (!Array.isArray(files)) {
+    return [];
+  }
+
+  const normalized = [];
+  const paths = new Set();
+
+  for (const rawFile of files) {
+    const file =
+      normalizeProjectFile(rawFile);
+
+    if (!file.path) {
+      continue;
+    }
+
+    if (paths.has(file.path)) {
+      continue;
+    }
+
+    paths.add(file.path);
+
+    normalized.push(file);
+  }
+
+  return normalized;
+}
+
+
+/* =========================================================
+   FILE COUNT
+   ========================================================= */
+
+function getFileCount(project) {
+  return Array.isArray(project?.files)
+    ? project.files.length
+    : 0;
+}
+
+
+/* =========================================================
+   ACTIVITY LOGGER
+   ========================================================= */
+
+async function createActivity({
+  projectId,
+  userId,
+  action,
+  message,
+  metadata = {}
+}) {
+  try {
+    await getResourceCollection()
+      .insertOne({
+        projectId:
+          objectId(projectId),
+
+        userId:
+          objectId(userId),
+
+        type:
+          "activity",
+
+        action,
+
+        message,
+
+        metadata,
+
+        createdAt:
+          new Date()
+      });
+  } catch (error) {
+    console.error(
+      "PROJECT ACTIVITY LOG ERROR:",
+      error
+    );
+  }
+}
+
+
 /* =========================================================
    CREATE PROJECT
    ========================================================= */
@@ -131,7 +302,8 @@ async function createProjectController(
   res
 ) {
   try {
-    const userId = getUserId(req);
+    const userId =
+      getUserId(req);
 
     if (!userId) {
       return sendError(
@@ -144,11 +316,15 @@ async function createProjectController(
     const {
       projectName,
       description = "",
-      framework = "Node.js"
+      framework = "Node.js",
+      files = []
     } = req.body || {};
 
     const cleanName =
-      cleanString(projectName, 120);
+      cleanString(
+        projectName,
+        120
+      );
 
     if (!cleanName) {
       return sendError(
@@ -158,16 +334,15 @@ async function createProjectController(
       );
     }
 
-    if (cleanName.length > 120) {
-      return sendError(
-        res,
-        400,
-        "Project name must be 120 characters or less"
-      );
-    }
-
     const normalizedFramework =
-      normalizeFramework(framework);
+      normalizeFramework(
+        framework
+      );
+
+    const normalizedFiles =
+      normalizeProjectFiles(
+        files
+      );
 
     const project =
       await Project.create({
@@ -192,47 +367,48 @@ async function createProjectController(
           "not_deployed",
 
         build: {
-          status: "idle"
+          status:
+            "idle"
         },
 
-        files: [],
+        files:
+          normalizedFiles,
 
-        aiGenerated: true
-      });
+        fileCount:
+          normalizedFiles.length,
 
-    /* ============================================
-       INITIAL ACTIVITY
-       ============================================ */
+        aiGenerated:
+          true,
 
-    await getResourceCollection()
-      .insertOne({
-        projectId:
-          project._id,
-
-        userId:
-          objectId(userId),
-
-        type:
-          "activity",
-
-        action:
-          "project.created",
-
-        message:
-          "Project created",
-
-        metadata: {
-          framework:
-            normalizedFramework
-        },
-
-        createdAt:
+        lastActivityAt:
           new Date()
       });
+
+    await createActivity({
+      projectId:
+        project._id,
+
+      userId,
+
+      action:
+        "project.created",
+
+      message:
+        "Project created",
+
+      metadata: {
+        framework:
+          normalizedFramework,
+
+        fileCount:
+          normalizedFiles.length
+      }
+    });
 
     return res.status(201).json(
       formatResponse({
         success: true,
+
         message:
           "Project created",
 
@@ -254,6 +430,7 @@ async function createProjectController(
   }
 }
 
+
 /* =========================================================
    GET MY PROJECTS
    ========================================================= */
@@ -263,7 +440,8 @@ async function getProjectsController(
   res
 ) {
   try {
-    const userId = getUserId(req);
+    const userId =
+      getUserId(req);
 
     if (!userId) {
       return sendError(
@@ -277,28 +455,33 @@ async function getProjectsController(
       page,
       limit,
       skip
-    } = parsePagination(req);
+    } =
+      parsePagination(req);
 
     const filter = {
       userId,
-      isArchived: false
+      isArchived:
+        false
     };
 
     const [
       projects,
       total
-    ] = await Promise.all([
-      Project.find(filter)
-        .sort({
-          lastActivityAt: -1,
-          createdAt: -1
-        })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
+    ] =
+      await Promise.all([
+        Project.find(filter)
+          .sort({
+            lastActivityAt: -1,
+            createdAt: -1
+          })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
 
-      Project.countDocuments(filter)
-    ]);
+        Project.countDocuments(
+          filter
+        )
+      ]);
 
     return res.json(
       formatResponse({
@@ -311,6 +494,7 @@ async function getProjectsController(
             page,
             limit,
             total,
+
             pages:
               Math.ceil(
                 total / limit
@@ -332,6 +516,7 @@ async function getProjectsController(
     );
   }
 }
+
 
 /* =========================================================
    GET SINGLE PROJECT
@@ -358,7 +543,9 @@ async function getSingleProjectController(
     }
 
     if (
-      !isValidObjectId(projectId)
+      !isValidObjectId(
+        projectId
+      )
     ) {
       return sendError(
         res,
@@ -384,6 +571,7 @@ async function getSingleProjectController(
     return res.json(
       formatResponse({
         success: true,
+
         data:
           publicProject(project)
       })
@@ -401,6 +589,7 @@ async function getSingleProjectController(
     );
   }
 }
+
 
 /* =========================================================
    UPDATE PROJECT
@@ -427,7 +616,9 @@ async function updateProjectStatusController(
     }
 
     if (
-      !isValidObjectId(projectId)
+      !isValidObjectId(
+        projectId
+      )
     ) {
       return sendError(
         res,
@@ -442,7 +633,8 @@ async function updateProjectStatusController(
       liveUrl,
       projectName,
       description,
-      framework
+      framework,
+      files
     } = req.body || {};
 
     const allowedStatuses = [
@@ -478,7 +670,8 @@ async function updateProjectStatusController(
     }
 
     if (
-      deploymentUrl !== undefined
+      deploymentUrl !==
+      undefined
     ) {
       update.deploymentUrl =
         cleanString(
@@ -488,7 +681,8 @@ async function updateProjectStatusController(
     }
 
     if (
-      liveUrl !== undefined
+      liveUrl !==
+      undefined
     ) {
       update.liveUrl =
         cleanString(
@@ -498,17 +692,30 @@ async function updateProjectStatusController(
     }
 
     if (
-      projectName !== undefined
+      projectName !==
+      undefined
     ) {
-      update.projectName =
+      const cleanName =
         cleanString(
           projectName,
           120
         );
+
+      if (!cleanName) {
+        return sendError(
+          res,
+          400,
+          "Project name cannot be empty"
+        );
+      }
+
+      update.projectName =
+        cleanName;
     }
 
     if (
-      description !== undefined
+      description !==
+      undefined
     ) {
       update.description =
         cleanString(
@@ -518,7 +725,8 @@ async function updateProjectStatusController(
     }
 
     if (
-      framework !== undefined
+      framework !==
+      undefined
     ) {
       update.framework =
         normalizeFramework(
@@ -527,7 +735,31 @@ async function updateProjectStatusController(
     }
 
     if (
-      status === "deployed"
+      files !== undefined
+    ) {
+      if (!Array.isArray(files)) {
+        return sendError(
+          res,
+          400,
+          "Files must be an array"
+        );
+      }
+
+      const normalizedFiles =
+        normalizeProjectFiles(
+          files
+        );
+
+      update.files =
+        normalizedFiles;
+
+      update.fileCount =
+        normalizedFiles.length;
+    }
+
+    if (
+      status ===
+      "deployed"
     ) {
       update.deploymentStatus =
         "deployed";
@@ -550,7 +782,8 @@ async function updateProjectStatusController(
             update,
 
           $inc: {
-            version: 1
+            version:
+              1
           }
         },
 
@@ -568,35 +801,32 @@ async function updateProjectStatusController(
       );
     }
 
-    await getResourceCollection()
-      .insertOne({
-        projectId:
-          objectId(projectId),
+    await createActivity({
+      projectId,
 
-        userId:
-          objectId(userId),
+      userId,
 
-        type:
-          "activity",
+      action:
+        "project.updated",
 
-        action:
-          "project.updated",
+      message:
+        "Project updated",
 
-        message:
-          "Project updated",
+      metadata: {
+        status:
+          status || null,
 
-        metadata: {
-          status:
-            status || null
-        },
-
-        createdAt:
-          new Date()
-      });
+        fileCount:
+          files !== undefined
+            ? updatedProject.fileCount
+            : undefined
+      }
+    });
 
     return res.json(
       formatResponse({
         success: true,
+
         message:
           "Project updated",
 
@@ -619,6 +849,7 @@ async function updateProjectStatusController(
     );
   }
 }
+
 
 /* =========================================================
    ARCHIVE PROJECT
@@ -645,7 +876,9 @@ async function deleteProjectController(
     }
 
     if (
-      !isValidObjectId(projectId)
+      !isValidObjectId(
+        projectId
+      )
     ) {
       return sendError(
         res,
@@ -696,30 +929,22 @@ async function deleteProjectController(
       );
     }
 
-    await getResourceCollection()
-      .insertOne({
-        projectId:
-          objectId(projectId),
+    await createActivity({
+      projectId,
 
-        userId:
-          objectId(userId),
+      userId,
 
-        type:
-          "activity",
+      action:
+        "project.archived",
 
-        action:
-          "project.archived",
-
-        message:
-          "Project archived",
-
-        createdAt:
-          new Date()
-      });
+      message:
+        "Project archived"
+    });
 
     return res.json(
       formatResponse({
         success: true,
+
         message:
           "Project archived"
       })
@@ -737,6 +962,7 @@ async function deleteProjectController(
     );
   }
 }
+
 
 /* =========================================================
    DEPLOY PROJECT
@@ -763,7 +989,9 @@ async function deployProjectController(
     }
 
     if (
-      !isValidObjectId(projectId)
+      !isValidObjectId(
+        projectId
+      )
     ) {
       return sendError(
         res,
@@ -799,8 +1027,24 @@ async function deployProjectController(
       );
     }
 
+    const files =
+      Array.isArray(project.files)
+        ? project.files
+        : [];
+
+    if (!files.length) {
+      return sendError(
+        res,
+        400,
+        "Project has no files to deploy"
+      );
+    }
+
     const startedAt =
       new Date();
+
+    const buildId =
+      `build_${Date.now()}`;
 
     project.status =
       "deploying";
@@ -812,8 +1056,7 @@ async function deployProjectController(
       status:
         "building",
 
-      buildId:
-        `build_${Date.now()}`,
+      buildId,
 
       startedAt,
 
@@ -823,6 +1066,9 @@ async function deployProjectController(
       errorMessage:
         ""
     };
+
+    project.lastActivityAt =
+      new Date();
 
     await project.save();
 
@@ -840,8 +1086,7 @@ async function deployProjectController(
         status:
           "building",
 
-        buildId:
-          project.build.buildId,
+        buildId,
 
         createdAt:
           new Date()
@@ -861,8 +1106,7 @@ async function deployProjectController(
           framework:
             project.framework,
 
-          files:
-            project.files,
+          files,
 
           deploymentProvider:
             project.deploymentProvider,
@@ -890,6 +1134,18 @@ async function deployProjectController(
 
       project.build.completedAt =
         completedAt;
+
+      project.lastActivityAt =
+        completedAt;
+
+      if (
+        !Array.isArray(
+          project.deploymentHistory
+        )
+      ) {
+        project.deploymentHistory =
+          [];
+      }
 
       project.deploymentHistory.push({
         deploymentId:
@@ -978,6 +1234,18 @@ async function deployProjectController(
     project.build.completedAt =
       completedAt;
 
+    project.lastActivityAt =
+      completedAt;
+
+    if (
+      !Array.isArray(
+        project.deploymentHistory
+      )
+    ) {
+      project.deploymentHistory =
+        [];
+    }
+
     project.deploymentHistory.push({
       deploymentId,
 
@@ -1020,31 +1288,23 @@ async function deployProjectController(
           new Date()
       });
 
-    await getResourceCollection()
-      .insertOne({
-        projectId:
-          objectId(projectId),
+    await createActivity({
+      projectId,
 
-        userId:
-          objectId(userId),
+      userId,
 
-        type:
-          "activity",
+      action:
+        "deployment.completed",
 
-        action:
-          "deployment.completed",
+      message:
+        "Project deployed successfully",
 
-        message:
-          "Project deployed successfully",
+      metadata: {
+        deploymentId,
 
-        metadata: {
-          deploymentId,
-          liveUrl
-        },
-
-        createdAt:
-          new Date()
-      });
+        liveUrl
+      }
+    });
 
     return res.json(
       formatResponse({
@@ -1077,6 +1337,7 @@ async function deployProjectController(
   }
 }
 
+
 /* =========================================================
    PROJECT FILES
    ========================================================= */
@@ -1093,6 +1354,26 @@ async function getProjectFilesController(
       projectId
     } = req.params;
 
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
+
+    if (
+      !isValidObjectId(
+        projectId
+      )
+    ) {
+      return sendError(
+        res,
+        400,
+        "Invalid project ID"
+      );
+    }
+
     const project =
       await getOwnedProject(
         projectId,
@@ -1107,17 +1388,18 @@ async function getProjectFilesController(
       );
     }
 
+    const files =
+      project.files || [];
+
     return res.json(
       formatResponse({
         success: true,
 
         data: {
-          files:
-            project.files || [],
+          files,
 
           fileCount:
-            project.fileCount ||
-            0
+            files.length
         }
       })
     );
@@ -1134,6 +1416,7 @@ async function getProjectFilesController(
     );
   }
 }
+
 
 /* =========================================================
    GET SINGLE FILE
@@ -1152,6 +1435,26 @@ async function getProjectFileController(
       fileId
     } = req.params;
 
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
+
+    if (
+      !isValidObjectId(
+        projectId
+      )
+    ) {
+      return sendError(
+        res,
+        400,
+        "Invalid project ID"
+      );
+    }
+
     const project =
       await getOwnedProject(
         projectId,
@@ -1167,7 +1470,9 @@ async function getProjectFileController(
     }
 
     const file =
-      project.files.id(fileId);
+      project.files.id(
+        fileId
+      );
 
     if (!file) {
       return sendError(
@@ -1180,7 +1485,9 @@ async function getProjectFileController(
     return res.json(
       formatResponse({
         success: true,
-        data: file
+
+        data:
+          file
       })
     );
   } catch (error) {
@@ -1196,6 +1503,7 @@ async function getProjectFileController(
     );
   }
 }
+
 
 /* =========================================================
    CREATE FILE
@@ -1213,15 +1521,13 @@ async function createProjectFileController(
       projectId
     } = req.params;
 
-    const {
-      path,
-      name,
-      type = "file",
-      language = "",
-      content = "",
-      isEntryPoint = false,
-      isGenerated = true
-    } = req.body || {};
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
 
     const project =
       await getOwnedProject(
@@ -1237,15 +1543,14 @@ async function createProjectFileController(
       );
     }
 
-    const cleanPath =
-      cleanString(path, 500);
-
-    const cleanName =
-      cleanString(name, 200);
+    const file =
+      normalizeProjectFile(
+        req.body || {}
+      );
 
     if (
-      !cleanPath ||
-      !cleanName
+      !file.path ||
+      !file.name
     ) {
       return sendError(
         res,
@@ -1256,9 +1561,9 @@ async function createProjectFileController(
 
     const duplicate =
       project.files.some(
-        file =>
-          file.path ===
-          cleanPath
+        existingFile =>
+          existingFile.path ===
+          file.path
       );
 
     if (duplicate) {
@@ -1269,67 +1574,42 @@ async function createProjectFileController(
       );
     }
 
-    project.files.push({
-      path:
-        cleanPath,
+    project.files.push(
+      file
+    );
 
-      name:
-        cleanName,
+    project.fileCount =
+      project.files.length;
 
-      type:
-        cleanString(type, 100),
+    project.version =
+      (project.version || 0) + 1;
 
-      language:
-        cleanString(language, 50),
-
-      content:
-        String(content || ""),
-
-      size:
-        Buffer.byteLength(
-          String(content || ""),
-          "utf8"
-        ),
-
-      hash:
-        "",
-
-      isEntryPoint:
-        Boolean(isEntryPoint),
-
-      isGenerated:
-        Boolean(isGenerated)
-    });
-
-    project.version += 1;
+    project.lastActivityAt =
+      new Date();
 
     await project.save();
 
-    await getResourceCollection()
-      .insertOne({
-        projectId:
-          objectId(projectId),
+    await createActivity({
+      projectId,
 
-        userId:
-          objectId(userId),
+      userId,
 
-        type:
-          "activity",
+      action:
+        "file.created",
 
-        action:
-          "file.created",
+      message:
+        `File created: ${file.path}`,
 
-        message:
-          `File created: ${cleanPath}`,
+      metadata: {
+        path:
+          file.path
+      }
+    });
 
-        metadata: {
-          path:
-            cleanPath
-        },
-
-        createdAt:
-          new Date()
-      });
+    const createdFile =
+      project.files[
+        project.files.length - 1
+      ];
 
     return res.status(201).json(
       formatResponse({
@@ -1339,9 +1619,7 @@ async function createProjectFileController(
           "Project file created",
 
         data:
-          project.files[
-            project.files.length - 1
-          ]
+          createdFile
       })
     );
   } catch (error) {
@@ -1357,6 +1635,7 @@ async function createProjectFileController(
     );
   }
 }
+
 
 /* =========================================================
    UPDATE FILE
@@ -1375,6 +1654,14 @@ async function updateProjectFileController(
       fileId
     } = req.params;
 
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
+
     const project =
       await getOwnedProject(
         projectId,
@@ -1390,7 +1677,9 @@ async function updateProjectFileController(
     }
 
     const file =
-      project.files.id(fileId);
+      project.files.id(
+        fileId
+      );
 
     if (!file) {
       return sendError(
@@ -1406,25 +1695,92 @@ async function updateProjectFileController(
       language,
       content,
       isEntryPoint,
-      isGenerated
+      isGenerated,
+      type
     } = req.body || {};
 
-    if (path !== undefined)
+    if (
+      path !== undefined
+    ) {
+      const cleanPath =
+        cleanString(
+          path,
+          500
+        );
+
+      if (!cleanPath) {
+        return sendError(
+          res,
+          400,
+          "File path cannot be empty"
+        );
+      }
+
+      const duplicate =
+        project.files.some(
+          existingFile =>
+            existingFile._id.toString() !==
+              file._id.toString() &&
+            existingFile.path ===
+              cleanPath
+        );
+
+      if (duplicate) {
+        return sendError(
+          res,
+          409,
+          "Another file already uses this path"
+        );
+      }
+
       file.path =
-        cleanString(path, 500);
+        cleanPath;
+    }
 
-    if (name !== undefined)
+    if (
+      name !== undefined
+    ) {
+      const cleanName =
+        cleanString(
+          name,
+          200
+        );
+
+      if (!cleanName) {
+        return sendError(
+          res,
+          400,
+          "File name cannot be empty"
+        );
+      }
+
       file.name =
-        cleanString(name, 200);
+        cleanName;
+    }
 
-    if (language !== undefined)
+    if (
+      type !== undefined
+    ) {
+      file.type =
+        cleanString(
+          type,
+          100
+        );
+    }
+
+    if (
+      language !== undefined
+    ) {
       file.language =
         cleanString(
           language,
           50
         );
+    }
 
-    if (content !== undefined) {
+    if (
+      content !== undefined
+    ) {
       file.content =
         String(content);
 
@@ -1437,19 +1793,51 @@ async function updateProjectFileController(
 
     if (
       isEntryPoint !== undefined
-    )
+    ) {
       file.isEntryPoint =
-        Boolean(isEntryPoint);
+        Boolean(
+          isEntryPoint
+        );
+    }
 
     if (
       isGenerated !== undefined
-    )
+    ) {
       file.isGenerated =
-        Boolean(isGenerated);
+        Boolean(
+          isGenerated
+        );
+    }
 
-    project.version += 1;
+    project.fileCount =
+      project.files.length;
+
+    project.version =
+      (project.version || 0) + 1;
+
+    project.lastActivityAt =
+      new Date();
 
     await project.save();
+
+    await createActivity({
+      projectId,
+
+      userId,
+
+      action:
+        "file.updated",
+
+      message:
+        `File updated: ${file.path}`,
+
+      metadata: {
+        path:
+          file.path,
+
+        fileId
+      }
+    });
 
     return res.json(
       formatResponse({
@@ -1458,7 +1846,8 @@ async function updateProjectFileController(
         message:
           "Project file updated",
 
-        data: file
+        data:
+          file
       })
     );
   } catch (error) {
@@ -1474,6 +1863,7 @@ async function updateProjectFileController(
     );
   }
 }
+
 
 /* =========================================================
    DELETE FILE
@@ -1492,6 +1882,14 @@ async function deleteProjectFileController(
       fileId
     } = req.params;
 
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
+
     const project =
       await getOwnedProject(
         projectId,
@@ -1507,7 +1905,9 @@ async function deleteProjectFileController(
     }
 
     const file =
-      project.files.id(fileId);
+      project.files.id(
+        fileId
+      );
 
     if (!file) {
       return sendError(
@@ -1522,9 +1922,34 @@ async function deleteProjectFileController(
 
     file.deleteOne();
 
-    project.version += 1;
+    project.fileCount =
+      project.files.length;
+
+    project.version =
+      (project.version || 0) + 1;
+
+    project.lastActivityAt =
+      new Date();
 
     await project.save();
+
+    await createActivity({
+      projectId,
+
+      userId,
+
+      action:
+        "file.deleted",
+
+      message:
+        `File deleted: ${path}`,
+
+      metadata: {
+        path,
+
+        fileId
+      }
+    });
 
     return res.json(
       formatResponse({
@@ -1552,6 +1977,7 @@ async function deleteProjectFileController(
   }
 }
 
+
 /* =========================================================
    PROJECT SETTINGS
    ========================================================= */
@@ -1568,6 +1994,14 @@ async function getProjectSettingsController(
       projectId
     } = req.params;
 
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
+
     const project =
       await getOwnedProject(
         projectId,
@@ -1582,20 +2016,18 @@ async function getProjectSettingsController(
       );
     }
 
-    const collection =
-      getResourceCollection();
-
     const settings =
-      await collection.findOne({
-        projectId:
-          objectId(projectId),
+      await getResourceCollection()
+        .findOne({
+          projectId:
+            objectId(projectId),
 
-        userId:
-          objectId(userId),
+          userId:
+            objectId(userId),
 
-        type:
-          "settings"
-      });
+          type:
+            "settings"
+        });
 
     return res.json(
       formatResponse({
@@ -1619,6 +2051,7 @@ async function getProjectSettingsController(
   }
 }
 
+
 /* =========================================================
    UPDATE SETTINGS
    ========================================================= */
@@ -1634,6 +2067,14 @@ async function updateProjectSettingsController(
     const {
       projectId
     } = req.params;
+
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
 
     const project =
       await getOwnedProject(
@@ -1689,9 +2130,15 @@ async function updateProjectSettingsController(
       },
 
       {
-        upsert: true
+        upsert:
+          true
       }
     );
+
+    project.lastActivityAt =
+      new Date();
+
+    await project.save();
 
     return res.json(
       formatResponse({
@@ -1718,6 +2165,7 @@ async function updateProjectSettingsController(
   }
 }
 
+
 /* =========================================================
    PROJECT ACTIVITY
    ========================================================= */
@@ -1733,6 +2181,14 @@ async function getProjectActivityController(
     const {
       projectId
     } = req.params;
+
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
 
     const project =
       await getOwnedProject(
@@ -1752,7 +2208,8 @@ async function getProjectActivityController(
       page,
       limit,
       skip
-    } = parsePagination(req);
+    } =
+      parsePagination(req);
 
     const collection =
       getResourceCollection();
@@ -1771,20 +2228,21 @@ async function getProjectActivityController(
     const [
       activities,
       total
-    ] = await Promise.all([
-      collection
-        .find(filter)
-        .sort({
-          createdAt: -1
-        })
-        .skip(skip)
-        .limit(limit)
-        .toArray(),
+    ] =
+      await Promise.all([
+        collection
+          .find(filter)
+          .sort({
+            createdAt: -1
+          })
+          .skip(skip)
+          .limit(limit)
+          .toArray(),
 
-      collection.countDocuments(
-        filter
-      )
-    ]);
+        collection.countDocuments(
+          filter
+        )
+      ]);
 
     return res.json(
       formatResponse({
@@ -1797,6 +2255,7 @@ async function getProjectActivityController(
             page,
             limit,
             total,
+
             pages:
               Math.ceil(
                 total / limit
@@ -1819,6 +2278,7 @@ async function getProjectActivityController(
   }
 }
 
+
 /* =========================================================
    ENVIRONMENT
    ========================================================= */
@@ -1834,6 +2294,14 @@ async function getProjectEnvironmentController(
     const {
       projectId
     } = req.params;
+
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
 
     const project =
       await getOwnedProject(
@@ -1892,6 +2360,7 @@ async function getProjectEnvironmentController(
   }
 }
 
+
 /* =========================================================
    CREATE ENVIRONMENT VARIABLE
    ========================================================= */
@@ -1908,10 +2377,19 @@ async function createProjectEnvironmentController(
       projectId
     } = req.params;
 
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
+
     const {
       key,
       value,
-      environment = "production"
+      environment =
+        "production"
     } = req.body || {};
 
     const project =
@@ -1929,7 +2407,10 @@ async function createProjectEnvironmentController(
     }
 
     const cleanKey =
-      cleanString(key, 200);
+      cleanString(
+        key,
+        200
+      );
 
     if (!cleanKey) {
       return sendError(
@@ -1938,6 +2419,12 @@ async function createProjectEnvironmentController(
         "Environment key required"
       );
     }
+
+    const cleanEnvironment =
+      cleanString(
+        environment,
+        50
+      ) || "production";
 
     const collection =
       getResourceCollection();
@@ -1956,7 +2443,8 @@ async function createProjectEnvironmentController(
         key:
           cleanKey,
 
-        environment
+        environment:
+          cleanEnvironment
       });
 
     if (existing) {
@@ -1981,13 +2469,10 @@ async function createProjectEnvironmentController(
         cleanKey,
 
       value:
-        String(value || ""),
+        String(value ?? ""),
 
       environment:
-        cleanString(
-          environment,
-          50
-        ),
+        cleanEnvironment,
 
       createdAt:
         new Date(),
@@ -2007,7 +2492,8 @@ async function createProjectEnvironmentController(
           key:
             cleanKey,
 
-          environment
+          environment:
+            cleanEnvironment
         }
       })
     );
@@ -2024,6 +2510,7 @@ async function createProjectEnvironmentController(
     );
   }
 }
+
 
 /* =========================================================
    UPDATE ENVIRONMENT VARIABLE
@@ -2042,60 +2529,118 @@ async function updateProjectEnvironmentController(
       variableId
     } = req.params;
 
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
+
+    if (
+      !isValidObjectId(
+        projectId
+      ) ||
+      !isValidObjectId(
+        variableId
+      )
+    ) {
+      return sendError(
+        res,
+        400,
+        "Invalid project or environment variable ID"
+      );
+    }
+
+    const project =
+      await getOwnedProject(
+        projectId,
+        userId
+      );
+
+    if (!project) {
+      return sendError(
+        res,
+        404,
+        "Project not found"
+      );
+    }
+
     const {
       key,
       value,
       environment
     } = req.body || {};
 
-    const collection =
-      getResourceCollection();
-
     const update = {
       updatedAt:
         new Date()
     };
 
-    if (key !== undefined)
-      update.key =
-        cleanString(key, 200);
+    if (
+      key !== undefined
+    ) {
+      const cleanKey =
+        cleanString(
+          key,
+          200
+        );
 
-    if (value !== undefined)
+      if (!cleanKey) {
+        return sendError(
+          res,
+          400,
+          "Environment key cannot be empty"
+        );
+      }
+
+      update.key =
+        cleanKey;
+    }
+
+    if (
+      value !== undefined
+    ) {
       update.value =
         String(value);
+    }
 
     if (
       environment !== undefined
-    )
+    ) {
       update.environment =
         cleanString(
           environment,
           50
         );
+    }
 
     const result =
-      await collection.updateOne(
-        {
-          _id:
-            objectId(variableId),
+      await getResourceCollection()
+        .updateOne(
+          {
+            _id:
+              objectId(variableId),
 
-          projectId:
-            objectId(projectId),
+            projectId:
+              objectId(projectId),
 
-          userId:
-            objectId(userId),
+            userId:
+              objectId(userId),
 
-          type:
-            "environment"
-        },
+            type:
+              "environment"
+          },
 
-        {
-          $set:
-            update
-        }
-      );
+          {
+            $set:
+              update
+          }
+        );
 
-    if (!result.matchedCount) {
+    if (
+      !result.matchedCount
+    ) {
       return sendError(
         res,
         404,
@@ -2125,6 +2670,7 @@ async function updateProjectEnvironmentController(
   }
 }
 
+
 /* =========================================================
    DELETE ENVIRONMENT VARIABLE
    ========================================================= */
@@ -2142,6 +2688,43 @@ async function deleteProjectEnvironmentController(
       variableId
     } = req.params;
 
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
+
+    if (
+      !isValidObjectId(
+        projectId
+      ) ||
+      !isValidObjectId(
+        variableId
+      )
+    ) {
+      return sendError(
+        res,
+        400,
+        "Invalid project or environment variable ID"
+      );
+    }
+
+    const project =
+      await getOwnedProject(
+        projectId,
+        userId
+      );
+
+    if (!project) {
+      return sendError(
+        res,
+        404,
+        "Project not found"
+      );
+    }
+
     const result =
       await getResourceCollection()
         .deleteOne({
@@ -2158,7 +2741,9 @@ async function deleteProjectEnvironmentController(
             "environment"
         });
 
-    if (!result.deletedCount) {
+    if (
+      !result.deletedCount
+    ) {
       return sendError(
         res,
         404,
@@ -2188,6 +2773,7 @@ async function deleteProjectEnvironmentController(
   }
 }
 
+
 /* =========================================================
    BUILD HISTORY
    ========================================================= */
@@ -2203,6 +2789,14 @@ async function getBuildHistoryController(
     const {
       projectId
     } = req.params;
+
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
 
     const project =
       await getOwnedProject(
@@ -2239,6 +2833,7 @@ async function getBuildHistoryController(
     return res.json(
       formatResponse({
         success: true,
+
         data: {
           builds
         }
@@ -2258,6 +2853,7 @@ async function getBuildHistoryController(
   }
 }
 
+
 /* =========================================================
    DEPLOYMENT HISTORY
    ========================================================= */
@@ -2273,6 +2869,14 @@ async function getDeploymentHistoryController(
     const {
       projectId
     } = req.params;
+
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
 
     const project =
       await getOwnedProject(
@@ -2329,6 +2933,7 @@ async function getDeploymentHistoryController(
   }
 }
 
+
 /* =========================================================
    PROJECT MEMBERS
    ========================================================= */
@@ -2344,6 +2949,14 @@ async function getProjectMembersController(
     const {
       projectId
     } = req.params;
+
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
 
     const project =
       await getOwnedProject(
@@ -2383,6 +2996,7 @@ async function getProjectMembersController(
     return res.json(
       formatResponse({
         success: true,
+
         data: {
           members
         }
@@ -2402,6 +3016,7 @@ async function getProjectMembersController(
   }
 }
 
+
 /* =========================================================
    ADD MEMBER
    ========================================================= */
@@ -2418,9 +3033,18 @@ async function addProjectMemberController(
       projectId
     } = req.params;
 
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
+
     const {
       email,
-      role = "member"
+      role =
+        "member"
     } = req.body || {};
 
     const project =
@@ -2460,7 +3084,9 @@ async function addProjectMemberController(
     ];
 
     if (
-      !allowedRoles.includes(role)
+      !allowedRoles.includes(
+        role
+      )
     ) {
       return sendError(
         res,
@@ -2521,6 +3147,25 @@ async function addProjectMemberController(
       member
     );
 
+    await createActivity({
+      projectId,
+
+      userId,
+
+      action:
+        "member.added",
+
+      message:
+        `Project member added: ${cleanEmail}`,
+
+      metadata: {
+        email:
+          cleanEmail,
+
+        role
+      }
+    });
+
     return res.status(201).json(
       formatResponse({
         success: true,
@@ -2550,6 +3195,7 @@ async function addProjectMemberController(
   }
 }
 
+
 /* =========================================================
    UPDATE MEMBER
    ========================================================= */
@@ -2566,6 +3212,43 @@ async function updateProjectMemberController(
       projectId,
       memberId
     } = req.params;
+
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
+
+    if (
+      !isValidObjectId(
+        projectId
+      ) ||
+      !isValidObjectId(
+        memberId
+      )
+    ) {
+      return sendError(
+        res,
+        400,
+        "Invalid project or member ID"
+      );
+    }
+
+    const project =
+      await getOwnedProject(
+        projectId,
+        userId
+      );
+
+    if (!project) {
+      return sendError(
+        res,
+        404,
+        "Project not found"
+      );
+    }
 
     const {
       role,
@@ -2588,7 +3271,9 @@ async function updateProjectMemberController(
 
     if (
       role &&
-      !allowedRoles.includes(role)
+      !allowedRoles.includes(
+        role
+      )
     ) {
       return sendError(
         res,
@@ -2599,7 +3284,9 @@ async function updateProjectMemberController(
 
     if (
       status &&
-      !allowedStatuses.includes(status)
+      !allowedStatuses.includes(
+        status
+      )
     ) {
       return sendError(
         res,
@@ -2613,13 +3300,15 @@ async function updateProjectMemberController(
         new Date()
     };
 
-    if (role)
+    if (role) {
       update.role =
         role;
+    }
 
-    if (status)
+    if (status) {
       update.status =
         status;
+    }
 
     const result =
       await getResourceCollection()
@@ -2641,13 +3330,37 @@ async function updateProjectMemberController(
           }
         );
 
-    if (!result.matchedCount) {
+    if (
+      !result.matchedCount
+    ) {
       return sendError(
         res,
         404,
         "Project member not found"
       );
     }
+
+    await createActivity({
+      projectId,
+
+      userId,
+
+      action:
+        "member.updated",
+
+      message:
+        "Project member updated",
+
+      metadata: {
+        memberId,
+
+        role:
+          role || null,
+
+        status:
+          status || null
+      }
+    });
 
     return res.json(
       formatResponse({
@@ -2671,6 +3384,7 @@ async function updateProjectMemberController(
   }
 }
 
+
 /* =========================================================
    REMOVE MEMBER
    ========================================================= */
@@ -2688,6 +3402,43 @@ async function removeProjectMemberController(
       memberId
     } = req.params;
 
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
+
+    if (
+      !isValidObjectId(
+        projectId
+      ) ||
+      !isValidObjectId(
+        memberId
+      )
+    ) {
+      return sendError(
+        res,
+        400,
+        "Invalid project or member ID"
+      );
+    }
+
+    const project =
+      await getOwnedProject(
+        projectId,
+        userId
+      );
+
+    if (!project) {
+      return sendError(
+        res,
+        404,
+        "Project not found"
+      );
+    }
+
     const result =
       await getResourceCollection()
         .deleteOne({
@@ -2701,13 +3452,31 @@ async function removeProjectMemberController(
             "member"
         });
 
-    if (!result.deletedCount) {
+    if (
+      !result.deletedCount
+    ) {
       return sendError(
         res,
         404,
         "Project member not found"
       );
     }
+
+    await createActivity({
+      projectId,
+
+      userId,
+
+      action:
+        "member.removed",
+
+      message:
+        "Project member removed",
+
+      metadata: {
+        memberId
+      }
+    });
 
     return res.json(
       formatResponse({
@@ -2731,6 +3500,7 @@ async function removeProjectMemberController(
   }
 }
 
+
 /* =========================================================
    PROJECT LOGS
    ========================================================= */
@@ -2746,6 +3516,14 @@ async function getProjectLogsController(
     const {
       projectId
     } = req.params;
+
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
 
     const project =
       await getOwnedProject(
@@ -2765,7 +3543,8 @@ async function getProjectLogsController(
       page,
       limit,
       skip
-    } = parsePagination(req);
+    } =
+      parsePagination(req);
 
     const filter = {
       projectId:
@@ -2802,7 +3581,9 @@ async function getProjectLogsController(
         );
     }
 
-    if (req.query.deploymentId) {
+    if (
+      req.query.deploymentId
+    ) {
       filter.deploymentId =
         cleanString(
           req.query.deploymentId,
@@ -2816,20 +3597,21 @@ async function getProjectLogsController(
     const [
       logs,
       total
-    ] = await Promise.all([
-      collection
-        .find(filter)
-        .sort({
-          createdAt: -1
-        })
-        .skip(skip)
-        .limit(limit)
-        .toArray(),
+    ] =
+      await Promise.all([
+        collection
+          .find(filter)
+          .sort({
+            createdAt: -1
+          })
+          .skip(skip)
+          .limit(limit)
+          .toArray(),
 
-      collection.countDocuments(
-        filter
-      )
-    ]);
+        collection.countDocuments(
+          filter
+        )
+      ]);
 
     return res.json(
       formatResponse({
@@ -2842,6 +3624,7 @@ async function getProjectLogsController(
             page,
             limit,
             total,
+
             pages:
               Math.ceil(
                 total / limit
@@ -2864,6 +3647,7 @@ async function getProjectLogsController(
   }
 }
 
+
 /* =========================================================
    PROJECT VERSIONS
    ========================================================= */
@@ -2879,6 +3663,14 @@ async function getProjectVersionsController(
     const {
       projectId
     } = req.params;
+
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
 
     const project =
       await getOwnedProject(
@@ -2935,6 +3727,7 @@ async function getProjectVersionsController(
   }
 }
 
+
 /* =========================================================
    GET SINGLE VERSION
    ========================================================= */
@@ -2951,6 +3744,29 @@ async function getProjectVersionController(
       projectId,
       versionId
     } = req.params;
+
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
+
+    if (
+      !isValidObjectId(
+        projectId
+      ) ||
+      !isValidObjectId(
+        versionId
+      )
+    ) {
+      return sendError(
+        res,
+        400,
+        "Invalid project or version ID"
+      );
+    }
 
     const version =
       await getResourceCollection()
@@ -2979,7 +3795,9 @@ async function getProjectVersionController(
     return res.json(
       formatResponse({
         success: true,
-        data: version
+
+        data:
+          version
       })
     );
   } catch (error) {
@@ -2996,6 +3814,7 @@ async function getProjectVersionController(
   }
 }
 
+
 /* =========================================================
    CREATE VERSION
    ========================================================= */
@@ -3011,6 +3830,14 @@ async function createProjectVersionController(
     const {
       projectId
     } = req.params;
+
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
 
     const project =
       await getOwnedProject(
@@ -3035,6 +3862,9 @@ async function createProjectVersionController(
           projectId:
             objectId(projectId),
 
+          userId:
+            objectId(userId),
+
           type:
             "version"
         })
@@ -3049,6 +3879,9 @@ async function createProjectVersionController(
         ? latest[0].versionNumber + 1
         : 1;
 
+    const files =
+      project.files || [];
+
     const version = {
       projectId:
         objectId(projectId),
@@ -3062,7 +3895,7 @@ async function createProjectVersionController(
       versionNumber,
 
       projectVersion:
-        project.version,
+        project.version || 0,
 
       projectName:
         project.projectName,
@@ -3070,8 +3903,10 @@ async function createProjectVersionController(
       framework:
         project.framework,
 
-      files:
-        project.files || [],
+      files,
+
+      fileCount:
+        files.length,
 
       status:
         project.status,
@@ -3085,6 +3920,22 @@ async function createProjectVersionController(
         version
       );
 
+    await createActivity({
+      projectId,
+
+      userId,
+
+      action:
+        "version.created",
+
+      message:
+        `Project version ${versionNumber} created`,
+
+      metadata: {
+        versionNumber
+      }
+    });
+
     return res.status(201).json(
       formatResponse({
         success: true,
@@ -3094,6 +3945,7 @@ async function createProjectVersionController(
 
         data: {
           ...version,
+
           _id:
             result.insertedId
         }
@@ -3113,6 +3965,7 @@ async function createProjectVersionController(
   }
 }
 
+
 /* =========================================================
    RESTORE VERSION
    ========================================================= */
@@ -3129,6 +3982,29 @@ async function restoreProjectVersionController(
       projectId,
       versionId
     } = req.params;
+
+    if (!userId) {
+      return sendError(
+        res,
+        401,
+        "Authentication required"
+      );
+    }
+
+    if (
+      !isValidObjectId(
+        projectId
+      ) ||
+      !isValidObjectId(
+        versionId
+      )
+    ) {
+      return sendError(
+        res,
+        400,
+        "Invalid project or version ID"
+      );
+    }
 
     const project =
       await getOwnedProject(
@@ -3169,46 +4045,52 @@ async function restoreProjectVersionController(
     }
 
     project.files =
-      version.files || [];
+      normalizeProjectFiles(
+        version.files || []
+      );
+
+    project.fileCount =
+      project.files.length;
 
     project.framework =
-      version.framework ||
-      project.framework;
+      normalizeFramework(
+        version.framework ||
+        project.framework
+      );
 
     project.projectName =
-      version.projectName ||
-      project.projectName;
+      cleanString(
+        version.projectName ||
+        project.projectName,
+        120
+      );
 
-    project.version += 1;
+    project.version =
+      (project.version || 0) + 1;
+
+    project.lastActivityAt =
+      new Date();
 
     await project.save();
 
-    await getResourceCollection()
-      .insertOne({
-        projectId:
-          objectId(projectId),
+    await createActivity({
+      projectId,
 
-        userId:
-          objectId(userId),
+      userId,
 
-        type:
-          "activity",
+      action:
+        "version.restored",
 
-        action:
-          "version.restored",
+      message:
+        `Project version ${version.versionNumber} restored`,
 
-        message:
-          `Project version ${version.versionNumber} restored`,
+      metadata: {
+        versionId,
 
-        metadata: {
-          versionId,
-          versionNumber:
-            version.versionNumber
-        },
-
-        createdAt:
-          new Date()
-      });
+        versionNumber:
+          version.versionNumber
+      }
+    });
 
     return res.json(
       formatResponse({
@@ -3218,7 +4100,9 @@ async function restoreProjectVersionController(
           "Project version restored",
 
         data:
-          publicProject(project)
+          publicProject(
+            project
+          )
       })
     );
   } catch (error) {
@@ -3234,6 +4118,7 @@ async function restoreProjectVersionController(
     );
   }
 }
+
 
 /* =========================================================
    EXPORTS
