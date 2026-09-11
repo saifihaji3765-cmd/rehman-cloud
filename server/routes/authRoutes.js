@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const express = require("express");
 const passport = require("passport");
 
@@ -10,10 +12,10 @@ const router = express.Router();
 const {
   registerUser,
   loginUser,
-  googleLogin,
-  githubLogin,
+  googleCallback,
+  githubCallback,
   getCurrentUser,
-  logoutUser
+  logoutUser,
 } = require("../controllers/authController");
 
 /* =========================================================
@@ -21,7 +23,7 @@ const {
 ========================================================= */
 
 const {
-  authMiddleware
+  authMiddleware,
 } = require("../middleware/authMiddleware");
 
 /* =========================================================
@@ -42,7 +44,7 @@ router.post(
 );
 
 /* =========================================================
-   LOGIN
+   EMAIL / PASSWORD LOGIN
 ========================================================= */
 
 router.post(
@@ -70,7 +72,7 @@ router.post(
 );
 
 /* =========================================================
-   GOOGLE AUTH
+   GOOGLE AUTH START
 ========================================================= */
 
 router.get(
@@ -80,15 +82,15 @@ router.get(
     {
       scope: [
         "profile",
-        "email"
+        "email",
       ],
-      session: false
+      session: false,
     }
   )
 );
 
 /* =========================================================
-   GOOGLE CALLBACK
+   GOOGLE AUTH CALLBACK
 ========================================================= */
 
 router.get(
@@ -97,15 +99,16 @@ router.get(
     "google",
     {
       session: false,
+
       failureRedirect:
-        `${FRONTEND_URL}/login`
+        `${FRONTEND_URL}/login?error=google_auth_failed`,
     }
   ),
-  googleLogin
+  googleCallback
 );
 
 /* =========================================================
-   GITHUB AUTH
+   GITHUB AUTH START
 ========================================================= */
 
 router.get(
@@ -114,15 +117,15 @@ router.get(
     "github",
     {
       scope: [
-        "user:email"
+        "user:email",
       ],
-      session: false
+      session: false,
     }
   )
 );
 
 /* =========================================================
-   GITHUB CALLBACK
+   GITHUB AUTH CALLBACK
 ========================================================= */
 
 router.get(
@@ -131,11 +134,12 @@ router.get(
     "github",
     {
       session: false,
+
       failureRedirect:
-        `${FRONTEND_URL}/login`
+        `${FRONTEND_URL}/login?error=github_auth_failed`,
     }
   ),
-  githubLogin
+  githubCallback
 );
 
 /* =========================================================
