@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
@@ -7,106 +9,176 @@ const User = require("../models/userModel");
    CONFIG
 ========================================================= */
 
-const AUTH_COOKIE_NAME = "access_token";
+const JWT_SECRET = process.env.JWT_SECRET;
 
-const AUTH_COOKIE_MAX_AGE =
+const TOKEN_EXPIRES_IN = "7d";
+
+const COOKIE_NAME = "access_token";
+
+const COOKIE_MAX_AGE =
   7 * 24 * 60 * 60 * 1000;
 
+const FRONTEND_URL =
+  process.env.FRONTEND_URL ||
+  "https://zyrionos.com";
+
 /* =========================================================
-   GENERATE APPLICATION JWT
+   ENV VALIDATION
+========================================================= */
+
+if (!JWT_SECRET) {
+  console.warn(
+    "WARNING: JWT_SECRET is not configured."
+  );
+}
+
+/* =========================================================
+   SAFE USER
+========================================================= */
+
+function sanitizeUser(user) {
+  if (!user) {
+    return null;
+  }
+
+  const source =
+    typeof user.toObject === "function"
+      ? user.toObject()
+      : { ...user };
+
+  /*
+   * Never expose password/hash fields.
+   */
+
+  delete source.password;
+  delete source.passwordHash;
+
+  /*
+   * Never expose sensitive OAuth tokens.
+   */
+
+  delete source.accessToken;
+  delete source.refreshToken;
+
+  return source;
+}
+
+/* =========================================================
+   GENERATE JWT
 ========================================================= */
 
 function generateToken(user) {
-  if (!process.env.JWT_SECRET) {
-    throw new Error("JWT_SECRET is missing");
+  if (!JWT_SECRET) {
+    throw new Error(
+      "JWT_SECRET is not configured."
+    );
   }
 
   return jwt.sign(
     {
-      id: String(user._id),
+      id: user._id,
       email: user.email,
-      role: user.role,
+      role: user.role || "user",
     },
-    process.env.JWT_SECRET,
+    JWT_SECRET,
     {
-      expiresIn: "7d",
+      expiresIn:
+        TOKEN_EXPIRES_IN,
     }
   );
 }
 
 /* =========================================================
-   AUTH COOKIE
+   SET AUTH COOKIE
 ========================================================= */
 
-function getAuthCookieOptions() {
-  const isProduction =
-    process.env.NODE_ENV === "production";
+function setAuthCookie(
+  res,
+  token
+) {
+  /*
+   * ZyrionOS frontend:
+   *
+   * https://zyrionos.com
+   *
+   * ZyrionOS API:
+   *
+   * https://api.zyrionos.com
+   *
+   * These are same-site subdomains.
+   *
+   * HttpOnly:
+   * JavaScript cannot read the JWT.
+   *
+   * Secure:
+   * Cookie is sent only over HTTPS.
+   *
+   * SameSite=lax:
+   * Suitable for the production
+   * zyrionos.com / api.zyrionos.com
+   * authentication flow.
+   */
 
-  return {
-    httpOnly: true,
-
-    /*
-     * Production API is HTTPS.
-     * Secure cookies prevent transmission over HTTP.
-     */
-    secure: isProduction,
-
-    /*
-     * Frontend and API may be treated as
-     * cross-origin by the browser.
-     *
-     * "none" requires Secure in production.
-     */
-    sameSite: "none",
-
-    /*
-     * Cookie is valid for the complete API path.
-     */
-    path: "/",
-
-    maxAge: AUTH_COOKIE_MAX_AGE,
-  };
-}
-
-function setAuthCookie(res, token) {
   res.cookie(
-    AUTH_COOKIE_NAME,
+    COOKIE_NAME,
     token,
-    getAuthCookieOptions()
+    {
+      httpOnly: true,
+
+      secure: true,
+
+      sameSite: "lax",
+
+      maxAge:
+        COOKIE_MAX_AGE,
+
+      path: "/",
+    }
   );
 }
 
 /* =========================================================
-   FORMAT USER
+   CLEAR AUTH COOKIE
 ========================================================= */
 
-function formatUser(user) {
-  return {
-    id: user._id,
-    name: user.name,
-    email: user.email,
-    avatar: user.avatar,
-    role: user.role,
-    provider: user.provider,
-    subscriptionPlan:
-      user.subscriptionPlan,
-    credits: user.credits,
-    deploymentsUsed:
-      user.deploymentsUsed,
-  };
+function clearAuthCookie(res) {
+  /*
+   * Cookie attributes must match
+   * the attributes used when setting it.
+   */
+
+  res.clearCookie(
+    COOKIE_NAME,
+    {
+      httpOnly: true,
+
+      secure: true,
+
+      sameSite: "lax",
+
+      path: "/",
+    }
+  );
 }
 
 /* =========================================================
-   REGISTER USER
+   REGISTER
 ========================================================= */
 
-async function registerUser(req, res) {
+async function registerUser(
+  req,
+  res
+) {
   try {
     const {
       name,
       email,
       password,
     } = req.body;
+
+    /* =========================
+       VALIDATION
+    ========================= */
 
     if (
       !name ||
@@ -115,39 +187,86 @@ async function registerUser(req, res) {
     ) {
       return res.status(400).json({
         success: false,
-        message: "All fields required",
+        message:
+          "Name, email and password are required.",
       });
     }
 
     const normalizedEmail =
-      email.trim().toLowerCase();
+      String(email)
+        .trim()
+        .toLowerCase();
+
+    if (
+      password.length < 6
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Password must be at least 6 characters.",
+      });
+    }
+
+    /* =========================
+       EXISTING USER
+    ========================= */
 
     const existingUser =
       await User.findOne({
-        email: normalizedEmail,
+        email:
+          normalizedEmail,
       });
 
     if (existingUser) {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
-        message: "User already exists",
+        message:
+          existingUser.provider &&
+          existingUser.provider !==
+            "email"
+            ? "This account uses social login."
+            : "An account with this email already exists.",
       });
     }
+
+    /* =========================
+       HASH PASSWORD
+    ========================= */
 
     const hashedPassword =
       await bcrypt.hash(
         password,
-        10
+        12
       );
+
+    /* =========================
+       CREATE USER
+    ========================= */
 
     const user =
       await User.create({
-        name: name.trim(),
-        email: normalizedEmail,
-        password: hashedPassword,
-        provider: "email",
-        isVerified: true,
+        name:
+          String(name).trim(),
+
+        email:
+          normalizedEmail,
+
+        password:
+          hashedPassword,
+
+        provider:
+          "email",
+
+        isVerified:
+          true,
+
+        lastLogin:
+          new Date(),
       });
+
+    /* =========================
+       SESSION
+    ========================= */
 
     const token =
       generateToken(user);
@@ -157,33 +276,48 @@ async function registerUser(req, res) {
       token
     );
 
+    /* =========================
+       RESPONSE
+    ========================= */
+
     return res.status(201).json({
       success: true,
-      user: formatUser(user),
+
+      user:
+        sanitizeUser(user),
     });
+
   } catch (error) {
     console.error(
-      "Register error:",
+      "Register Error:",
       error
     );
 
     return res.status(500).json({
       success: false,
-      message: "Register failed",
+      message:
+        "Unable to create account.",
     });
   }
 }
 
 /* =========================================================
-   LOGIN USER
+   EMAIL / PASSWORD LOGIN
 ========================================================= */
 
-async function loginUser(req, res) {
+async function loginUser(
+  req,
+  res
+) {
   try {
     const {
       email,
       password,
     } = req.body;
+
+    /* =========================
+       VALIDATION
+    ========================= */
 
     if (
       !email ||
@@ -192,249 +326,289 @@ async function loginUser(req, res) {
       return res.status(400).json({
         success: false,
         message:
-          "Email and password required",
+          "Email and password are required.",
       });
     }
 
     const normalizedEmail =
-      email.trim().toLowerCase();
+      String(email)
+        .trim()
+        .toLowerCase();
+
+    /* =========================
+       FIND USER
+    ========================= */
 
     const user =
       await User.findOne({
-        email: normalizedEmail,
+        email:
+          normalizedEmail,
       });
 
     if (!user) {
+      return res.status(401).json({
+        success: false,
+        message:
+          "Invalid email or password.",
+      });
+    }
+
+    /* =========================
+       SOCIAL LOGIN ACCOUNT
+    ========================= */
+
+    if (
+      user.provider &&
+      user.provider !==
+        "email"
+    ) {
       return res.status(400).json({
         success: false,
         message:
-          "Invalid credentials",
+          "This account uses social login.",
       });
     }
+
+    /* =========================
+       PASSWORD
+    ========================= */
 
     if (!user.password) {
       return res.status(400).json({
         success: false,
         message:
-          "This account uses social login",
+          "This account does not have a password login.",
       });
     }
 
-    const validPassword =
+    const passwordValid =
       await bcrypt.compare(
         password,
         user.password
       );
 
-    if (!validPassword) {
-      return res.status(400).json({
+    if (!passwordValid) {
+      return res.status(401).json({
         success: false,
         message:
-          "Invalid credentials",
+          "Invalid email or password.",
       });
     }
 
+    /* =========================
+       VERIFIED
+    ========================= */
+
     if (
-      user.isVerified === false &&
-      user.provider === "email"
+      user.isVerified === false
     ) {
       return res.status(403).json({
         success: false,
         message:
-          "Account not verified",
+          "Please verify your account before signing in.",
       });
     }
+
+    /* =========================
+       LAST LOGIN
+    ========================= */
 
     user.lastLogin =
       new Date();
 
     await user.save();
 
+    /* =========================
+       CREATE SESSION
+    ========================= */
+
     const token =
       generateToken(user);
+
+    setAuthCookie(
+      res,
+      token
+    );
+
+    /* =========================
+       RESPONSE
+    ========================= */
 
     /*
      * IMPORTANT:
      *
-     * JWT stays inside HttpOnly cookie.
-     * It is NOT returned to frontend JavaScript.
+     * JWT is NOT returned in JSON.
+     *
+     * It stays inside the
+     * HttpOnly access_token cookie.
      */
-    setAuthCookie(
-      res,
-      token
-    );
 
     return res.status(200).json({
       success: true,
-      user: formatUser(user),
+
+      user:
+        sanitizeUser(user),
     });
+
   } catch (error) {
     console.error(
-      "Login error:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: "Login failed",
-    });
-  }
-}
-
-/* =========================================================
-   GOOGLE LOGIN
-========================================================= */
-
-async function googleLogin(req, res) {
-  try {
-    const user = req.user;
-
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message:
-          "Google authentication failed",
-      });
-    }
-
-    user.lastLogin =
-      new Date();
-
-    await user.save();
-
-    const token =
-      generateToken(user);
-
-    setAuthCookie(
-      res,
-      token
-    );
-
-    const frontendUrl =
-      process.env.FRONTEND_URL;
-
-    if (!frontendUrl) {
-      console.error(
-        "FRONTEND_URL is missing"
-      );
-
-      return res.status(500).json({
-        success: false,
-        message:
-          "Frontend URL configuration missing",
-      });
-    }
-
-    return res.redirect(
-      `${frontendUrl}/dashboard`
-    );
-  } catch (error) {
-    console.error(
-      "Google login error:",
+      "Login Error:",
       error
     );
 
     return res.status(500).json({
       success: false,
       message:
-        "Google login failed",
+        "Unable to sign in.",
     });
   }
 }
 
 /* =========================================================
-   GITHUB LOGIN
+   GOOGLE CALLBACK
 ========================================================= */
 
-async function githubLogin(req, res) {
+function googleCallback(
+  req,
+  res
+) {
   try {
-    const user = req.user;
-
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message:
-          "GitHub authentication failed",
-      });
+    if (!req.user) {
+      return res.redirect(
+        `${FRONTEND_URL}/login?error=google_auth_failed`
+      );
     }
 
-    user.lastLogin =
-      new Date();
-
-    await user.save();
-
     const token =
-      generateToken(user);
+      generateToken(
+        req.user
+      );
 
     setAuthCookie(
       res,
       token
     );
 
-    const frontendUrl =
-      process.env.FRONTEND_URL;
-
-    if (!frontendUrl) {
-      console.error(
-        "FRONTEND_URL is missing"
-      );
-
-      return res.status(500).json({
-        success: false,
-        message:
-          "Frontend URL configuration missing",
-      });
-    }
+    /*
+     * IMPORTANT:
+     *
+     * Never put JWT in the URL.
+     *
+     * BAD:
+     *
+     * /dashboard?token=...
+     *
+     * GOOD:
+     *
+     * HttpOnly cookie
+     * +
+     * /dashboard
+     */
 
     return res.redirect(
-      `${frontendUrl}/dashboard`
+      `${FRONTEND_URL}/dashboard`
     );
+
   } catch (error) {
     console.error(
-      "GitHub login error:",
+      "Google Callback Error:",
       error
     );
 
-    return res.status(500).json({
-      success: false,
-      message:
-        "GitHub login failed",
-    });
+    return res.redirect(
+      `${FRONTEND_URL}/login?error=google_auth_failed`
+    );
   }
 }
 
 /* =========================================================
-   GET CURRENT USER
+   GITHUB CALLBACK
 ========================================================= */
 
-async function getCurrentUser(req, res) {
+function githubCallback(
+  req,
+  res
+) {
+  try {
+    if (!req.user) {
+      return res.redirect(
+        `${FRONTEND_URL}/login?error=github_auth_failed`
+      );
+    }
+
+    const token =
+      generateToken(
+        req.user
+      );
+
+    setAuthCookie(
+      res,
+      token
+    );
+
+    /*
+     * JWT stays inside
+     * HttpOnly cookie.
+     */
+
+    return res.redirect(
+      `${FRONTEND_URL}/dashboard`
+    );
+
+  } catch (error) {
+    console.error(
+      "GitHub Callback Error:",
+      error
+    );
+
+    return res.redirect(
+      `${FRONTEND_URL}/login?error=github_auth_failed`
+    );
+  }
+}
+
+/* =========================================================
+   CURRENT USER
+========================================================= */
+
+async function getCurrentUser(
+  req,
+  res
+) {
   try {
     /*
-     * authMiddleware must populate req.user
-     * after verifying the access_token cookie.
+     * authMiddleware already verified
+     * the HttpOnly JWT and attached
+     * the user to req.user.
      */
+
     if (!req.user) {
       return res.status(401).json({
         success: false,
         message:
-          "Not authenticated",
+          "Authentication required.",
       });
     }
 
     return res.status(200).json({
       success: true,
-      user: formatUser(req.user),
+
+      user:
+        sanitizeUser(
+          req.user
+        ),
     });
+
   } catch (error) {
     console.error(
-      "Get current user error:",
+      "Get Current User Error:",
       error
     );
 
     return res.status(500).json({
       success: false,
       message:
-        "Failed to get current user",
+        "Unable to retrieve current user.",
     });
   }
 }
@@ -443,45 +617,53 @@ async function getCurrentUser(req, res) {
    LOGOUT
 ========================================================= */
 
-async function logoutUser(req, res) {
+async function logoutUser(
+  req,
+  res
+) {
   try {
-    /*
-     * clearCookie must use the same important
-     * cookie attributes used when setting it.
-     */
-    res.clearCookie(
-      AUTH_COOKIE_NAME,
-      getAuthCookieOptions()
+    clearAuthCookie(
+      res
     );
 
     return res.status(200).json({
       success: true,
       message:
-        "Logged out successfully",
+        "Logged out successfully.",
     });
+
   } catch (error) {
     console.error(
-      "Logout error:",
+      "Logout Error:",
       error
     );
 
-    return res.status(500).json({
-      success: false,
+    /*
+     * Even if another operation fails,
+     * make sure the cookie is cleared.
+     */
+
+    clearAuthCookie(
+      res
+    );
+
+    return res.status(200).json({
+      success: true,
       message:
-        "Logout failed",
+        "Logged out successfully.",
     });
   }
 }
 
 /* =========================================================
-   EXPORTS
+   EXPORT
 ========================================================= */
 
 module.exports = {
   registerUser,
   loginUser,
-  googleLogin,
-  githubLogin,
+  googleCallback,
+  githubCallback,
   getCurrentUser,
   logoutUser,
 };
