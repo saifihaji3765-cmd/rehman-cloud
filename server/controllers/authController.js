@@ -1,15 +1,20 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-/* =========================
-MODEL
-========================= */
-
 const User = require("../models/userModel");
 
-/* =========================
-GENERATE APPLICATION JWT
-========================= */
+/* =========================================================
+   CONFIG
+========================================================= */
+
+const AUTH_COOKIE_NAME = "access_token";
+
+const AUTH_COOKIE_MAX_AGE =
+  7 * 24 * 60 * 60 * 1000;
+
+/* =========================================================
+   GENERATE APPLICATION JWT
+========================================================= */
 
 function generateToken(user) {
   if (!process.env.JWT_SECRET) {
@@ -18,34 +23,62 @@ function generateToken(user) {
 
   return jwt.sign(
     {
-      id: user._id,
+      id: String(user._id),
       email: user.email,
-      role: user.role
+      role: user.role,
     },
     process.env.JWT_SECRET,
     {
-      expiresIn: "7d"
+      expiresIn: "7d",
     }
   );
 }
 
-/* =========================
-SET AUTH COOKIE
-========================= */
+/* =========================================================
+   AUTH COOKIE
+========================================================= */
 
-function setAuthCookie(res, token) {
-  res.cookie("access_token", token, {
+function getAuthCookieOptions() {
+  const isProduction =
+    process.env.NODE_ENV === "production";
+
+  return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+
+    /*
+     * Production API is HTTPS.
+     * Secure cookies prevent transmission over HTTP.
+     */
+    secure: isProduction,
+
+    /*
+     * Frontend and API may be treated as
+     * cross-origin by the browser.
+     *
+     * "none" requires Secure in production.
+     */
     sameSite: "none",
-    maxAge: 7 * 24 * 60 * 60 * 1000,
-    path: "/"
-  });
+
+    /*
+     * Cookie is valid for the complete API path.
+     */
+    path: "/",
+
+    maxAge: AUTH_COOKIE_MAX_AGE,
+  };
 }
 
-/* =========================
-USER RESPONSE
-========================= */
+function setAuthCookie(res, token) {
+  res.cookie(
+    AUTH_COOKIE_NAME,
+    token,
+    getAuthCookieOptions()
+  );
+}
+
+/* =========================================================
+   FORMAT USER
+========================================================= */
 
 function formatUser(user) {
   return {
@@ -55,9 +88,11 @@ function formatUser(user) {
     avatar: user.avatar,
     role: user.role,
     provider: user.provider,
-    subscriptionPlan: user.subscriptionPlan,
+    subscriptionPlan:
+      user.subscriptionPlan,
     credits: user.credits,
-    deploymentsUsed: user.deploymentsUsed
+    deploymentsUsed:
+      user.deploymentsUsed,
   };
 }
 
@@ -70,81 +105,62 @@ async function registerUser(req, res) {
     const {
       name,
       email,
-      password
+      password,
     } = req.body;
 
-    /* =========================
-       VALIDATION
-    ========================= */
-
-    if (!name || !email || !password) {
+    if (
+      !name ||
+      !email ||
+      !password
+    ) {
       return res.status(400).json({
         success: false,
-        message: "All fields required"
+        message: "All fields required",
       });
     }
 
     const normalizedEmail =
       email.trim().toLowerCase();
 
-    /* =========================
-       EXISTING USER
-    ========================= */
-
     const existingUser =
       await User.findOne({
-        email: normalizedEmail
+        email: normalizedEmail,
       });
 
     if (existingUser) {
       return res.status(400).json({
         success: false,
-        message: "User already exists"
+        message: "User already exists",
       });
     }
 
-    /* =========================
-       HASH PASSWORD
-    ========================= */
-
     const hashedPassword =
-      await bcrypt.hash(password, 10);
+      await bcrypt.hash(
+        password,
+        10
+      );
 
-    /* =========================
-       CREATE USER
-    ========================= */
-
-    const user = await User.create({
-      name: name.trim(),
-      email: normalizedEmail,
-      password: hashedPassword,
-      provider: "email",
-      isVerified: true
-    });
-
-    /* =========================
-       GENERATE JWT
-    ========================= */
+    const user =
+      await User.create({
+        name: name.trim(),
+        email: normalizedEmail,
+        password: hashedPassword,
+        provider: "email",
+        isVerified: true,
+      });
 
     const token =
       generateToken(user);
 
-    /* =========================
-       AUTH COOKIE
-    ========================= */
-
-    setAuthCookie(res, token);
-
-    /* =========================
-       RESPONSE
-    ========================= */
+    setAuthCookie(
+      res,
+      token
+    );
 
     return res.status(201).json({
       success: true,
-      token,
-      user: formatUser(user)
+      user: formatUser(user),
     });
-
   } catch (error) {
     console.error(
       "Register error:",
@@ -153,7 +169,7 @@ async function registerUser(req, res) {
 
     return res.status(500).json({
       success: false,
-      message: "Register failed"
+      message: "Register failed",
     });
   }
 }
@@ -166,55 +182,43 @@ async function loginUser(req, res) {
   try {
     const {
       email,
-      password
+      password,
     } = req.body;
 
-    /* =========================
-       VALIDATION
-    ========================= */
-
-    if (!email || !password) {
+    if (
+      !email ||
+      !password
+    ) {
       return res.status(400).json({
         success: false,
         message:
-          "Email and password required"
+          "Email and password required",
       });
     }
 
     const normalizedEmail =
       email.trim().toLowerCase();
 
-    /* =========================
-       FIND USER
-    ========================= */
-
     const user =
       await User.findOne({
-        email: normalizedEmail
+        email: normalizedEmail,
       });
 
     if (!user) {
       return res.status(400).json({
         success: false,
-        message: "Invalid credentials"
+        message:
+          "Invalid credentials",
       });
     }
-
-    /* =========================
-       PASSWORD USER CHECK
-    ========================= */
 
     if (!user.password) {
       return res.status(400).json({
         success: false,
         message:
-          "This account uses social login"
+          "This account uses social login",
       });
     }
-
-    /* =========================
-       PASSWORD CHECK
-    ========================= */
 
     const validPassword =
       await bcrypt.compare(
@@ -225,13 +229,10 @@ async function loginUser(req, res) {
     if (!validPassword) {
       return res.status(400).json({
         success: false,
-        message: "Invalid credentials"
+        message:
+          "Invalid credentials",
       });
     }
-
-    /* =========================
-       EMAIL VERIFICATION
-    ========================= */
 
     if (
       user.isVerified === false &&
@@ -239,41 +240,34 @@ async function loginUser(req, res) {
     ) {
       return res.status(403).json({
         success: false,
-        message: "Account not verified"
+        message:
+          "Account not verified",
       });
     }
 
-    /* =========================
-       UPDATE LAST LOGIN
-    ========================= */
-
-    user.lastLogin = new Date();
+    user.lastLogin =
+      new Date();
 
     await user.save();
-
-    /* =========================
-       GENERATE JWT
-    ========================= */
 
     const token =
       generateToken(user);
 
-    /* =========================
-       AUTH COOKIE
-    ========================= */
-
-    setAuthCookie(res, token);
-
-    /* =========================
-       RESPONSE
-    ========================= */
+    /*
+     * IMPORTANT:
+     *
+     * JWT stays inside HttpOnly cookie.
+     * It is NOT returned to frontend JavaScript.
+     */
+    setAuthCookie(
+      res,
+      token
+    );
 
     return res.status(200).json({
       success: true,
-      token,
-      user: formatUser(user)
+      user: formatUser(user),
     });
-
   } catch (error) {
     console.error(
       "Login error:",
@@ -282,7 +276,7 @@ async function loginUser(req, res) {
 
     return res.status(500).json({
       success: false,
-      message: "Login failed"
+      message: "Login failed",
     });
   }
 }
@@ -293,63 +287,47 @@ async function loginUser(req, res) {
 
 async function googleLogin(req, res) {
   try {
-    /* =========================
-       PASSPORT USER
-    ========================= */
-
     const user = req.user;
 
     if (!user) {
       return res.status(401).json({
         success: false,
         message:
-          "Google authentication failed"
+          "Google authentication failed",
       });
     }
 
-    /* =========================
-       UPDATE LAST LOGIN
-    ========================= */
-
-    user.lastLogin = new Date();
+    user.lastLogin =
+      new Date();
 
     await user.save();
 
-    /* =========================
-   APPLICATION JWT
-========================= */
+    const token =
+      generateToken(user);
 
-const token =
-  generateToken(user);
+    setAuthCookie(
+      res,
+      token
+    );
 
-/* =========================
-   HTTP-ONLY COOKIE
-========================= */
+    const frontendUrl =
+      process.env.FRONTEND_URL;
 
-setAuthCookie(res, token);
+    if (!frontendUrl) {
+      console.error(
+        "FRONTEND_URL is missing"
+      );
 
-/* =========================
-   FRONTEND REDIRECT
-========================= */
+      return res.status(500).json({
+        success: false,
+        message:
+          "Frontend URL configuration missing",
+      });
+    }
 
-if (!process.env.FRONTEND_URL) {
-
-  console.error(
-    "FRONTEND_URL is missing"
-  );
-
-  return res.status(500).json({
-    success: false,
-    message:
-      "Frontend URL configuration missing"
-  });
-
-}
-
-return res.redirect(
-  `${process.env.FRONTEND_URL}/dashboard`
-);
-
+    return res.redirect(
+      `${frontendUrl}/dashboard`
+    );
   } catch (error) {
     console.error(
       "Google login error:",
@@ -358,7 +336,8 @@ return res.redirect(
 
     return res.status(500).json({
       success: false,
-      message: "Google login failed"
+      message:
+        "Google login failed",
     });
   }
 }
@@ -369,61 +348,47 @@ return res.redirect(
 
 async function githubLogin(req, res) {
   try {
-    /* =========================
-       PASSPORT USER
-    ========================= */
-
     const user = req.user;
 
     if (!user) {
       return res.status(401).json({
         success: false,
         message:
-          "GitHub authentication failed"
+          "GitHub authentication failed",
       });
     }
 
-    /* =========================
-       UPDATE LAST LOGIN
-    ========================= */
-
-    user.lastLogin = new Date();
+    user.lastLogin =
+      new Date();
 
     await user.save();
-
-    /* =========================
-       APPLICATION JWT
-    ========================= */
 
     const token =
       generateToken(user);
 
-    /* =========================
-       HTTP-ONLY COOKIE
-    ========================= */
+    setAuthCookie(
+      res,
+      token
+    );
 
-    setAuthCookie(res, token);
+    const frontendUrl =
+      process.env.FRONTEND_URL;
 
-    /* =========================
-       FRONTEND REDIRECT
-    ========================= */
-
-    if (!process.env.CLIENT_URL) {
+    if (!frontendUrl) {
       console.error(
-        "CLIENT_URL is missing"
+        "FRONTEND_URL is missing"
       );
 
       return res.status(500).json({
         success: false,
         message:
-          "Frontend URL configuration missing"
+          "Frontend URL configuration missing",
       });
     }
 
     return res.redirect(
-      `${process.env.CLIENT_URL}/dashboard`
+      `${frontendUrl}/dashboard`
     );
-
   } catch (error) {
     console.error(
       "GitHub login error:",
@@ -432,7 +397,8 @@ async function githubLogin(req, res) {
 
     return res.status(500).json({
       success: false,
-      message: "GitHub login failed"
+      message:
+        "GitHub login failed",
     });
   }
 }
@@ -443,31 +409,22 @@ async function githubLogin(req, res) {
 
 async function getCurrentUser(req, res) {
   try {
+    /*
+     * authMiddleware must populate req.user
+     * after verifying the access_token cookie.
+     */
     if (!req.user) {
       return res.status(401).json({
         success: false,
-        message: "Not authenticated"
+        message:
+          "Not authenticated",
       });
     }
 
     return res.status(200).json({
       success: true,
-      user: {
-        id: req.user.id,
-        name: req.user.name,
-        email: req.user.email,
-        avatar: req.user.avatar,
-        role: req.user.role,
-        provider: req.user.provider,
-        subscriptionPlan:
-          req.user.subscriptionPlan,
-        credits:
-          req.user.credits,
-        deploymentsUsed:
-          req.user.deploymentsUsed
-      }
+      user: formatUser(req.user),
     });
-
   } catch (error) {
     console.error(
       "Get current user error:",
@@ -477,42 +434,31 @@ async function getCurrentUser(req, res) {
     return res.status(500).json({
       success: false,
       message:
-        "Failed to get current user"
+        "Failed to get current user",
     });
   }
 }
 
 /* =========================================================
-   LOGOUT USER
+   LOGOUT
 ========================================================= */
 
 async function logoutUser(req, res) {
   try {
-    /* =========================
-       CLEAR AUTH COOKIE
-    ========================= */
-
+    /*
+     * clearCookie must use the same important
+     * cookie attributes used when setting it.
+     */
     res.clearCookie(
-      "access_token",
-      {
-        httpOnly: true,
-        secure:
-          process.env.NODE_ENV ===
-          "production",
-        sameSite: "none",
-        path: "/"
-      }
+      AUTH_COOKIE_NAME,
+      getAuthCookieOptions()
     );
-
-    /* =========================
-       RESPONSE
-    ========================= */
 
     return res.status(200).json({
       success: true,
-      message: "Logged out successfully"
+      message:
+        "Logged out successfully",
     });
-
   } catch (error) {
     console.error(
       "Logout error:",
@@ -521,7 +467,8 @@ async function logoutUser(req, res) {
 
     return res.status(500).json({
       success: false,
-      message: "Logout failed"
+      message:
+        "Logout failed",
     });
   }
 }
@@ -536,5 +483,5 @@ module.exports = {
   googleLogin,
   githubLogin,
   getCurrentUser,
-  logoutUser
+  logoutUser,
 };
