@@ -1,191 +1,402 @@
-const fs =
-require("fs");
+"use strict";
 
-const path =
-require("path");
+const fs = require("fs");
+const path = require("path");
 
-/* =========================
+/* =========================================================
+   ZYRIONOS LOGGER SERVICE
+   =========================================================
+
+   Production:
+   - Console / stdout only
+   - ECS automatically sends container logs to CloudWatch
+   - No local file writes
+   - Prevents ENOTDIR / filesystem logging failures
+
+   Development:
+   - Console logging
+   - Optional file logging with LOG_TO_FILE=true
+========================================================= */
+
+/* =========================================================
+   ENVIRONMENT
+========================================================= */
+
+const NODE_ENV = String(
+  process.env.NODE_ENV || "production"
+)
+  .trim()
+  .toLowerCase();
+
+const IS_PRODUCTION =
+  NODE_ENV === "production";
+
+/* =========================================================
+   FILE LOGGING
+========================================================= */
+
+const ENABLE_FILE_LOGGING =
+  !IS_PRODUCTION &&
+  String(process.env.LOG_TO_FILE || "")
+    .trim()
+    .toLowerCase() === "true";
+
+/* =========================================================
    LOG DIRECTORY
-========================= */
+========================================================= */
 
-const logsDir =
-
-path.join(
-
-  process.cwd(),
-
-  "server",
-
-  "logs"
-
+const logsDir = path.resolve(
+  process.env.LOG_DIR ||
+    path.join(
+      process.cwd(),
+      "server",
+      "logs"
+    )
 );
 
-/* =========================
-   CREATE LOG DIR
-========================= */
+/* =========================================================
+   LOG FILE
+========================================================= */
 
-if(
+const logFileName =
+  String(
+    process.env.LOG_FILE_NAME ||
+      "vertexcloud.log"
+  )
+    .trim()
+    .replace(/[\/\\]/g, "_");
 
-  !fs.existsSync(logsDir)
+const logPath = path.join(
+  logsDir,
+  logFileName
+);
 
-){
+/* =========================================================
+   PREPARE FILE LOGGER
+========================================================= */
 
-  fs.mkdirSync(
+function prepareFileLogger() {
 
-    logsDir,
+  if (!ENABLE_FILE_LOGGING) {
+    return false;
+  }
 
-    { recursive:true }
+  try {
 
-  );
+    /*
+     * If the configured log path already exists
+     * as a file, do not attempt to treat it as a
+     * directory.
+     */
 
+    if (fs.existsSync(logsDir)) {
+
+      const stats =
+        fs.statSync(logsDir);
+
+      if (!stats.isDirectory()) {
+
+        console.error(
+          `[LOGGER] Log directory path is not a directory: ${logsDir}`
+        );
+
+        return false;
+      }
+
+    } else {
+
+      fs.mkdirSync(
+        logsDir,
+        {
+          recursive: true
+        }
+      );
+
+    }
+
+    /*
+     * Verify the final log path is usable.
+     */
+
+    if (fs.existsSync(logPath)) {
+
+      const stats =
+        fs.statSync(logPath);
+
+      if (!stats.isFile()) {
+
+        console.error(
+          `[LOGGER] Log file path is not a file: ${logPath}`
+        );
+
+        return false;
+      }
+
+    }
+
+    return true;
+
+  } catch (error) {
+
+    console.error(
+      `[LOGGER] File logging disabled: ${error.message}`
+    );
+
+    return false;
+  }
 }
 
-/* =========================
-   LOG FILE
-========================= */
+const FILE_LOGGING_READY =
+  prepareFileLogger();
 
-const logPath =
+/* =========================================================
+   MESSAGE NORMALIZATION
+========================================================= */
 
-path.join(
+function normalizeMessage(message) {
 
-  logsDir,
+  if (
+    message === null ||
+    message === undefined
+  ) {
+    return "";
+  }
 
-  "vertexcloud.log"
+  if (
+    typeof message === "string"
+  ) {
+    return message;
+  }
 
-);
+  if (
+    message instanceof Error
+  ) {
 
-/* =========================
-   WRITE LOG
-========================= */
+    return message.stack ||
+      message.message ||
+      String(message);
+  }
+
+  try {
+
+    return JSON.stringify(
+      message
+    );
+
+  } catch {
+
+    return String(message);
+  }
+}
+
+/* =========================================================
+   CONSOLE OUTPUT
+========================================================= */
+
+function writeConsole(
+  type,
+  message
+) {
+
+  const timestamp =
+    new Date().toISOString();
+
+  const logMessage =
+    `[${timestamp}] [${type}] ${message}`;
+
+  /*
+   * Keep production logs on stdout/stderr.
+   * ECS/CloudWatch captures these automatically.
+   */
+
+  if (type === "ERROR") {
+
+    console.error(
+      logMessage
+    );
+
+  } else if (
+    type === "WARNING"
+  ) {
+
+    console.warn(
+      logMessage
+    );
+
+  } else {
+
+    console.log(
+      logMessage
+    );
+  }
+
+  return logMessage;
+}
+
+/* =========================================================
+   FILE OUTPUT
+========================================================= */
+
+function writeFile(
+  logMessage
+) {
+
+  if (
+    !FILE_LOGGING_READY
+  ) {
+    return;
+  }
+
+  try {
+
+    fs.appendFile(
+      logPath,
+      `${logMessage}\n`,
+      (error) => {
+
+        if (error) {
+
+          /*
+           * Never allow logging failure to
+           * crash or interfere with the app.
+           */
+
+          console.error(
+            `[LOGGER] File write failed: ${error.message}`
+          );
+        }
+      }
+    );
+
+  } catch (error) {
+
+    console.error(
+      `[LOGGER] File logger failure: ${error.message}`
+    );
+  }
+}
+
+/* =========================================================
+   MAIN LOGGER
+========================================================= */
 
 function writeLog(
   type,
   message
-){
+) {
 
-  try{
+  try {
 
-    const timestamp =
-
-    new Date()
-    .toISOString();
+    const normalizedMessage =
+      normalizeMessage(
+        message
+      );
 
     const logMessage =
+      writeConsole(
+        type,
+        normalizedMessage
+      );
 
-`[${timestamp}] [${type}] ${message}\n`;
+    /*
+     * File logging is intentionally disabled
+     * in production.
+     */
 
-    /* =========================
-       CONSOLE OUTPUT
-    ========================= */
+    if (
+      FILE_LOGGING_READY
+    ) {
 
-    console.log(logMessage);
+      writeFile(
+        logMessage
+      );
+    }
 
-    /* =========================
-       FILE LOG
-    ========================= */
+  } catch (error) {
 
-    fs.appendFile(
-
-      logPath,
-
-      logMessage,
-
-      (error)=>{
-
-        if(error){
-
-          console.error(
-
-            "Log Write Error:",
-
-            error.message
-
-          );
-
-        }
-
-      }
-
-    );
-
-  }
-
-  catch(error){
+    /*
+     * Logger must never become
+     * the reason the application crashes.
+     */
 
     console.error(
-      "Logger Failure:",
-      error.message
+      `[LOGGER] Logger failure: ${error.message}`
     );
-
   }
-
 }
 
-/* =========================
+/* =========================================================
    LOGGER METHODS
-========================= */
+========================================================= */
 
 const logger = {
 
-  info:(message)=>{
+  info(message) {
 
     writeLog(
       "INFO",
       message
     );
-
   },
 
-  success:(message)=>{
+  success(message) {
 
     writeLog(
       "SUCCESS",
       message
     );
-
   },
 
-  error:(message)=>{
-
-    writeLog(
-      "ERROR",
-      message
-    );
-
-  },
-
-  warning:(message)=>{
+  warning(message) {
 
     writeLog(
       "WARNING",
       message
     );
-
   },
 
-  debug:(message)=>{
+  error(message) {
 
-    if(
+    writeLog(
+      "ERROR",
+      message
+    );
+  },
 
-      process.env.NODE_ENV ===
+  debug(message) {
+
+    if (
+      NODE_ENV ===
       "development"
-
-    ){
+    ) {
 
       writeLog(
         "DEBUG",
         message
       );
-
     }
-
   }
 
 };
 
-/* =========================
+/* =========================================================
+   LOGGER METADATA
+========================================================= */
+
+logger.environment =
+  NODE_ENV;
+
+logger.fileLogging =
+  FILE_LOGGING_READY;
+
+logger.logPath =
+  FILE_LOGGING_READY
+    ? logPath
+    : null;
+
+/* =========================================================
    EXPORT
-========================= */
+========================================================= */
 
 module.exports =
-logger;
+  logger;
