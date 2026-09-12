@@ -1,68 +1,93 @@
+/* =========================================================
+   ZyrionOS PAYMENT WEBHOOK CONTROLLER
+   =========================================================
+
+   Responsibilities:
+   - Verify Stripe webhooks
+   - Verify Razorpay webhooks
+   - Activate paid subscriptions
+   - Persist official billing entitlements
+   - Handle renewals
+   - Handle failed payments
+   - Handle cancellations
+   - Maintain webhook idempotency
+
+   IMPORTANT:
+   ---------------------------------------------------------
+   Payment success is NEVER trusted from the frontend.
+
+   Subscription activation happens only after a verified
+   payment-provider webhook.
+
+   Billing catalog / entitlements come from billingAgent.
+========================================================= */
+
 const crypto = require("crypto");
-const Stripe = require("stripe");
 
-const Subscription = require("../models/subscriptionModel");
-const User = require("../models/userModel");
+const Subscription =
+  require("../models/subscriptionModel");
 
-const formatResponse = require("../utils/formatResponse");
-const logger = require("../services/loggerService");
+const User =
+  require("../models/User");
 
-
-/* =========================================================
-   PROVIDER CONFIGURATION
-========================================================= */
-
-const stripe =
-  process.env.STRIPE_SECRET_KEY
-    ? new Stripe(process.env.STRIPE_SECRET_KEY)
-    : null;
+const billingAgent =
+  require("../agents/billingAgent");
 
 
 /* =========================================================
-   ZYRIONOS PLAN CATALOG
+   STRIPE
 ========================================================= */
 
-const PLAN_CATALOG = {
-  Starter: {
+let stripe = null;
+
+if (process.env.STRIPE_SECRET_KEY) {
+  const Stripe = require("stripe");
+
+  stripe = new Stripe(
+    process.env.STRIPE_SECRET_KEY
+  );
+}
+
+
+/* =========================================================
+   PLAN HELPERS
+========================================================= */
+
+const PLAN_CATALOG = Object.freeze({
+  Starter: Object.freeze({
     monthly: 19,
     yearly: 190
-  },
+  }),
 
-  Pro: {
+  Pro: Object.freeze({
     monthly: 99,
     yearly: 990
-  },
+  }),
 
-  Business: {
+  Business: Object.freeze({
     monthly: 199,
     yearly: 1990
-  },
+  }),
 
-  Scale: {
+  Scale: Object.freeze({
     monthly: 299,
     yearly: 2990
-  },
+  }),
 
-  Enterprise: {
+  Enterprise: Object.freeze({
     monthly: 499,
     yearly: 4990
-  }
-};
+  })
+});
 
 
-/* =========================================================
-   BASIC HELPERS
-========================================================= */
-
-function normalizePlan(plan) {
-  if (!plan) {
+function normalizePlan(value) {
+  if (typeof value !== "string") {
     return null;
   }
 
-  const value =
-    String(plan)
-      .trim()
-      .toLowerCase();
+  const normalized =
+    value.trim().toLowerCase();
 
   const plans = {
     starter: "Starter",
@@ -72,34 +97,186 @@ function normalizePlan(plan) {
     enterprise: "Enterprise"
   };
 
-  return plans[value] || null;
+  return plans[normalized] || null;
 }
 
 
-function normalizeCycle(cycle) {
-  return String(cycle || "").toLowerCase() === "yearly"
-    ? "yearly"
-    : "monthly";
+function normalizeCycle(value) {
+  if (typeof value !== "string") {
+    return "monthly";
+  }
+
+  const normalized =
+    value.trim().toLowerCase();
+
+  if (normalized === "yearly") {
+    return "yearly";
+  }
+
+  return "monthly";
 }
 
 
-function expectedPrice(plan, cycle) {
-  const data = PLAN_CATALOG[plan];
+function expectedPrice(
+  planName,
+  billingCycle
+) {
+  const plan =
+    PLAN_CATALOG[planName];
 
-  if (!data) {
+  if (!plan) {
     return null;
   }
 
-  return data[cycle];
+  return plan[billingCycle] ?? null;
 }
 
 
-function getUserIdFromMetadata(metadata = {}) {
-  return (
+/* =========================================================
+   BILLING AGENT ENTITLEMENTS
+=========================================================
+
+   This is the critical part.
+
+   The subscription model stores limits/features, while
+   billingAgent remains the official source of plan
+   entitlements.
+
+========================================================= */
+
+function getPlanEntitlements(planName) {
+  if (
+    !billingAgent ||
+    typeof billingAgent.getPlanByName !==
+      "function"
+  ) {
+    throw new Error(
+      "Billing Agent plan catalog is unavailable"
+    );
+  }
+
+  const plan =
+    billingAgent.getPlanByName(
+      planName
+    );
+
+  if (!plan) {
+    throw new Error(
+      `Billing plan not found: ${planName}`
+    );
+  }
+
+  return plan;
+}
+
+
+/* =========================================================
+   BUILD SUBSCRIPTION ENTITLEMENTS
+========================================================= */
+
+function buildEntitlementData(
+  plan
+) {
+  return {
+    deploymentsLimit:
+      Number(plan.deploymentsLimit ?? 0),
+
+    aiCreditsLimit:
+      Number(plan.aiCredits ?? 0),
+
+    thumbnailCreditsLimit:
+      Number(plan.thumbnailCredits ?? 0),
+
+    videoCreditsLimit:
+      Number(plan.videoCredits ?? 0),
+
+    infrastructure: {
+      ram:
+        plan.ram ?? null,
+
+      cpu:
+        plan.cpu ?? null,
+
+      storage:
+        plan.storage ?? null,
+
+      bandwidth:
+        plan.bandwidth ?? null
+    },
+
+    featureFlags: {
+      customDomain:
+        Boolean(plan.customDomain),
+
+      autoSSL:
+        Boolean(plan.autoSSL),
+
+      autoScaling:
+        Boolean(plan.autoScaling),
+
+      advancedMonitoring:
+        Boolean(plan.advancedMonitoring),
+
+      priorityDeployments:
+        Boolean(plan.priorityDeployments),
+
+      dedicatedInfrastructure:
+        Boolean(
+          plan.dedicatedInfrastructure
+        ),
+
+      dedicatedSupport:
+        Boolean(
+          plan.dedicatedSupport
+        )
+    },
+
+    features:
+      Array.isArray(plan.features)
+        ? [...plan.features]
+        : [],
+
+    support:
+      plan.support ||
+      "Community Support"
+  };
+}
+
+
+/* =========================================================
+   USER ID HELPERS
+========================================================= */
+
+function normalizeUserId(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (
+    typeof value === "string"
+  ) {
+    return value.trim() || null;
+  }
+
+  if (
+    typeof value === "object" &&
+    value.toString
+  ) {
+    return value.toString();
+  }
+
+  return null;
+}
+
+
+function getUserIdFromMetadata(
+  metadata = {}
+) {
+  return normalizeUserId(
     metadata.userId ||
     metadata.user_id ||
-    metadata.userID ||
-    null
+    metadata.uid ||
+    metadata.user
   );
 }
 
@@ -112,75 +289,89 @@ function getExpiryDate(
   billingCycle,
   startDate = new Date()
 ) {
-  const expiry = new Date(startDate);
+  const date =
+    new Date(startDate);
 
-  if (billingCycle === "yearly") {
-    expiry.setFullYear(
-      expiry.getFullYear() + 1
+  if (
+    Number.isNaN(
+      date.getTime()
+    )
+  ) {
+    return null;
+  }
+
+  if (
+    billingCycle === "yearly"
+  ) {
+    date.setUTCFullYear(
+      date.getUTCFullYear() + 1
     );
   } else {
-    expiry.setMonth(
-      expiry.getMonth() + 1
+    date.setUTCMonth(
+      date.getUTCMonth() + 1
     );
   }
 
-  return expiry;
+  return date;
 }
 
 
 function getRenewedExpiryDate(
-  subscription,
-  billingCycle,
-  now
+  currentExpiryDate,
+  billingCycle
 ) {
-  /*
-   * For an existing active subscription, renew from the
-   * later of:
-   *
-   * - existing expiry date
-   * - current time
-   *
-   * This prevents a recurring invoice from accidentally
-   * shortening the subscription.
-   */
+  const now = new Date();
+
+  let baseDate =
+    currentExpiryDate
+      ? new Date(currentExpiryDate)
+      : now;
 
   if (
-    subscription &&
-    subscription.expiryDate
+    Number.isNaN(
+      baseDate.getTime()
+    )
   ) {
-    const existingExpiry =
-      new Date(
-        subscription.expiryDate
-      );
+    baseDate = now;
+  }
 
-    if (
-      !Number.isNaN(
-        existingExpiry.getTime()
-      ) &&
-      existingExpiry > now
-    ) {
-      return getExpiryDate(
-        billingCycle,
-        existingExpiry
-      );
-    }
+  /*
+   * If the old subscription has already expired,
+   * renewal starts from now.
+   *
+   * Otherwise continue from the existing expiry date.
+   */
+  if (baseDate < now) {
+    baseDate = now;
   }
 
   return getExpiryDate(
     billingCycle,
-    now
+    baseDate
   );
 }
 
 
 /* =========================================================
-   PROVIDER AMOUNT HELPERS
+   MONEY HELPERS
 ========================================================= */
 
-function minorToMajor(amount) {
-  const numeric = Number(amount);
+function minorToMajor(
+  amount
+) {
+  if (
+    amount === null ||
+    amount === undefined
+  ) {
+    return null;
+  }
 
-  if (!Number.isFinite(numeric)) {
+  const numeric =
+    Number(amount);
+
+  if (
+    !Number.isFinite(numeric)
+  ) {
     return null;
   }
 
@@ -189,87 +380,80 @@ function minorToMajor(amount) {
 
 
 /* =========================================================
-   PLAN PRICE VALIDATION
+   PAYMENT AMOUNT VALIDATION
 ========================================================= */
 
-function validatePlanAmount(
-  plan,
-  cycle,
-  amount
-) {
-  const normalizedPlan =
-    normalizePlan(plan);
-
-  if (!normalizedPlan) {
-    return {
-      valid: false,
-      reason: "Unknown plan"
-    };
-  }
-
-  const normalizedCycle =
-    normalizeCycle(cycle);
-
+function validatePlanAmount({
+  planName,
+  billingCycle,
+  amount,
+  allowMissing = false
+}) {
   const expected =
     expectedPrice(
-      normalizedPlan,
-      normalizedCycle
+      planName,
+      billingCycle
     );
 
   if (expected === null) {
     return {
       valid: false,
-      reason:
-        "Unable to resolve plan price"
+      reason: "PLAN_NOT_CONFIGURED"
     };
   }
 
-  const received = Number(amount);
+  if (
+    amount === null ||
+    amount === undefined
+  ) {
+    return {
+      valid: allowMissing,
+      reason: allowMissing
+        ? null
+        : "PAYMENT_AMOUNT_MISSING"
+    };
+  }
 
-  if (!Number.isFinite(received)) {
+  const numeric =
+    Number(amount);
+
+  if (
+    !Number.isFinite(numeric)
+  ) {
     return {
       valid: false,
-      reason:
-        "Invalid payment amount"
+      reason: "INVALID_PAYMENT_AMOUNT"
     };
   }
 
   /*
-   * ZyrionOS public catalog is currently USD.
-   *
-   * Do NOT silently treat INR as USD.
+   * Stripe/Razorpay webhooks are provider-authenticated.
+   * Exact catalog validation prevents a lower amount from
+   * activating a higher plan.
    */
-
-  if (received !== expected) {
+  if (
+    Math.abs(
+      numeric - expected
+    ) > 0.01
+  ) {
     return {
       valid: false,
-
-      reason:
-        "Payment amount does not match configured plan price",
-
+      reason: "PAYMENT_AMOUNT_MISMATCH",
       expected,
-
-      received
+      received: numeric
     };
   }
 
   return {
     valid: true,
-
-    plan:
-      normalizedPlan,
-
-    billingCycle:
-      normalizedCycle,
-
-    amount:
-      expected
+    expected,
+    received: numeric
   };
 }
 
 
 /* =========================================================
-   FIND SUBSCRIPTION
+   SUBSCRIPTION LOOKUP
 ========================================================= */
 
 async function findSubscription({
@@ -278,47 +462,65 @@ async function findSubscription({
   paymentId,
   userId
 }) {
-  let subscription = null;
-
-  if (providerSubscriptionId) {
-    subscription =
-      await Subscription.findOne({
-        providerSubscriptionId
-      });
-  }
-
   if (
-    !subscription &&
-    paymentProvider &&
-    paymentId
+    providerSubscriptionId
   ) {
-    subscription =
+    const subscription =
       await Subscription.findOne({
-        paymentProvider,
-        paymentId
+        providerSubscriptionId,
+        paymentProvider
       });
+
+    if (subscription) {
+      return subscription;
+    }
   }
 
-  if (
-    !subscription &&
-    userId
-  ) {
-    subscription =
+  if (paymentId) {
+    const subscription =
       await Subscription.findOne({
-        userId,
-        status: "active"
-      }).sort({
-        createdAt: -1
+        paymentId,
+        paymentProvider
       });
+
+    if (subscription) {
+      return subscription;
+    }
   }
 
-  return subscription;
+  if (userId) {
+    return Subscription.findOne({
+      userId,
+      paymentProvider,
+      status: "active"
+    }).sort({
+      createdAt: -1
+    });
+  }
+
+  return null;
 }
 
 
 /* =========================================================
-   WEBHOOK IDEMPOTENCY
+   WEBHOOK EVENT DUPLICATION
 ========================================================= */
+
+async function alreadyProcessed(
+  eventId
+) {
+  if (!eventId) {
+    return false;
+  }
+
+  const existing =
+    await Subscription.findOne({
+      processedWebhookEvents: eventId
+    }).select("_id");
+
+  return Boolean(existing);
+}
+
 
 function hasProcessedEvent(
   subscription,
@@ -331,32 +533,57 @@ function hasProcessedEvent(
     return false;
   }
 
-  const events =
-    Array.isArray(
-      subscription.processedWebhookEvents
-    )
-      ? subscription.processedWebhookEvents
-      : [];
+  if (
+    subscription.lastWebhookEventId ===
+    eventId
+  ) {
+    return true;
+  }
 
-  return events.includes(eventId);
+  return Array.isArray(
+    subscription.processedWebhookEvents
+  )
+    ? subscription.processedWebhookEvents.includes(
+        eventId
+      )
+    : false;
 }
 
 
-async function alreadyProcessed(
+/* =========================================================
+   EVENT HISTORY
+========================================================= */
+
+function appendWebhookEvent(
+  existingEvents,
   eventId
 ) {
-  if (!eventId) {
-    return false;
+  const events =
+    Array.isArray(existingEvents)
+      ? [...existingEvents]
+      : [];
+
+  if (
+    eventId &&
+    !events.includes(eventId)
+  ) {
+    events.push(eventId);
   }
 
-  const existing =
-    await Subscription.findOne({
-      processedWebhookEvents: eventId
-    })
-      .select("_id")
-      .lean();
+  /*
+   * Keep the document from growing forever.
+   */
+  const MAX_EVENTS = 100;
 
-  return Boolean(existing);
+  if (
+    events.length > MAX_EVENTS
+  ) {
+    return events.slice(
+      events.length - MAX_EVENTS
+    );
+  }
+
+  return events;
 }
 
 
@@ -368,7 +595,14 @@ async function updateUserPlan(
   userId,
   planName
 ) {
-  if (!userId || !planName) {
+  if (!userId) {
+    return;
+  }
+
+  const normalized =
+    normalizePlan(planName);
+
+  if (!normalized) {
     return;
   }
 
@@ -377,34 +611,55 @@ async function updateUserPlan(
     {
       $set: {
         subscriptionPlan:
-          planName.toLowerCase()
+          normalized.toLowerCase()
       }
+    },
+    {
+      new: false
     }
   );
 }
 
 
 /* =========================================================
-   ACTIVATE / RENEW SUBSCRIPTION
+   ACTIVATE SUBSCRIPTION
+=========================================================
+
+   This function is the central billing activation point.
+
+   It writes:
+   - payment information
+   - subscription dates
+   - plan limits
+   - credits
+   - infrastructure
+   - feature flags
+   - support
+   - webhook idempotency
+
 ========================================================= */
 
 async function activateSubscription({
   userId,
   planName,
-  amount,
-  currency,
+  billingCycle = "monthly",
   paymentProvider,
-  paymentId,
-  orderId,
-  providerCustomerId,
-  providerSubscriptionId,
-  billingCycle,
+  paymentId = null,
+  orderId = null,
+  providerCustomerId = null,
+  providerSubscriptionId = null,
+  currency = "USD",
+  amount = null,
   eventId,
-  eventType
+  eventType,
+  renewal = false
 }) {
-  if (!userId) {
+  const normalizedUserId =
+    normalizeUserId(userId);
+
+  if (!normalizedUserId) {
     throw new Error(
-      "Webhook did not contain a user ID"
+      "Subscription activation requires userId"
     );
   }
 
@@ -413,7 +668,7 @@ async function activateSubscription({
 
   if (!normalizedPlan) {
     throw new Error(
-      "Webhook contains an invalid plan"
+      "Invalid subscription plan"
     );
   }
 
@@ -423,46 +678,64 @@ async function activateSubscription({
     );
 
   const normalizedCurrency =
-    String(
-      currency || "USD"
-    ).toUpperCase();
+    String(currency || "USD")
+      .trim()
+      .toUpperCase();
 
-  /*
-   * Current public catalog is USD.
-   */
   if (
     normalizedCurrency !== "USD"
   ) {
     throw new Error(
-      "Only USD subscription activation is currently supported by the configured plan catalog"
+      "Current ZyrionOS subscription catalog requires USD"
     );
   }
 
-  const validation =
-    validatePlanAmount(
-      normalizedPlan,
-      cycle,
-      Number(amount)
+  const entitlements =
+    getPlanEntitlements(
+      normalizedPlan
     );
 
-  if (!validation.valid) {
+  const entitlementData =
+    buildEntitlementData(
+      entitlements
+    );
+
+  /*
+   * Amount is required for new activation.
+   *
+   * For authenticated provider renewals, the provider
+   * subscription identity is already verified.
+   */
+  const amountValidation =
+    validatePlanAmount({
+      planName: normalizedPlan,
+      billingCycle: cycle,
+      amount,
+      allowMissing:
+        Boolean(
+          providerSubscriptionId
+        )
+    });
+
+  if (
+    !amountValidation.valid
+  ) {
     throw new Error(
-      validation.reason
+      `Subscription payment validation failed: ${amountValidation.reason}`
     );
   }
-
-  const now = new Date();
 
   let subscription =
     await findSubscription({
       providerSubscriptionId,
       paymentProvider,
       paymentId,
-      userId
+      userId:
+        normalizedUserId
     });
 
   /*
-   * Never process the exact same provider event twice.
+   * Exact event idempotency.
    */
   if (
     hasProcessedEvent(
@@ -470,84 +743,204 @@ async function activateSubscription({
       eventId
     )
   ) {
-    return subscription;
+    return {
+      success: true,
+      duplicate: true,
+      subscription
+    };
   }
 
-  const startDate =
-    subscription &&
-    subscription.startDate &&
-    subscription.status === "active"
-      ? subscription.startDate
-      : now;
+  /*
+   * Global event idempotency.
+   */
+  if (
+    !subscription &&
+    await alreadyProcessed(eventId)
+  ) {
+    return {
+      success: true,
+      duplicate: true
+    };
+  }
 
-  const expiryDate =
+  const now =
+    new Date();
+
+  /*
+   * Existing provider subscription means this is normally
+   * a renewal/update of the same provider subscription.
+   */
+  const isExistingSubscription =
+    Boolean(subscription);
+
+  let startDate =
+    now;
+
+  let expiryDate;
+
+  if (
+    subscription &&
+    renewal
+  ) {
+    startDate =
+      now;
+
+    expiryDate =
+      getRenewedExpiryDate(
+        subscription.expiryDate,
+        cycle
+      );
+  } else if (
     subscription
-      ? getRenewedExpiryDate(
-          subscription,
-          cycle,
-          now
-        )
-      : getExpiryDate(
-          cycle,
-          now
+  ) {
+    /*
+     * Existing subscription receiving a successful initial
+     * event from another webhook type.
+     *
+     * Do not blindly extend the subscription twice.
+     */
+    const sameProviderSubscription =
+      providerSubscriptionId &&
+      subscription.providerSubscriptionId &&
+      String(
+        providerSubscriptionId
+      ) ===
+        String(
+          subscription.providerSubscriptionId
         );
 
-  const processedEvents =
-    subscription &&
-    Array.isArray(
-      subscription.processedWebhookEvents
-    )
-      ? subscription.processedWebhookEvents
-      : [];
+    if (
+      sameProviderSubscription &&
+      subscription.status === "active"
+    ) {
+      const eventAlreadyKnown =
+        hasProcessedEvent(
+          subscription,
+          eventId
+        );
 
-  if (eventId) {
-    processedEvents.push(
-      eventId
-    );
+      if (
+        !eventAlreadyKnown
+      ) {
+        subscription.processedWebhookEvents =
+          appendWebhookEvent(
+            subscription.processedWebhookEvents,
+            eventId
+          );
+
+        subscription.lastWebhookEventId =
+          eventId || null;
+
+        subscription.lastWebhookEventType =
+          eventType || null;
+
+        await subscription.save();
+      }
+
+      return {
+        success: true,
+        duplicate: true,
+        alreadyActive: true,
+        subscription
+      };
+    }
+
+    expiryDate =
+      getExpiryDate(
+        cycle,
+        startDate
+      );
+  } else {
+    expiryDate =
+      getExpiryDate(
+        cycle,
+        startDate
+      );
   }
 
+  const processedEvents =
+    appendWebhookEvent(
+      subscription?.processedWebhookEvents,
+      eventId
+    );
+
+  /*
+   * Preserve usage on initial activation only when an
+   * existing record is being updated for the same payment.
+   *
+   * For a genuine renewal, reset period-based usage.
+   */
+  const currentUsage =
+    subscription?.usage || {};
+
+  const usage =
+    renewal
+      ? {
+          aiRequestsUsed: 0,
+          aiCreditsUsed: 0,
+          deploymentsUsed: 0,
+          thumbnailsGenerated: 0,
+          videoCreditsUsed: 0
+        }
+      : {
+          aiRequestsUsed:
+            Number(
+              currentUsage.aiRequestsUsed ??
+                0
+            ),
+
+          aiCreditsUsed:
+            Number(
+              currentUsage.aiCreditsUsed ??
+                0
+            ),
+
+          deploymentsUsed:
+            Number(
+              currentUsage.deploymentsUsed ??
+                0
+            ),
+
+          thumbnailsGenerated:
+            Number(
+              currentUsage.thumbnailsGenerated ??
+                0
+            ),
+
+          videoCreditsUsed:
+            Number(
+              currentUsage.videoCreditsUsed ??
+                0
+            )
+        };
+
   const updateData = {
-    userId,
+    userId:
+      normalizedUserId,
 
     planName:
       normalizedPlan,
 
     price:
-      validation.amount,
+      amountValidation.expected ??
+      expectedPrice(
+        normalizedPlan,
+        cycle
+      ),
 
     currency:
       normalizedCurrency,
 
     paymentProvider,
 
-    paymentId:
-      paymentId ||
-      subscription?.paymentId ||
-      "",
-
-    orderId:
-      orderId ||
-      subscription?.orderId ||
-      "",
-
-    providerCustomerId:
-      providerCustomerId ||
-      subscription?.providerCustomerId ||
-      "",
-
-    providerSubscriptionId:
-      providerSubscriptionId ||
-      subscription?.providerSubscriptionId ||
-      "",
-
-    billingCycle:
-      cycle,
+    paymentStatus:
+      "paid",
 
     status:
       "active",
 
-    paymentStatus:
-      "paid",
+    billingCycle:
+      cycle,
 
     startDate,
 
@@ -556,19 +949,67 @@ async function activateSubscription({
     autoRenew:
       true,
 
+    usage,
+
+    /*
+     * =====================================================
+     * CRITICAL ENTITLEMENT FIX
+     * =====================================================
+     */
+
+    deploymentsLimit:
+      entitlementData.deploymentsLimit,
+
+    aiCreditsLimit:
+      entitlementData.aiCreditsLimit,
+
+    thumbnailCreditsLimit:
+      entitlementData.thumbnailCreditsLimit,
+
+    videoCreditsLimit:
+      entitlementData.videoCreditsLimit,
+
+    infrastructure:
+      entitlementData.infrastructure,
+
+    featureFlags:
+      entitlementData.featureFlags,
+
+    features:
+      entitlementData.features,
+
+    support:
+      entitlementData.support,
+
     processedWebhookEvents:
       processedEvents,
 
     lastWebhookEventId:
-      eventId ||
-      subscription?.lastWebhookEventId ||
-      "",
+      eventId || null,
 
     lastWebhookEventType:
-      eventType ||
-      subscription?.lastWebhookEventType ||
-      ""
+      eventType || null
   };
+
+  if (paymentId) {
+    updateData.paymentId =
+      paymentId;
+  }
+
+  if (orderId) {
+    updateData.orderId =
+      orderId;
+  }
+
+  if (providerCustomerId) {
+    updateData.providerCustomerId =
+      providerCustomerId;
+  }
+
+  if (providerSubscriptionId) {
+    updateData.providerSubscriptionId =
+      providerSubscriptionId;
+  }
 
   if (subscription) {
     Object.assign(
@@ -577,7 +1018,6 @@ async function activateSubscription({
     );
 
     await subscription.save();
-
   } else {
     subscription =
       await Subscription.create(
@@ -586,11 +1026,18 @@ async function activateSubscription({
   }
 
   await updateUserPlan(
-    userId,
+    normalizedUserId,
     normalizedPlan
   );
 
-  return subscription;
+  return {
+    success: true,
+    duplicate: false,
+    renewed: Boolean(renewal),
+    created:
+      !isExistingSubscription,
+    subscription
+  };
 }
 
 
@@ -599,36 +1046,31 @@ async function activateSubscription({
 ========================================================= */
 
 async function updateSubscriptionStatus({
-  providerSubscriptionId,
   userId,
+  providerSubscriptionId,
+  paymentProvider,
   status,
   paymentStatus,
   eventId,
-  eventType
+  eventType,
+  cancelled = false
 }) {
-  const query =
-    providerSubscriptionId
-      ? {
-          providerSubscriptionId
-        }
-      : userId
-        ? {
-            userId,
-            status: "active"
-          }
-        : null;
+  const normalizedUserId =
+    normalizeUserId(userId);
 
-  if (!query) {
-    return null;
-  }
-
-  const subscription =
-    await Subscription.findOne(
-      query
-    );
+  let subscription =
+    await findSubscription({
+      providerSubscriptionId,
+      paymentProvider,
+      userId:
+        normalizedUserId
+    });
 
   if (!subscription) {
-    return null;
+    return {
+      success: false,
+      found: false
+    };
   }
 
   if (
@@ -637,52 +1079,61 @@ async function updateSubscriptionStatus({
       eventId
     )
   ) {
-    return subscription;
+    return {
+      success: true,
+      duplicate: true,
+      subscription
+    };
   }
 
-  subscription.status =
-    status;
-
-  if (paymentStatus) {
-    subscription.paymentStatus =
-      paymentStatus;
-  }
-
-  if (eventId) {
-    if (
-      !Array.isArray(
-        subscription.processedWebhookEvents
-      )
-    ) {
-      subscription.processedWebhookEvents =
-        [];
-    }
-
-    subscription.processedWebhookEvents.push(
+  const processedEvents =
+    appendWebhookEvent(
+      subscription.processedWebhookEvents,
       eventId
     );
 
-    subscription.lastWebhookEventId =
-      eventId;
+  const update = {
+    processedWebhookEvents:
+      processedEvents,
+
+    lastWebhookEventId:
+      eventId || null,
+
+    lastWebhookEventType:
+      eventType || null
+  };
+
+  if (status) {
+    update.status =
+      status;
   }
 
-  subscription.lastWebhookEventType =
-    eventType ||
-    subscription.lastWebhookEventType;
+  if (paymentStatus) {
+    update.paymentStatus =
+      paymentStatus;
+  }
+
+  if (cancelled) {
+    update.cancelledAt =
+      new Date();
+
+    update.autoRenew =
+      false;
+  }
+
+  Object.assign(
+    subscription,
+    update
+  );
 
   await subscription.save();
 
-  /*
-   * If subscription becomes cancelled/expired,
-   * do not leave the user's plan pointing to the
-   * old active subscription.
-   */
   if (
-    status === "cancelled" ||
-    status === "expired"
+    cancelled &&
+    normalizedUserId
   ) {
     await User.findByIdAndUpdate(
-      subscription.userId,
+      normalizedUserId,
       {
         $set: {
           subscriptionPlan:
@@ -692,7 +1143,12 @@ async function updateSubscriptionStatus({
     );
   }
 
-  return subscription;
+  return {
+    success: true,
+    duplicate: false,
+    found: true,
+    subscription
+  };
 }
 
 
@@ -700,11 +1156,19 @@ async function updateSubscriptionStatus({
    STRIPE RAW BODY
 ========================================================= */
 
-function getRawBody(req) {
+function getStripeRawBody(req) {
   if (
     Buffer.isBuffer(req.body)
   ) {
     return req.body;
+  }
+
+  if (
+    typeof req.rawBody === "string"
+  ) {
+    return Buffer.from(
+      req.rawBody
+    );
   }
 
   if (
@@ -718,26 +1182,6 @@ function getRawBody(req) {
 
 
 /* =========================================================
-   STRIPE METADATA RESOLUTION
-========================================================= */
-
-async function resolveStripeSubscription(
-  subscriptionId
-) {
-  if (
-    !stripe ||
-    !subscriptionId
-  ) {
-    return null;
-  }
-
-  return stripe.subscriptions.retrieve(
-    subscriptionId
-  );
-}
-
-
-/* =========================================================
    STRIPE WEBHOOK
 ========================================================= */
 
@@ -745,191 +1189,189 @@ async function stripeWebhookController(
   req,
   res
 ) {
+  if (!stripe) {
+    return res.status(503).json({
+      success: false,
+      message:
+        "Stripe is not configured"
+    });
+  }
+
+  const signature =
+    req.headers[
+      "stripe-signature"
+    ];
+
+  const webhookSecret =
+    process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (
+    !signature ||
+    !webhookSecret
+  ) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Stripe webhook configuration is incomplete"
+    });
+  }
+
+  const rawBody =
+    getStripeRawBody(req);
+
+  if (!rawBody) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Stripe raw request body is required"
+    });
+  }
+
+  let event;
+
   try {
-    logger.info(
-      "Stripe Webhook Received"
-    );
-
-    if (!stripe) {
-      return res
-        .status(500)
-        .json(
-          formatResponse({
-            success: false,
-            provider: "stripe",
-            message:
-              "Stripe is not configured"
-          })
-        );
-    }
-
-    const signature =
-      req.headers[
-        "stripe-signature"
-      ];
-
-    const webhookSecret =
-      process.env
-        .STRIPE_WEBHOOK_SECRET;
-
-    if (
-      !signature ||
-      !webhookSecret
-    ) {
-      return res
-        .status(400)
-        .json(
-          formatResponse({
-            success: false,
-            provider: "stripe",
-            message:
-              "Stripe webhook signature configuration missing"
-          })
-        );
-    }
-
-    const rawBody =
-      getRawBody(req);
-
-    if (!rawBody) {
-      return res
-        .status(400)
-        .json(
-          formatResponse({
-            success: false,
-            provider: "stripe",
-            message:
-              "Raw Stripe webhook body required"
-          })
-        );
-    }
-
-    /*
-     * Stripe signature verification.
-     */
-    const event =
+    event =
       stripe.webhooks.constructEvent(
         rawBody,
         signature,
         webhookSecret
       );
+  } catch (error) {
+    console.error(
+      "Stripe Webhook Signature Error:",
+      error?.message || error
+    );
 
-    const eventId =
-      event.id;
+    return res.status(400).json({
+      success: false,
+      message:
+        "Invalid Stripe webhook signature"
+    });
+  }
 
-    const eventType =
-      event.type;
+  const eventId =
+    event.id;
 
+  try {
     /*
-     * Fast duplicate protection.
+     * Global duplicate check.
      */
     if (
       await alreadyProcessed(
         eventId
       )
     ) {
-      logger.info(
-        `Stripe webhook already processed: ${eventId}`
-      );
-
-      return res
-        .status(200)
-        .json({
-          received: true,
-          duplicate: true
-        });
+      return res.status(200).json({
+        success: true,
+        duplicate: true
+      });
     }
 
     const object =
-      event?.data?.object || {};
-
+      event.data?.object || {};
 
     /* =====================================================
-       CHECKOUT COMPLETED
+       CHECKOUT SESSION COMPLETED
     ===================================================== */
 
     if (
-      eventType ===
+      event.type ===
       "checkout.session.completed"
     ) {
       const metadata =
         object.metadata || {};
+
+      const subscriptionId =
+        typeof object.subscription ===
+        "string"
+          ? object.subscription
+          : object.subscription?.id ||
+            null;
 
       const userId =
         getUserIdFromMetadata(
           metadata
         );
 
-      const plan =
+      const planName =
         normalizePlan(
-          metadata.plan
+          metadata.plan ||
+          metadata.planName
         );
 
-      const cycle =
+      const billingCycle =
         normalizeCycle(
-          metadata.billingCycle
+          metadata.billingCycle ||
+          metadata.billing_cycle
         );
 
-      /*
-       * Stripe checkout amount is in minor units.
-       */
+      if (
+        !userId ||
+        !planName
+      ) {
+        console.error(
+          "Stripe checkout missing metadata",
+          {
+            eventId
+          }
+        );
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Stripe checkout metadata is incomplete"
+        });
+      }
+
       const amount =
         minorToMajor(
           object.amount_total
         );
 
-      if (
-        object.mode ===
-        "subscription"
-      ) {
-        if (
-          !userId ||
-          !plan ||
-          amount === null
-        ) {
-          throw new Error(
-            "Stripe checkout webhook is missing userId, plan or amount metadata"
-          );
-        }
-
+      const result =
         await activateSubscription({
           userId,
-
-          planName:
-            plan,
-
-          amount,
-
-          currency:
-            object.currency ||
-            "USD",
-
+          planName,
+          billingCycle,
           paymentProvider:
             "stripe",
-
           paymentId:
+            object.payment_intent
+              ?.toString?.() ||
             object.payment_intent ||
-            "",
-
+            null,
           orderId:
-            object.id,
-
+            object.id ||
+            null,
           providerCustomerId:
-            object.customer ||
-            "",
-
+            typeof object.customer ===
+            "string"
+              ? object.customer
+              : object.customer?.id ||
+                null,
           providerSubscriptionId:
-            object.subscription ||
-            "",
-
-          billingCycle:
-            cycle,
-
+            subscriptionId,
+          currency:
+            String(
+              object.currency ||
+                "usd"
+            ).toUpperCase(),
+          amount,
           eventId,
-
-          eventType
+          eventType:
+            event.type,
+          renewal: false
         });
-      }
+
+      return res.status(200).json({
+        success: true,
+        event:
+          event.type,
+        activation:
+          result.success,
+        duplicate:
+          Boolean(result.duplicate)
+      });
     }
 
 
@@ -937,8 +1379,8 @@ async function stripeWebhookController(
        PAYMENT INTENT SUCCEEDED
     ===================================================== */
 
-    else if (
-      eventType ===
+    if (
+      event.type ===
       "payment_intent.succeeded"
     ) {
       const metadata =
@@ -949,14 +1391,51 @@ async function stripeWebhookController(
           metadata
         );
 
-      const plan =
+      const planName =
         normalizePlan(
-          metadata.plan
+          metadata.plan ||
+          metadata.planName
         );
 
-      const cycle =
+      const providerSubscriptionId =
+        metadata.providerSubscriptionId ||
+        metadata.provider_subscription_id ||
+        null;
+
+      /*
+       * For a real Stripe subscription, invoice/session
+       * events are the subscription lifecycle source.
+
+       * This PaymentIntent handler is retained for the
+       * current one-time PaymentIntent compatibility path.
+       */
+      if (
+        providerSubscriptionId
+      ) {
+        return res.status(200).json({
+          success: true,
+          ignored: true,
+          reason:
+            "Subscription PaymentIntent handled by subscription lifecycle webhook"
+        });
+      }
+
+      if (
+        !userId ||
+        !planName
+      ) {
+        return res.status(200).json({
+          success: true,
+          ignored: true,
+          reason:
+            "PaymentIntent metadata incomplete"
+        });
+      }
+
+      const billingCycle =
         normalizeCycle(
-          metadata.billingCycle
+          metadata.billingCycle ||
+          metadata.billing_cycle
         );
 
       const amount =
@@ -965,50 +1444,42 @@ async function stripeWebhookController(
           object.amount
         );
 
-      /*
-       * PaymentIntent metadata may not be present
-       * for subscription checkout. Do not invent a
-       * subscription activation without metadata.
-       */
-      if (
-        userId &&
-        plan &&
-        amount !== null
-      ) {
+      const result =
         await activateSubscription({
           userId,
-
-          planName:
-            plan,
-
-          amount,
-
-          currency:
-            object.currency ||
-            "USD",
-
+          planName,
+          billingCycle,
           paymentProvider:
             "stripe",
-
           paymentId:
             object.id,
-
           providerCustomerId:
-            object.customer ||
-            "",
-
-          billingCycle:
-            cycle,
-
+            typeof object.customer ===
+            "string"
+              ? object.customer
+              : object.customer?.id ||
+                null,
+          currency:
+            String(
+              object.currency ||
+                "usd"
+            ).toUpperCase(),
+          amount,
           eventId,
-
-          eventType
+          eventType:
+            event.type,
+          renewal: false
         });
-      } else {
-        logger.warning(
-          `Stripe PaymentIntent ${object.id} has insufficient metadata; subscription activation skipped`
-        );
-      }
+
+      return res.status(200).json({
+        success: true,
+        event:
+          event.type,
+        activation:
+          result.success,
+        duplicate:
+          Boolean(result.duplicate)
+      });
     }
 
 
@@ -1016,131 +1487,273 @@ async function stripeWebhookController(
        INVOICE PAID
     ===================================================== */
 
-    else if (
-      eventType ===
+    if (
+      event.type ===
       "invoice.paid"
     ) {
-      const subscriptionId =
-        object.subscription;
+      let providerSubscriptionId =
+        typeof object.subscription ===
+        "string"
+          ? object.subscription
+          : object.subscription?.id ||
+            null;
 
-      if (subscriptionId) {
-        const stripeSubscription =
-          await resolveStripeSubscription(
-            subscriptionId
-          );
+      let providerCustomerId =
+        typeof object.customer ===
+        "string"
+          ? object.customer
+          : object.customer?.id ||
+            null;
 
-        const metadata =
-          stripeSubscription?.metadata ||
-          object.metadata ||
-          {};
+      let subscriptionMetadata =
+        object.metadata || {};
 
-        const userId =
-          getUserIdFromMetadata(
-            metadata
-          );
+      /*
+       * Retrieve the Stripe subscription so metadata remains
+       * available during recurring invoices.
+       */
+      if (
+        providerSubscriptionId
+      ) {
+        try {
+          const stripeSubscription =
+            await stripe.subscriptions.retrieve(
+              providerSubscriptionId
+            );
 
-        const plan =
-          normalizePlan(
-            metadata.plan
-          );
+          providerCustomerId =
+            providerCustomerId ||
+            (
+              typeof stripeSubscription.customer ===
+              "string"
+                ? stripeSubscription.customer
+                : stripeSubscription.customer?.id ||
+                  null
+            );
 
-        const cycle =
-          normalizeCycle(
-            metadata.billingCycle
-          );
-
-        const amount =
-          minorToMajor(
-            object.amount_paid ??
-            object.amount_due
-          );
-
-        if (
-          userId &&
-          plan &&
-          amount !== null
-        ) {
-          await activateSubscription({
-            userId,
-
-            planName:
-              plan,
-
-            amount,
-
-            currency:
-              object.currency ||
-              "USD",
-
-            paymentProvider:
-              "stripe",
-
-            paymentId:
-              object.payment_intent ||
-              object.id,
-
-            providerCustomerId:
-              object.customer ||
-              "",
-
-            providerSubscriptionId:
-              subscriptionId,
-
-            billingCycle:
-              cycle,
-
-            eventId,
-
-            eventType
-          });
-        } else {
-          logger.warning(
-            `Stripe invoice ${object.id} has insufficient subscription metadata`
+          subscriptionMetadata = {
+            ...(
+              stripeSubscription.metadata ||
+              {}
+            ),
+            ...subscriptionMetadata
+          };
+        } catch (error) {
+          console.error(
+            "Stripe Subscription Retrieval Error:",
+            error?.message || error
           );
         }
       }
-    }
 
+      const userId =
+        getUserIdFromMetadata(
+          subscriptionMetadata
+        );
 
-    /* =====================================================
-       PAYMENT FAILED
-    ===================================================== */
+      const planName =
+        normalizePlan(
+          subscriptionMetadata.plan ||
+          subscriptionMetadata.planName
+        );
 
-    else if (
-      eventType ===
-      "invoice.payment_failed"
-    ) {
-      await updateSubscriptionStatus({
-        providerSubscriptionId:
-          object.subscription,
+      if (
+        !userId ||
+        !planName
+      ) {
+        /*
+         * Try existing local subscription when metadata is
+         * unavailable.
+         */
+        const existing =
+          await findSubscription({
+            providerSubscriptionId,
+            paymentProvider:
+              "stripe"
+          });
 
-        userId:
-          object.metadata
-            ?.userId,
+        if (existing) {
+          const cycle =
+            normalizeCycle(
+              existing.billingCycle
+            );
 
-        status:
-          "past_due",
+          const amount =
+            minorToMajor(
+              object.amount_paid ??
+              object.amount_due
+            );
 
-        paymentStatus:
-          "failed",
+          const result =
+            await activateSubscription({
+              userId:
+                existing.userId,
+              planName:
+                existing.planName,
+              billingCycle:
+                cycle,
+              paymentProvider:
+                "stripe",
+              paymentId:
+                object.payment_intent ||
+                existing.paymentId ||
+                null,
+              providerCustomerId,
+              providerSubscriptionId,
+              currency:
+                String(
+                  object.currency ||
+                    existing.currency ||
+                    "usd"
+                ).toUpperCase(),
+              amount,
+              eventId,
+              eventType:
+                event.type,
+              renewal: true
+            });
 
-        eventId,
+          return res.status(200).json({
+            success: true,
+            event:
+              event.type,
+            activation:
+              result.success,
+            duplicate:
+              Boolean(result.duplicate),
+            renewed:
+              Boolean(result.renewed)
+          });
+        }
 
-        eventType
+        return res.status(200).json({
+          success: true,
+          ignored: true,
+          reason:
+            "Invoice metadata could not identify a subscription"
+        });
+      }
+
+      const billingCycle =
+        normalizeCycle(
+          subscriptionMetadata.billingCycle ||
+          subscriptionMetadata.billing_cycle
+        );
+
+      const amount =
+        minorToMajor(
+          object.amount_paid ??
+          object.amount_due
+        );
+
+      const result =
+        await activateSubscription({
+          userId,
+          planName,
+          billingCycle,
+          paymentProvider:
+            "stripe",
+          paymentId:
+            object.payment_intent ||
+            null,
+          providerCustomerId,
+          providerSubscriptionId,
+          currency:
+            String(
+              object.currency ||
+                "usd"
+            ).toUpperCase(),
+          amount,
+          eventId,
+          eventType:
+            event.type,
+          renewal: true
+        });
+
+      return res.status(200).json({
+        success: true,
+        event:
+          event.type,
+        activation:
+          result.success,
+        duplicate:
+          Boolean(result.duplicate),
+        renewed:
+          Boolean(result.renewed)
       });
     }
 
 
     /* =====================================================
-       SUBSCRIPTION UPDATED
+       INVOICE PAYMENT FAILED
     ===================================================== */
 
-    else if (
-      eventType ===
+    if (
+      event.type ===
+      "invoice.payment_failed"
+    ) {
+      const providerSubscriptionId =
+        typeof object.subscription ===
+        "string"
+          ? object.subscription
+          : object.subscription?.id ||
+            null;
+
+      const providerCustomerId =
+        typeof object.customer ===
+        "string"
+          ? object.customer
+          : object.customer?.id ||
+            null;
+
+      const metadata =
+        object.metadata || {};
+
+      const userId =
+        getUserIdFromMetadata(
+          metadata
+        );
+
+      const result =
+        await updateSubscriptionStatus({
+          userId,
+          providerSubscriptionId,
+          paymentProvider:
+            "stripe",
+          status:
+            "past_due",
+          paymentStatus:
+            "failed",
+          eventId,
+          eventType:
+            event.type
+        });
+
+      return res.status(200).json({
+        success: true,
+        event:
+          event.type,
+        updated:
+          Boolean(result.found)
+      });
+    }
+
+
+    /* =====================================================
+       STRIPE SUBSCRIPTION UPDATED
+    ===================================================== */
+
+    if (
+      event.type ===
       "customer.subscription.updated"
     ) {
-      const stripeStatus =
-        object.status;
+      const metadata =
+        object.metadata || {};
+
+      const userId =
+        getUserIdFromMetadata(
+          metadata
+        );
 
       let localStatus =
         "active";
@@ -1148,138 +1761,164 @@ async function stripeWebhookController(
       let paymentStatus =
         "paid";
 
-      if (
-        stripeStatus ===
-        "past_due"
+      switch (
+        object.status
       ) {
-        localStatus =
-          "past_due";
+        case "active":
+          localStatus =
+            "active";
+          paymentStatus =
+            "paid";
+          break;
 
-        paymentStatus =
-          "failed";
+        case "trialing":
+          localStatus =
+            "active";
+          paymentStatus =
+            "pending";
+          break;
 
-      } else if (
-        stripeStatus ===
-          "canceled" ||
-        stripeStatus ===
-          "unpaid"
-      ) {
-        localStatus =
-          "cancelled";
+        case "past_due":
+          localStatus =
+            "past_due";
+          paymentStatus =
+            "failed";
+          break;
 
-        paymentStatus =
-          "cancelled";
+        case "unpaid":
+          localStatus =
+            "past_due";
+          paymentStatus =
+            "failed";
+          break;
 
-      } else if (
-        stripeStatus ===
-        "incomplete"
-      ) {
-        localStatus =
-          "pending";
+        case "canceled":
+          localStatus =
+            "cancelled";
+          paymentStatus =
+            "cancelled";
+          break;
 
-        paymentStatus =
-          "pending";
+        case "incomplete":
+        case "incomplete_expired":
+          localStatus =
+            "expired";
+          paymentStatus =
+            "failed";
+          break;
 
-      } else if (
-        stripeStatus ===
-        "incomplete_expired"
-      ) {
-        localStatus =
-          "cancelled";
-
-        paymentStatus =
-          "failed";
+        default:
+          localStatus =
+            "pending";
       }
 
-      await updateSubscriptionStatus({
-        providerSubscriptionId:
-          object.id,
+      const result =
+        await updateSubscriptionStatus({
+          userId,
+          providerSubscriptionId:
+            object.id,
+          paymentProvider:
+            "stripe",
+          status:
+            localStatus,
+          paymentStatus,
+          eventId,
+          eventType:
+            event.type,
+          cancelled:
+            localStatus ===
+            "cancelled"
+        });
 
-        userId:
-          object.metadata
-            ?.userId,
-
-        status:
-          localStatus,
-
-        paymentStatus,
-
-        eventId,
-
-        eventType
+      return res.status(200).json({
+        success: true,
+        event:
+          event.type,
+        updated:
+          Boolean(result.found),
+        duplicate:
+          Boolean(result.duplicate)
       });
     }
 
 
     /* =====================================================
-       SUBSCRIPTION DELETED
+       STRIPE SUBSCRIPTION DELETED
     ===================================================== */
 
-    else if (
-      eventType ===
+    if (
+      event.type ===
       "customer.subscription.deleted"
     ) {
-      await updateSubscriptionStatus({
-        providerSubscriptionId:
-          object.id,
+      const metadata =
+        object.metadata || {};
 
-        userId:
-          object.metadata
-            ?.userId,
+      const userId =
+        getUserIdFromMetadata(
+          metadata
+        );
 
-        status:
-          "cancelled",
+      const result =
+        await updateSubscriptionStatus({
+          userId,
+          providerSubscriptionId:
+            object.id,
+          paymentProvider:
+            "stripe",
+          status:
+            "cancelled",
+          paymentStatus:
+            "cancelled",
+          eventId,
+          eventType:
+            event.type,
+          cancelled: true
+        });
 
-        paymentStatus:
-          "cancelled",
-
-        eventId,
-
-        eventType
+      return res.status(200).json({
+        success: true,
+        event:
+          event.type,
+        cancelled:
+          Boolean(result.found),
+        duplicate:
+          Boolean(result.duplicate)
       });
     }
 
 
     /* =====================================================
-       RESPONSE
+       UNHANDLED STRIPE EVENT
     ===================================================== */
 
-    return res
-      .status(200)
-      .json({
-        received: true,
-        provider: "stripe",
-        eventId
-      });
+    return res.status(200).json({
+      success: true,
+      received: true,
+      handled: false,
+      event:
+        event.type
+    });
 
   } catch (error) {
-    logger.error(
-      `Stripe webhook failed: ${error?.message}`
+    console.error(
+      "Stripe Webhook Processing Error:",
+      error?.message || error
     );
 
     /*
-     * Returning 400 allows the provider to regard the
-     * webhook as unsuccessful and retry according to its
-     * delivery policy.
+     * Returning 500 tells Stripe to retry the webhook.
      */
-
-    return res
-      .status(400)
-      .json({
-        success: false,
-        provider: "stripe",
-        message:
-          "Webhook processing failed",
-        error:
-          error?.message ||
-          "Unknown webhook error"
-      });
+    return res.status(500).json({
+      success: false,
+      message:
+        "Stripe webhook processing failed"
+    });
   }
 }
 
 
 /* =========================================================
-   RAZORPAY SIGNATURE VERIFICATION
+   RAZORPAY SIGNATURE
 ========================================================= */
 
 function getRazorpayRawBody(req) {
@@ -1296,8 +1935,7 @@ function getRazorpayRawBody(req) {
   }
 
   if (
-    typeof req.rawBody ===
-    "string"
+    typeof req.rawBody === "string"
   ) {
     return Buffer.from(
       req.rawBody
@@ -1308,27 +1946,16 @@ function getRazorpayRawBody(req) {
 }
 
 
-function verifyRazorpayWebhook(req) {
-  const signature =
-    req.headers[
-      "x-razorpay-signature"
-    ];
-
-  const secret =
-    process.env
-      .RAZORPAY_WEBHOOK_SECRET;
-
+function verifyRazorpaySignature(
+  rawBody,
+  signature,
+  secret
+) {
   if (
+    !rawBody ||
     !signature ||
     !secret
   ) {
-    return false;
-  }
-
-  const rawBody =
-    getRazorpayRawBody(req);
-
-  if (!rawBody) {
     return false;
   }
 
@@ -1342,15 +1969,11 @@ function verifyRazorpayWebhook(req) {
       .digest("hex");
 
   const expectedBuffer =
-    Buffer.from(
-      expected,
-      "utf8"
-    );
+    Buffer.from(expected);
 
   const receivedBuffer =
     Buffer.from(
-      String(signature),
-      "utf8"
+      String(signature)
     );
 
   if (
@@ -1367,6 +1990,35 @@ function verifyRazorpayWebhook(req) {
 }
 
 
+function parseRazorpayBody(
+  req
+) {
+  if (
+    req.body &&
+    !Buffer.isBuffer(req.body) &&
+    typeof req.body ===
+      "object"
+  ) {
+    return req.body;
+  }
+
+  const rawBody =
+    getRazorpayRawBody(req);
+
+  if (!rawBody) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(
+      rawBody.toString("utf8")
+    );
+  } catch {
+    return null;
+  }
+}
+
+
 /* =========================================================
    RAZORPAY WEBHOOK
 ========================================================= */
@@ -1375,100 +2027,114 @@ async function razorpayWebhookController(
   req,
   res
 ) {
-  try {
-    logger.info(
-      "Razorpay Webhook Received"
+  const secret =
+    process.env.RAZORPAY_WEBHOOK_SECRET;
+
+  const signature =
+    req.headers[
+      "x-razorpay-signature"
+    ];
+
+  if (
+    !secret ||
+    !signature
+  ) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Razorpay webhook configuration is incomplete"
+    });
+  }
+
+  const rawBody =
+    getRazorpayRawBody(req);
+
+  if (!rawBody) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Razorpay raw request body is required"
+    });
+  }
+
+  const validSignature =
+    verifyRazorpaySignature(
+      rawBody,
+      signature,
+      secret
     );
 
-    if (
-      !verifyRazorpayWebhook(
-        req
-      )
-    ) {
-      logger.warning(
+  if (!validSignature) {
+    return res.status(400).json({
+      success: false,
+      message:
         "Invalid Razorpay webhook signature"
-      );
+    });
+  }
 
-      return res
-        .status(400)
-        .json({
-          success: false,
-          provider: "razorpay",
-          message:
-            "Invalid webhook signature"
-        });
-    }
+  const payload =
+    parseRazorpayBody(req);
 
-    let event;
+  if (!payload) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Invalid Razorpay webhook payload"
+    });
+  }
 
-    try {
-      event =
-        Buffer.isBuffer(req.body)
-          ? JSON.parse(
-              req.body.toString(
-                "utf8"
-              )
-            )
-          : req.body;
-    } catch {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          provider: "razorpay",
-          message:
-            "Invalid webhook payload"
-        });
-    }
+  const eventType =
+    payload.event ||
+    payload.type ||
+    null;
 
-    if (
-      !event ||
-      typeof event !==
-        "object"
-    ) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          provider: "razorpay",
-          message:
-            "Invalid webhook payload"
-        });
-    }
+  const paymentEntity =
+    payload.payload?.payment?.entity ||
+    {};
 
-    const eventType =
-      event.event || null;
+  const orderEntity =
+    payload.payload?.order?.entity ||
+    {};
 
-    /*
-     * Razorpay webhook payloads do not always expose a
-     * universal top-level event ID. Payment/subscription
-     * entity IDs are used as fallback.
-     */
-    const eventId =
-      event.id ||
-      event.payload
-        ?.payment
-        ?.entity
-        ?.id ||
-      event.payload
-        ?.subscription
-        ?.entity
-        ?.id ||
-      null;
+  const subscriptionEntity =
+    payload.payload?.subscription?.entity ||
+    {};
 
+  const paymentId =
+    paymentEntity.id ||
+    null;
+
+  const orderId =
+    paymentEntity.order_id ||
+    orderEntity.id ||
+    null;
+
+  const providerSubscriptionId =
+    subscriptionEntity.id ||
+    paymentEntity.subscription_id ||
+    null;
+
+  const metadata =
+    paymentEntity.notes ||
+    subscriptionEntity.notes ||
+    orderEntity.notes ||
+    {};
+
+  const eventId =
+    payload.id ||
+    `${eventType || "razorpay"}:${paymentId || orderId || providerSubscriptionId || Date.now()}`;
+
+  try {
     if (
       await alreadyProcessed(
         eventId
       )
     ) {
-      return res
-        .status(200)
-        .json({
-          received: true,
-          duplicate: true
-        });
+      return res.status(200).json({
+        success: true,
+        duplicate: true
+      });
     }
-
 
     /* =====================================================
        PAYMENT CAPTURED
@@ -1476,94 +2142,95 @@ async function razorpayWebhookController(
 
     if (
       eventType ===
-      "payment.captured"
+        "payment.captured" ||
+      eventType ===
+        "order.paid"
     ) {
-      const payment =
-        event.payload
-          ?.payment
-          ?.entity || {};
-
-      const notes =
-        payment.notes || {};
-
       const userId =
-        notes.userId ||
-        notes.user_id ||
-        null;
-
-      const plan =
-        normalizePlan(
-          notes.plan
+        getUserIdFromMetadata(
+          metadata
         );
 
-      const cycle =
+      const planName =
+        normalizePlan(
+          metadata.plan ||
+          metadata.planName
+        );
+
+      if (
+        !userId ||
+        !planName
+      ) {
+        return res.status(200).json({
+          success: true,
+          ignored: true,
+          reason:
+            "Razorpay payment metadata incomplete"
+        });
+      }
+
+      const billingCycle =
         normalizeCycle(
-          notes.billingCycle
+          metadata.billingCycle ||
+          metadata.billing_cycle
+        );
+
+      const amount =
+        minorToMajor(
+          paymentEntity.amount
         );
 
       const currency =
         String(
-          payment.currency ||
-          "INR"
+          paymentEntity.currency ||
+            "USD"
         ).toUpperCase();
 
-      const amount =
-        minorToMajor(
-          payment.amount
-        );
-
       /*
-       * The current ZyrionOS catalog is USD.
+       * Current ZyrionOS catalog is USD.
        *
-       * Do not convert INR to USD using an invented
-       * exchange rate or silently map arbitrary INR
-       * amounts to plans.
+       * Razorpay activation remains guarded until an
+       * officially configured Razorpay currency/catalog
+       * exists.
        */
       if (
-        currency !==
-        "USD"
+        currency !== "USD"
       ) {
-        throw new Error(
-          "Razorpay USD plan activation requires a verified USD payment. Current Razorpay payload is not USD."
-        );
+        return res.status(400).json({
+          success: false,
+          message:
+            "Razorpay currency is not configured for the current ZyrionOS catalog"
+        });
       }
 
-      if (
-        !userId ||
-        !plan ||
-        amount === null
-      ) {
-        throw new Error(
-          "Razorpay payment webhook is missing userId, plan or amount metadata"
-        );
-      }
+      const result =
+        await activateSubscription({
+          userId,
+          planName,
+          billingCycle,
+          paymentProvider:
+            "razorpay",
+          paymentId,
+          orderId,
+          providerCustomerId:
+            paymentEntity.customer_id ||
+            null,
+          providerSubscriptionId,
+          currency,
+          amount,
+          eventId,
+          eventType,
+          renewal: false
+        });
 
-      await activateSubscription({
-        userId,
-
-        planName:
-          plan,
-
-        amount,
-
-        currency,
-
-        paymentProvider:
-          "razorpay",
-
-        paymentId:
-          payment.id,
-
-        orderId:
-          payment.order_id ||
-          "",
-
-        billingCycle:
-          cycle,
-
-        eventId,
-
-        eventType
+      return res.status(200).json({
+        success: true,
+        event:
+          eventType,
+        activation:
+          result.success,
+        duplicate:
+          Boolean(result.duplicate)
       });
     }
 
@@ -1572,33 +2239,35 @@ async function razorpayWebhookController(
        PAYMENT FAILED
     ===================================================== */
 
-    else if (
+    if (
       eventType ===
       "payment.failed"
     ) {
-      const payment =
-        event.payload
-          ?.payment
-          ?.entity || {};
+      const userId =
+        getUserIdFromMetadata(
+          metadata
+        );
 
-      const notes =
-        payment.notes || {};
+      const result =
+        await updateSubscriptionStatus({
+          userId,
+          providerSubscriptionId,
+          paymentProvider:
+            "razorpay",
+          status:
+            "past_due",
+          paymentStatus:
+            "failed",
+          eventId,
+          eventType
+        });
 
-      await updateSubscriptionStatus({
-        userId:
-          notes.userId ||
-          notes.user_id ||
-          null,
-
-        status:
-          "past_due",
-
-        paymentStatus:
-          "failed",
-
-        eventId,
-
-        eventType
+      return res.status(200).json({
+        success: true,
+        event:
+          eventType,
+        updated:
+          Boolean(result.found)
       });
     }
 
@@ -1607,126 +2276,88 @@ async function razorpayWebhookController(
        SUBSCRIPTION ACTIVATED
     ===================================================== */
 
-    else if (
+    if (
       eventType ===
       "subscription.activated"
     ) {
-      const subscriptionEntity =
-        event.payload
-          ?.subscription
-          ?.entity || {};
-
-      const notes =
-        subscriptionEntity.notes ||
-        {};
-
-      const plan =
-        normalizePlan(
-          notes.plan
-        );
-
-      const cycle =
-        normalizeCycle(
-          notes.billingCycle
-        );
-
       const userId =
-        notes.userId ||
-        notes.user_id ||
-        null;
+        getUserIdFromMetadata(
+          metadata
+        );
 
-      /*
-       * Razorpay subscription amount must be explicitly
-       * supplied in trusted provider metadata.
-       *
-       * Do not invent the plan price.
-       */
-      const amount =
-        Number(
-          notes.amount
+      const planName =
+        normalizePlan(
+          metadata.plan ||
+          metadata.planName
         );
 
       if (
-        userId &&
-        plan &&
-        Number.isFinite(amount)
+        !userId ||
+        !planName
       ) {
+        return res.status(200).json({
+          success: true,
+          ignored: true,
+          reason:
+            "Razorpay subscription metadata incomplete"
+        });
+      }
+
+      const billingCycle =
+        normalizeCycle(
+          metadata.billingCycle ||
+          metadata.billing_cycle
+        );
+
+      const amount =
+        minorToMajor(
+          subscriptionEntity.amount
+        );
+
+      const currency =
+        String(
+          subscriptionEntity.currency ||
+            "USD"
+        ).toUpperCase();
+
+      if (
+        currency !== "USD"
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Razorpay currency is not configured for the current ZyrionOS catalog"
+        });
+      }
+
+      const result =
         await activateSubscription({
           userId,
-
-          planName:
-            plan,
-
-          amount,
-
-          currency:
-            String(
-              notes.currency ||
-              "USD"
-            ).toUpperCase(),
-
+          planName,
+          billingCycle,
           paymentProvider:
             "razorpay",
-
-          paymentId:
-            "",
-
-          orderId:
-            "",
-
-          providerSubscriptionId:
-            subscriptionEntity.id,
-
-          billingCycle:
-            cycle,
-
+          paymentId,
+          orderId,
+          providerCustomerId:
+            subscriptionEntity.customer_id ||
+            null,
+          providerSubscriptionId,
+          currency,
+          amount,
           eventId,
-
-          eventType
+          eventType,
+          renewal: false
         });
-      } else {
-        logger.warning(
-          `Razorpay subscription ${subscriptionEntity.id} has insufficient metadata`
-        );
-      }
-    }
 
-
-    /* =====================================================
-       SUBSCRIPTION CANCELLED
-    ===================================================== */
-
-    else if (
-      eventType ===
-      "subscription.cancelled"
-    ) {
-      const subscriptionEntity =
-        event.payload
-          ?.subscription
-          ?.entity || {};
-
-      await updateSubscriptionStatus({
-        providerSubscriptionId:
-          subscriptionEntity.id,
-
-        userId:
-          subscriptionEntity
-            ?.notes
-            ?.userId ||
-          subscriptionEntity
-            ?.notes
-            ?.user_id ||
-          null,
-
-        status:
-          "cancelled",
-
-        paymentStatus:
-          "cancelled",
-
-        eventId,
-
-        eventType
+      return res.status(200).json({
+        success: true,
+        event:
+          eventType,
+        activation:
+          result.success,
+        duplicate:
+          Boolean(result.duplicate)
       });
     }
 
@@ -1735,69 +2366,102 @@ async function razorpayWebhookController(
        SUBSCRIPTION HALTED
     ===================================================== */
 
-    else if (
+    if (
       eventType ===
       "subscription.halted"
     ) {
-      const subscriptionEntity =
-        event.payload
-          ?.subscription
-          ?.entity || {};
+      const userId =
+        getUserIdFromMetadata(
+          metadata
+        );
 
-      await updateSubscriptionStatus({
-        providerSubscriptionId:
-          subscriptionEntity.id,
+      const result =
+        await updateSubscriptionStatus({
+          userId,
+          providerSubscriptionId,
+          paymentProvider:
+            "razorpay",
+          status:
+            "past_due",
+          paymentStatus:
+            "failed",
+          eventId,
+          eventType
+        });
 
-        userId:
-          subscriptionEntity
-            ?.notes
-            ?.userId ||
-          subscriptionEntity
-            ?.notes
-            ?.user_id ||
-          null,
-
-        status:
-          "past_due",
-
-        paymentStatus:
-          "failed",
-
-        eventId,
-
-        eventType
+      return res.status(200).json({
+        success: true,
+        event:
+          eventType,
+        updated:
+          Boolean(result.found)
       });
     }
 
 
     /* =====================================================
-       SUCCESS RESPONSE
+       SUBSCRIPTION CANCELLED
     ===================================================== */
 
-    return res
-      .status(200)
-      .json({
-        received: true,
-        provider: "razorpay",
-        eventId
+    if (
+      eventType ===
+        "subscription.cancelled" ||
+      eventType ===
+        "subscription.completed"
+    ) {
+      const userId =
+        getUserIdFromMetadata(
+          metadata
+        );
+
+      const result =
+        await updateSubscriptionStatus({
+          userId,
+          providerSubscriptionId,
+          paymentProvider:
+            "razorpay",
+          status:
+            "cancelled",
+          paymentStatus:
+            "cancelled",
+          eventId,
+          eventType,
+          cancelled: true
+        });
+
+      return res.status(200).json({
+        success: true,
+        event:
+          eventType,
+        cancelled:
+          Boolean(result.found)
       });
+    }
+
+
+    /* =====================================================
+       UNHANDLED EVENT
+    ===================================================== */
+
+    return res.status(200).json({
+      success: true,
+      received: true,
+      handled: false,
+      event:
+        eventType
+    });
 
   } catch (error) {
-    logger.error(
-      `Razorpay webhook failed: ${error?.message}`
+    console.error(
+      "Razorpay Webhook Processing Error:",
+      error?.message || error
     );
 
-    return res
-      .status(400)
-      .json({
-        success: false,
-        provider: "razorpay",
-        message:
-          "Webhook processing failed",
-        error:
-          error?.message ||
-          "Unknown webhook error"
-      });
+    return res.status(500).json({
+      success: false,
+      message:
+        "Razorpay webhook processing failed"
+    });
   }
 }
 
