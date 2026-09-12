@@ -1,3 +1,8 @@
+/* =========================================================
+   ZyrionOS MASTER AGENT
+   Central AI Orchestrator
+========================================================= */
+
 /* =========================
    PACKAGES
 ========================= */
@@ -62,6 +67,11 @@ const openai =
   });
 
 
+/* =========================================================
+   HELPERS
+========================================================= */
+
+
 /* =========================
    SAFE JSON
 ========================= */
@@ -77,10 +87,13 @@ function safeJson(value) {
   } catch (error) {
 
     return JSON.stringify({
+
       error:
         "Unable to serialize result",
+
       message:
         error.message
+
     });
 
   }
@@ -97,11 +110,23 @@ function normalizeError(error) {
   if (!error) {
 
     return {
+
       message:
-        "Unknown error"
+        "Unknown error",
+
+      name:
+        "Error",
+
+      status:
+        null,
+
+      code:
+        null
+
     };
 
   }
+
 
   return {
 
@@ -128,8 +153,43 @@ function normalizeError(error) {
 
 
 /* =========================
-   MASTER AGENT
+   RESULT ERROR
 ========================= */
+
+function getAgentError(result) {
+
+  if (!result) {
+
+    return "Agent returned no result.";
+
+  }
+
+  return (
+    result.error ||
+    result.message ||
+    "Agent returned an unsuccessful result."
+  );
+
+}
+
+
+/* =========================
+   SUCCESS CHECK
+========================= */
+
+function isSuccessful(result) {
+
+  return Boolean(
+    result &&
+    result.success === true
+  );
+
+}
+
+
+/* =========================
+   MASTER AGENT
+========================================================= */
 
 async function masterAgent(
   request,
@@ -147,23 +207,23 @@ async function masterAgent(
     );
 
 
-    /* =========================
+    /* =====================================================
        REQUEST NORMALIZATION
 
-       Supports:
+       Supported:
 
-       masterAgent("prompt", user)
+       masterAgent("Build a website", user)
 
        OR
 
        masterAgent({
-         type,
-         prompt,
-         framework,
-         projectId,
+         type: "code",
+         prompt: "Build a website",
+         framework: "React",
+         projectId: "...",
          user
        })
-    ========================= */
+    ===================================================== */
 
     let userPrompt = "";
 
@@ -201,18 +261,20 @@ async function masterAgent(
         request.projectId || "";
 
       user =
-        request.user || user;
+        request.user ||
+        user ||
+        {};
 
     }
 
 
-    /* =========================
+    /* =====================================================
        VALIDATION
-    ========================= */
+    ===================================================== */
 
     if (
-      !userPrompt ||
-      typeof userPrompt !== "string"
+      typeof userPrompt !== "string" ||
+      !userPrompt.trim()
     ) {
 
       return {
@@ -223,7 +285,10 @@ async function masterAgent(
           "User prompt required",
 
         error:
-          "Master Agent received an empty prompt."
+          "Master Agent received an empty prompt.",
+
+        stage:
+          currentStage
 
       };
 
@@ -234,26 +299,9 @@ async function masterAgent(
       userPrompt.trim();
 
 
-    if (!userPrompt) {
-
-      return {
-
-        success: false,
-
-        message:
-          "User prompt required",
-
-        error:
-          "Prompt cannot be empty."
-
-      };
-
-    }
-
-
-    /* =========================
-       OPENAI CONFIG CHECK
-    ========================= */
+    /* =====================================================
+       OPENAI CONFIGURATION
+    ===================================================== */
 
     if (
       !process.env.OPENAI_API_KEY
@@ -267,16 +315,19 @@ async function masterAgent(
           "Master Agent configuration error",
 
         error:
-          "OPENAI_API_KEY is not configured on the backend."
+          "OPENAI_API_KEY is not configured on the backend.",
+
+        stage:
+          currentStage
 
       };
 
     }
 
 
-    /* =========================
-       MEMORY
-    ========================= */
+    /* =====================================================
+       MEMORY AGENT
+    ===================================================== */
 
     currentStage =
       "memory-agent";
@@ -284,6 +335,7 @@ async function masterAgent(
 
     let memoryContext =
       null;
+
 
     try {
 
@@ -297,9 +349,24 @@ async function masterAgent(
 
         });
 
-      logger.success(
-        "Memory Agent Completed"
-      );
+
+      if (
+        isSuccessful(memoryContext)
+      ) {
+
+        logger.success(
+          "Memory Agent Completed"
+        );
+
+      }
+
+      else {
+
+        logger.warning(
+          `Memory Agent returned failure: ${getAgentError(memoryContext)}`
+        );
+
+      }
 
     }
 
@@ -324,9 +391,9 @@ async function masterAgent(
     }
 
 
-    /* =========================
-       INTENT
-    ========================= */
+    /* =====================================================
+       INTENT AGENT
+    ===================================================== */
 
     currentStage =
       "intent-agent";
@@ -334,6 +401,7 @@ async function masterAgent(
 
     let intent =
       null;
+
 
     try {
 
@@ -349,9 +417,24 @@ async function masterAgent(
 
         });
 
-      logger.success(
-        "Intent Detected"
-      );
+
+      if (
+        !isSuccessful(intent)
+      ) {
+
+        logger.warning(
+          `Intent Agent returned failure: ${getAgentError(intent)}`
+        );
+
+      }
+
+      else {
+
+        logger.success(
+          `Intent Agent Completed: ${intent.type || "unknown"}`
+        );
+
+      }
 
     }
 
@@ -360,45 +443,96 @@ async function masterAgent(
       const normalized =
         normalizeError(error);
 
-      logger.warning(
+      logger.error(
         `Intent Agent Failed: ${normalized.message}`
       );
 
-      intent = null;
+      intent = {
+
+        success: false,
+
+        error:
+          normalized.message,
+
+        type:
+          "chat"
+
+      };
 
     }
 
 
-    /* =========================
-       CODE REQUEST OVERRIDE
-    ========================= */
+    /* =====================================================
+       REQUEST TYPE OVERRIDES
+
+       Controller-level request types have priority
+       where necessary.
+    ===================================================== */
 
     if (
       requestType === "code"
     ) {
 
-      if (
-        !intent ||
-        intent.type !== "build"
-      ) {
+      intent = {
 
-        intent = {
+        ...(intent || {}),
 
-          ...(intent || {}),
+        success: true,
 
-          type:
-            "build"
+        type:
+          "build"
 
-        };
-
-      }
+      };
 
     }
 
 
-    /* =========================
-       PLANNING
-    ========================= */
+    if (
+      requestType === "deploy"
+    ) {
+
+      intent = {
+
+        ...(intent || {}),
+
+        success: true,
+
+        type:
+          "deploy"
+
+      };
+
+    }
+
+
+    if (
+      requestType === "thumbnail"
+    ) {
+
+      /*
+       * Thumbnail generation currently has no dedicated
+       * thumbnail agent in this Master Agent dependency
+       * list. We preserve the request as chat rather than
+       * falsely claiming a thumbnail was generated.
+       */
+
+      intent = {
+
+        ...(intent || {}),
+
+        success: true,
+
+        type:
+          "chat"
+
+      };
+
+    }
+
+
+    /* =====================================================
+       PLANNING AGENT
+    ===================================================== */
 
     currentStage =
       "planning-agent";
@@ -406,6 +540,7 @@ async function masterAgent(
 
     let planning =
       null;
+
 
     try {
 
@@ -423,9 +558,24 @@ async function masterAgent(
 
         });
 
-      logger.success(
-        "Planning Completed"
-      );
+
+      if (
+        isSuccessful(planning)
+      ) {
+
+        logger.success(
+          "Planning Agent Completed"
+        );
+
+      }
+
+      else {
+
+        logger.warning(
+          `Planning Agent returned failure: ${getAgentError(planning)}`
+        );
+
+      }
 
     }
 
@@ -434,8 +584,8 @@ async function masterAgent(
       const normalized =
         normalizeError(error);
 
-      logger.warning(
-        `Planner Agent Failed: ${normalized.message}`
+      logger.error(
+        `Planning Agent Failed: ${normalized.message}`
       );
 
       planning = {
@@ -450,9 +600,29 @@ async function masterAgent(
     }
 
 
-    /* =========================
-       RESULTS
-    ========================= */
+    /* =====================================================
+       NORMALIZED PLANNING DATA
+
+       Planner returns:
+
+       {
+         success: true,
+         data: {...}
+       }
+
+       Agents downstream should receive the actual
+       planning payload, not the wrapper.
+    ===================================================== */
+
+    const planningData =
+      planning?.data ||
+      planning ||
+      null;
+
+
+    /* =====================================================
+       RESULT CONTAINERS
+    ===================================================== */
 
     let buildResult =
       null;
@@ -479,9 +649,9 @@ async function masterAgent(
       null;
 
 
-    /* =========================
+    /* =====================================================
        BUILD FLOW
-    ========================= */
+    ===================================================== */
 
     if (
       intent?.type === "build"
@@ -490,7 +660,12 @@ async function masterAgent(
       currentStage =
         "builder-agent";
 
+
       try {
+
+        /*
+         * Builder receives the actual planner data.
+         */
 
         buildResult =
           await builderAgent({
@@ -499,11 +674,12 @@ async function masterAgent(
               userPrompt,
 
             plan:
-              planning,
+              planningData,
 
             framework:
               framework ||
-              planning?.framework ||
+              planningData?.framework ||
+              planningData?.frontend?.framework ||
               "React",
 
             user,
@@ -515,19 +691,14 @@ async function masterAgent(
           });
 
 
-        logger.success(
-          "Builder Agent Completed"
-        );
-
-
-        /* =========================
-           BUILDER SUCCESS VALIDATION
-        ========================= */
-
         if (
-          !buildResult ||
-          buildResult.success !== true
+          !isSuccessful(buildResult)
         ) {
+
+          logger.error(
+            `Builder Agent Failed: ${getAgentError(buildResult)}`
+          );
+
 
           return {
 
@@ -537,9 +708,7 @@ async function masterAgent(
               "Builder Agent Failed",
 
             error:
-              buildResult?.error ||
-              buildResult?.message ||
-              "Builder Agent returned an unsuccessful result.",
+              getAgentError(buildResult),
 
             stage:
               currentStage,
@@ -560,6 +729,15 @@ async function masterAgent(
 
         }
 
+
+        logger.success(
+          "Builder Agent Completed"
+        );
+
+
+        /* =================================================
+           GENERATED FILE VALIDATION
+        ================================================= */
 
         const generatedFiles =
           buildResult?.data?.files;
@@ -580,7 +758,7 @@ async function masterAgent(
               "Builder Agent returned no project files",
 
             error:
-              "AI Builder completed but did not return any files.",
+              "Builder completed but returned an empty files array.",
 
             stage:
               currentStage,
@@ -601,6 +779,11 @@ async function masterAgent(
 
         }
 
+
+        logger.success(
+          `Builder generated ${generatedFiles.length} project files`
+        );
+
       }
 
       catch (error) {
@@ -611,6 +794,7 @@ async function masterAgent(
         logger.error(
           `Builder Agent Failed: ${normalized.message}`
         );
+
 
         return {
 
@@ -648,9 +832,9 @@ async function masterAgent(
     }
 
 
-    /* =========================
+    /* =====================================================
        DEPLOY FLOW
-    ========================= */
+    ===================================================== */
 
     if (
       intent?.type === "deploy"
@@ -658,6 +842,7 @@ async function masterAgent(
 
       currentStage =
         "deploy-agent";
+
 
       try {
 
@@ -671,26 +856,54 @@ async function masterAgent(
             projectId,
 
             projectName:
-              planning?.projectName,
+              planningData?.projectName,
 
             framework:
-              planning?.framework,
+              framework ||
+              planningData?.framework ||
+              planningData?.frontend?.framework,
 
             prompt:
               userPrompt,
 
             plan:
-              planning?.plan,
+              planningData?.plan ||
+              planningData,
 
             user,
 
-            planning
+            planning:
+              planningData,
+
+            /*
+             * If deployment follows a build operation,
+             * pass generated files through.
+             */
+
+            files:
+              buildResult?.data?.files ||
+              []
 
           });
 
-        logger.success(
-          "Deploy Agent Completed"
-        );
+
+        if (
+          isSuccessful(deploymentResult)
+        ) {
+
+          logger.success(
+            "Deploy Agent Completed"
+          );
+
+        }
+
+        else {
+
+          logger.error(
+            `Deploy Agent returned failure: ${getAgentError(deploymentResult)}`
+          );
+
+        }
 
       }
 
@@ -717,9 +930,9 @@ async function masterAgent(
     }
 
 
-    /* =========================
-       MONITOR FLOW
-    ========================= */
+    /* =====================================================
+       MONITORING FLOW
+    ===================================================== */
 
     if (
       intent?.type === "monitor"
@@ -728,26 +941,51 @@ async function masterAgent(
       currentStage =
         "monitoring-agent";
 
+
       try {
+
+        const deploymentId =
+          planningData?.deploymentId ||
+          deploymentResult?.deploymentId ||
+          deploymentResult?.data?.deploymentId ||
+          projectId;
+
 
         monitoringResult =
           await monitoringAgent({
 
-            deploymentId:
-              planning?.deploymentId,
+            deploymentId,
 
             appName:
-              planning?.projectName,
+              planningData?.projectName,
+
+            projectId,
 
             user,
 
-            planning
+            planning:
+              planningData
 
           });
 
-        logger.success(
-          "Monitoring Agent Completed"
-        );
+
+        if (
+          isSuccessful(monitoringResult)
+        ) {
+
+          logger.success(
+            "Monitoring Agent Completed"
+          );
+
+        }
+
+        else {
+
+          logger.warning(
+            `Monitoring Agent returned failure: ${getAgentError(monitoringResult)}`
+          );
+
+        }
 
       }
 
@@ -774,9 +1012,9 @@ async function masterAgent(
     }
 
 
-    /* =========================
+    /* =====================================================
        SCALING FLOW
-    ========================= */
+    ===================================================== */
 
     if (
       intent?.type === "scale"
@@ -785,23 +1023,48 @@ async function masterAgent(
       currentStage =
         "scaling-agent";
 
+
       try {
+
+        const deploymentId =
+          planningData?.deploymentId ||
+          deploymentResult?.deploymentId ||
+          deploymentResult?.data?.deploymentId ||
+          projectId;
+
 
         scalingResult =
           await scalingAgent({
 
-            deploymentId:
-              planning?.deploymentId,
+            deploymentId,
+
+            projectId,
 
             user,
 
-            planning
+            planning:
+              planningData
 
           });
 
-        logger.success(
-          "Scaling Agent Completed"
-        );
+
+        if (
+          isSuccessful(scalingResult)
+        ) {
+
+          logger.success(
+            "Scaling Agent Completed"
+          );
+
+        }
+
+        else {
+
+          logger.warning(
+            `Scaling Agent returned failure: ${getAgentError(scalingResult)}`
+          );
+
+        }
 
       }
 
@@ -828,9 +1091,9 @@ async function masterAgent(
     }
 
 
-    /* =========================
+    /* =====================================================
        BILLING FLOW
-    ========================= */
+    ===================================================== */
 
     if (
       intent?.type === "billing"
@@ -838,6 +1101,7 @@ async function masterAgent(
 
       currentStage =
         "billing-agent";
+
 
       try {
 
@@ -849,17 +1113,34 @@ async function masterAgent(
               user?._id,
 
             plan:
-              planning?.plan,
+              planningData?.plan ||
+              planningData?.subscriptionPlan,
 
             user,
 
-            planning
+            planning:
+              planningData
 
           });
 
-        logger.success(
-          "Billing Agent Completed"
-        );
+
+        if (
+          isSuccessful(billingResult)
+        ) {
+
+          logger.success(
+            "Billing Agent Completed"
+          );
+
+        }
+
+        else {
+
+          logger.warning(
+            `Billing Agent returned failure: ${getAgentError(billingResult)}`
+          );
+
+        }
 
       }
 
@@ -886,17 +1167,17 @@ async function masterAgent(
     }
 
 
-    /* =========================
+    /* =====================================================
        SUBSCRIPTION FLOW
-    ========================= */
+    ===================================================== */
 
     if (
-      intent?.type ===
-      "subscription"
+      intent?.type === "subscription"
     ) {
 
       currentStage =
         "subscription-agent";
+
 
       try {
 
@@ -908,17 +1189,34 @@ async function masterAgent(
               user?._id,
 
             plan:
-              planning?.plan,
+              planningData?.plan ||
+              planningData?.subscriptionPlan,
 
             user,
 
-            planning
+            planning:
+              planningData
 
           });
 
-        logger.success(
-          "Subscription Agent Completed"
-        );
+
+        if (
+          isSuccessful(subscriptionResult)
+        ) {
+
+          logger.success(
+            "Subscription Agent Completed"
+          );
+
+        }
+
+        else {
+
+          logger.warning(
+            `Subscription Agent returned failure: ${getAgentError(subscriptionResult)}`
+          );
+
+        }
 
       }
 
@@ -945,9 +1243,9 @@ async function masterAgent(
     }
 
 
-    /* =========================
+    /* =====================================================
        FIX FLOW
-    ========================= */
+    ===================================================== */
 
     if (
       intent?.type === "fix"
@@ -955,6 +1253,7 @@ async function masterAgent(
 
       currentStage =
         "fix-agent";
+
 
       try {
 
@@ -968,15 +1267,42 @@ async function masterAgent(
 
             intent,
 
-            planning,
+            planning:
+              planningData,
 
-            memoryContext
+            memoryContext,
+
+            projectId,
+
+            /*
+             * Provide files whenever they already exist
+             * in the current orchestration.
+             */
+
+            files:
+              buildResult?.data?.files ||
+              []
 
           });
 
-        logger.success(
-          "Fix Agent Completed"
-        );
+
+        if (
+          isSuccessful(fixResult)
+        ) {
+
+          logger.success(
+            "Fix Agent Completed"
+          );
+
+        }
+
+        else {
+
+          logger.warning(
+            `Fix Agent returned failure: ${getAgentError(fixResult)}`
+          );
+
+        }
 
       }
 
@@ -1003,9 +1329,9 @@ async function masterAgent(
     }
 
 
-    /* =========================
+    /* =====================================================
        FILE FLOW
-    ========================= */
+    ===================================================== */
 
     if (
       intent?.type === "file"
@@ -1013,6 +1339,7 @@ async function masterAgent(
 
       currentStage =
         "file-agent";
+
 
       try {
 
@@ -1026,15 +1353,37 @@ async function masterAgent(
 
             intent,
 
-            planning,
+            planning:
+              planningData,
 
-            memoryContext
+            memoryContext,
+
+            projectId,
+
+            files:
+              buildResult?.data?.files ||
+              []
 
           });
 
-        logger.success(
-          "File Agent Completed"
-        );
+
+        if (
+          isSuccessful(fileResult)
+        ) {
+
+          logger.success(
+            "File Agent Completed"
+          );
+
+        }
+
+        else {
+
+          logger.warning(
+            `File Agent returned failure: ${getAgentError(fileResult)}`
+          );
+
+        }
 
       }
 
@@ -1061,9 +1410,9 @@ async function masterAgent(
     }
 
 
-    /* =========================
-       ORCHESTRATION
-    ========================= */
+    /* =====================================================
+       ORCHESTRATION RESULT
+    ===================================================== */
 
     const orchestration = {
 
@@ -1092,16 +1441,15 @@ async function masterAgent(
     };
 
 
-    /* =========================
-       FINAL AI RESPONSE
-    ========================= */
+    /* =====================================================
+       FINAL MASTER AI RESPONSE
+    ===================================================== */
 
     currentStage =
       "master-ai-response";
 
 
     const completion =
-
       await openai
         .chat
         .completions
@@ -1119,21 +1467,40 @@ async function masterAgent(
 
               content: `
 
-You are ZyrionOS Autonomous Master AI.
+You are the ZyrionOS Autonomous Master AI.
 
-You coordinate the connected
-ZyrionOS AI agents.
+You are the final communication layer of
+a multi-agent AI operating system.
 
-Your goals:
+Your job is to explain what the connected
+agents actually did.
 
-- understand the user's request
-- summarize actual agent results
-- never invent project files
-- never invent deployment URLs
-- never invent infrastructure data
-- never claim an operation succeeded
-  unless the backend returned success
-- provide clear professional responses
+STRICT RULES:
+
+1. Never invent project files.
+2. Never invent deployment URLs.
+3. Never invent AWS, Docker, database,
+   billing, subscription, monitoring,
+   or infrastructure results.
+4. Never say an operation succeeded unless
+   the corresponding backend agent returned
+   success: true.
+5. If an agent failed, clearly say that it failed.
+6. If an agent returned no result, say that
+   the result is unavailable.
+7. Do not expose internal secrets,
+   API keys, tokens, passwords, or cookies.
+8. Keep the response useful and concise.
+9. For generated projects, mention the actual
+   number of generated files when available.
+10. Do not claim that deployment is live unless
+    deploymentResult explicitly confirms success.
+11. Do not claim that files were saved unless
+    fileResult explicitly confirms success.
+12. Do not claim that code was fixed unless
+    fixResult explicitly confirms success.
+
+You are a truthful orchestration assistant.
 
 `
 
@@ -1147,63 +1514,48 @@ Your goals:
               content: `
 
 USER PROMPT:
-
 ${userPrompt}
 
 REQUEST TYPE:
-
 ${requestType || "general"}
 
 FRAMEWORK:
-
 ${framework || "not specified"}
 
 PROJECT ID:
-
 ${projectId || "not specified"}
 
 INTENT:
-
 ${safeJson(intent)}
 
 PLANNING:
-
 ${safeJson(planning)}
 
 MEMORY:
-
 ${safeJson(memoryContext)}
 
 BUILD RESULT:
-
 ${safeJson(buildResult)}
 
 DEPLOYMENT RESULT:
-
 ${safeJson(deploymentResult)}
 
 MONITORING RESULT:
-
 ${safeJson(monitoringResult)}
 
 SCALING RESULT:
-
 ${safeJson(scalingResult)}
 
 BILLING RESULT:
-
 ${safeJson(billingResult)}
 
 SUBSCRIPTION RESULT:
-
 ${safeJson(subscriptionResult)}
 
 FIX RESULT:
-
 ${safeJson(fixResult)}
 
 FILE RESULT:
-
 ${safeJson(fileResult)}
 
 `
@@ -1213,7 +1565,7 @@ ${safeJson(fileResult)}
           ],
 
           temperature:
-            0.7,
+            0.5,
 
           max_tokens:
             1500
@@ -1221,17 +1573,17 @@ ${safeJson(fileResult)}
         });
 
 
-    /* =========================
+    /* =====================================================
        FINAL RESPONSE VALIDATION
-    ========================= */
+    ===================================================== */
 
     const reply =
-
       completion
         ?.choices?.[0]
         ?.message
         ?.content
-        ?.trim() || "";
+        ?.trim() ||
+      "";
 
 
     if (!reply) {
@@ -1256,9 +1608,9 @@ ${safeJson(fileResult)}
     }
 
 
-    /* =========================
+    /* =====================================================
        SUCCESS
-    ========================= */
+    ===================================================== */
 
     return {
 
@@ -1306,9 +1658,9 @@ ${safeJson(fileResult)}
 }
 
 
-/* =========================
+/* =========================================================
    EXPORT
-========================= */
+========================================================= */
 
 module.exports =
   masterAgent;
