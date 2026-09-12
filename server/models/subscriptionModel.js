@@ -1,216 +1,809 @@
 const mongoose =
-require("mongoose");
+  require("mongoose");
 
-/* =========================
-SUBSCRIPTION SCHEMA
-========================= */
+
+/* =========================================================
+   SUBSCRIPTION SCHEMA
+========================================================= */
 
 const subscriptionSchema =
+  new mongoose.Schema(
 
-new mongoose.Schema(
+    {
 
-{
+      /* =====================================================
+         USER
+      ===================================================== */
 
-/* =========================
-USER
-========================= */
+      userId: {
 
-userId:{
+        type:
+          mongoose.Schema.Types.ObjectId,
 
-type:
-mongoose.Schema.Types.ObjectId,
+        ref:
+          "User",
 
-ref:"User",
+        required:
+          true,
 
-required:true,
+        index:
+          true
 
-index:true
+      },
 
-},
 
-/* =========================
-PLAN
-========================= */
+      /* =====================================================
+         PLAN
+      ===================================================== */
 
-planName:{
+      planName: {
 
-type:String,
+        type:
+          String,
 
-required:true
+        enum: [
+          "Starter",
+          "Pro",
+          "Business",
+          "Scale",
+          "Enterprise"
+        ],
 
-},
+        required:
+          true,
 
-/* =========================
-PRICE
-========================= */
+        index:
+          true
 
-price:{
+      },
 
-type:Number,
 
-required:true
+      /* =====================================================
+         BILLING
+      ===================================================== */
 
-},
+      price: {
 
-currency:{
+        type:
+          Number,
 
-type:String,
+        required:
+          true,
 
-default:"USD"
+        min:
+          0
 
-},
+      },
 
-/* =========================
-PAYMENT
-========================= */
 
-paymentProvider:{
+      currency: {
 
-type:String,
+        type:
+          String,
 
-enum:[
+        enum: [
+          "USD",
+          "INR"
+        ],
 
-  "razorpay",
+        default:
+          "USD",
 
-  "stripe"
+        uppercase:
+          true
 
-],
+      },
 
-required:true
 
-},
+      billingCycle: {
 
-paymentId:{
+        type:
+          String,
 
-type:String,
+        enum: [
+          "monthly",
+          "yearly"
+        ],
 
-default:""
+        default:
+          "monthly",
 
-},
+        index:
+          true
 
-orderId:{
+      },
 
-type:String,
 
-default:""
+      /* =====================================================
+         PAYMENT PROVIDER
+      ===================================================== */
 
-},
+      paymentProvider: {
 
-/* =========================
-STATUS
-========================= */
+        type:
+          String,
 
-status:{
+        enum: [
+          "stripe",
+          "razorpay"
+        ],
 
-type:String,
+        required:
+          true,
 
-enum:[
+        index:
+          true
 
-  "active",
+      },
 
-  "cancelled",
 
-  "expired",
+      paymentId: {
 
-  "upgraded"
+        type:
+          String,
 
-],
+        default:
+          "",
 
-default:"active"
+        index:
+          true
 
-},
+      },
 
-/* =========================
-DATES
-========================= */
 
-startDate:{
+      orderId: {
 
-type:Date,
+        type:
+          String,
 
-default:Date.now
+        default:
+          "",
 
-},
+        index:
+          true
 
-expiryDate:{
+      },
 
-type:Date,
 
-required:true
+      providerCustomerId: {
 
-},
+        type:
+          String,
 
-autoRenew:{
+        default:
+          "",
 
-type:Boolean,
+        index:
+          true
 
-default:true
+      },
 
-},
 
-/* =========================
-USAGE
-========================= */
+      providerSubscriptionId: {
 
-aiRequestsUsed:{
+        type:
+          String,
 
-type:Number,
+        default:
+          "",
 
-default:0
+        index:
+          true
 
-},
+      },
 
-deploymentsUsed:{
 
-type:Number,
+      /* =====================================================
+         PAYMENT STATUS
+      ===================================================== */
 
-default:0
+      paymentStatus: {
 
-},
+        type:
+          String,
 
-thumbnailsGenerated:{
+        enum: [
+          "pending",
+          "paid",
+          "failed",
+          "refunded",
+          "cancelled"
+        ],
 
-type:Number,
+        default:
+          "pending",
 
-default:0
+        index:
+          true
 
-},
+      },
 
-creditsRemaining:{
 
-type:Number,
+      /* =====================================================
+         SUBSCRIPTION STATUS
+      ===================================================== */
 
-default:2000
+      status: {
 
-}
+        type:
+          String,
 
-},
+        enum: [
+          "pending",
+          "active",
+          "past_due",
+          "cancelled",
+          "expired",
+          "upgraded"
+        ],
 
-{
+        default:
+          "pending",
 
-timestamps:true
+        index:
+          true
 
-}
+      },
 
+
+      /* =====================================================
+         DATES
+      ===================================================== */
+
+      startDate: {
+
+        type:
+          Date,
+
+        default:
+          Date.now
+
+      },
+
+
+      expiryDate: {
+
+        type:
+          Date,
+
+        required:
+          true,
+
+        index:
+          true
+
+      },
+
+
+      autoRenew: {
+
+        type:
+          Boolean,
+
+        default:
+          true
+
+      },
+
+
+      cancelledAt: {
+
+        type:
+          Date,
+
+        default:
+          null
+
+      },
+
+
+      /* =====================================================
+         USAGE
+      ===================================================== */
+
+      aiRequestsUsed: {
+
+        type:
+          Number,
+
+        default:
+          0,
+
+        min:
+          0
+
+      },
+
+
+      aiCreditsUsed: {
+
+        type:
+          Number,
+
+        default:
+          0,
+
+        min:
+          0
+
+      },
+
+
+      deploymentsUsed: {
+
+        type:
+          Number,
+
+        default:
+          0,
+
+        min:
+          0
+
+      },
+
+
+      thumbnailsGenerated: {
+
+        type:
+          Number,
+
+        default:
+          0,
+
+        min:
+          0
+
+      },
+
+
+      videoCreditsUsed: {
+
+        type:
+          Number,
+
+        default:
+          0,
+
+        min:
+          0
+
+      },
+
+
+      /* =====================================================
+         ENTITLEMENT LIMITS
+      ===================================================== */
+
+      deploymentsLimit: {
+
+        type:
+          Number,
+
+        default:
+          0
+
+      },
+
+
+      aiCreditsLimit: {
+
+        type:
+          Number,
+
+        default:
+          0
+
+      },
+
+
+      thumbnailCreditsLimit: {
+
+        type:
+          Number,
+
+        default:
+          0
+
+      },
+
+
+      videoCreditsLimit: {
+
+        type:
+          Number,
+
+        default:
+          0
+
+      },
+
+
+      /* =====================================================
+         INFRASTRUCTURE ENTITLEMENTS
+      ===================================================== */
+
+      infrastructure: {
+
+        ram: {
+
+          type:
+            String,
+
+          default:
+            null
+
+        },
+
+        cpu: {
+
+          type:
+            String,
+
+          default:
+            null
+
+        },
+
+        storage: {
+
+          type:
+            String,
+
+          default:
+            null
+
+        },
+
+        bandwidth: {
+
+          type:
+            String,
+
+          default:
+            null
+
+        }
+
+      },
+
+
+      /* =====================================================
+         FEATURE FLAGS
+      ===================================================== */
+
+      featureFlags: {
+
+        customDomain: {
+
+          type:
+            Boolean,
+
+          default:
+            false
+
+        },
+
+        autoSSL: {
+
+          type:
+            Boolean,
+
+          default:
+            false
+
+        },
+
+        autoScaling: {
+
+          type:
+            Boolean,
+
+          default:
+            false
+
+        },
+
+        advancedMonitoring: {
+
+          type:
+            Boolean,
+
+          default:
+            false
+
+        },
+
+        priorityDeployments: {
+
+          type:
+            Boolean,
+
+          default:
+            false
+
+        },
+
+        dedicatedInfrastructure: {
+
+          type:
+            Boolean,
+
+          default:
+            false
+
+        },
+
+        dedicatedSupport: {
+
+          type:
+            Boolean,
+
+          default:
+            false
+
+        }
+
+      },
+
+
+      /* =====================================================
+         PLAN FEATURES
+      ===================================================== */
+
+      features: {
+
+        type:
+          [String],
+
+        default:
+          []
+
+      },
+
+
+      support: {
+
+        type:
+          String,
+
+        default:
+          "Community Support"
+
+      },
+
+
+      /* =====================================================
+         WEBHOOK IDEMPOTENCY
+      ===================================================== */
+
+      processedWebhookEvents: {
+
+        type:
+          [String],
+
+        default:
+          []
+
+      },
+
+
+      lastWebhookEventId: {
+
+        type:
+          String,
+
+        default:
+          ""
+
+      },
+
+
+      lastWebhookEventType: {
+
+        type:
+          String,
+
+        default:
+          ""
+
+      },
+
+
+      /* =====================================================
+         METADATA
+      ===================================================== */
+
+      metadata: {
+
+        environment: {
+
+          type:
+            String,
+
+          default:
+            null
+
+        },
+
+        version: {
+
+          type:
+            String,
+
+          default:
+            "3.0.0"
+
+        }
+
+      }
+
+    },
+
+    {
+
+      timestamps:
+        true
+
+    }
+
+  );
+
+
+/* =========================================================
+   INDEXES
+========================================================= */
+
+
+/*
+ * Fast lookup of user's active subscription.
+ */
+
+subscriptionSchema.index({
+
+  userId:
+    1,
+
+  status:
+    1,
+
+  createdAt:
+    -1
+
+});
+
+
+/*
+ * Provider subscription lookup.
+ */
+
+subscriptionSchema.index({
+
+  paymentProvider:
+    1,
+
+  providerSubscriptionId:
+    1
+
+});
+
+
+/*
+ * Provider payment lookup.
+ */
+
+subscriptionSchema.index({
+
+  paymentProvider:
+    1,
+
+  paymentId:
+    1
+
+});
+
+
+/*
+ * Expiry processing.
+ */
+
+subscriptionSchema.index({
+
+  status:
+    1,
+
+  expiryDate:
+    1
+
+});
+
+
+/* =========================================================
+   NORMALIZATION
+========================================================= */
+
+subscriptionSchema.pre(
+  "save",
+  function(next) {
+
+    if (
+      this.planName
+    ) {
+
+      const normalized =
+        String(
+          this.planName
+        ).trim();
+
+
+      const planMap = {
+
+        starter:
+          "Starter",
+
+        pro:
+          "Pro",
+
+        business:
+          "Business",
+
+        scale:
+          "Scale",
+
+        enterprise:
+          "Enterprise"
+
+      };
+
+
+      const mapped =
+        planMap[
+          normalized.toLowerCase()
+        ];
+
+
+      if (mapped) {
+
+        this.planName =
+          mapped;
+
+      }
+
+    }
+
+
+    if (
+      this.currency
+    ) {
+
+      this.currency =
+        String(
+          this.currency
+        ).toUpperCase();
+
+    }
+
+
+    next();
+
+  }
 );
 
-/* =========================
-MODEL
-========================= */
+
+/* =========================================================
+   MODEL
+========================================================= */
 
 const Subscription =
+  mongoose.model(
+    "Subscription",
+    subscriptionSchema
+  );
 
-mongoose.model(
 
-"Subscription",
-
-subscriptionSchema
-
-);
-
-/* =========================
-EXPORT
-========================= */
+/* =========================================================
+   EXPORT
+========================================================= */
 
 module.exports =
-Subscription;
+  Subscription;
