@@ -3,27 +3,22 @@
    =========================================================
 
    Responsibilities:
-   - Create subscription
-   - Get authenticated user's subscriptions
-   - Upgrade subscription
+   - Get current authenticated subscription
+   - Get authenticated user's subscription history
+   - Create subscription/payment request
+   - Upgrade subscription/payment request
    - Cancel subscription
-   - Usage / credits information
+   - Usage + credits information
 
-   Authentication:
-   All subscription endpoints require an authenticated
-   ZyrionOS user.
-
-   Pricing catalog is controlled by the subscription /
-   billing layer, not by this router.
+   Security:
+   - Every endpoint requires authentication
+   - User ownership comes from req.user
+   - Client cannot establish payment success
 ========================================================= */
 
-const express =
-  require("express");
+const express = require("express");
 
-
-const router =
-  express.Router();
-
+const router = express.Router();
 
 /* =========================================================
    CONTROLLERS
@@ -31,173 +26,132 @@ const router =
 
 const {
   createSubscriptionController,
+  getSubscriptionController,
   getSubscriptionsController,
   cancelSubscriptionController,
   upgradeSubscriptionController,
   usageController
-} =
-  require(
-    "../controllers/subscriptionController"
-  );
-
+} = require("../controllers/subscriptionController");
 
 /* =========================================================
    MIDDLEWARE
 ========================================================= */
 
-const {
-  authMiddleware
-} =
-  require(
-    "../middleware/authMiddleware"
-  );
+const { authMiddleware } = require("../middleware/authMiddleware");
 
+const { apiLimiter } = require("../middleware/rateLimiter");
 
-const {
-  apiLimiter
-} =
-  require(
-    "../middleware/rateLimiter"
-  );
+/* =========================================================
+   CURRENT SUBSCRIPTION
+=========================================================
 
+   GET /api/subscription/me
+
+   Returns the authenticated user's current subscription.
+
+   This endpoint is intentionally separate from the
+   subscription history endpoint.
+
+========================================================= */
+
+router.get(
+  "/me",
+  authMiddleware,
+  apiLimiter,
+  getSubscriptionController
+);
+
+/* =========================================================
+   SUBSCRIPTION HISTORY
+=========================================================
+
+   GET /api/subscription
+
+   Returns subscriptions belonging only to the
+   authenticated user.
+
+========================================================= */
+
+router.get(
+  "/",
+  authMiddleware,
+  apiLimiter,
+  getSubscriptionsController
+);
 
 /* =========================================================
    CREATE SUBSCRIPTION
 =========================================================
 
-   POST
-   /create
+   POST /api/subscription/create
 
-   Authentication:
-   REQUIRED
+   This endpoint creates/request a subscription flow.
 
-   The authenticated user's ID comes from req.user.
+   Payment success must come from the payment provider
+   webhook. The client cannot activate a subscription.
 
-   Client must not be trusted for subscription ownership.
 ========================================================= */
 
 router.post(
-
   "/create",
-
   authMiddleware,
-
   apiLimiter,
-
   createSubscriptionController
-
 );
-
-
-/* =========================================================
-   GET MY SUBSCRIPTIONS
-=========================================================
-
-   GET
-   /me
-
-   Authentication:
-   REQUIRED
-
-   Only subscriptions belonging to the authenticated
-   user should be returned by the controller.
-========================================================= */
-
-router.get(
-
-  "/me",
-
-  authMiddleware,
-
-  apiLimiter,
-
-  getSubscriptionsController
-
-);
-
 
 /* =========================================================
    UPGRADE SUBSCRIPTION
 =========================================================
 
-   POST
-   /upgrade
+   POST /api/subscription/upgrade
 
-   Authentication:
-   REQUIRED
+   Payment confirmation is handled by the provider/webhook
+   layer, not by this router.
 
-   Upgrade processing is delegated to the controller /
-   billing layer.
-
-   The router does not trust the client to establish
-   payment success.
 ========================================================= */
 
 router.post(
-
   "/upgrade",
-
   authMiddleware,
-
   apiLimiter,
-
   upgradeSubscriptionController
-
 );
-
 
 /* =========================================================
    CANCEL SUBSCRIPTION
 =========================================================
 
-   POST
-   /cancel
-
-   Authentication:
-   REQUIRED
+   POST /api/subscription/cancel
 
 ========================================================= */
 
 router.post(
-
   "/cancel",
-
   authMiddleware,
-
   apiLimiter,
-
   cancelSubscriptionController
-
 );
 
-
 /* =========================================================
-   USAGE + CREDITS
+   USAGE
 =========================================================
 
-   GET
-   /usage
+   GET /api/subscription/usage
 
-   Authentication:
-   REQUIRED
+   Returns actual usage and remaining subscription
+   entitlements for the authenticated user.
+
 ========================================================= */
 
 router.get(
-
   "/usage",
-
   authMiddleware,
-
   apiLimiter,
-
   usageController
-
 );
-
 
 /* =========================================================
    EXPORT
 ========================================================= */
 
-module.exports =
-  router;
+module.exports = router;
