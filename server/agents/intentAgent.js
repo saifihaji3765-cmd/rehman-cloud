@@ -1,28 +1,42 @@
+/* =========================================================
+   ZyrionOS INTENT AGENT
+   Intent Classification & Agent Routing
+========================================================= */
+
+
 /* =========================
    PACKAGES
 ========================= */
 
 const OpenAI =
-require("openai");
+  require("openai");
+
 
 /* =========================
    SERVICES
 ========================= */
 
 const logger =
-require("../services/loggerService");
+  require("../services/loggerService");
+
 
 /* =========================
-   OPENAI
+   OPENAI CLIENT
 ========================= */
 
 const openai =
-new OpenAI({
+  new OpenAI({
 
-  apiKey:
-  process.env.OPENAI_API_KEY
+    apiKey:
+      process.env.OPENAI_API_KEY
 
-});
+  });
+
+
+/* =========================================================
+   CONSTANTS
+========================================================= */
+
 
 /* =========================
    VALID INTENTS
@@ -56,104 +70,737 @@ const VALID_INTENTS = [
 
 ];
 
-/* =========================
-   INTENT AGENT
-========================= */
-
-async function intentAgent(
-data = {}
-){
-
-try{
 
 /* =========================
-   INPUT
+   VALID COMPLEXITIES
 ========================= */
 
-const prompt =
+const VALID_COMPLEXITIES = [
 
-  data.prompt ||
+  "low",
 
-  "";
+  "medium",
+
+  "high"
+
+];
+
 
 /* =========================
-   VALIDATION
+   KNOWN AGENTS
+
+   These names represent agents
+   currently connected to the
+   ZyrionOS Master Agent.
 ========================= */
 
-if(
+const KNOWN_AGENTS = [
 
-  !prompt ||
+  "intentAgent",
 
-  typeof prompt !== "string"
+  "plannerAgent",
 
-){
+  "builderAgent",
+
+  "deployAgent",
+
+  "monitoringAgent",
+
+  "scalingAgent",
+
+  "billingAgent",
+
+  "subscriptionAgent",
+
+  "memoryAgent",
+
+  "fixAgent",
+
+  "fileAgent"
+
+];
+
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
+
+/* =========================
+   SAFE STRING
+========================= */
+
+function cleanString(
+  value,
+  maxLength = 4000
+) {
+
+  if (
+    typeof value !== "string"
+  ) {
+
+    return "";
+
+  }
+
+
+  return value
+    .trim()
+    .slice(
+      0,
+      maxLength
+    );
+
+}
+
+
+/* =========================
+   SAFE JSON
+========================= */
+
+function safeJson(value) {
+
+  try {
+
+    return JSON.stringify(
+      value ?? null
+    );
+
+  }
+
+  catch (error) {
+
+    return JSON.stringify({
+
+      error:
+        "Unable to serialize context"
+
+    });
+
+  }
+
+}
+
+
+/* =========================
+   SAFE JSON PARSE
+========================= */
+
+function safeJsonParse(value) {
+
+  if (
+    !value ||
+    typeof value !== "string"
+  ) {
+
+    return null;
+
+  }
+
+
+  try {
+
+    return JSON.parse(
+      value.trim()
+    );
+
+  }
+
+  catch (error) {
+
+    try {
+
+      const cleaned =
+        value
+          .replace(
+            /```json/gi,
+            ""
+          )
+          .replace(
+            /```/g,
+            ""
+          )
+          .trim();
+
+
+      return JSON.parse(
+        cleaned
+      );
+
+    }
+
+    catch (secondError) {
+
+      return null;
+
+    }
+
+  }
+
+}
+
+
+/* =========================
+   DEFAULT INTENT
+========================= */
+
+function createDefaultIntent() {
 
   return {
 
-    success:false,
+    type:
+      "chat",
 
-    message:
-    "Prompt required",
+    goal:
+      "general interaction",
 
-    type:"chat"
+    complexity:
+      "low",
+
+    confidence:
+      50,
+
+    requiredAgents:
+      []
 
   };
 
 }
 
-/* =========================
-   TRUNCATE
-========================= */
-
-const cleanPrompt =
-
-  prompt
-  .trim()
-  .slice(0,4000);
 
 /* =========================
-   AI ANALYSIS
+   FALLBACK AGENTS
 ========================= */
 
-const completion =
+function getFallbackAgents(
+  type
+) {
 
-await openai
-.chat.completions
-.create({
+  switch (type) {
 
-model:
-"gpt-4.1-mini",
+    case "build":
 
-temperature:0.1,
+      return [
 
-response_format:{
+        "plannerAgent",
 
-  type:"json_object"
+        "builderAgent"
 
-},
+      ];
 
-messages:[
 
-{
+    case "deploy":
 
-role:"system",
+      return [
 
-content:`
+        "deployAgent"
+
+      ];
+
+
+    case "monitor":
+
+      return [
+
+        "monitoringAgent"
+
+      ];
+
+
+    case "scale":
+
+      return [
+
+        "scalingAgent"
+
+      ];
+
+
+    case "billing":
+
+      return [
+
+        "billingAgent"
+
+      ];
+
+
+    case "subscription":
+
+      return [
+
+        "subscriptionAgent"
+
+      ];
+
+
+    case "fix":
+
+      return [
+
+        "fixAgent"
+
+      ];
+
+
+    case "file":
+
+      return [
+
+        "fileAgent"
+
+      ];
+
+
+    /*
+     * There is currently no dedicated
+     * automation agent imported by the
+     * Master Agent.
+     *
+     * Planner can still understand and
+     * structure the request.
+     */
+
+    case "automation":
+
+      return [
+
+        "plannerAgent"
+
+      ];
+
+
+    /*
+     * Infrastructure requests can be
+     * planned first.
+     *
+     * We do not falsely claim that a
+     * dedicated infrastructureAgent exists.
+     */
+
+    case "infrastructure":
+
+      return [
+
+        "plannerAgent"
+
+      ];
+
+
+    /*
+     * There is currently no dedicated
+     * thumbnailAgent imported by Master.
+     *
+     * Therefore we intentionally return
+     * no fake agent dependency.
+     */
+
+    case "thumbnail":
+
+      return [];
+
+
+    case "chat":
+
+    default:
+
+      return [];
+
+  }
+
+}
+
+
+/* =========================
+   NORMALIZE REQUIRED AGENTS
+========================= */
+
+function normalizeRequiredAgents(
+  agents,
+  type
+) {
+
+  let normalized = [];
+
+
+  if (
+    Array.isArray(agents)
+  ) {
+
+    normalized =
+      agents
+        .filter(
+          (agent) =>
+            typeof agent ===
+            "string"
+        )
+        .map(
+          (agent) =>
+            agent.trim()
+        )
+        .filter(Boolean)
+        .filter(
+          (agent) =>
+            KNOWN_AGENTS.includes(
+              agent
+            )
+        );
+
+  }
+
+
+  normalized = [
+    ...new Set(
+      normalized
+    )
+  ];
+
+
+  /*
+   * If AI did not return any
+   * usable connected agents,
+   * use deterministic routing.
+   */
+
+  if (
+    normalized.length === 0
+  ) {
+
+    normalized =
+      getFallbackAgents(
+        type
+      );
+
+  }
+
+
+  return normalized;
+
+}
+
+
+/* =========================
+   NORMALIZE CONFIDENCE
+========================= */
+
+function normalizeConfidence(
+  value
+) {
+
+  let confidence =
+    Number(value);
+
+
+  if (
+    !Number.isFinite(
+      confidence
+    )
+  ) {
+
+    confidence =
+      70;
+
+  }
+
+
+  confidence =
+    Math.round(
+      confidence
+    );
+
+
+  if (
+    confidence > 100
+  ) {
+
+    confidence =
+      100;
+
+  }
+
+
+  if (
+    confidence < 0
+  ) {
+
+    confidence =
+      0;
+
+  }
+
+
+  return confidence;
+
+}
+
+
+/* =========================
+   NORMALIZE INTENT
+========================= */
+
+function normalizeIntent(
+  parsed
+) {
+
+  const fallback =
+    createDefaultIntent();
+
+
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed)
+  ) {
+
+    return fallback;
+
+  }
+
+
+  let type =
+    cleanString(
+      parsed.type,
+      50
+    )
+      .toLowerCase();
+
+
+  if (
+    !VALID_INTENTS.includes(
+      type
+    )
+  ) {
+
+    type =
+      "chat";
+
+  }
+
+
+  let goal =
+    cleanString(
+      parsed.goal,
+      1000
+    );
+
+
+  if (!goal) {
+
+    goal =
+      "general interaction";
+
+  }
+
+
+  let complexity =
+    cleanString(
+      parsed.complexity,
+      50
+    )
+      .toLowerCase();
+
+
+  if (
+    !VALID_COMPLEXITIES.includes(
+      complexity
+    )
+  ) {
+
+    complexity =
+      "medium";
+
+  }
+
+
+  const confidence =
+    normalizeConfidence(
+      parsed.confidence
+    );
+
+
+  const requiredAgents =
+    normalizeRequiredAgents(
+      parsed.requiredAgents,
+      type
+    );
+
+
+  return {
+
+    type,
+
+    goal,
+
+    complexity,
+
+    confidence,
+
+    requiredAgents
+
+  };
+
+}
+
+
+/* =========================================================
+   INTENT AGENT
+========================================================= */
+
+async function intentAgent(
+  data = {}
+) {
+
+  try {
+
+    logger.info(
+      "🧠 ZyrionOS Intent Agent Started"
+    );
+
+
+    /* =====================================================
+       INPUT NORMALIZATION
+    ===================================================== */
+
+    const prompt =
+      cleanString(
+        data?.prompt,
+        4000
+      );
+
+
+    const memoryContext =
+      data?.memoryContext ||
+      null;
+
+
+    /* =====================================================
+       VALIDATION
+    ===================================================== */
+
+    if (!prompt) {
+
+      return {
+
+        success: false,
+
+        message:
+          "Prompt required",
+
+        type:
+          "chat",
+
+        data:
+          createDefaultIntent()
+
+      };
+
+    }
+
+
+    /* =====================================================
+       OPENAI CONFIGURATION
+    ===================================================== */
+
+    if (
+      !process.env.OPENAI_API_KEY
+    ) {
+
+      return {
+
+        success: false,
+
+        message:
+          "Intent Agent configuration error",
+
+        type:
+          "chat",
+
+        data:
+          createDefaultIntent(),
+
+        error:
+          "OPENAI_API_KEY is not configured on the backend."
+
+      };
+
+    }
+
+
+    /* =====================================================
+       MEMORY SUMMARY
+
+       Memory is only contextual information.
+       It must never override the current
+       explicit user request.
+    ===================================================== */
+
+    let memorySummary =
+      "";
+
+
+    if (memoryContext) {
+
+      memorySummary =
+        safeJson(
+          memoryContext
+        )
+          .slice(
+            0,
+            2500
+          );
+
+    }
+
+
+    /* =====================================================
+       AI INTENT ANALYSIS
+    ===================================================== */
+
+    const completion =
+      await openai
+        .chat
+        .completions
+        .create({
+
+          model:
+            "gpt-4.1-mini",
+
+          temperature:
+            0.1,
+
+          response_format: {
+
+            type:
+              "json_object"
+
+          },
+
+          messages: [
+
+            {
+
+              role:
+                "system",
+
+              content: `
 
 You are the Intent Detection Agent
-of VertexCloud AI OS.
+of ZyrionOS Autonomous AI OS.
 
-Your ONLY responsibility is
-intent classification.
+Your ONLY responsibility is to classify
+the user's CURRENT request.
 
-You must determine:
+You do NOT execute actions.
+You do NOT generate project code.
+You do NOT deploy infrastructure.
+You do NOT claim that anything succeeded.
 
-- main intent
-- user goal
-- complexity
-- required AI agents
+Determine:
 
-Return ONLY valid JSON.
+1. the primary intent
+2. the user's concrete goal
+3. request complexity
+4. which connected agents are relevant
 
 VALID INTENTS:
 
@@ -170,370 +817,306 @@ VALID INTENTS:
 - infrastructure
 - thumbnail
 
-JSON FORMAT:
+CONNECTED AGENTS:
+
+- plannerAgent
+- builderAgent
+- deployAgent
+- monitoringAgent
+- scalingAgent
+- billingAgent
+- subscriptionAgent
+- memoryAgent
+- fixAgent
+- fileAgent
+
+INTENT DEFINITIONS:
+
+chat:
+General questions, explanations,
+conversation, advice, or requests that
+do not require a specialized operation.
+
+build:
+Create, generate, develop, or modify
+an application, website, backend,
+frontend, API, feature, software project,
+or source code.
+
+deploy:
+Deploy, publish, host, release, or make
+an existing project live.
+
+monitor:
+Inspect deployment health, CPU, RAM,
+service health, availability, or runtime
+infrastructure metrics.
+
+scale:
+Increase or decrease infrastructure
+capacity or application instances.
+
+billing:
+Questions or operations involving
+pricing, billing information, charges,
+or plan billing.
+
+subscription:
+Subscription plan, limits, status,
+features, or subscription lifecycle.
+
+fix:
+Debug, repair, diagnose, optimize,
+or correct broken code or a project.
+
+file:
+Read, inspect, manage, save, delete,
+or work directly with project files.
+
+automation:
+Create or reason about an automated
+workflow or repeated software process.
+
+infrastructure:
+Infrastructure architecture,
+cloud resources, containers,
+networking, or infrastructure planning.
+
+thumbnail:
+Requests specifically asking to create
+or generate a thumbnail.
+
+CLASSIFICATION RULES:
+
+- Classify the CURRENT prompt.
+- Current explicit instructions have
+  priority over memory/context.
+- Do not invent unsupported intents.
+- If the user asks to build software,
+  classify as "build".
+- If the user asks to fix broken code,
+  classify as "fix".
+- If the user asks to deploy an existing
+  project, classify as "deploy".
+- If uncertain, use "chat".
+- complexity must be:
+  "low", "medium", or "high".
+- confidence must be a number from 0-100.
+- requiredAgents must be an array.
+- Only use names from CONNECTED AGENTS.
+- Do not invent agent names.
+- Return JSON only.
+- No markdown.
+- No explanation outside JSON.
+
+REQUIRED JSON FORMAT:
 
 {
-"type":"",
-"goal":"",
-"complexity":"",
-"confidence":0,
-"requiredAgents":[]
+  "type": "",
+  "goal": "",
+  "complexity": "",
+  "confidence": 0,
+  "requiredAgents": []
 }
-
-Rules:
-
-- confidence must be 0-100
-- requiredAgents must be array
-- type must match valid intents
-- no explanations
-- no markdown
-- no extra text
 
 `
 
-},
+            },
 
-{
+            {
 
-role:"user",
+              role:
+                "user",
 
-content:cleanPrompt
+              content: `
+
+CURRENT USER REQUEST:
+
+${prompt}
+
+OPTIONAL MEMORY CONTEXT:
+
+${memorySummary || "No memory context provided."}
+
+Classify only the current request.
+
+`
+
+            }
+
+          ]
+
+        });
+
+
+    /* =====================================================
+       RESPONSE EXTRACTION
+    ===================================================== */
+
+    const raw =
+      completion
+        ?.choices?.[0]
+        ?.message
+        ?.content;
+
+
+    if (
+      !raw ||
+      typeof raw !== "string"
+    ) {
+
+      logger.warning(
+        "Intent Agent received empty AI response"
+      );
+
+
+      const fallback =
+        createDefaultIntent();
+
+
+      return {
+
+        success: false,
+
+        message:
+          "Intent AI returned an empty response",
+
+        type:
+          fallback.type,
+
+        data:
+          fallback
+
+      };
+
+    }
+
+
+    /* =====================================================
+       JSON PARSING
+    ===================================================== */
+
+    const parsed =
+      safeJsonParse(
+        raw
+      );
+
+
+    if (!parsed) {
+
+      logger.warning(
+        "Intent JSON Parse Failed"
+      );
+
+
+      const fallback =
+        createDefaultIntent();
+
+
+      return {
+
+        success: false,
+
+        message:
+          "Intent response could not be parsed",
+
+        type:
+          fallback.type,
+
+        data:
+          fallback
+
+      };
+
+    }
+
+
+    /* =====================================================
+       NORMALIZATION
+    ===================================================== */
+
+    const normalized =
+      normalizeIntent(
+        parsed
+      );
+
+
+    /* =====================================================
+       SUCCESS LOG
+    ===================================================== */
+
+    logger.success(
+      `Intent Detected: ${normalized.type} | Confidence: ${normalized.confidence}%`
+    );
+
+
+    /* =====================================================
+       RESPONSE CONTRACT
+
+       Master Agent uses:
+       result.type
+
+       Planning Agent can use:
+       result.data
+    ===================================================== */
+
+    return {
+
+      success: true,
+
+      type:
+        normalized.type,
+
+      data:
+        normalized
+
+    };
+
+  }
+
+  catch (error) {
+
+    const errorMessage =
+      error?.message ||
+      "Unknown Intent Agent error";
+
+
+    logger.error(
+      `Intent Agent Failed: ${errorMessage}`
+    );
+
+
+    /* =====================================================
+       SAFE FALLBACK
+    ===================================================== */
+
+    const fallback =
+      createDefaultIntent();
+
+
+    return {
+
+      success: false,
+
+      type:
+        fallback.type,
+
+      data:
+        fallback,
+
+      error:
+        errorMessage
+
+    };
+
+  }
 
 }
 
-]
 
-});
-
-/* =========================
-   RAW RESPONSE
-========================= */
-
-const raw =
-
-completion
-.choices[0]
-.message
-.content;
-
-/* =========================
-   PARSE JSON
-========================= */
-
-let parsed = {};
-
-try{
-
-parsed =
-JSON.parse(raw);
-
-}
-
-catch(error){
-
-logger.warning(
-  "Intent JSON Parse Failed"
-);
-
-parsed = {
-
-  type:"chat",
-
-  goal:"general conversation",
-
-  complexity:"low",
-
-  confidence:50,
-
-  requiredAgents:[]
-
-};
-
-}
-
-/* =========================
-   TYPE VALIDATION
-========================= */
-
-if(
-
-!parsed.type ||
-
-!VALID_INTENTS.includes(
-parsed.type
-)
-
-){
-
-parsed.type =
-"chat";
-
-}
-
-/* =========================
-   GOAL VALIDATION
-========================= */
-
-if(
-
-!parsed.goal ||
-
-typeof parsed.goal !==
-"string"
-
-){
-
-parsed.goal =
-"general interaction";
-
-}
-
-/* =========================
-   COMPLEXITY VALIDATION
-========================= */
-
-if(
-
-!parsed.complexity
-
-){
-
-parsed.complexity =
-"medium";
-
-}
-
-/* =========================
-   CONFIDENCE VALIDATION
-========================= */
-
-if(
-
-parsed.confidence ===
-undefined ||
-
-typeof parsed.confidence
-!== "number"
-
-){
-
-parsed.confidence = 70;
-
-}
-
-/* =========================
-   CONFIDENCE LIMIT
-========================= */
-
-if(
-
-parsed.confidence > 100
-
-){
-
-parsed.confidence = 100;
-
-}
-
-if(
-
-parsed.confidence < 0
-
-){
-
-parsed.confidence = 0;
-
-}
-
-/* =========================
-   REQUIRED AGENTS
-========================= */
-
-if(
-
-!Array.isArray(
-parsed.requiredAgents
-)
-
-){
-
-parsed.requiredAgents =
-[];
-
-}
-
-/* =========================
-   FALLBACK AGENTS
-========================= */
-
-if(
-
-parsed.requiredAgents
-.length === 0
-
-){
-
-switch(parsed.type){
-
-case "build":
-
-parsed.requiredAgents = [
-
-  "plannerAgent",
-
-  "builderAgent"
-
-];
-
-break;
-
-case "deploy":
-
-parsed.requiredAgents = [
-
-  "deployAgent"
-
-];
-
-break;
-
-case "monitor":
-
-parsed.requiredAgents = [
-
-  "monitoringAgent"
-
-];
-
-break;
-
-case "scale":
-
-parsed.requiredAgents = [
-
-  "scalingAgent"
-
-];
-
-break;
-
-case "billing":
-
-parsed.requiredAgents = [
-
-  "billingAgent"
-
-];
-
-break;
-
-case "subscription":
-
-parsed.requiredAgents = [
-
-  "subscriptionAgent"
-
-];
-
-break;
-
-case "fix":
-
-parsed.requiredAgents = [
-
-  "fixAgent"
-
-];
-
-break;
-
-case "file":
-
-parsed.requiredAgents = [
-
-  "fileAgent"
-
-];
-
-break;
-
-default:
-
-parsed.requiredAgents = [];
-
-}
-
-}
-
-/* =========================
-   SUCCESS LOG
-========================= */
-
-logger.success(
-
-`Intent Detected: ${parsed.type}`
-
-);
-
-/* =========================
-   RESPONSE
-========================= */
-
-return {
-
-success:true,
-
-type:
-parsed.type,
-
-data:parsed
-
-};
-
-}
-
-catch(error){
-
-logger.error(
-error.message
-);
-
-/* =========================
-   SAFE FALLBACK
-========================= */
-
-return {
-
-success:false,
-
-type:"chat",
-
-data:{
-
-  type:"chat",
-
-  goal:
-  "general interaction",
-
-  complexity:"low",
-
-  confidence:40,
-
-  requiredAgents:[]
-
-},
-
-error:error.message
-
-};
-
-}
-
-}
-
-/* =========================
+/* =========================================================
    EXPORT
-========================= */
+========================================================= */
 
 module.exports =
-intentAgent;
+  intentAgent;
