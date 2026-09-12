@@ -3,78 +3,138 @@
 ========================= */
 
 const OpenAI =
-require("openai");
+  require("openai");
+
 
 /* =========================
    AGENTS
 ========================= */
 
 const intentAgent =
-require("./intentAgent");
+  require("./intentAgent");
 
 const plannerAgent =
-require("./planningAgent");
+  require("./planningAgent");
 
 const builderAgent =
-require("./builderAgent");
+  require("./builderAgent");
 
 const deployAgent =
-require("./deployAgent");
+  require("./deployAgent");
 
 const monitoringAgent =
-require("./monitoringAgent");
+  require("./monitoringAgent");
 
 const scalingAgent =
-require("./scalingAgent");
+  require("./scalingAgent");
 
 const billingAgent =
-require("./billingAgent");
+  require("./billingAgent");
 
 const subscriptionAgent =
-require("./subscriptionAgent");
+  require("./subscriptionAgent");
 
 const memoryAgent =
-require("./memoryAgent");
+  require("./memoryAgent");
 
 const fixAgent =
-require("./fixAgent");
+  require("./fixAgent");
 
 const fileAgent =
-require("./fileAgent");
+  require("./fileAgent");
+
 
 /* =========================
    SERVICES
 ========================= */
 
 const logger =
-require("../services/loggerService");
+  require("../services/loggerService");
+
 
 /* =========================
    OPENAI CLIENT
 ========================= */
 
 const openai =
-new OpenAI({
+  new OpenAI({
 
-  apiKey:
-  process.env.OPENAI_API_KEY
+    apiKey:
+      process.env.OPENAI_API_KEY
 
-});
+  });
+
 
 /* =========================
    MASTER AGENT
 ========================= */
 
 async function masterAgent(
-  userPrompt,
+  request,
   user = {}
 ){
 
   try{
 
     logger.info(
-      "⚡ VertexCloud Master Agent Started"
+      "⚡ ZyrionOS Master Agent Started"
     );
+
+
+    /* =========================
+       REQUEST NORMALIZATION
+
+       Supports both:
+
+       masterAgent("prompt", user)
+
+       and:
+
+       masterAgent({
+         type,
+         prompt,
+         framework,
+         projectId,
+         user
+       })
+    ========================= */
+
+    let userPrompt = "";
+    let requestType = "";
+    let framework = "";
+    let projectId = "";
+
+    if(
+      typeof request === "string"
+    ){
+
+      userPrompt =
+        request;
+
+    }
+
+    else if(
+      request &&
+      typeof request === "object"
+    ){
+
+      userPrompt =
+        request.prompt || "";
+
+      requestType =
+        request.type || "";
+
+      framework =
+        request.framework || "";
+
+      projectId =
+        request.projectId || "";
+
+      user =
+        request.user || user;
+
+    }
+
 
     /* =========================
        VALIDATION
@@ -93,11 +153,16 @@ async function masterAgent(
         success:false,
 
         message:
-        "User prompt required"
+          "User prompt required"
 
       };
 
     }
+
+
+    userPrompt =
+      userPrompt.trim();
+
 
     /* =========================
        MEMORY
@@ -109,13 +174,14 @@ async function masterAgent(
 
       memoryContext =
 
-      await memoryAgent({
+        await memoryAgent({
 
-        prompt:userPrompt,
+          prompt:
+            userPrompt,
 
-        user
+          user
 
-      });
+        });
 
       logger.success(
         "Memory Agent Completed"
@@ -131,6 +197,7 @@ async function masterAgent(
 
     }
 
+
     /* =========================
        INTENT
     ========================= */
@@ -141,13 +208,16 @@ async function masterAgent(
 
       intent =
 
-      await intentAgent({
+        await intentAgent({
 
-        prompt:userPrompt,
+          prompt:
+            userPrompt,
 
-        user
+          user,
 
-      });
+          memoryContext
+
+        });
 
       logger.success(
         "Intent Detected"
@@ -163,6 +233,41 @@ async function masterAgent(
 
     }
 
+
+    /* =========================
+       CODE REQUEST OVERRIDE
+
+       /api/ai/generate-code
+       explicitly requests a build.
+
+       If Intent Agent returns
+       another type, the explicit
+       code request remains authoritative.
+    ========================= */
+
+    if(
+      requestType === "code"
+    ){
+
+      if(
+        !intent ||
+        intent.type !== "build"
+      ){
+
+        intent = {
+
+          ...(intent || {}),
+
+          type:
+            "build"
+
+        };
+
+      }
+
+    }
+
+
     /* =========================
        PLANNING
     ========================= */
@@ -173,15 +278,18 @@ async function masterAgent(
 
       planning =
 
-      await plannerAgent({
+        await plannerAgent({
 
-        prompt:userPrompt,
+          prompt:
+            userPrompt,
 
-        intent,
+          intent,
 
-        user
+          user,
 
-      });
+          memoryContext
+
+        });
 
       logger.success(
         "Planning Completed"
@@ -196,6 +304,7 @@ async function masterAgent(
       );
 
     }
+
 
     /* =========================
        RESULTS
@@ -217,6 +326,7 @@ async function masterAgent(
 
     let fileResult = null;
 
+
     /* =========================
        BUILD FLOW
     ========================= */
@@ -231,15 +341,26 @@ async function masterAgent(
 
         buildResult =
 
-        await builderAgent({
+          await builderAgent({
 
-          prompt:userPrompt,
+            prompt:
+              userPrompt,
 
-          plan:planning,
+            plan:
+              planning,
 
-          user
+            framework:
+              framework ||
+              planning?.framework ||
+              "React",
 
-        });
+            user,
+
+            memoryContext,
+
+            intent
+
+          });
 
         logger.success(
           "Builder Agent Completed"
@@ -257,6 +378,7 @@ async function masterAgent(
 
     }
 
+
     /* =========================
        DEPLOY FLOW
     ========================= */
@@ -271,34 +393,34 @@ async function masterAgent(
 
         deploymentResult =
 
-        await deployAgent({
+          await deployAgent({
 
-          userId:
-          user?.id ||
+            userId:
+              user?.id ||
+              user?._id,
 
-          "guest-user",
+            projectId,
 
-          projectName:
+            projectName:
 
-          planning?.projectName ||
+              planning?.projectName,
 
-          "vertexcloud-app",
+            framework:
 
-          framework:
+              planning?.framework,
 
-          planning?.framework ||
+            prompt:
+              userPrompt,
 
-          "node",
+            plan:
 
-          prompt:userPrompt,
+              planning?.plan,
 
-          plan:
+            user,
 
-          planning?.plan ||
+            planning
 
-          "Starter"
-
-        });
+          });
 
         logger.success(
           "Deploy Agent Completed"
@@ -316,6 +438,7 @@ async function masterAgent(
 
     }
 
+
     /* =========================
        MONITOR FLOW
     ========================= */
@@ -330,19 +453,21 @@ async function masterAgent(
 
         monitoringResult =
 
-        await monitoringAgent({
+          await monitoringAgent({
 
-          deploymentId:
+            deploymentId:
 
-          planning?.deploymentId,
+              planning?.deploymentId,
 
-          appName:
+            appName:
 
-          planning?.projectName ||
+              planning?.projectName,
 
-          "VertexCloud App"
+            user,
 
-        });
+            planning
+
+          });
 
         logger.success(
           "Monitoring Agent Completed"
@@ -360,6 +485,7 @@ async function masterAgent(
 
     }
 
+
     /* =========================
        SCALING FLOW
     ========================= */
@@ -374,19 +500,17 @@ async function masterAgent(
 
         scalingResult =
 
-        await scalingAgent({
+          await scalingAgent({
 
-          deploymentId:
+            deploymentId:
 
-          planning?.deploymentId,
+              planning?.deploymentId,
 
-          cpuUsage:70,
+            user,
 
-          ramUsage:60,
+            planning
 
-          activeUsers:500
-
-        });
+          });
 
         logger.success(
           "Scaling Agent Completed"
@@ -404,6 +528,7 @@ async function masterAgent(
 
     }
 
+
     /* =========================
        BILLING FLOW
     ========================= */
@@ -418,20 +543,20 @@ async function masterAgent(
 
         billingResult =
 
-        await billingAgent({
+          await billingAgent({
 
-          userId:
-          user?.id ||
+            userId:
+              user?.id ||
+              user?._id,
 
-          "guest-user",
+            plan:
+              planning?.plan,
 
-          plan:
+            user,
 
-          planning?.plan ||
+            planning
 
-          "Starter"
-
-        });
+          });
 
         logger.success(
           "Billing Agent Completed"
@@ -449,13 +574,15 @@ async function masterAgent(
 
     }
 
+
     /* =========================
        SUBSCRIPTION FLOW
     ========================= */
 
     if(
 
-      intent?.type === "subscription"
+      intent?.type ===
+      "subscription"
 
     ){
 
@@ -463,20 +590,20 @@ async function masterAgent(
 
         subscriptionResult =
 
-        await subscriptionAgent({
+          await subscriptionAgent({
 
-          userId:
-          user?.id ||
+            userId:
+              user?.id ||
+              user?._id,
 
-          "guest-user",
+            plan:
+              planning?.plan,
 
-          plan:
+            user,
 
-          planning?.plan ||
+            planning
 
-          "Starter"
-
-        });
+          });
 
         logger.success(
           "Subscription Agent Completed"
@@ -494,6 +621,7 @@ async function masterAgent(
 
     }
 
+
     /* =========================
        FIX FLOW
     ========================= */
@@ -508,13 +636,20 @@ async function masterAgent(
 
         fixResult =
 
-        await fixAgent({
+          await fixAgent({
 
-          prompt:userPrompt,
+            prompt:
+              userPrompt,
 
-          user
+            user,
 
-        });
+            intent,
+
+            planning,
+
+            memoryContext
+
+          });
 
         logger.success(
           "Fix Agent Completed"
@@ -532,6 +667,7 @@ async function masterAgent(
 
     }
 
+
     /* =========================
        FILE FLOW
     ========================= */
@@ -546,13 +682,20 @@ async function masterAgent(
 
         fileResult =
 
-        await fileAgent({
+          await fileAgent({
 
-          prompt:userPrompt,
+            prompt:
+              userPrompt,
 
-          user
+            user,
 
-        });
+            intent,
+
+            planning,
+
+            memoryContext
+
+          });
 
         logger.success(
           "File Agent Completed"
@@ -570,85 +713,162 @@ async function masterAgent(
 
     }
 
+
+    /* =========================
+       ORCHESTRATION
+    ========================= */
+
+    const orchestration = {
+
+      intent,
+
+      planning,
+
+      memoryContext,
+
+      buildResult,
+
+      deploymentResult,
+
+      monitoringResult,
+
+      scalingResult,
+
+      billingResult,
+
+      subscriptionResult,
+
+      fixResult,
+
+      fileResult
+
+    };
+
+
     /* =========================
        AI RESPONSE
     ========================= */
 
     const completion =
 
-    await openai
-    .chat.completions
-    .create({
+      await openai
+        .chat
+        .completions
+        .create({
 
-      model:"gpt-4.1-mini",
+          model:
+            "gpt-4.1-mini",
 
-      messages:[
+          messages:[
 
-        {
+            {
 
-          role:"system",
+              role:
+                "system",
 
-          content:`
+              content:`
 
-You are VertexCloud Autonomous Master AI.
+You are ZyrionOS Autonomous Master AI.
 
-You coordinate AI agents.
-
-You think like:
-
-- CTO
-- Cloud Architect
-- DevOps Engineer
-- SaaS Founder
-- AI Infrastructure Engineer
+You coordinate the connected
+ZyrionOS AI agents.
 
 Your goals:
 
-- automation
-- scalability
-- production safety
-- deployment optimization
-- infrastructure reliability
-- monetization
-- performance
-
-Always return clean,
-professional,
-production-ready responses.
+- understand the user's request
+- summarize actual agent results
+- never invent project files
+- never invent deployment URLs
+- never invent infrastructure data
+- never claim an operation succeeded
+  unless the backend returned success
+- provide clear professional responses
 
 `
 
-        },
+            },
 
-        {
+            {
 
-          role:"user",
+              role:
+                "user",
 
-          content:`
+              content:`
 
 USER PROMPT:
+
 ${userPrompt}
 
+REQUEST TYPE:
+
+${requestType || "general"}
+
+FRAMEWORK:
+
+${framework || "not specified"}
+
+PROJECT ID:
+
+${projectId || "not specified"}
+
 INTENT:
+
 ${JSON.stringify(intent)}
 
 PLANNING:
+
 ${JSON.stringify(planning)}
 
 MEMORY:
+
 ${JSON.stringify(memoryContext)}
+
+BUILD RESULT:
+
+${JSON.stringify(buildResult)}
+
+DEPLOYMENT RESULT:
+
+${JSON.stringify(deploymentResult)}
+
+MONITORING RESULT:
+
+${JSON.stringify(monitoringResult)}
+
+SCALING RESULT:
+
+${JSON.stringify(scalingResult)}
+
+BILLING RESULT:
+
+${JSON.stringify(billingResult)}
+
+SUBSCRIPTION RESULT:
+
+${JSON.stringify(subscriptionResult)}
+
+FIX RESULT:
+
+${JSON.stringify(fixResult)}
+
+FILE RESULT:
+
+${JSON.stringify(fileResult)}
 
 `
 
-        }
+            }
 
-      ],
+          ],
 
-      temperature:0.7,
+          temperature:
+            0.7,
 
-      max_tokens:1500
+          max_tokens:
+            1500
 
-    });
+        });
+
 
     /* =========================
        FINAL RESPONSE
@@ -660,36 +880,12 @@ ${JSON.stringify(memoryContext)}
 
       reply:
 
-      completion
-      .choices[0]
-      .message
-      .content,
+        completion
+          .choices?.[0]
+          ?.message
+          ?.content || "",
 
-      orchestration:{
-
-        intent,
-
-        planning,
-
-        memoryContext,
-
-        buildResult,
-
-        deploymentResult,
-
-        monitoringResult,
-
-        scalingResult,
-
-        billingResult,
-
-        subscriptionResult,
-
-        fixResult,
-
-        fileResult
-
-      }
+      orchestration
 
     };
 
@@ -706,10 +902,10 @@ ${JSON.stringify(memoryContext)}
       success:false,
 
       message:
-      "Master Agent Failed",
+        "Master Agent Failed",
 
       error:
-      error.message
+        error.message
 
     };
 
@@ -717,9 +913,10 @@ ${JSON.stringify(memoryContext)}
 
 }
 
+
 /* =========================
    EXPORT
 ========================= */
 
 module.exports =
-masterAgent;
+  masterAgent;
