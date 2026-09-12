@@ -5,23 +5,23 @@
    Responsibilities:
    - Razorpay client configuration
    - Real order creation
-   - Server-side amount validation
+   - Server-side plan validation
    - Plan metadata / notes
    - Receipt generation
    - Order retrieval
    - Payment retrieval
    - No client-controlled pricing
+   - No fake currency conversion
 
    IMPORTANT:
-   ZyrionOS public plan catalog is USD.
 
-   Razorpay must NOT receive a fake USD -> INR
-   conversion.
+   ZyrionOS public catalog is currently USD.
 
-   This service supports an explicitly supplied
-   currency/amount, but the payment controller must
-   only enable a currency that is officially configured
-   for the selected plan.
+   Razorpay order creation is therefore intentionally
+   blocked until an officially configured Razorpay
+   currency catalog exists.
+
+   NEVER convert USD -> INR using an invented exchange rate.
 ========================================================= */
 
 const Razorpay =
@@ -36,7 +36,6 @@ const logger =
 ========================================================= */
 
 let razorpay = null;
-
 
 const keyId =
   process.env.RAZORPAY_KEY_ID;
@@ -56,10 +55,10 @@ if (
     new Razorpay({
 
       key_id:
-        keyId,
+        keyId.trim(),
 
       key_secret:
-        keySecret
+        keySecret.trim()
 
     });
 
@@ -70,63 +69,51 @@ if (
    PLAN CATALOG
 ========================================================= */
 
-const PLANS = {
+const PLANS = Object.freeze({
 
-  Starter: {
+  Starter: Object.freeze({
+    monthly: 19,
+    yearly: 190
+  }),
 
-    monthly:
-      19,
+  Pro: Object.freeze({
+    monthly: 99,
+    yearly: 990
+  }),
 
-    yearly:
-      190
+  Business: Object.freeze({
+    monthly: 199,
+    yearly: 1990
+  }),
 
-  },
+  Scale: Object.freeze({
+    monthly: 299,
+    yearly: 2990
+  }),
 
-  Pro: {
+  Enterprise: Object.freeze({
+    monthly: 499,
+    yearly: 4990
+  })
 
-    monthly:
-      99,
-
-    yearly:
-      990
-
-  },
-
-  Business: {
-
-    monthly:
-      199,
-
-    yearly:
-      1990
-
-  },
-
-  Scale: {
-
-    monthly:
-      299,
-
-    yearly:
-      2990
-
-  },
-
-  Enterprise: {
-
-    monthly:
-      499,
-
-    yearly:
-      4990
-
-  }
-
-};
+});
 
 
 /* =========================================================
-   HELPERS
+   CONSTANTS
+========================================================= */
+
+const PUBLIC_CATALOG_CURRENCY =
+  "USD";
+
+const SUPPORTED_RAZORPAY_CURRENCIES =
+  new Set([
+    "USD"
+  ]);
+
+
+/* =========================================================
+   PLAN NORMALIZATION
 ========================================================= */
 
 function normalizePlan(
@@ -137,12 +124,10 @@ function normalizePlan(
     return null;
   }
 
-
   const value =
     String(plan)
       .trim()
       .toLowerCase();
-
 
   const map = {
 
@@ -163,28 +148,64 @@ function normalizePlan(
 
   };
 
-
   return (
     map[value] ||
     null
   );
-
 }
 
+
+/* =========================================================
+   BILLING CYCLE NORMALIZATION
+========================================================= */
 
 function normalizeCycle(
   cycle
 ) {
 
-  return cycle ===
+  if (
+    cycle ===
+      undefined ||
+    cycle ===
+      null ||
+    cycle ===
+      ""
+  ) {
+
+    return "monthly";
+
+  }
+
+  const value =
+    String(cycle)
+      .trim()
+      .toLowerCase();
+
+  if (
+    value ===
+    "monthly"
+  ) {
+
+    return "monthly";
+
+  }
+
+  if (
+    value ===
     "yearly"
+  ) {
 
-    ? "yearly"
+    return "yearly";
 
-    : "monthly";
+  }
 
+  return null;
 }
 
+
+/* =========================================================
+   PLAN PRICE
+========================================================= */
 
 function getPlanPrice(
   plan,
@@ -196,17 +217,18 @@ function getPlanPrice(
       plan
     );
 
-
   if (!normalizedPlan) {
     return null;
   }
-
 
   const cycle =
     normalizeCycle(
       billingCycle
     );
 
+  if (!cycle) {
+    return null;
+  }
 
   return (
     PLANS[
@@ -214,7 +236,6 @@ function getPlanPrice(
     ]?.[cycle] ??
     null
   );
-
 }
 
 
@@ -242,6 +263,82 @@ function ensureRazorpay() {
 
 
 /* =========================================================
+   CURRENCY VALIDATION
+========================================================= */
+
+function validateCurrency(
+  currency
+) {
+
+  const normalized =
+    String(
+      currency ||
+      PUBLIC_CATALOG_CURRENCY
+    )
+      .trim()
+      .toUpperCase();
+
+  if (
+    !SUPPORTED_RAZORPAY_CURRENCIES.has(
+      normalized
+    )
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      currency:
+        normalized,
+
+      reason:
+        "Unsupported Razorpay currency"
+
+    };
+
+  }
+
+  /*
+   * The current catalog is USD.
+   *
+   * There is deliberately NO USD -> INR conversion.
+   */
+
+  if (
+    normalized !==
+    PUBLIC_CATALOG_CURRENCY
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      currency:
+        normalized,
+
+      reason:
+        "Razorpay currency does not match the configured ZyrionOS catalog"
+
+    };
+
+  }
+
+  return {
+
+    valid:
+      true,
+
+    currency:
+      normalized
+
+  };
+
+}
+
+
+/* =========================================================
    AMOUNT VALIDATION
 ========================================================= */
 
@@ -249,14 +346,13 @@ function validateAmount({
   plan,
   billingCycle,
   amount
-}) {
+} = {}) {
 
   const expected =
     getPlanPrice(
       plan,
       billingCycle
     );
-
 
   if (
     expected ===
@@ -269,37 +365,73 @@ function validateAmount({
         false,
 
       reason:
-        "Invalid Razorpay plan"
+        "Invalid Razorpay plan or billing cycle"
 
     };
 
   }
 
+  /*
+   * Amount is optional for trusted internal calls.
+   *
+   * If supplied, it must exactly equal the server
+   * catalog price.
+   */
 
   if (
     amount !==
       undefined &&
-    Number(amount) !==
-      expected
+    amount !==
+      null
   ) {
 
-    return {
+    const received =
+      Number(amount);
 
-      valid:
-        false,
+    if (
+      !Number.isFinite(
+        received
+      )
+    ) {
 
-      reason:
-        "Razorpay amount does not match server plan price",
+      return {
 
-      expected,
+        valid:
+          false,
 
-      received:
-        Number(amount)
+        reason:
+          "Invalid Razorpay amount",
 
-    };
+        expected,
+
+        received
+
+      };
+
+    }
+
+    if (
+      received !==
+      expected
+    ) {
+
+      return {
+
+        valid:
+          false,
+
+        reason:
+          "Razorpay amount does not match server plan price",
+
+        expected,
+
+        received
+
+      };
+
+    }
 
   }
-
 
   return {
 
@@ -315,7 +447,7 @@ function validateAmount({
 
 
 /* =========================================================
-   RECEIPT
+   RECEIPT GENERATION
 ========================================================= */
 
 function createReceipt(
@@ -336,11 +468,8 @@ function createReceipt(
         20
       );
 
-
   const timestamp =
-    Date.now()
-      .toString();
-
+    Date.now().toString();
 
   return (
     `zyrionos_${safeUser}_${timestamp}`
@@ -359,7 +488,7 @@ function createReceipt(
 
 async function createOrder({
   amount,
-  currency = "INR",
+  currency = PUBLIC_CATALOG_CURRENCY,
   receipt,
   userId,
   plan,
@@ -372,11 +501,33 @@ async function createOrder({
     ensureRazorpay();
 
 
+    /* -----------------------------------------------------
+       USER
+    ----------------------------------------------------- */
+
+    if (!userId) {
+
+      return {
+
+        success:
+          false,
+
+        message:
+          "User ID required"
+
+      };
+
+    }
+
+
+    /* -----------------------------------------------------
+       PLAN
+    ----------------------------------------------------- */
+
     const selectedPlan =
       normalizePlan(
         plan
       );
-
 
     if (!selectedPlan) {
 
@@ -386,18 +537,78 @@ async function createOrder({
           false,
 
         message:
-          "Invalid Razorpay plan"
+          "Invalid Razorpay plan",
+
+        error:
+          "Supported plans: Starter, Pro, Business, Scale, Enterprise"
 
       };
 
     }
 
 
+    /* -----------------------------------------------------
+       BILLING CYCLE
+    ----------------------------------------------------- */
+
     const cycle =
       normalizeCycle(
         billingCycle
       );
 
+    if (!cycle) {
+
+      return {
+
+        success:
+          false,
+
+        message:
+          "Invalid billing cycle",
+
+        error:
+          "Supported billing cycles: monthly, yearly"
+
+      };
+
+    }
+
+
+    /* -----------------------------------------------------
+       CURRENCY
+    ----------------------------------------------------- */
+
+    const currencyValidation =
+      validateCurrency(
+        currency
+      );
+
+    if (
+      !currencyValidation.valid
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        message:
+          currencyValidation.reason,
+
+        currency:
+          currencyValidation.currency,
+
+        code:
+          "RAZORPAY_CURRENCY_NOT_CONFIGURED"
+
+      };
+
+    }
+
+
+    /* -----------------------------------------------------
+       PLAN PRICE
+    ----------------------------------------------------- */
 
     const validation =
       validateAmount({
@@ -411,7 +622,6 @@ async function createOrder({
         amount
 
       });
-
 
     if (
       !validation.valid
@@ -436,102 +646,9 @@ async function createOrder({
     }
 
 
-    if (!userId) {
-
-      return {
-
-        success:
-          false,
-
-        message:
-          "User ID required"
-
-      };
-
-    }
-
-
-    const normalizedCurrency =
-      String(
-        currency
-      )
-        .trim()
-        .toUpperCase();
-
-
-    /*
-     * Do not silently convert USD pricing into INR.
-     *
-     * If Razorpay is used for ZyrionOS, the caller must
-     * provide a deliberately configured currency mapping.
-     *
-     * The current public catalog remains USD.
-     */
-
-    if (
-      normalizedCurrency !==
-      "USD" &&
-      normalizedCurrency !==
-      "INR"
-    ) {
-
-      return {
-
-        success:
-          false,
-
-        message:
-          "Unsupported Razorpay currency",
-
-        currency:
-          normalizedCurrency
-
-      };
-
-    }
-
-
-    /*
-     * Current plan price is USD.
-     *
-     * Do not pretend INR amount is equal to USD amount.
-     *
-     * Until an official INR catalog exists, USD should
-     * not be silently converted.
-     */
-
-    if (
-      normalizedCurrency ===
-      "INR"
-    ) {
-
-      return {
-
-        success:
-          false,
-
-        message:
-          "Razorpay INR pricing is not configured for the current USD plan catalog",
-
-        code:
-          "RAZORPAY_INR_PRICE_MAPPING_REQUIRED",
-
-        plan:
-          selectedPlan,
-
-        usdPrice:
-          validation.amount
-
-      };
-
-    }
-
-
-    /*
-     * If Razorpay account/configuration supports the
-     * requested currency, amount is represented in the
-     * provider's minor units.
-     */
+    /* -----------------------------------------------------
+       PROVIDER AMOUNT
+    ----------------------------------------------------- */
 
     const providerAmount =
       Math.round(
@@ -540,12 +657,43 @@ async function createOrder({
       );
 
 
-    const receiptId =
-      receipt ||
-      createReceipt(
-        userId
-      );
+    if (
+      !Number.isSafeInteger(
+        providerAmount
+      ) ||
+      providerAmount <= 0
+    ) {
 
+      return {
+
+        success:
+          false,
+
+        message:
+          "Invalid provider payment amount"
+
+      };
+
+    }
+
+
+    /* -----------------------------------------------------
+       RECEIPT
+    ----------------------------------------------------- */
+
+    const receiptId =
+      receipt
+        ? String(receipt)
+            .trim()
+            .slice(0, 40)
+        : createReceipt(
+            userId
+          );
+
+
+    /* -----------------------------------------------------
+       MANDATORY PROVIDER NOTES
+    ----------------------------------------------------- */
 
     const orderNotes = {
 
@@ -564,7 +712,7 @@ async function createOrder({
         ),
 
       currency:
-        normalizedCurrency,
+        currencyValidation.currency,
 
       platform:
         "ZyrionOS",
@@ -575,44 +723,69 @@ async function createOrder({
     };
 
 
-    /*
-     * Add caller-provided notes only after
-     * mandatory platform metadata.
-     *
-     * User notes cannot overwrite security-critical
-     * identifiers.
-     */
+    /* -----------------------------------------------------
+       OPTIONAL NOTES
+    ----------------------------------------------------- */
 
     if (
       notes &&
       typeof notes ===
-        "object"
+        "object" &&
+      !Array.isArray(notes)
     ) {
+
+      const protectedKeys =
+        new Set([
+
+          "userId",
+
+          "plan",
+
+          "billingCycle",
+
+          "amount",
+
+          "currency",
+
+          "platform",
+
+          "version"
+
+        ]);
+
 
       for (
         const [key, value]
-        of Object.entries(notes)
+        of Object.entries(
+          notes
+        )
       ) {
 
         if (
-          [
-            "userId",
-            "plan",
-            "billingCycle",
-            "amount",
-            "currency",
-            "platform",
-            "version"
-          ].includes(key)
+          protectedKeys.has(
+            key
+          )
         ) {
+
           continue;
+
+        }
+
+
+        if (
+          value ===
+            undefined ||
+          value ===
+            null
+        ) {
+
+          continue;
+
         }
 
 
         const stringValue =
-          String(
-            value
-          );
+          String(value);
 
 
         if (
@@ -630,6 +803,10 @@ async function createOrder({
     }
 
 
+    /* -----------------------------------------------------
+       CREATE REAL RAZORPAY ORDER
+    ----------------------------------------------------- */
+
     const order =
       await razorpay
         .orders
@@ -639,7 +816,7 @@ async function createOrder({
             providerAmount,
 
           currency:
-            normalizedCurrency,
+            currencyValidation.currency,
 
           receipt:
             receiptId,
@@ -651,9 +828,13 @@ async function createOrder({
 
 
     logger.success(
-      `Razorpay order created for ${selectedPlan}`
+      `Razorpay order created: ${order.id} (${selectedPlan}/${cycle})`
     );
 
+
+    /* -----------------------------------------------------
+       RESPONSE
+    ----------------------------------------------------- */
 
     return {
 
@@ -701,18 +882,18 @@ async function createOrder({
         cycle,
 
       catalogAmount:
-        validation.amount
+        validation.amount,
+
+      currency:
+        currencyValidation.currency
 
     };
 
-  }
-
-  catch (error) {
+  } catch (error) {
 
     logger.error(
       `Razorpay order creation failed: ${error?.message}`
     );
-
 
     return {
 
@@ -738,7 +919,7 @@ async function createOrder({
 
 
 /* =========================================================
-   RETRIEVE ORDER
+   FETCH ORDER
 ========================================================= */
 
 async function fetchOrder(
@@ -769,7 +950,9 @@ async function fetchOrder(
       await razorpay
         .orders
         .fetch(
-          orderId
+          String(
+            orderId
+          ).trim()
         );
 
 
@@ -785,23 +968,27 @@ async function fetchOrder(
 
     };
 
-  }
-
-  catch (error) {
+  } catch (error) {
 
     logger.error(
       `Razorpay order retrieval failed: ${error?.message}`
     );
-
 
     return {
 
       success:
         false,
 
+      message:
+        "Unable to retrieve Razorpay order",
+
       error:
         error?.message ||
-        "Unable to retrieve Razorpay order"
+        "Unknown Razorpay error",
+
+      code:
+        error?.code ||
+        null
 
     };
 
@@ -811,7 +998,7 @@ async function fetchOrder(
 
 
 /* =========================================================
-   RETRIEVE PAYMENT
+   FETCH PAYMENT
 ========================================================= */
 
 async function fetchPayment(
@@ -842,7 +1029,9 @@ async function fetchPayment(
       await razorpay
         .payments
         .fetch(
-          paymentId
+          String(
+            paymentId
+          ).trim()
         );
 
 
@@ -858,23 +1047,27 @@ async function fetchPayment(
 
     };
 
-  }
-
-  catch (error) {
+  } catch (error) {
 
     logger.error(
       `Razorpay payment retrieval failed: ${error?.message}`
     );
-
 
     return {
 
       success:
         false,
 
+      message:
+        "Unable to retrieve Razorpay payment",
+
       error:
         error?.message ||
-        "Unable to retrieve Razorpay payment"
+        "Unknown Razorpay error",
+
+      code:
+        error?.code ||
+        null
 
     };
 
@@ -897,6 +1090,8 @@ module.exports = {
 
   getPlanPrice,
 
-  normalizePlan
+  normalizePlan,
+
+  normalizeCycle
 
 };
