@@ -1,163 +1,223 @@
+/* =========================================================
+   ZyrionOS PAYMENT ROUTES
+   =========================================================
+
+   Responsibilities:
+   - Authenticated payment endpoints
+   - Payment verification
+   - Billing history
+   - User credits
+
+   IMPORTANT:
+   Stripe/Razorpay webhooks are NOT mounted here.
+
+   Webhooks have their own:
+      /routes/webhookRoutes.js
+
+   This prevents duplicate webhook endpoints and keeps
+   raw-body webhook handling isolated from normal JSON APIs.
+========================================================= */
+
 const express =
-require("express");
+  require("express");
+
 
 const router =
-express.Router();
+  express.Router();
 
-/* =========================
-CONTROLLERS
-========================= */
+
+/* =========================================================
+   CONTROLLERS
+========================================================= */
 
 const {
+  createPaymentController,
+  verifyPaymentController,
+  createSubscriptionController,
+  billingHistoryController,
+  creditsController
+} =
+  require(
+    "../controllers/paymentController"
+  );
 
-createPaymentController,
 
-verifyPaymentController,
-
-createSubscriptionController,
-
-billingHistoryController,
-
-creditsController,
-
-stripeWebhookController,
-
-razorpayWebhookController
-
-} = require(
-
-"../controllers/paymentController"
-
-);
-
-/* =========================
-MIDDLEWARE
-========================= */
+/* =========================================================
+   MIDDLEWARE
+========================================================= */
 
 const {
   authMiddleware
-} = require("../middleware/authMiddleware"
-
-);
+} =
+  require(
+    "../middleware/authMiddleware"
+  );
 
 
 const {
   apiLimiter
-} = require("../middleware/rateLimiter");
+} =
+  require(
+    "../middleware/rateLimiter"
+  );
 
-/* =========================
-CREATE PAYMENT
-========================= */
 
-router.post(
+/* =========================================================
+   CREATE PAYMENT / ORDER
+=========================================================
 
-"/create-order",
+   POST
+   /create-order
 
-authMiddleware,
+   Authentication:
+   REQUIRED
 
-apiLimiter,
+   Provider:
+   stripe / razorpay
 
-createPaymentController
-
-);
-
-/* =========================
-VERIFY PAYMENT
-========================= */
-
-router.post(
-
-"/verify-payment",
-
-authMiddleware,
-
-apiLimiter,
-
-verifyPaymentController
-
-);
-
-/* =========================
-CREATE SUBSCRIPTION
-========================= */
+   Pricing is validated server-side by the controller
+   and payment services.
+========================================================= */
 
 router.post(
 
-"/subscription",
+  "/create-order",
 
-authMiddleware,
+  authMiddleware,
 
-apiLimiter,
+  apiLimiter,
 
-createSubscriptionController
+  createPaymentController
 
 );
 
-/* =========================
-BILLING HISTORY
-========================= */
+
+/* =========================================================
+   VERIFY PAYMENT
+=========================================================
+
+   POST
+   /verify-payment
+
+   Authentication:
+   REQUIRED
+
+   Used for provider-side payment verification where
+   applicable.
+
+   Webhook confirmation remains authoritative for
+   subscription state.
+========================================================= */
+
+router.post(
+
+  "/verify-payment",
+
+  authMiddleware,
+
+  apiLimiter,
+
+  verifyPaymentController
+
+);
+
+
+/* =========================================================
+   CREATE SUBSCRIPTION
+=========================================================
+
+   POST
+   /subscription
+
+   Authentication:
+   REQUIRED
+
+   This endpoint remains available for the existing
+   controller contract.
+
+   Actual payment/subscription state must be confirmed
+   through the provider/webhook flow.
+========================================================= */
+
+router.post(
+
+  "/subscription",
+
+  authMiddleware,
+
+  apiLimiter,
+
+  createSubscriptionController
+
+);
+
+
+/* =========================================================
+   BILLING HISTORY
+=========================================================
+
+   GET
+   /billing-history
+
+   Authentication:
+   REQUIRED
+========================================================= */
 
 router.get(
 
-"/billing-history",
+  "/billing-history",
 
-authMiddleware,
+  authMiddleware,
 
-apiLimiter,
+  apiLimiter,
 
-billingHistoryController
+  billingHistoryController
 
 );
 
-/* =========================
-USER CREDITS
-========================= */
+
+/* =========================================================
+   USER CREDITS
+=========================================================
+
+   GET
+   /credits
+
+   Authentication:
+   REQUIRED
+========================================================= */
 
 router.get(
 
-"/credits",
+  "/credits",
 
-authMiddleware,
+  authMiddleware,
 
-apiLimiter,
+  apiLimiter,
 
-creditsController
-
-);
-
-/* =========================
-STRIPE WEBHOOK
-========================= */
-
-router.post(
-
-"/stripe/webhook",
-
-express.raw({
-
-type:"application/json"
-
-}),
-
-stripeWebhookController
+  creditsController
 
 );
 
-/* =========================
-RAZORPAY WEBHOOK
-========================= */
 
-router.post(
+/* =========================================================
+   WEBHOOKS
+=========================================================
 
-"/razorpay/webhook",
+   DO NOT ADD STRIPE OR RAZORPAY WEBHOOKS HERE.
 
-razorpayWebhookController
+   Dedicated webhook routes:
 
-);
+      /routes/webhookRoutes.js
 
-/* =========================
-EXPORT
-========================= */
+   This separation is important because Stripe requires
+   the original raw request body for signature verification.
+========================================================= */
+
+
+/* =========================================================
+   EXPORT
+========================================================= */
 
 module.exports =
-router;
+  router;
