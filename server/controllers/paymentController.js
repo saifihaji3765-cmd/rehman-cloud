@@ -1,701 +1,1483 @@
-const Stripe =
-require("stripe");
+/* =========================================================
+   ZyrionOS PAYMENT CONTROLLER
+   =========================================================
 
-const Razorpay =
-require("razorpay");
+   Responsibilities:
+   - Create Stripe PaymentIntent
+   - Create Razorpay Order
+   - Validate authenticated user
+   - Validate plan through Billing Agent
+   - Never trust client-supplied plan price
+   - Verify Razorpay payment signature
+   - Never activate subscription directly
+   - Subscription activation happens through verified webhook
+   - Return real provider data only
+
+   Plans:
+   Starter     $19
+   Pro         $99
+   Business    $199
+   Scale       $299
+   Enterprise  $499
+========================================================= */
+
+
+/* =========================
+   PACKAGES
+========================= */
 
 const crypto =
-require("crypto");
+  require("crypto");
+
+
+/* =========================
+   SERVICES
+========================= */
 
 const formatResponse =
-require("../utils/formatResponse");
+  require("../utils/formatResponse");
 
-const Subscription =
-require("../models/subscriptionModel");
-
-/* =========================
-STRIPE
-========================= */
-
-let stripe = null;
-
-if (
-process.env.STRIPE_SECRET_KEY &&
-process.env.STRIPE_SECRET_KEY.trim() !== ""
-){
-
-stripe = new Stripe(
-process.env.STRIPE_SECRET_KEY
-);
-
-}
+const logger =
+  require("../services/loggerService");
 
 
 /* =========================
-RAZORPAY
+   AGENTS
 ========================= */
-let razorpay = null;
 
-if (
+const billingAgent =
+  require("../agents/billingAgent");
 
-process.env.RAZORPAY_KEY_ID &&
-process.env.RAZORPAY_KEY_SECRET &&
-
-process.env.RAZORPAY_KEY_ID.trim() !== "" &&
-process.env.RAZORPAY_KEY_SECRET.trim() !== ""
-
-){
-
-razorpay = new Razorpay({
-
-key_id:
-process.env.RAZORPAY_KEY_ID,
-
-key_secret:
-process.env.RAZORPAY_KEY_SECRET
-
-});
-
-}
 
 /* =========================
-CREATE PAYMENT
+   PAYMENT SERVICES
 ========================= */
-async function createPaymentController(
-req,
-res
-){
 
-try{
+const razorpayService =
+  require("../services/razorpayService");
 
-const {
+const stripeService =
+  require("../services/stripeService");
 
-  amount,
 
-  currency,
+/* =========================================================
+   HELPERS
+========================================================= */
 
-  plan,
-
-  provider
-
-} = req.body;
 
 /* =========================
-   VALIDATION
+   AUTH USER
 ========================= */
 
-if(
+function getUserId(req) {
 
-  !amount ||
-
-  !plan ||
-
-  !provider
-
-){
-
-  return res.status(400)
-  .json(
-
-    formatResponse({
-
-      success:false,
-
-      message:
-      "Amount, plan and provider required"
-
-    })
-
+  return (
+    req?.user?.id ||
+    req?.user?._id ||
+    req?.user?.userId ||
+    null
   );
 
 }
 
+
 /* =========================
-   STRIPE
+   NORMALIZE PROVIDER
 ========================= */
-if(provider === "stripe"){
 
-  const paymentIntent =
+function normalizeProvider(
+  provider
+) {
 
-  await stripe
-  .paymentIntents
-  .create({
+  if (!provider) {
+    return null;
+  }
 
-    amount:
-    amount * 100,
+  const value =
+    String(provider)
+      .trim()
+      .toLowerCase();
 
-    currency:
-    currency || "usd",
+  if (
+    value === "stripe" ||
+    value === "razorpay"
+  ) {
 
-    metadata:{
+    return value;
 
-      userId:
-      req.user.id,
+  }
 
-      plan
+  return null;
+
+}
+
+
+/* =========================
+   NORMALIZE PLAN
+========================= */
+
+function normalizePlan(
+  plan
+) {
+
+  if (!plan) {
+    return null;
+  }
+
+  const value =
+    String(plan)
+      .trim()
+      .toLowerCase();
+
+  const aliases = {
+
+    starter:
+      "Starter",
+
+    pro:
+      "Pro",
+
+    business:
+      "Business",
+
+    scale:
+      "Scale",
+
+    enterprise:
+      "Enterprise"
+
+  };
+
+  return (
+    aliases[value] ||
+    null
+  );
+
+}
+
+
+/* =========================
+   BILLING PLAN
+========================= */
+
+async function resolvePlan({
+  userId,
+  plan,
+  billingCycle
+}) {
+
+  const billing =
+    await billingAgent({
+
+      userId,
+
+      plan,
+
+      billingCycle:
+        billingCycle === "yearly"
+          ? "yearly"
+          : "monthly"
+
+    });
+
+
+  if (
+    !billing ||
+    billing.success !== true
+  ) {
+
+    const error =
+      new Error(
+        billing?.error ||
+        billing?.message ||
+        "Unable to validate billing plan"
+      );
+
+    error.code =
+      "BILLING_PLAN_INVALID";
+
+    throw error;
+
+  }
+
+
+  const selectedPlan =
+    billing
+      ?.billing
+      ?.selectedPlan;
+
+
+  if (!selectedPlan) {
+
+    const error =
+      new Error(
+        "Billing agent returned no selected plan"
+      );
+
+    error.code =
+      "PLAN_DATA_MISSING";
+
+    throw error;
+
+  }
+
+
+  return {
+
+    billing,
+
+    plan:
+      selectedPlan
+
+  };
+
+}
+
+
+/* =========================
+   SAFE AMOUNT
+========================= */
+
+function getAmountInMinorUnits(
+  amount
+) {
+
+  const numeric =
+    Number(amount);
+
+
+  if (
+    !Number.isFinite(numeric) ||
+    numeric <= 0
+  ) {
+
+    throw new Error(
+      "Invalid payment amount"
+    );
+
+  }
+
+
+  return Math.round(
+    numeric * 100
+  );
+
+}
+
+
+/* =========================================================
+   CREATE PAYMENT
+========================================================= */
+
+async function createPaymentController(
+  req,
+  res
+) {
+
+  try {
+
+    logger.info(
+      "Payment creation started"
+    );
+
+
+    /* =========================
+       USER
+    ========================= */
+
+    const userId =
+      getUserId(req);
+
+
+    if (!userId) {
+
+      return res
+        .status(401)
+        .json(
+          formatResponse({
+
+            success:
+              false,
+
+            message:
+              "Authentication required"
+
+          })
+        );
 
     }
 
-  });
 
-  return res.json(
+    /* =========================
+       REQUEST
+    ========================= */
 
-    formatResponse({
+    const {
+      plan,
+      provider,
+      billingCycle = "monthly",
+      currency
+    } =
+      req.body || {};
 
-      success:true,
 
-      provider:"stripe",
+    /* =========================
+       VALIDATION
+    ========================= */
 
-      data:{
+    const normalizedPlan =
+      normalizePlan(plan);
 
-        clientSecret:
-        paymentIntent.client_secret
+    const normalizedProvider =
+      normalizeProvider(provider);
+
+
+    if (!normalizedPlan) {
+
+      return res
+        .status(400)
+        .json(
+          formatResponse({
+
+            success:
+              false,
+
+            message:
+              "Valid plan is required",
+
+            allowedPlans: [
+              "Starter",
+              "Pro",
+              "Business",
+              "Scale",
+              "Enterprise"
+            ]
+
+          })
+        );
+
+    }
+
+
+    if (!normalizedProvider) {
+
+      return res
+        .status(400)
+        .json(
+          formatResponse({
+
+            success:
+              false,
+
+            message:
+              "Valid payment provider is required",
+
+            allowedProviders: [
+              "stripe",
+              "razorpay"
+            ]
+
+          })
+        );
+
+    }
+
+
+    const normalizedCycle =
+      billingCycle === "yearly"
+        ? "yearly"
+        : "monthly";
+
+
+    /* =====================================================
+       BILLING AGENT
+       =====================================================
+
+       IMPORTANT:
+       Client does NOT control the final price.
+    */
+
+    const {
+      billing,
+      plan: selectedPlan
+    } =
+      await resolvePlan({
+
+        userId,
+
+        plan:
+          normalizedPlan,
+
+        billingCycle:
+          normalizedCycle
+
+      });
+
+
+    const amount =
+      Number(
+        billing
+          ?.billing
+          ?.amount
+      );
+
+
+    if (
+      !Number.isFinite(amount) ||
+      amount <= 0
+    ) {
+
+      return res
+        .status(500)
+        .json(
+          formatResponse({
+
+            success:
+              false,
+
+            message:
+              "Invalid server-side plan price"
+
+          })
+        );
+
+    }
+
+
+    /* =====================================================
+       CURRENCY
+    ===================================================== */
+
+    const planCurrency =
+      String(
+        selectedPlan.currency ||
+        "USD"
+      ).toUpperCase();
+
+
+    /*
+     * Current ZyrionOS pricing is USD.
+     *
+     * Stripe receives USD directly.
+     *
+     * Razorpay orders generally require a supported
+     * settlement currency. We do NOT silently convert
+     * USD into INR because that would create an
+     * unverified exchange-rate/pricing system.
+     */
+
+    if (
+      normalizedProvider ===
+        "razorpay" &&
+      planCurrency !== "INR" &&
+      String(
+        currency ||
+        planCurrency
+      ).toUpperCase() !== "INR"
+    ) {
+
+      return res
+        .status(400)
+        .json(
+          formatResponse({
+
+            success:
+              false,
+
+            message:
+              "Razorpay requires an INR-priced billing configuration",
+
+            code:
+              "RAZORPAY_CURRENCY_UNSUPPORTED",
+
+            planCurrency,
+
+            requestedCurrency:
+              String(
+                currency ||
+                planCurrency
+              ).toUpperCase(),
+
+            hint:
+              "Use Stripe for the current USD subscription plans, or configure an official INR price mapping before enabling Razorpay for USD plans."
+
+          })
+        );
+
+    }
+
+
+    /* =====================================================
+       STRIPE
+    ===================================================== */
+
+    if (
+      normalizedProvider ===
+      "stripe"
+    ) {
+
+      if (
+        planCurrency !==
+        "USD"
+      ) {
+
+        return res
+          .status(400)
+          .json(
+            formatResponse({
+
+              success:
+                false,
+
+              message:
+                "Stripe pricing configuration is not USD"
+
+            })
+          );
 
       }
 
-    })
 
-  );
+      const payment =
+        await stripeService
+          .createPaymentIntent({
+
+            amount,
+
+            currency:
+              "USD",
+
+            userId,
+
+            plan:
+              normalizedPlan,
+
+            billingCycle:
+              normalizedCycle
+
+          });
+
+
+      if (
+        !payment ||
+        payment.success !== true
+      ) {
+
+        return res
+          .status(502)
+          .json(
+            formatResponse({
+
+              success:
+                false,
+
+              provider:
+                "stripe",
+
+              message:
+                "Stripe payment initialization failed",
+
+              error:
+                payment?.error ||
+                "Stripe service returned an unsuccessful result"
+
+            })
+          );
+
+      }
+
+
+      logger.success(
+        `Stripe payment initialized for ${normalizedPlan}`
+      );
+
+
+      return res.json(
+        formatResponse({
+
+          success:
+            true,
+
+          provider:
+            "stripe",
+
+          data: {
+
+            paymentIntentId:
+              payment
+                ?.paymentIntent
+                ?.id ||
+              null,
+
+            clientSecret:
+              payment
+                ?.paymentIntent
+                ?.client_secret ||
+              null,
+
+            amount,
+
+            currency:
+              "USD",
+
+            plan:
+              normalizedPlan,
+
+            billingCycle:
+              normalizedCycle
+
+          },
+
+          billing: {
+
+            billingId:
+              billing
+                ?.billing
+                ?.billingId ||
+              null,
+
+            amount,
+
+            currency:
+              "USD",
+
+            plan:
+              normalizedPlan
+
+          },
+
+          subscriptionActivation:
+            "pending_webhook"
+
+        })
+      );
+
+    }
+
+
+    /* =====================================================
+       RAZORPAY
+    ===================================================== */
+
+    if (
+      normalizedProvider ===
+      "razorpay"
+    ) {
+
+      /*
+       * Current public plan catalog is USD.
+       * Do not invent an INR conversion.
+       */
+
+      return res
+        .status(400)
+        .json(
+          formatResponse({
+
+            success:
+              false,
+
+            provider:
+              "razorpay",
+
+            message:
+              "Razorpay is not enabled for the current USD plan catalog",
+
+            code:
+              "RAZORPAY_USD_PLAN_NOT_CONFIGURED",
+
+            plan:
+              normalizedPlan,
+
+            amount,
+
+            currency:
+              planCurrency,
+
+            hint:
+              "Configure verified INR prices separately before accepting Razorpay payments for these plans."
+
+          })
+        );
+
+    }
+
+
+    return res
+      .status(400)
+      .json(
+        formatResponse({
+
+          success:
+            false,
+
+          message:
+            "Unsupported payment provider"
+
+        })
+      );
+
+  }
+
+  catch (error) {
+
+    const message =
+      error?.message ||
+      "Payment creation failed";
+
+
+    logger.error(
+      `Payment creation failed: ${message}`
+    );
+
+
+    const status =
+      error?.code ===
+        "BILLING_PLAN_INVALID"
+        ? 400
+        : 500;
+
+
+    return res
+      .status(status)
+      .json(
+        formatResponse({
+
+          success:
+            false,
+
+          message:
+            "Payment creation failed",
+
+          error:
+            message
+
+        })
+      );
+
+  }
 
 }
 
-/* =========================
-   RAZORPAY
-========================= */
 
-if(provider === "razorpay"){
-
-  const order =
-
-  await razorpay.orders.create({
-
-    amount:
-    amount * 100,
-
-    currency:
-    currency || "INR",
-
-    receipt:
-    `receipt_${Date.now()}`
-
-  });
-
-  return res.json(
-
-    formatResponse({
-
-      success:true,
-
-      provider:"razorpay",
-
-      data:order
-
-    })
-
-  );
-
-}
-
-/* =========================
-   INVALID PROVIDER
-========================= */
-
-return res.status(400)
-.json(
-
-  formatResponse({
-
-    success:false,
-
-    message:
-    "Invalid payment provider"
-
-  })
-
-);
-
-}
-
-catch(error){
-
-return res.status(500)
-.json(
-
-  formatResponse({
-
-    success:false,
-
-    error:error.message
-
-  })
-
-);
-
-}
-
-}
-
-/* =========================
-VERIFY PAYMENT
-========================= */
+/* =========================================================
+   VERIFY RAZORPAY PAYMENT
+========================================================= */
 
 async function verifyPaymentController(
-req,
-res
-){
+  req,
+  res
+) {
 
-try{
+  try {
 
-const {
+    const userId =
+      getUserId(req);
 
-  razorpay_order_id,
 
-  razorpay_payment_id,
+    if (!userId) {
 
-  razorpay_signature
+      return res
+        .status(401)
+        .json(
+          formatResponse({
 
-} = req.body;
+            success:
+              false,
 
-const generatedSignature =
+            message:
+              "Authentication required"
 
-crypto
+          })
+        );
 
-.createHmac(
+    }
 
-  "sha256",
 
-  process.env
-  .RAZORPAY_KEY_SECRET
+    const {
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature
+    } =
+      req.body || {};
 
-)
 
-.update(
+    /* =========================
+       VALIDATION
+    ========================= */
 
-  razorpay_order_id +
+    if (
+      !razorpay_order_id ||
+      !razorpay_payment_id ||
+      !razorpay_signature
+    ) {
 
-  "|" +
+      return res
+        .status(400)
+        .json(
+          formatResponse({
 
-  razorpay_payment_id
+            success:
+              false,
 
-)
+            message:
+              "Razorpay payment verification fields are required"
 
-.digest("hex");
+          })
+        );
 
-if(
+    }
 
-  generatedSignature !==
-  razorpay_signature
 
-){
+    const secret =
+      process.env
+        .RAZORPAY_KEY_SECRET ||
+      process.env
+        .RAZORPAY_SECRET;
 
-  return res.status(400)
-  .json({
 
-    success:false,
+    if (!secret) {
 
-    message:
-    "Payment verification failed"
+      logger.error(
+        "Razorpay secret is not configured"
+      );
 
-  });
+      return res
+        .status(500)
+        .json(
+          formatResponse({
+
+            success:
+              false,
+
+            message:
+              "Razorpay verification is not configured"
+
+          })
+        );
+
+    }
+
+
+    /* =====================================================
+       SIGNATURE
+    ===================================================== */
+
+    const generatedSignature =
+      crypto
+        .createHmac(
+          "sha256",
+          secret
+        )
+        .update(
+          `${razorpay_order_id}|${razorpay_payment_id}`
+        )
+        .digest("hex");
+
+
+    /* =====================================================
+       TIMING-SAFE COMPARISON
+    ===================================================== */
+
+    const expectedBuffer =
+      Buffer.from(
+        generatedSignature,
+        "utf8"
+      );
+
+    const receivedBuffer =
+      Buffer.from(
+        String(
+          razorpay_signature
+        ),
+        "utf8"
+      );
+
+
+    if (
+      expectedBuffer.length !==
+      receivedBuffer.length ||
+      !crypto.timingSafeEqual(
+        expectedBuffer,
+        receivedBuffer
+      )
+    ) {
+
+      logger.warning(
+        "Razorpay payment signature verification failed"
+      );
+
+
+      return res
+        .status(400)
+        .json(
+          formatResponse({
+
+            success:
+              false,
+
+            message:
+              "Payment verification failed"
+
+          })
+        );
+
+    }
+
+
+    /*
+     * IMPORTANT:
+     *
+     * Signature verification does NOT mean the
+     * subscription is activated here.
+     *
+     * The authoritative webhook must confirm the
+     * payment event and activate the subscription.
+     */
+
+
+    logger.success(
+      `Razorpay payment signature verified: ${razorpay_payment_id}`
+    );
+
+
+    return res.json(
+      formatResponse({
+
+        success:
+          true,
+
+        verified:
+          true,
+
+        provider:
+          "razorpay",
+
+        paymentId:
+          razorpay_payment_id,
+
+        orderId:
+          razorpay_order_id,
+
+        subscriptionActivation:
+          "pending_webhook",
+
+        message:
+          "Payment signature verified. Subscription activation will occur after the verified webhook."
+
+      })
+    );
+
+  }
+
+  catch (error) {
+
+    logger.error(
+      `Razorpay verification failed: ${error?.message}`
+    );
+
+
+    return res
+      .status(500)
+      .json(
+        formatResponse({
+
+          success:
+            false,
+
+          message:
+            "Payment verification failed",
+
+          error:
+            error?.message ||
+            "Unknown verification error"
+
+        })
+      );
+
+  }
 
 }
 
-return res.json(
 
-  formatResponse({
+/* =========================================================
+   CREATE SUBSCRIPTION
+   =========================================================
 
-    success:true,
+   Legacy-compatible endpoint.
 
-    message:
-    "Payment verified"
+   It does NOT activate a subscription.
 
-  })
-
-);
-
-}
-
-catch(error){
-
-return res.status(500)
-.json(
-
-  formatResponse({
-
-    success:false,
-
-    error:error.message
-
-  })
-
-);
-
-}
-
-}
-
-/* =========================
-CREATE SUBSCRIPTION
-========================= */
+   Payment must happen first and the verified webhook
+   is responsible for activation.
+========================================================= */
 
 async function createSubscriptionController(
-req,
-res
-){
+  req,
+  res
+) {
 
-try{
+  try {
 
-const {
+    const userId =
+      getUserId(req);
 
-  planName,
 
-  price,
+    if (!userId) {
 
-  currency,
+      return res
+        .status(401)
+        .json(
+          formatResponse({
 
-  paymentProvider,
+            success:
+              false,
 
-  paymentId,
+            message:
+              "Authentication required"
 
-  orderId
+          })
+        );
 
-} = req.body;
+    }
 
-const expiryDate =
-new Date();
 
-expiryDate.setMonth(
-  expiryDate.getMonth() + 1
-);
+    const {
+      plan,
+      planName,
+      billingCycle = "monthly",
+      paymentProvider
+    } =
+      req.body || {};
 
-const subscription =
 
-await Subscription.create({
+    const selectedPlan =
+      normalizePlan(
+        plan ||
+        planName
+      );
 
-  userId:
-  req.user.id,
 
-  planName,
+    if (!selectedPlan) {
 
-  price,
+      return res
+        .status(400)
+        .json(
+          formatResponse({
 
-  currency,
+            success:
+              false,
 
-  paymentProvider,
+            message:
+              "Valid plan is required"
 
-  paymentId,
+          })
+        );
 
-  orderId,
+    }
 
-  expiryDate
 
-});
+    /*
+     * This endpoint is intentionally not allowed
+     * to activate a subscription.
+     */
 
-return res.json(
+    return res
+      .status(409)
+      .json(
+        formatResponse({
 
-  formatResponse({
+          success:
+            false,
 
-    success:true,
+          message:
+            "Subscription cannot be activated directly",
 
-    message:
-    "Subscription activated",
+          code:
+            "PAYMENT_REQUIRED",
 
-    data:subscription
+          plan:
+            selectedPlan,
 
-  })
+          billingCycle:
+            billingCycle ===
+            "yearly"
+              ? "yearly"
+              : "monthly",
 
-);
+          paymentProvider:
+            normalizeProvider(
+              paymentProvider
+            ),
+
+          nextStep:
+            "Create and complete payment. The verified provider webhook will activate the subscription."
+
+        })
+      );
+
+  }
+
+  catch (error) {
+
+    logger.error(
+      `Subscription creation request failed: ${error?.message}`
+    );
+
+
+    return res
+      .status(500)
+      .json(
+        formatResponse({
+
+          success:
+            false,
+
+          message:
+            "Subscription request failed",
+
+          error:
+            error?.message ||
+            "Unknown error"
+
+        })
+      );
+
+  }
 
 }
 
-catch(error){
 
-return res.status(500)
-.json(
-
-  formatResponse({
-
-    success:false,
-
-    error:error.message
-
-  })
-
-);
-
-}
-
-}
-
-/* =========================
-BILLING HISTORY
-========================= */
+/* =========================================================
+   BILLING HISTORY
+========================================================= */
 
 async function billingHistoryController(
-req,
-res
-){
+  req,
+  res
+) {
 
-try{
+  try {
 
-const history =
+    const Subscription =
+      require(
+        "../models/subscriptionModel"
+      );
 
-await Subscription.find({
 
-  userId:req.user.id
+    const userId =
+      getUserId(req);
 
-})
 
-.sort({
+    if (!userId) {
 
-  createdAt:-1
+      return res
+        .status(401)
+        .json(
+          formatResponse({
 
-});
+            success:
+              false,
 
-return res.json(
+            message:
+              "Authentication required"
 
-  formatResponse({
+          })
+        );
 
-    success:true,
+    }
 
-    data:history
 
-  })
+    const history =
+      await Subscription
+        .find({
+          userId
+        })
+        .sort({
+          createdAt:
+            -1
+        })
+        .lean();
 
-);
+
+    return res.json(
+      formatResponse({
+
+        success:
+          true,
+
+        data:
+          history
+
+      })
+    );
+
+  }
+
+  catch (error) {
+
+    logger.error(
+      `Billing history failed: ${error?.message}`
+    );
+
+
+    return res
+      .status(500)
+      .json(
+        formatResponse({
+
+          success:
+            false,
+
+          message:
+            "Failed to fetch billing history",
+
+          error:
+            error?.message ||
+            "Unknown error"
+
+        })
+      );
+
+  }
 
 }
 
-catch(error){
 
-return res.status(500)
-.json(
-
-  formatResponse({
-
-    success:false,
-
-    error:error.message
-
-  })
-
-);
-
-}
-
-}
-
-/* =========================
-USER CREDITS
-========================= */
+/* =========================================================
+   USER CREDITS
+========================================================= */
 
 async function creditsController(
-req,
-res
-){
+  req,
+  res
+) {
 
-try{
+  try {
 
-return res.json(
+    const Subscription =
+      require(
+        "../models/subscriptionModel"
+      );
 
-  formatResponse({
 
-    success:true,
+    const userId =
+      getUserId(req);
 
-    credits:2000,
 
-    used:320,
+    if (!userId) {
 
-    remaining:1680
+      return res
+        .status(401)
+        .json(
+          formatResponse({
 
-  })
+            success:
+              false,
 
-);
+            message:
+              "Authentication required"
+
+          })
+        );
+
+    }
+
+
+    const subscription =
+      await Subscription
+        .findOne({
+          userId,
+
+          status:
+            "active"
+        })
+        .sort({
+          createdAt:
+            -1
+        })
+        .lean();
+
+
+    if (!subscription) {
+
+      return res.json(
+        formatResponse({
+
+          success:
+            true,
+
+          credits: {
+
+            total:
+              0,
+
+            used:
+              0,
+
+            remaining:
+              0
+
+          }
+
+        })
+      );
+
+    }
+
+
+    const total =
+      Number(
+        subscription.aiCreditsLimit ??
+        subscription.creditsLimit ??
+        0
+      );
+
+
+    const used =
+      Number(
+        subscription.aiCreditsUsed ??
+        0
+      );
+
+
+    const remaining =
+      total === -1
+        ? -1
+        : Math.max(
+            0,
+            total - used
+          );
+
+
+    return res.json(
+      formatResponse({
+
+        success:
+          true,
+
+        credits: {
+
+          total,
+
+          used,
+
+          remaining,
+
+          unlimited:
+            total === -1
+
+        }
+
+      })
+    );
+
+  }
+
+  catch (error) {
+
+    logger.error(
+      `Credits lookup failed: ${error?.message}`
+    );
+
+
+    return res
+      .status(500)
+      .json(
+        formatResponse({
+
+          success:
+            false,
+
+          message:
+            "Failed to fetch credits",
+
+          error:
+            error?.message ||
+            "Unknown error"
+
+        })
+      );
+
+  }
 
 }
 
-catch(error){
 
-return res.status(500)
-.json(
+/* =========================================================
+   WEBHOOK FUNCTIONS
+   =========================================================
 
-  formatResponse({
+   Kept as compatibility exports.
 
-    success:false,
-
-    error:error.message
-
-  })
-
-);
-
-}
-
-}
-
-/* =========================
-STRIPE WEBHOOK
-========================= */
+   Actual webhook processing should be handled by
+   webhookController.js so that provider signature
+   verification and subscription activation have one
+   authoritative path.
+========================================================= */
 
 async function stripeWebhookController(
-req,
-res
-){
+  req,
+  res
+) {
 
-try{
+  return res
+    .status(410)
+    .json(
+      formatResponse({
 
-const sig =
+        success:
+          false,
 
-req.headers[
-  "stripe-signature"
-];
+        message:
+          "Stripe webhook endpoint moved to webhookController"
 
-const event =
-
-stripe.webhooks.constructEvent(
-
-  req.body,
-
-  sig,
-
-  process.env
-  .STRIPE_WEBHOOK_SECRET
-
-);
-
-if(
-
-  event.type ===
-  "payment_intent.succeeded"
-
-){
-
-  console.log(
-    "Stripe Payment Success"
-  );
+      })
+    );
 
 }
 
-res.status(200).json({
-
-  received:true
-
-});
-
-}
-
-catch(error){
-
-res.status(400).send(
-
-  `Webhook Error: ${error.message}`
-
-);
-
-}
-
-}
-
-/* =========================
-RAZORPAY WEBHOOK
-========================= */
 
 async function razorpayWebhookController(
-req,
-res
-){
+  req,
+  res
+) {
 
-try{
+  return res
+    .status(410)
+    .json(
+      formatResponse({
 
-const signature =
+        success:
+          false,
 
-req.headers[
-  "x-razorpay-signature"
-];
+        message:
+          "Razorpay webhook endpoint moved to webhookController"
 
-const body =
-
-JSON.stringify(req.body);
-
-const expectedSignature =
-
-crypto
-.createHmac(
-
-  "sha256",
-
-  process.env
-  .RAZORPAY_WEBHOOK_SECRET
-
-)
-
-.update(body)
-
-.digest("hex");
-
-if(
-
-  signature !==
-  expectedSignature
-
-){
-
-  return res.status(400)
-  .json({
-
-    success:false,
-
-    message:
-    "Invalid webhook signature"
-
-  });
+      })
+    );
 
 }
 
-return res.json({
 
-  success:true,
-
-  message:
-  "Webhook verified"
-
-});
-
-}
-
-catch(error){
-
-return res.status(500)
-.json({
-
-  success:false,
-
-  error:error.message
-
-});
-
-}
-
-}
-
-/* =========================
-EXPORTS
-========================= */
+/* =========================================================
+   EXPORTS
+========================================================= */
 
 module.exports = {
 
-createPaymentController,
+  createPaymentController,
 
-verifyPaymentController,
+  verifyPaymentController,
 
-createSubscriptionController,
+  createSubscriptionController,
 
-billingHistoryController,
+  billingHistoryController,
 
-creditsController,
+  creditsController,
 
-stripeWebhookController,
+  stripeWebhookController,
 
-razorpayWebhookController
+  razorpayWebhookController
 
 };
