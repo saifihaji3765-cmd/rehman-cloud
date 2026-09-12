@@ -1,31 +1,29 @@
+const Stripe = require("stripe");
+const logger = require("./loggerService");
+
+
 /* =========================================================
    ZyrionOS STRIPE SERVICE
    =========================================================
 
    Responsibilities:
    - Stripe configuration
-   - Recurring Checkout Session
-   - PaymentIntent creation
+   - Recurring Checkout Sessions
+   - PaymentIntent support for legacy integrations
    - Server-side plan validation
-   - User/plan metadata
-   - Monthly/yearly billing
+   - User / plan / billing metadata
+   - Monthly / yearly billing
    - No client-controlled pricing
    - Webhook-compatible metadata
 
-   PRICING:
+   PUBLIC PRICING
 
-   Starter     $19
-   Pro         $99
-   Business    $199
-   Scale       $299
-   Enterprise  $499
+   Starter     $19 / month
+   Pro         $99 / month
+   Business    $199 / month
+   Scale       $299 / month
+   Enterprise  $499 / month
 ========================================================= */
-
-const Stripe =
-  require("stripe");
-
-const logger =
-  require("./loggerService");
 
 
 /* =========================================================
@@ -34,18 +32,13 @@ const logger =
 
 let stripe = null;
 
-
 if (
   process.env.STRIPE_SECRET_KEY &&
-  process.env.STRIPE_SECRET_KEY
-    .trim() !== ""
+  process.env.STRIPE_SECRET_KEY.trim() !== ""
 ) {
-
-  stripe =
-    new Stripe(
-      process.env.STRIPE_SECRET_KEY
-    );
-
+  stripe = new Stripe(
+    process.env.STRIPE_SECRET_KEY.trim()
+  );
 }
 
 
@@ -53,121 +46,128 @@ if (
    PLAN CATALOG
 ========================================================= */
 
-const PLANS = {
+const PLANS = Object.freeze({
 
-  Starter: {
+  Starter: Object.freeze({
+    monthly: 19,
+    yearly: 190
+  }),
 
-    monthly:
-      19,
+  Pro: Object.freeze({
+    monthly: 99,
+    yearly: 990
+  }),
 
-    yearly:
-      190
+  Business: Object.freeze({
+    monthly: 199,
+    yearly: 1990
+  }),
 
-  },
+  Scale: Object.freeze({
+    monthly: 299,
+    yearly: 2990
+  }),
 
-  Pro: {
+  Enterprise: Object.freeze({
+    monthly: 499,
+    yearly: 4990
+  })
 
-    monthly:
-      99,
-
-    yearly:
-      990
-
-  },
-
-  Business: {
-
-    monthly:
-      199,
-
-    yearly:
-      1990
-
-  },
-
-  Scale: {
-
-    monthly:
-      299,
-
-    yearly:
-      2990
-
-  },
-
-  Enterprise: {
-
-    monthly:
-      499,
-
-    yearly:
-      4990
-
-  }
-
-};
+});
 
 
 /* =========================================================
-   HELPERS
+   CONSTANTS
 ========================================================= */
 
-function normalizePlan(
-  plan
-) {
+const SUPPORTED_CURRENCY = "USD";
+
+const STRIPE_API_CURRENCY = "usd";
+
+const DEFAULT_FRONTEND_URL =
+  "https://zyrionos.com";
+
+
+/* =========================================================
+   PLAN NORMALIZATION
+========================================================= */
+
+function normalizePlan(plan) {
 
   if (!plan) {
     return null;
   }
-
 
   const value =
     String(plan)
       .trim()
       .toLowerCase();
 
-
   const map = {
 
-    starter:
-      "Starter",
+    starter: "Starter",
 
-    pro:
-      "Pro",
+    pro: "Pro",
 
-    business:
-      "Business",
+    business: "Business",
 
-    scale:
-      "Scale",
+    scale: "Scale",
 
-    enterprise:
-      "Enterprise"
+    enterprise: "Enterprise"
 
   };
-
 
   return (
     map[value] ||
     null
   );
-
 }
 
+
+/* =========================================================
+   BILLING CYCLE NORMALIZATION
+========================================================= */
 
 function normalizeBillingCycle(
   cycle
 ) {
 
-  return cycle ===
+  if (
+    cycle ===
+    undefined ||
+    cycle ===
+    null ||
+    cycle === ""
+  ) {
+    return "monthly";
+  }
+
+  const value =
+    String(cycle)
+      .trim()
+      .toLowerCase();
+
+  if (
+    value ===
+    "monthly"
+  ) {
+    return "monthly";
+  }
+
+  if (
+    value ===
     "yearly"
+  ) {
+    return "yearly";
+  }
 
-    ? "yearly"
-
-    : "monthly";
-
+  return null;
 }
 
+
+/* =========================================================
+   PLAN PRICE
+========================================================= */
 
 function getPlanPrice(
   plan,
@@ -175,21 +175,20 @@ function getPlanPrice(
 ) {
 
   const normalizedPlan =
-    normalizePlan(
-      plan
-    );
-
+    normalizePlan(plan);
 
   if (!normalizedPlan) {
     return null;
   }
-
 
   const cycle =
     normalizeBillingCycle(
       billingCycle
     );
 
+  if (!cycle) {
+    return null;
+  }
 
   return (
     PLANS[
@@ -197,22 +196,24 @@ function getPlanPrice(
     ]?.[cycle] ??
     null
   );
-
 }
 
+
+/* =========================================================
+   AMOUNT VALIDATION
+========================================================= */
 
 function validateAmount({
   plan,
   billingCycle,
   amount
-}) {
+} = {}) {
 
   const expected =
     getPlanPrice(
       plan,
       billingCycle
     );
-
 
   if (
     expected ===
@@ -225,44 +226,73 @@ function validateAmount({
         false,
 
       reason:
-        "Invalid Stripe plan"
+        "Invalid Stripe plan or billing cycle"
 
     };
 
   }
 
-
   /*
-   * Amount is optional for server-side calls.
+   * Amount is optional for internal server calls.
    *
-   * If supplied, it must exactly match
-   * the server catalog.
+   * When supplied, it MUST exactly match the
+   * server-side catalog.
    */
 
   if (
     amount !==
       undefined &&
-    Number(amount) !==
-      expected
+    amount !==
+      null
   ) {
 
-    return {
+    const received =
+      Number(amount);
 
-      valid:
-        false,
+    if (
+      !Number.isFinite(
+        received
+      )
+    ) {
 
-      reason:
-        "Stripe amount does not match server plan price",
+      return {
 
-      expected,
+        valid:
+          false,
 
-      received:
-        Number(amount)
+        reason:
+          "Invalid Stripe amount",
 
-    };
+        expected,
+
+        received
+
+      };
+
+    }
+
+    if (
+      received !==
+      expected
+    ) {
+
+      return {
+
+        valid:
+          false,
+
+        reason:
+          "Stripe amount does not match server plan price",
+
+        expected,
+
+        received
+
+      };
+
+    }
 
   }
-
 
   return {
 
@@ -273,12 +303,11 @@ function validateAmount({
       expected
 
   };
-
 }
 
 
 /* =========================================================
-   CONFIG CHECK
+   STRIPE CONFIGURATION CHECK
 ========================================================= */
 
 function ensureStripe() {
@@ -294,9 +323,72 @@ function ensureStripe() {
       "STRIPE_NOT_CONFIGURED";
 
     throw error;
+  }
+}
+
+
+/* =========================================================
+   FRONTEND URL
+========================================================= */
+
+function getFrontendUrl() {
+
+  const configured =
+    process.env.FRONTEND_URL;
+
+  if (
+    configured &&
+    configured.trim() !== ""
+  ) {
+
+    return configured
+      .trim()
+      .replace(
+        /\/+$/,
+        ""
+      );
 
   }
 
+  return DEFAULT_FRONTEND_URL;
+}
+
+
+/* =========================================================
+   METADATA BUILDER
+========================================================= */
+
+function buildMetadata({
+  userId,
+  plan,
+  billingCycle,
+  amount
+}) {
+
+  return {
+
+    userId:
+      String(userId),
+
+    plan:
+      String(plan),
+
+    billingCycle:
+      String(billingCycle),
+
+    amount:
+      String(amount),
+
+    currency:
+      SUPPORTED_CURRENCY,
+
+    platform:
+      "ZyrionOS",
+
+    version:
+      "3.0.0"
+
+  };
 }
 
 
@@ -318,12 +410,15 @@ async function createCheckoutSession({
     ensureStripe();
 
 
+    /* -----------------------------------------------------
+       PLAN
+    ----------------------------------------------------- */
+
     const selectedPlan =
       normalizePlan(
         planName ||
         plan
       );
-
 
     if (!selectedPlan) {
 
@@ -343,11 +438,36 @@ async function createCheckoutSession({
     }
 
 
+    /* -----------------------------------------------------
+       BILLING CYCLE
+    ----------------------------------------------------- */
+
     const cycle =
       normalizeBillingCycle(
         billingCycle
       );
 
+    if (!cycle) {
+
+      return {
+
+        success:
+          false,
+
+        message:
+          "Invalid billing cycle",
+
+        error:
+          "Supported billing cycles: monthly, yearly"
+
+      };
+
+    }
+
+
+    /* -----------------------------------------------------
+       PRICE
+    ----------------------------------------------------- */
 
     const validation =
       validateAmount({
@@ -361,7 +481,6 @@ async function createCheckoutSession({
         amount
 
       });
-
 
     if (
       !validation.valid
@@ -386,6 +505,10 @@ async function createCheckoutSession({
     }
 
 
+    /* -----------------------------------------------------
+       USER
+    ----------------------------------------------------- */
+
     if (!userId) {
 
       return {
@@ -401,9 +524,9 @@ async function createCheckoutSession({
     }
 
 
-    /*
-     * Stripe uses minor currency units.
-     */
+    /* -----------------------------------------------------
+       CURRENCY
+    ----------------------------------------------------- */
 
     const unitAmount =
       Math.round(
@@ -412,42 +535,41 @@ async function createCheckoutSession({
       );
 
 
+    /* -----------------------------------------------------
+       STRIPE INTERVAL
+    ----------------------------------------------------- */
+
     const interval =
       cycle ===
-        "yearly"
-
+      "yearly"
         ? "year"
-
         : "month";
 
 
-    const metadata = {
+    /* -----------------------------------------------------
+       METADATA
+    ----------------------------------------------------- */
 
-      userId:
-        String(userId),
+    const metadata =
+      buildMetadata({
 
-      plan:
-        selectedPlan,
+        userId,
 
-      billingCycle:
-        cycle,
+        plan:
+          selectedPlan,
 
-      amount:
-        String(
+        billingCycle:
+          cycle,
+
+        amount:
           validation.amount
-        ),
 
-      currency:
-        "USD",
+      });
 
-      platform:
-        "ZyrionOS",
 
-      version:
-        "3.0.0"
-
-    };
-
+    /* -----------------------------------------------------
+       CHECKOUT SESSION
+    ----------------------------------------------------- */
 
     const sessionParams = {
 
@@ -461,7 +583,7 @@ async function createCheckoutSession({
           price_data: {
 
             currency:
-              "usd",
+              STRIPE_API_CURRENCY,
 
             product_data: {
 
@@ -498,28 +620,28 @@ async function createCheckoutSession({
 
       ],
 
-
+      /*
+       * Session metadata.
+       */
       metadata,
 
-
+      /*
+       * Subscription metadata.
+       *
+       * This is critical because recurring invoice
+       * webhooks need user/plan information.
+       */
       subscription_data: {
 
         metadata
 
       },
 
-
       success_url:
-        `${
-          process.env.FRONTEND_URL ||
-          "https://zyrionos.com"
-        }/success?session_id={CHECKOUT_SESSION_ID}`,
+        `${getFrontendUrl()}/success?session_id={CHECKOUT_SESSION_ID}`,
 
       cancel_url:
-        `${
-          process.env.FRONTEND_URL ||
-          "https://zyrionos.com"
-        }/cancel`,
+        `${getFrontendUrl()}/cancel`,
 
       allow_promotion_codes:
         true
@@ -527,8 +649,13 @@ async function createCheckoutSession({
     };
 
 
+    /* -----------------------------------------------------
+       CUSTOMER EMAIL
+    ----------------------------------------------------- */
+
     if (
-      customerEmail
+      customerEmail &&
+      String(customerEmail).trim()
     ) {
 
       sessionParams.customer_email =
@@ -538,6 +665,10 @@ async function createCheckoutSession({
 
     }
 
+
+    /* -----------------------------------------------------
+       CREATE SESSION
+    ----------------------------------------------------- */
 
     const session =
       await stripe
@@ -549,7 +680,7 @@ async function createCheckoutSession({
 
 
     logger.success(
-      `Stripe Checkout Session created for ${selectedPlan}`
+      `Stripe Checkout Session created: ${session.id} (${selectedPlan}/${cycle})`
     );
 
 
@@ -590,18 +721,15 @@ async function createCheckoutSession({
         validation.amount,
 
       currency:
-        "USD"
+        SUPPORTED_CURRENCY
 
     };
 
-  }
-
-  catch (error) {
+  } catch (error) {
 
     logger.error(
       `Stripe Checkout creation failed: ${error?.message}`
     );
-
 
     return {
 
@@ -620,25 +748,32 @@ async function createCheckoutSession({
         null
 
     };
-
   }
-
 }
 
 
 /* =========================================================
    CREATE PAYMENT INTENT
-   =========================================================
+=========================================================
 
-   This method is retained because existing controller
-   integrations may call createPaymentIntent().
+   This method is retained for compatibility with existing
+   integrations.
 
    IMPORTANT:
-   PaymentIntent is a payment object, NOT a recurring
-   subscription by itself.
 
-   For recurring ZyrionOS plans, use
-   createCheckoutSession().
+   PaymentIntent != recurring subscription.
+
+   For ZyrionOS recurring subscriptions, the preferred
+   production flow is:
+
+   createCheckoutSession()
+       ↓
+   Stripe Checkout
+       ↓
+   Stripe webhook
+       ↓
+   Subscription activation
+
 ========================================================= */
 
 async function createPaymentIntent({
@@ -654,11 +789,33 @@ async function createPaymentIntent({
     ensureStripe();
 
 
+    /* -----------------------------------------------------
+       USER
+    ----------------------------------------------------- */
+
+    if (!userId) {
+
+      return {
+
+        success:
+          false,
+
+        message:
+          "User ID required"
+
+      };
+
+    }
+
+
+    /* -----------------------------------------------------
+       PLAN
+    ----------------------------------------------------- */
+
     const selectedPlan =
       normalizePlan(
         plan
       );
-
 
     if (!selectedPlan) {
 
@@ -675,11 +832,62 @@ async function createPaymentIntent({
     }
 
 
+    /* -----------------------------------------------------
+       BILLING CYCLE
+    ----------------------------------------------------- */
+
     const cycle =
       normalizeBillingCycle(
         billingCycle
       );
 
+    if (!cycle) {
+
+      return {
+
+        success:
+          false,
+
+        message:
+          "Invalid billing cycle"
+
+      };
+
+    }
+
+
+    /* -----------------------------------------------------
+       CURRENCY
+    ----------------------------------------------------- */
+
+    const normalizedCurrency =
+      String(
+        currency
+      )
+        .trim()
+        .toUpperCase();
+
+    if (
+      normalizedCurrency !==
+      SUPPORTED_CURRENCY
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        message:
+          "ZyrionOS Stripe catalog currently uses USD"
+
+      };
+
+    }
+
+
+    /* -----------------------------------------------------
+       PRICE
+    ----------------------------------------------------- */
 
     const validation =
       validateAmount({
@@ -693,7 +901,6 @@ async function createPaymentIntent({
         amount
 
       });
-
 
     if (
       !validation.valid
@@ -718,44 +925,30 @@ async function createPaymentIntent({
     }
 
 
-    if (!userId) {
+    /* -----------------------------------------------------
+       METADATA
+    ----------------------------------------------------- */
 
-      return {
+    const metadata =
+      buildMetadata({
 
-        success:
-          false,
+        userId,
 
-        message:
-          "User ID required"
+        plan:
+          selectedPlan,
 
-      };
+        billingCycle:
+          cycle,
 
-    }
+        amount:
+          validation.amount
 
-
-    const normalizedCurrency =
-      String(
-        currency
-      ).toLowerCase();
+      });
 
 
-    if (
-      normalizedCurrency !==
-      "usd"
-    ) {
-
-      return {
-
-        success:
-          false,
-
-        message:
-          "ZyrionOS Stripe catalog currently uses USD"
-
-      };
-
-    }
-
+    /* -----------------------------------------------------
+       PAYMENT INTENT
+    ----------------------------------------------------- */
 
     const paymentIntent =
       await stripe
@@ -769,7 +962,7 @@ async function createPaymentIntent({
             ),
 
           currency:
-            "usd",
+            STRIPE_API_CURRENCY,
 
           automatic_payment_methods: {
 
@@ -778,35 +971,13 @@ async function createPaymentIntent({
 
           },
 
-          metadata: {
-
-            userId:
-              String(userId),
-
-            plan:
-              selectedPlan,
-
-            billingCycle:
-              cycle,
-
-            amount:
-              String(
-                validation.amount
-              ),
-
-            currency:
-              "USD",
-
-            platform:
-              "ZyrionOS"
-
-          }
+          metadata
 
         });
 
 
     logger.success(
-      `Stripe PaymentIntent created for ${selectedPlan}`
+      `Stripe PaymentIntent created: ${paymentIntent.id}`
     );
 
 
@@ -845,14 +1016,11 @@ async function createPaymentIntent({
 
     };
 
-  }
-
-  catch (error) {
+  } catch (error) {
 
     logger.error(
       `Stripe PaymentIntent creation failed: ${error?.message}`
     );
-
 
     return {
 
@@ -871,9 +1039,7 @@ async function createPaymentIntent({
         null
 
     };
-
   }
-
 }
 
 
@@ -888,7 +1054,6 @@ async function retrieveCheckoutSession(
   try {
 
     ensureStripe();
-
 
     if (!sessionId) {
 
@@ -926,28 +1091,30 @@ async function retrieveCheckoutSession(
 
     };
 
-  }
-
-  catch (error) {
+  } catch (error) {
 
     logger.error(
       `Stripe session retrieval failed: ${error?.message}`
     );
-
 
     return {
 
       success:
         false,
 
+      message:
+        "Unable to retrieve Stripe session",
+
       error:
         error?.message ||
-        "Unable to retrieve Stripe session"
+        "Unknown Stripe error",
+
+      code:
+        error?.code ||
+        null
 
     };
-
   }
-
 }
 
 
@@ -962,7 +1129,6 @@ async function retrieveSubscription(
   try {
 
     ensureStripe();
-
 
     if (!subscriptionId) {
 
@@ -999,28 +1165,30 @@ async function retrieveSubscription(
 
     };
 
-  }
-
-  catch (error) {
+  } catch (error) {
 
     logger.error(
       `Stripe subscription retrieval failed: ${error?.message}`
     );
-
 
     return {
 
       success:
         false,
 
+      message:
+        "Unable to retrieve Stripe subscription",
+
       error:
         error?.message ||
-        "Unable to retrieve Stripe subscription"
+        "Unknown Stripe error",
+
+      code:
+        error?.code ||
+        null
 
     };
-
   }
-
 }
 
 
@@ -1040,6 +1208,8 @@ module.exports = {
 
   getPlanPrice,
 
-  normalizePlan
+  normalizePlan,
+
+  normalizeBillingCycle
 
 };
