@@ -26,7 +26,7 @@ const logger =
    =========================================================
    Monthly pricing:
    Starter     $19
-   Pro         $49
+   Pro         $99
    Business    $199
    Scale       $299
    Enterprise  $499
