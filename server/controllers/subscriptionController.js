@@ -1,474 +1,1063 @@
+/* =========================================================
+   ZyrionOS SUBSCRIPTION CONTROLLER
+   =========================================================
+
+   Responsibilities:
+   - Read user's real subscription
+   - Never activate subscription without webhook
+   - Upgrade/cancel safely
+   - Return real usage from database
+   - Enforce current plan catalog
+   - Keep payment provider IDs available
+========================================================= */
+
+
+/* =========================
+   MODELS
+========================= */
+
 const Subscription =
-require(
-
-"../models/subscriptionModel"
-
-);
+  require(
+    "../models/subscriptionModel"
+  );
 
 const User =
-require(
+  require(
+    "../models/userModel"
+  );
 
-"../models/userModel"
 
-);
+/* =========================
+   SERVICES
+========================= */
 
 const formatResponse =
-require(
+  require(
+    "../utils/formatResponse"
+  );
 
-"../utils/formatResponse"
+const logger =
+  require(
+    "../services/loggerService"
+  );
 
-);
-
-/* =========================
-CREATE SUBSCRIPTION
-========================= */
-
-async function createSubscriptionController(
-
-req,
-
-res
-
-){
-
-try{
-
-const {
-
-  planName,
-
-  price,
-
-  currency,
-
-  paymentProvider,
-
-  paymentId,
-
-  orderId
-
-} = req.body;
 
 /* =========================
-   USER
+   PLAN CATALOG
 ========================= */
 
-const userId =
-req.user.id;
+const PLAN_PRICES = {
+
+  Starter: {
+    monthly: 19,
+    yearly: 190
+  },
+
+  Pro: {
+    monthly: 99,
+    yearly: 990
+  },
+
+  Business: {
+    monthly: 199,
+    yearly: 1990
+  },
+
+  Scale: {
+    monthly: 299,
+    yearly: 2990
+  },
+
+  Enterprise: {
+    monthly: 499,
+    yearly: 4990
+  }
+
+};
+
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
 
 /* =========================
-   VALIDATION
+   USER ID
 ========================= */
 
-if(
+function getUserId(req) {
 
-  !planName ||
-
-  !price ||
-
-  !paymentProvider
-
-){
-
-  return res.status(400)
-  .json(
-
-    formatResponse({
-
-      success:false,
-
-      message:
-      "Missing required fields"
-
-    })
-
+  return (
+    req?.user?.id ||
+    req?.user?._id ||
+    req?.user?.userId ||
+    null
   );
 
 }
 
-/* =========================
-   EXPIRY DATE
-========================= */
-
-const expiryDate =
-new Date();
-
-expiryDate.setMonth(
-
-  expiryDate.getMonth() + 1
-
-);
 
 /* =========================
-   CHECK EXISTING
+   PLAN NORMALIZER
 ========================= */
 
-const existingSubscription =
+function normalizePlan(
+  plan
+) {
 
-  await Subscription.findOne({
+  if (!plan) {
+    return null;
+  }
 
-    userId,
+  const value =
+    String(plan)
+      .trim()
+      .toLowerCase();
 
-    status:"active"
 
-  });
+  const aliases = {
 
-/* =========================
-   CANCEL OLD
-========================= */
+    starter:
+      "Starter",
 
-if(existingSubscription){
+    pro:
+      "Pro",
 
-  existingSubscription.status =
-  "upgraded";
+    business:
+      "Business",
 
-  await existingSubscription.save();
+    scale:
+      "Scale",
+
+    enterprise:
+      "Enterprise"
+
+  };
+
+
+  return (
+    aliases[value] ||
+    null
+  );
 
 }
 
+
 /* =========================
+   BILLING CYCLE
+========================= */
+
+function normalizeBillingCycle(
+  value
+) {
+
+  return value ===
+    "yearly"
+    ? "yearly"
+    : "monthly";
+
+}
+
+
+/* =========================
+   PRICE
+========================= */
+
+function getExpectedPrice(
+  plan,
+  billingCycle
+) {
+
+  const selected =
+    PLAN_PRICES[
+      plan
+    ];
+
+
+  if (!selected) {
+    return null;
+  }
+
+
+  return selected[
+    billingCycle
+  ];
+
+}
+
+
+/* =========================
+   ACTIVE SUBSCRIPTION
+========================= */
+
+async function getActiveSubscription(
+  userId
+) {
+
+  return Subscription
+    .findOne({
+
+      userId,
+
+      status:
+        "active"
+
+    })
+    .sort({
+      createdAt:
+        -1
+    });
+
+}
+
+
+/* =========================================================
    CREATE SUBSCRIPTION
-========================= */
+   =========================================================
 
-const subscription =
+   IMPORTANT:
+   This endpoint does NOT activate a paid subscription.
 
-  await Subscription.create({
+   Payment provider webhook is authoritative.
+========================================================= */
 
-    userId,
+async function createSubscriptionController(
+  req,
+  res
+) {
 
-    planName,
+  try {
 
-    price,
+    const userId =
+      getUserId(req);
 
-    currency:
-    currency || "USD",
 
-    paymentProvider,
+    if (!userId) {
 
-    paymentId,
+      return res
+        .status(401)
+        .json(
+          formatResponse({
 
-    orderId,
+            success:
+              false,
 
-    expiryDate,
+            message:
+              "Authentication required"
 
-    status:"active"
+          })
+        );
 
-  });
+    }
 
-/* =========================
-   UPDATE USER PLAN
-========================= */
 
-await User.findByIdAndUpdate(
+    const {
+      planName,
+      plan,
+      price,
+      currency = "USD",
+      paymentProvider,
+      paymentId,
+      orderId,
+      billingCycle = "monthly"
+    } =
+      req.body || {};
 
-  userId,
 
-  {
+    const normalizedPlan =
+      normalizePlan(
+        planName ||
+        plan
+      );
 
-    subscriptionPlan:
-    planName.toLowerCase()
+
+    if (!normalizedPlan) {
+
+      return res
+        .status(400)
+        .json(
+          formatResponse({
+
+            success:
+              false,
+
+            message:
+              "Invalid plan selected",
+
+            allowedPlans:
+              Object.keys(
+                PLAN_PRICES
+              )
+
+          })
+        );
+
+    }
+
+
+    const cycle =
+      normalizeBillingCycle(
+        billingCycle
+      );
+
+
+    const expectedPrice =
+      getExpectedPrice(
+        normalizedPlan,
+        cycle
+      );
+
+
+    if (
+      expectedPrice ===
+      null
+    ) {
+
+      return res
+        .status(400)
+        .json(
+          formatResponse({
+
+            success:
+              false,
+
+            message:
+              "Unable to resolve plan price"
+
+          })
+        );
+
+    }
+
+
+    /*
+     * Never trust the price sent by frontend.
+     */
+
+    if (
+      price !==
+        undefined &&
+      Number(price) !==
+        expectedPrice
+    ) {
+
+      return res
+        .status(400)
+        .json(
+          formatResponse({
+
+            success:
+              false,
+
+            message:
+              "Plan price mismatch",
+
+            expectedPrice,
+
+            currency:
+              "USD"
+
+          })
+        );
+
+    }
+
+
+    /*
+     * Do not create ACTIVE subscription from
+     * a normal authenticated request.
+     */
+
+    return res
+      .status(409)
+      .json(
+        formatResponse({
+
+          success:
+            false,
+
+          message:
+            "Subscription activation requires verified payment",
+
+          code:
+            "PAYMENT_REQUIRED",
+
+          plan:
+            normalizedPlan,
+
+          billingCycle:
+            cycle,
+
+          amount:
+            expectedPrice,
+
+          currency:
+            "USD",
+
+          paymentProvider:
+            paymentProvider ||
+            null,
+
+          paymentId:
+            paymentId ||
+            null,
+
+          orderId:
+            orderId ||
+            null,
+
+          nextStep:
+            "Complete payment and wait for the verified provider webhook."
+
+        })
+      );
 
   }
 
-);
+  catch (error) {
 
-/* =========================
-   RESPONSE
-========================= */
+    logger.error(
+      `Subscription creation failed: ${error?.message}`
+    );
 
-return res.json(
 
-  formatResponse({
+    return res
+      .status(500)
+      .json(
+        formatResponse({
 
-    success:true,
+          success:
+            false,
 
-    message:
-    "Subscription activated",
+          message:
+            "Subscription request failed",
 
-    data:subscription
+          error:
+            error?.message ||
+            "Unknown error"
 
-  })
+        })
+      );
 
-);
-
-}
-
-catch(error){
-
-return res.status(500)
-.json(
-
-  formatResponse({
-
-    success:false,
-
-    message:
-    "Subscription failed",
-
-    error:error.message
-
-  })
-
-);
+  }
 
 }
 
-}
 
-/* =========================
-GET MY SUBSCRIPTION
-========================= */
+/* =========================================================
+   GET MY SUBSCRIPTIONS
+========================================================= */
 
 async function getSubscriptionsController(
+  req,
+  res
+) {
 
-req,
+  try {
 
-res
+    const userId =
+      getUserId(req);
 
-){
 
-try{
+    if (!userId) {
 
-const userId =
-req.user.id;
+      return res
+        .status(401)
+        .json(
+          formatResponse({
 
-const subscriptions =
+            success:
+              false,
 
-  await Subscription.find({
+            message:
+              "Authentication required"
 
-    userId
+          })
+        );
 
-  }).sort({
+    }
 
-    createdAt:-1
 
-  });
+    const subscriptions =
+      await Subscription
+        .find({
+          userId
+        })
+        .sort({
+          createdAt:
+            -1
+        })
+        .lean();
 
-return res.json(
 
-  formatResponse({
+    return res.json(
+      formatResponse({
 
-    success:true,
+        success:
+          true,
 
-    data:subscriptions
+        data:
+          subscriptions
 
-  })
-
-);
-
-}
-
-catch(error){
-
-return res.status(500)
-.json(
-
-  formatResponse({
-
-    success:false,
-
-    message:
-    "Failed to fetch subscriptions",
-
-    error:error.message
-
-  })
-
-);
-
-}
-
-}
-
-/* =========================
-UPGRADE SUBSCRIPTION
-========================= */
-
-async function upgradeSubscriptionController(
-
-req,
-
-res
-
-){
-
-try{
-
-const {
-
-  newPlan
-
-} = req.body;
-
-return res.json(
-
-  formatResponse({
-
-    success:true,
-
-    message:
-    `Plan upgraded to ${newPlan}`
-
-  })
-
-);
-
-}
-
-catch(error){
-
-return res.status(500)
-.json(
-
-  formatResponse({
-
-    success:false,
-
-    error:error.message
-
-  })
-
-);
-
-}
-
-}
-
-/* =========================
-CANCEL SUBSCRIPTION
-========================= */
-
-async function cancelSubscriptionController(
-
-req,
-
-res
-
-){
-
-try{
-
-const userId =
-req.user.id;
-
-const subscription =
-
-  await Subscription.findOne({
-
-    userId,
-
-    status:"active"
-
-  });
-
-if(!subscription){
-
-  return res.status(404)
-  .json({
-
-    success:false,
-
-    message:
-    "No active subscription"
-
-  });
-
-}
-
-subscription.status =
-"cancelled";
-
-await subscription.save();
-
-return res.json({
-
-  success:true,
-
-  message:
-  "Subscription cancelled"
-
-});
-
-}
-
-catch(error){
-
-return res.status(500)
-.json({
-
-  success:false,
-
-  error:error.message
-
-});
-
-}
-
-}
-
-/* =========================
-USAGE + CREDITS
-========================= */
-
-async function usageController(
-
-req,
-
-res
-
-){
-
-try{
-
-return res.json({
-
-  success:true,
-
-  usage:{
-
-    aiRequests:120,
-
-    deployments:4,
-
-    thumbnailsGenerated:38,
-
-    creditsRemaining:1962
+      })
+    );
 
   }
 
-});
+  catch (error) {
+
+    logger.error(
+      `Subscription history failed: ${error?.message}`
+    );
+
+
+    return res
+      .status(500)
+      .json(
+        formatResponse({
+
+          success:
+            false,
+
+          message:
+            "Failed to fetch subscriptions",
+
+          error:
+            error?.message ||
+            "Unknown error"
+
+        })
+      );
+
+  }
 
 }
 
-catch(error){
 
-return res.status(500)
-.json({
+/* =========================================================
+   UPGRADE SUBSCRIPTION
+========================================================= */
 
-  success:false,
+async function upgradeSubscriptionController(
+  req,
+  res
+) {
 
-  error:error.message
+  try {
 
-});
+    const userId =
+      getUserId(req);
+
+
+    if (!userId) {
+
+      return res
+        .status(401)
+        .json({
+          success:
+            false,
+
+          message:
+            "Authentication required"
+        });
+
+    }
+
+
+    const {
+      newPlan,
+      billingCycle = "monthly"
+    } =
+      req.body || {};
+
+
+    const normalizedPlan =
+      normalizePlan(
+        newPlan
+      );
+
+
+    if (!normalizedPlan) {
+
+      return res
+        .status(400)
+        .json({
+          success:
+            false,
+
+          message:
+            "Invalid target plan",
+
+          allowedPlans:
+            Object.keys(
+              PLAN_PRICES
+            )
+        });
+
+    }
+
+
+    const cycle =
+      normalizeBillingCycle(
+        billingCycle
+      );
+
+
+    const targetPrice =
+      getExpectedPrice(
+        normalizedPlan,
+        cycle
+      );
+
+
+    const currentSubscription =
+      await getActiveSubscription(
+        userId
+      );
+
+
+    if (!currentSubscription) {
+
+      return res
+        .status(404)
+        .json({
+          success:
+            false,
+
+          message:
+            "No active subscription found"
+        });
+
+    }
+
+
+    const currentPlan =
+      normalizePlan(
+        currentSubscription.planName
+      );
+
+
+    const currentPrice =
+      Number(
+        currentSubscription.price ||
+        0
+      );
+
+
+    /*
+     * Do not mutate the active subscription here.
+     *
+     * A real provider-side subscription change
+     * must be confirmed through webhook.
+     */
+
+    if (
+      currentPlan ===
+      normalizedPlan
+    ) {
+
+      return res
+        .status(400)
+        .json({
+          success:
+            false,
+
+          message:
+            "User is already on this plan"
+        });
+
+    }
+
+
+    logger.info(
+      `Subscription upgrade requested: ${currentPlan} -> ${normalizedPlan}`
+    );
+
+
+    return res.json({
+      success:
+        true,
+
+      message:
+        "Subscription upgrade requires payment provider confirmation",
+
+      upgrade: {
+
+        currentPlan,
+
+        currentPrice,
+
+        newPlan:
+          normalizedPlan,
+
+        newPrice:
+          targetPrice,
+
+        currency:
+          "USD",
+
+        billingCycle:
+          cycle,
+
+        status:
+          "payment_required"
+
+      },
+
+      nextStep:
+        "Create the payment/subscription with the selected provider. The verified webhook will apply the new entitlement."
+
+    });
+
+  }
+
+  catch (error) {
+
+    logger.error(
+      `Subscription upgrade failed: ${error?.message}`
+    );
+
+
+    return res
+      .status(500)
+      .json({
+        success:
+          false,
+
+        message:
+          "Subscription upgrade failed",
+
+        error:
+          error?.message ||
+          "Unknown error"
+      });
+
+  }
 
 }
 
+
+/* =========================================================
+   CANCEL SUBSCRIPTION
+========================================================= */
+
+async function cancelSubscriptionController(
+  req,
+  res
+) {
+
+  try {
+
+    const userId =
+      getUserId(req);
+
+
+    if (!userId) {
+
+      return res
+        .status(401)
+        .json({
+          success:
+            false,
+
+          message:
+            "Authentication required"
+        });
+
+    }
+
+
+    const subscription =
+      await getActiveSubscription(
+        userId
+      );
+
+
+    if (!subscription) {
+
+      return res
+        .status(404)
+        .json({
+          success:
+            false,
+
+          message:
+            "No active subscription"
+        });
+
+    }
+
+
+    /*
+     * Provider-managed subscriptions should be
+     * cancelled at the provider first.
+     *
+     * Local entitlement must not be revoked
+     * merely because a client called this endpoint.
+     */
+
+    return res.json({
+
+      success:
+        true,
+
+      message:
+        "Subscription cancellation requested",
+
+      subscription: {
+
+        subscriptionId:
+          subscription._id,
+
+        planName:
+          subscription.planName,
+
+        status:
+          subscription.status,
+
+        provider:
+          subscription.paymentProvider,
+
+        providerSubscriptionId:
+          subscription.providerSubscriptionId ||
+          null
+
+      },
+
+      nextStep:
+        "Cancel the provider subscription. The verified provider webhook will update the local subscription status."
+
+    });
+
+  }
+
+  catch (error) {
+
+    logger.error(
+      `Subscription cancellation failed: ${error?.message}`
+    );
+
+
+    return res
+      .status(500)
+      .json({
+        success:
+          false,
+
+        message:
+          "Subscription cancellation failed",
+
+        error:
+          error?.message ||
+          "Unknown error"
+      });
+
+  }
+
 }
 
-/* =========================
-EXPORTS
-========================= */
+
+/* =========================================================
+   USAGE + CREDITS
+========================================================= */
+
+async function usageController(
+  req,
+  res
+) {
+
+  try {
+
+    const userId =
+      getUserId(req);
+
+
+    if (!userId) {
+
+      return res
+        .status(401)
+        .json({
+          success:
+            false,
+
+          message:
+            "Authentication required"
+        });
+
+    }
+
+
+    const subscription =
+      await getActiveSubscription(
+        userId
+      );
+
+
+    if (!subscription) {
+
+      return res.json({
+
+        success:
+          true,
+
+        usage: {
+
+          aiRequests:
+            0,
+
+          deployments:
+            0,
+
+          thumbnailsGenerated:
+            0,
+
+          creditsRemaining:
+            0
+
+        },
+
+        subscription:
+          null
+
+      });
+
+    }
+
+
+    const aiRequests =
+      Number(
+        subscription.aiRequestsUsed ||
+        0
+      );
+
+
+    const deployments =
+      Number(
+        subscription.deploymentsUsed ||
+        0
+      );
+
+
+    const thumbnailsGenerated =
+      Number(
+        subscription.thumbnailsGenerated ||
+        0
+      );
+
+
+    const creditsLimit =
+      Number(
+        subscription.aiCreditsLimit ??
+        subscription.creditsLimit ??
+        0
+      );
+
+
+    const creditsUsed =
+      Number(
+        subscription.aiCreditsUsed ||
+        0
+      );
+
+
+    const creditsRemaining =
+      creditsLimit ===
+        -1
+        ? -1
+        : Math.max(
+            0,
+            creditsLimit -
+            creditsUsed
+          );
+
+
+    return res.json({
+
+      success:
+        true,
+
+      usage: {
+
+        aiRequests,
+
+        deployments,
+
+        thumbnailsGenerated,
+
+        creditsRemaining,
+
+        creditsLimit,
+
+        unlimitedCredits:
+          creditsLimit === -1
+
+      },
+
+      subscription: {
+
+        id:
+          subscription._id,
+
+        planName:
+          subscription.planName,
+
+        status:
+          subscription.status,
+
+        expiryDate:
+          subscription.expiryDate,
+
+        autoRenew:
+          subscription.autoRenew
+
+      }
+
+    });
+
+  }
+
+  catch (error) {
+
+    logger.error(
+      `Subscription usage failed: ${error?.message}`
+    );
+
+
+    return res
+      .status(500)
+      .json({
+
+        success:
+          false,
+
+        message:
+          "Failed to fetch subscription usage",
+
+        error:
+          error?.message ||
+          "Unknown error"
+
+      });
+
+  }
+
+}
+
+
+/* =========================================================
+   EXPORTS
+========================================================= */
 
 module.exports = {
 
-createSubscriptionController,
+  createSubscriptionController,
 
-getSubscriptionsController,
+  getSubscriptionsController,
 
-upgradeSubscriptionController,
+  upgradeSubscriptionController,
 
-cancelSubscriptionController,
+  cancelSubscriptionController,
 
-usageController
+  usageController
 
 };
