@@ -42,6 +42,23 @@ const webhookRoutes = require("./server/routes/webhookRoutes");
 const subscriptionRoutes = require("./server/routes/subscriptionRoutes");
 const projectRoutes = require("./server/routes/projectRoutes");
 
+/*
+ * Financial Control Plane
+ *
+ * This route is owner-only internally through:
+ *
+ * authMiddleware
+ *      ↓
+ * ownerOnlyMiddleware
+ *      ↓
+ * financialController
+ *      ↓
+ * financialControlService
+ */
+const financialRoutes = require(
+  "./server/routes/financialRoutes"
+);
+
 /* =========================================================
    SERVICES
 ========================================================= */
@@ -135,14 +152,14 @@ app.use(
 );
 
 /* =========================================================
-   WEBHOOK ROUTES — MUST COME BEFORE JSON PARSER
+   WEBHOOK ROUTES — BEFORE JSON PARSER
 =========================================================
 
-   Stripe/Razorpay webhook signature verification can require
-   access to the original request body.
+   Stripe/Razorpay/WhatsApp webhook signature verification
+   may require access to the original request body.
 
-   webhookRoutes.js is responsible for applying the correct
-   raw-body handling to the provider endpoints.
+   webhookRoutes is responsible for provider-specific
+   webhook body handling.
 
    IMPORTANT:
    Do NOT move this below express.json().
@@ -259,6 +276,39 @@ app.use(
 );
 
 /* =========================================================
+   FINANCIAL CONTROL PLANE
+=========================================================
+
+   Base:
+   /api/financial
+
+   Examples:
+
+   GET  /api/financial
+   GET  /api/financial/status
+   GET  /api/financial/costs
+   GET  /api/financial/usage
+   GET  /api/financial/forecast
+   GET  /api/financial/emergency
+
+   POST /api/financial/assessment
+   POST /api/financial/payment-approval
+   POST /api/financial/alerts/prepare
+   POST /api/financial/execute
+
+   financialRoutes itself enforces authentication
+   and owner-only authorization.
+
+   No financial operation is automatically executed merely
+   because this route is mounted.
+========================================================= */
+
+app.use(
+  "/api/financial",
+  financialRoutes
+);
+
+/* =========================================================
    ROOT
 ========================================================= */
 
@@ -285,9 +335,10 @@ app.get(
 
     /*
      * Health endpoint intentionally reports application
-     * availability here. Database-specific health should
-     * come from the actual connection state if exposed
-     * by the database modules.
+     * availability here.
+     *
+     * Provider-specific health must come from the actual
+     * provider services and is never fabricated here.
      */
 
     return res.status(200).json({
