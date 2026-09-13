@@ -1,180 +1,440 @@
 "use strict";
 
 /**
- * ZyrionOS Financial Control Routes
+ * =========================================================
+ * ZyrionOS FINANCIAL CONTROL ROUTES
+ * =========================================================
  *
- * All financial-control endpoints are owner-only.
+ * Security:
  *
- * Security model:
  *   Request
  *      ↓
  *   Authentication
  *      ↓
  *   Owner Authorization
  *      ↓
- *   Rate Limiter (when available)
+ *   Rate Limiter
  *      ↓
  *   Financial Controller
  *      ↓
  *   Financial Control Service
  *
  * IMPORTANT:
- * - No payment execution happens here.
- * - No provider credentials are accepted here.
- * - No fake financial data is generated here.
- * - Financial provider data must come from the real provider layer.
+ * - No payment execution here.
+ * - No infrastructure execution here.
+ * - No provider credentials accepted here.
+ * - No fake financial data.
+ * - Owner-only access.
+ * - Provider data must come from real provider adapters.
  */
 
 const express = require("express");
 
 const router = express.Router();
 
-const financialController = require("../controllers/financialController");
-const authMiddleware = require("../middleware/authMiddleware");
-const ownerOnlyMiddleware = require("../middleware/ownerOnlyMiddleware");
+/* =========================================================
+   CONTROLLERS
+========================================================= */
 
-/*
- * Optional API limiter.
+const financialController =
+  require("../controllers/financialController");
+
+/* =========================================================
+   RAW MIDDLEWARE MODULES
+========================================================= */
+
+const authMiddlewareModule =
+  require("../middleware/authMiddleware");
+
+const ownerOnlyMiddlewareModule =
+  require("../middleware/ownerOnlyMiddleware");
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
+function isFunction(value) {
+  return typeof value === "function";
+}
+
+function cleanString(value, maxLength = 200) {
+  if (
+    value === undefined ||
+    value === null
+  ) {
+    return null;
+  }
+
+  const text = String(value).trim();
+
+  if (!text) {
+    return null;
+  }
+
+  return text.slice(0, maxLength);
+}
+
+/**
+ * Resolve middleware exports safely.
  *
- * The financial route must still work if the project currently
- * does not expose a financial-specific limiter.
+ * Supports projects where middleware is exported as:
  *
- * We intentionally do not silently import a guessed limiter path.
+ * module.exports = middleware
+ *
+ * OR:
+ *
+ * module.exports = {
+ *   middleware
+ * }
+ *
+ * OR:
+ *
+ * module.exports = {
+ *   authMiddleware
+ * }
+ *
+ * OR owner middleware exposing:
+ *
+ * requireOwner
+ *
+ * This prevents Express from receiving an object as
+ * a route callback.
  */
+function resolveMiddleware(
+  moduleValue,
+  preferredNames = []
+) {
+  if (isFunction(moduleValue)) {
+    return moduleValue;
+  }
+
+  if (
+    moduleValue &&
+    isFunction(moduleValue.default)
+  ) {
+    return moduleValue.default;
+  }
+
+  for (
+    const name of preferredNames
+  ) {
+    if (
+      moduleValue &&
+      isFunction(moduleValue[name])
+    ) {
+      return moduleValue[name];
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Resolve controller operation safely.
+ *
+ * Every returned route handler is guaranteed to be
+ * a function or null.
+ */
+function resolveController(
+  controller,
+  names = []
+) {
+  if (!controller) {
+    return null;
+  }
+
+  if (isFunction(controller)) {
+    return controller;
+  }
+
+  for (
+    const name of names
+  ) {
+    if (
+      controller &&
+      isFunction(controller[name])
+    ) {
+      return controller[name];
+    }
+  }
+
+  return null;
+}
+
+/* =========================================================
+   AUTHENTICATION
+========================================================= */
+
+const authenticationMiddleware =
+  resolveMiddleware(
+    authMiddlewareModule,
+    [
+      "authMiddleware",
+      "authenticate",
+      "requireAuth"
+    ]
+  );
+
+/* =========================================================
+   OWNER AUTHORIZATION
+========================================================= */
+
+const ownerAuthorizationMiddleware =
+  resolveMiddleware(
+    ownerOnlyMiddlewareModule,
+    [
+      "ownerOnlyMiddleware",
+      "requireOwner",
+      "ownerOnly",
+      "authorizeOwner"
+    ]
+  );
+
+/**
+ * Fail closed during startup instead of allowing Express
+ * to receive an object and crash with:
+ *
+ * Route.get() requires a callback function
+ */
+if (
+  !isFunction(
+    authenticationMiddleware
+  )
+) {
+  throw new Error(
+    "FINANCIAL_AUTH_MIDDLEWARE_INVALID: authMiddleware must export a function."
+  );
+}
+
+if (
+  !isFunction(
+    ownerAuthorizationMiddleware
+  )
+) {
+  throw new Error(
+    "FINANCIAL_OWNER_MIDDLEWARE_INVALID: ownerOnlyMiddleware must export a function."
+  );
+}
+
+/* =========================================================
+   OPTIONAL API RATE LIMITER
+========================================================= */
+
 let apiLimiter = null;
 
 try {
-  const limiterModule = require("../middleware/apiLimiter");
+  const limiterModule =
+    require("../middleware/apiLimiter");
 
-  if (typeof limiterModule === "function") {
-    apiLimiter = limiterModule;
-  } else if (
-    limiterModule &&
-    typeof limiterModule.apiLimiter === "function"
-  ) {
-    apiLimiter = limiterModule.apiLimiter;
-  }
+  apiLimiter =
+    resolveMiddleware(
+      limiterModule,
+      [
+        "apiLimiter",
+        "limiter",
+        "rateLimiter"
+      ]
+    );
 } catch (error) {
-  /*
-   * Rate limiting can be attached by the application's existing
-   * middleware stack.
-   *
-   * Authentication and owner authorization remain mandatory.
-   */
   apiLimiter = null;
 }
 
-/**
- * ---------------------------------------------------------
- * SECURITY MIDDLEWARE
- * ---------------------------------------------------------
- */
+/* =========================================================
+   SECURITY MIDDLEWARE STACK
+========================================================= */
 
 const securityMiddleware = [
-  authMiddleware,
-  ownerOnlyMiddleware
+  authenticationMiddleware,
+  ownerAuthorizationMiddleware
 ];
 
-if (apiLimiter) {
-  securityMiddleware.push(apiLimiter);
+if (
+  isFunction(apiLimiter)
+) {
+  securityMiddleware.push(
+    apiLimiter
+  );
 }
 
-/**
- * ---------------------------------------------------------
- * CONTROLLER WRAPPERS
- * ---------------------------------------------------------
- *
- * Wrappers keep route registration clean and make sure errors
- * reaching the Express layer are handled consistently.
- */
+/* =========================================================
+   CONTROLLER WRAPPER
+========================================================= */
 
-function controllerHandler(handler) {
-  return async function financialRouteHandler(req, res, next) {
+function controllerHandler(
+  handler,
+  operationName
+) {
+  return async function financialRouteHandler(
+    req,
+    res,
+    next
+  ) {
     try {
-      if (typeof handler !== "function") {
+      if (
+        !isFunction(handler)
+      ) {
         return res.status(500).json({
           success: false,
           status: "error",
           error: {
-            code: "FINANCIAL_CONTROLLER_UNAVAILABLE",
+            code:
+              "FINANCIAL_CONTROLLER_OPERATION_UNAVAILABLE",
             message:
-              "Financial controller operation is unavailable."
+              `${operationName || "Financial"} controller operation is unavailable.`
           }
         });
       }
 
-      return await handler(req, res, next);
+      return await handler(
+        req,
+        res,
+        next
+      );
     } catch (error) {
       return next(error);
     }
   };
 }
 
-/**
- * ---------------------------------------------------------
- * CONTROLLER REFERENCES
- * ---------------------------------------------------------
- */
+/* =========================================================
+   CONTROLLER OPERATIONS
+========================================================= */
 
 const assessment =
   controllerHandler(
-    financialController.assessment
+    resolveController(
+      financialController,
+      [
+        "assessment",
+        "runAssessment"
+      ]
+    ),
+    "assessment"
   );
 
 const status =
   controllerHandler(
-    financialController.status
+    resolveController(
+      financialController,
+      [
+        "status",
+        "getStatus"
+      ]
+    ),
+    "status"
   );
 
 const costs =
   controllerHandler(
-    financialController.costs
+    resolveController(
+      financialController,
+      [
+        "costs",
+        "getCosts"
+      ]
+    ),
+    "costs"
   );
 
 const usage =
   controllerHandler(
-    financialController.usage
+    resolveController(
+      financialController,
+      [
+        "usage",
+        "getUsage"
+      ]
+    ),
+    "usage"
   );
 
 const forecast =
   controllerHandler(
-    financialController.forecast
+    resolveController(
+      financialController,
+      [
+        "forecast",
+        "getForecast"
+      ]
+    ),
+    "forecast"
   );
 
 const emergency =
   controllerHandler(
-    financialController.emergency
+    resolveController(
+      financialController,
+      [
+        "emergency",
+        "getEmergency"
+      ]
+    ),
+    "emergency"
   );
 
 const paymentApproval =
   controllerHandler(
-    financialController.paymentApproval
+    resolveController(
+      financialController,
+      [
+        "paymentApproval",
+        "requestPaymentApproval"
+      ]
+    ),
+    "payment approval"
   );
 
 const prepareAlerts =
   controllerHandler(
-    financialController.prepareAlerts
+    resolveController(
+      financialController,
+      [
+        "prepareAlerts",
+        "alerts"
+      ]
+    ),
+    "alert preparation"
   );
 
 const execute =
   controllerHandler(
-    financialController.execute
+    resolveController(
+      financialController,
+      [
+        "execute",
+        "control"
+      ]
+    ),
+    "execution"
   );
 
 const controllerInfo =
   controllerHandler(
-    financialController.controllerInfo
+    resolveController(
+      financialController,
+      [
+        "controllerInfo",
+        "info"
+      ]
+    ),
+    "controller information"
   );
 
+/* =========================================================
+   CONTROLLER INFO
+========================================================= */
+
 /**
- * ---------------------------------------------------------
- * ROUTE: CONTROLLER INFO
- * ---------------------------------------------------------
- *
  * GET /api/financial
  *
- * This only reports the capability of the controller layer.
- * It does NOT claim that OpenAI/AWS/Stripe/etc. are healthy.
+ * Reports the financial-control capability.
+ *
+ * It does NOT claim:
+ * - AWS is healthy
+ * - OpenAI is healthy
+ * - Stripe is healthy
+ * - Razorpay is healthy
+ * - WhatsApp is healthy
  */
 router.get(
   "/",
@@ -182,21 +442,13 @@ router.get(
   controllerInfo
 );
 
+/* =========================================================
+   FULL ASSESSMENT
+========================================================= */
+
 /**
- * ---------------------------------------------------------
- * ROUTE: FULL ASSESSMENT
- * ---------------------------------------------------------
- *
  * GET  /api/financial/assessment
  * POST /api/financial/assessment
- *
- * Assessment can combine:
- * - costs
- * - usage
- * - forecast
- * - emergency/risk
- * - alert preparation
- * - optional payment approval request
  */
 router.get(
   "/assessment",
@@ -210,12 +462,12 @@ router.post(
   assessment
 );
 
+/* =========================================================
+   STATUS
+========================================================= */
+
 /**
- * ---------------------------------------------------------
- * ROUTE: STATUS
- * ---------------------------------------------------------
- *
- * GET /api/financial/status
+ * GET  /api/financial/status
  * POST /api/financial/status
  */
 router.get(
@@ -230,12 +482,12 @@ router.post(
   status
 );
 
+/* =========================================================
+   COSTS
+========================================================= */
+
 /**
- * ---------------------------------------------------------
- * ROUTE: COSTS
- * ---------------------------------------------------------
- *
- * GET /api/financial/costs
+ * GET  /api/financial/costs
  * POST /api/financial/costs
  */
 router.get(
@@ -250,12 +502,12 @@ router.post(
   costs
 );
 
+/* =========================================================
+   USAGE
+========================================================= */
+
 /**
- * ---------------------------------------------------------
- * ROUTE: USAGE
- * ---------------------------------------------------------
- *
- * GET /api/financial/usage
+ * GET  /api/financial/usage
  * POST /api/financial/usage
  */
 router.get(
@@ -270,12 +522,12 @@ router.post(
   usage
 );
 
+/* =========================================================
+   FORECAST
+========================================================= */
+
 /**
- * ---------------------------------------------------------
- * ROUTE: FORECAST
- * ---------------------------------------------------------
- *
- * GET /api/financial/forecast
+ * GET  /api/financial/forecast
  * POST /api/financial/forecast
  */
 router.get(
@@ -290,12 +542,12 @@ router.post(
   forecast
 );
 
+/* =========================================================
+   EMERGENCY / RISK
+========================================================= */
+
 /**
- * ---------------------------------------------------------
- * ROUTE: EMERGENCY / RISK
- * ---------------------------------------------------------
- *
- * GET /api/financial/emergency
+ * GET  /api/financial/emergency
  * POST /api/financial/emergency
  */
 router.get(
@@ -310,20 +562,19 @@ router.post(
   emergency
 );
 
+/* =========================================================
+   PAYMENT APPROVAL
+========================================================= */
+
 /**
- * ---------------------------------------------------------
- * ROUTE: PAYMENT APPROVAL
- * ---------------------------------------------------------
- *
  * POST /api/financial/payment-approval
  *
- * IMPORTANT:
- * This is an approval request only.
+ * Approval request ONLY.
  *
- * It does NOT:
- * - charge a card
- * - execute a Stripe payment
- * - execute a Razorpay payment
+ * Does NOT:
+ * - charge cards
+ * - execute Stripe payments
+ * - execute Razorpay payments
  * - accept CVV
  * - accept OTP
  * - accept card numbers
@@ -335,9 +586,10 @@ router.post(
   paymentApproval
 );
 
-/**
- * Compatibility aliases for clients using shorter names.
- */
+/* =========================================================
+   PAYMENT COMPATIBILITY ALIASES
+========================================================= */
+
 router.post(
   "/payment",
   ...securityMiddleware,
@@ -350,15 +602,16 @@ router.post(
   paymentApproval
 );
 
+/* =========================================================
+   ALERT PREPARATION
+========================================================= */
+
 /**
- * ---------------------------------------------------------
- * ROUTE: PREPARE ALERTS
- * ---------------------------------------------------------
- *
  * POST /api/financial/alerts/prepare
  *
- * This prepares safe owner-alert payloads.
- * It does NOT send WhatsApp messages directly.
+ * Prepares safe owner-alert payloads.
+ *
+ * Does NOT directly send WhatsApp messages.
  */
 router.post(
   "/alerts/prepare",
@@ -366,16 +619,17 @@ router.post(
   prepareAlerts
 );
 
+/* =========================================================
+   GENERIC EXECUTION
+========================================================= */
+
 /**
- * ---------------------------------------------------------
- * ROUTE: GENERIC EXECUTION
- * ---------------------------------------------------------
- *
  * POST /api/financial/execute
  *
- * Supported operations are validated inside the controller.
+ * Generic financial-control operation endpoint.
  *
- * This endpoint is intentionally owner-only.
+ * Actual operation validation remains inside the controller
+ * and financial control service.
  */
 router.post(
   "/execute",
@@ -383,21 +637,12 @@ router.post(
   execute
 );
 
+/* =========================================================
+   REPORT ALIAS
+========================================================= */
+
 /**
- * ---------------------------------------------------------
- * ROUTE: REPORT ALIAS
- * ---------------------------------------------------------
- *
  * POST /api/financial/report
- *
- * Uses the same generic controller operation handler.
- * The request can specify:
- *
- * {
- *   "operation": "assessment"
- * }
- *
- * No automatic payment or infrastructure execution occurs.
  */
 router.post(
   "/report",
@@ -405,11 +650,11 @@ router.post(
   execute
 );
 
+/* =========================================================
+   CONTROL ALIAS
+========================================================= */
+
 /**
- * ---------------------------------------------------------
- * ROUTE: FINANCIAL CONTROL ALIAS
- * ---------------------------------------------------------
- *
  * POST /api/financial/control
  */
 router.post(
@@ -418,30 +663,36 @@ router.post(
   execute
 );
 
-/**
- * ---------------------------------------------------------
- * ROUTE: ERROR HANDLER
- * ---------------------------------------------------------
- *
- * This route-level handler prevents financial errors from
- * leaking stack traces, provider credentials, or internal
- * implementation details.
- */
+/* =========================================================
+   ROUTE ERROR HANDLER
+========================================================= */
+
 router.use(
-  (error, req, res, next) => {
-    if (res.headersSent) {
+  (
+    error,
+    req,
+    res,
+    next
+  ) => {
+    if (
+      res.headersSent
+    ) {
       return next(error);
     }
 
     const code =
-      typeof error?.code === "string"
-        ? error.code.slice(0, 200)
-        : "FINANCIAL_ROUTE_ERROR";
+      cleanString(
+        error?.code,
+        200
+      ) ||
+      "FINANCIAL_ROUTE_ERROR";
 
     const message =
-      typeof error?.message === "string"
-        ? error.message.slice(0, 1000)
-        : "Financial route request failed.";
+      cleanString(
+        error?.message,
+        1000
+      ) ||
+      "Financial route request failed.";
 
     return res.status(500).json({
       success: false,
@@ -454,10 +705,8 @@ router.use(
   }
 );
 
-/**
- * ---------------------------------------------------------
- * EXPORT
- * ---------------------------------------------------------
- */
+/* =========================================================
+   EXPORT
+========================================================= */
 
 module.exports = router;
