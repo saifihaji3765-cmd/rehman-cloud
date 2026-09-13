@@ -30,7 +30,7 @@
 
    IMPORTANT:
    Master does NOT require itself.
-   ========================================================= */
+   ================================================= */
 
 
 /* =========================
@@ -107,6 +107,35 @@ const deployAgent =
 
 
 /* =========================================================
+   FINANCIAL CONTROL AGENTS
+========================================================= */
+
+const financialControlAgent =
+  require("./financial/financialControlAgent");
+
+const providerRegistry =
+  require("./financial/providerRegistry");
+
+const costMonitorAgent =
+  require("./financial/costMonitorAgent");
+
+const usageMonitorAgent =
+  require("./financial/usageMonitorAgent");
+
+const forecastAgent =
+  require("./financial/forecastAgent");
+
+const paymentApprovalAgent =
+  require("./financial/paymentApprovalAgent");
+
+const emergencyAgent =
+  require("./financial/emergencyAgent");
+
+const whatsappControlAgent =
+  require("./financial/whatsappControlAgent");
+
+
+/* =========================================================
    SERVICES
 ========================================================= */
 
@@ -180,6 +209,44 @@ const agentRegistry = {
   subscription: subscriptionAgent,
 
   deploy: deployAgent,
+
+
+  /* =======================================================
+     FINANCIAL CONTROL AGENTS
+     =======================================================
+
+     Registered only.
+
+     They are NOT executed by Master yet.
+
+     Financial orchestration will be integrated after
+     the financial provider/service/route/middleware/
+     worker validation phase.
+  ======================================================= */
+
+  financialControl:
+    financialControlAgent,
+
+  providerRegistry:
+    providerRegistry,
+
+  costMonitor:
+    costMonitorAgent,
+
+  usageMonitor:
+    usageMonitorAgent,
+
+  forecast:
+    forecastAgent,
+
+  paymentApproval:
+    paymentApprovalAgent,
+
+  emergency:
+    emergencyAgent,
+
+  whatsappControl:
+    whatsappControlAgent,
 };
 
 
