@@ -5,19 +5,34 @@
  *
  * Purpose:
  * - Persist verified financial observations.
+ * - Keep every observation strictly user-scoped.
  * - Read historical observations for forecasting.
  * - Prevent duplicate snapshots.
- * - Keep provider/source/timestamp/period/currency information.
+ * - Preserve provider/source/timestamp/period/currency/unit.
+ * - Keep account/project/model/service/resource context.
  * - Never fabricate missing financial data.
  *
  * Source of truth:
  * - Provider-confirmed observations only.
  *
- * This service does NOT:
- * - execute payments
- * - call AWS/OpenAI directly
- * - store API keys
- * - store card/OTP/CVV/password data
+ * Architecture:
+ *
+ * Provider Adapters
+ *       ↓
+ * financialProviderService
+ *       ↓
+ * financialDataService
+ *       ↓
+ * financialSnapshotService
+ *       ↓
+ * CostEvent MongoDB
+ *
+ * SECURITY:
+ * - userId is mandatory.
+ * - Queries cannot intentionally operate globally.
+ * - Provider credentials are never stored.
+ * - Card/OTP/CVV/password/token data is removed.
+ * - Payment execution is NOT performed here.
  */
 
 const CostEvent =
@@ -28,12 +43,27 @@ const VALUE_TYPE = Object.freeze({
   USAGE: "usage",
 });
 
-const VALID_STATUSES = new Set([
-  "verified",
-  "available",
-]);
+const DATA_STATUS = Object.freeze({
+  VERIFIED: "verified",
+  AVAILABLE: "available",
+  UNAVAILABLE: "unavailable",
+  NOT_CONFIGURED: "not_configured",
+  ERROR: "error",
+});
+
+const VALID_STORAGE_STATUSES =
+  new Set([
+    DATA_STATUS.VERIFIED,
+    DATA_STATUS.AVAILABLE,
+  ]);
 
 const MAX_BULK_EVENTS = 500;
+const MAX_QUERY_LIMIT = 1000;
+const MAX_HISTORY_LIMIT = 5000;
+
+/* -------------------------------------------------------------------------- */
+/* Basic helpers                                                              */
+/* -------------------------------------------------------------------------- */
 
 function isObject(value) {
   return (
@@ -64,6 +94,21 @@ function normalizeString(
   );
 }
 
+function normalizeUserId(
+  userId
+) {
+  /*
+   * Mongo ObjectId is normally represented as
+   * a string by the controller/service layer.
+   *
+   * We intentionally do not cast or invent IDs here.
+   */
+  return normalizeString(
+    userId,
+    200
+  );
+}
+
 function normalizeProvider(
   provider
 ) {
@@ -85,6 +130,18 @@ function normalizeDate(
     return null;
   }
 
+  if (
+    value instanceof Date
+  ) {
+    return Number.isNaN(
+      value.getTime()
+    )
+      ? null
+      : new Date(
+          value.getTime()
+        );
+  }
+
   const date =
     new Date(value);
 
@@ -102,6 +159,14 @@ function normalizeDate(
 function normalizeNumber(
   value
 ) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
+    return null;
+  }
+
   const number =
     Number(value);
 
@@ -133,9 +198,11 @@ function normalizeStatus(
     normalizeString(
       status,
       50
-    )?.toLowerCase();
+    );
 
-  return value || null;
+  return value
+    ? value.toLowerCase()
+    : null;
 }
 
 function normalizeValueType(
@@ -145,7 +212,7 @@ function normalizeValueType(
     normalizeString(
       valueType,
       50
-    )?.toLowerCase();
+    );
 
   if (
     value ===
@@ -159,15 +226,32 @@ function normalizeValueType(
   return null;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Sensitive-data protection                                                  */
+/* -------------------------------------------------------------------------- */
+
+const BLOCKED_KEY_PATTERN =
+  /(^|[_\-.])(api.?key|access.?token|refresh.?token|token|secret|private.?key|password|passwd|credential|credentials|otp|pin|cvv|cvc|authorization|bearer|card.?number|security.?code)([_\-.]|$)/i;
+
+function isSensitiveKey(
+  key
+) {
+  return BLOCKED_KEY_PATTERN.test(
+    String(key)
+  );
+}
+
 function sanitizeProviderData(
-  data
+  data,
+  depth = 0
 ) {
   if (!isObject(data)) {
     return null;
   }
 
-  const blocked =
-    /(^|_)(api.?key|access.?token|token|secret|private.?key|password|passwd|otp|pin|cvv|cvc|authorization)$/i;
+  if (depth > 3) {
+    return null;
+  }
 
   const result = {};
 
@@ -178,9 +262,7 @@ function sanitizeProviderData(
     ] of Object.entries(data)
   ) {
     if (
-      blocked.test(
-        String(key)
-      )
+      isSensitiveKey(key)
     ) {
       continue;
     }
@@ -202,11 +284,72 @@ function sanitizeProviderData(
               1000
             )
           : value;
+
+      continue;
+    }
+
+    if (
+      Array.isArray(value)
+    ) {
+      result[key] =
+        value
+          .slice(0, 50)
+          .map(
+            (item) => {
+              if (
+                typeof item ===
+                  "string" ||
+                typeof item ===
+                  "number" ||
+                typeof item ===
+                  "boolean" ||
+                item === null
+              ) {
+                return item;
+              }
+
+              if (
+                isObject(item)
+              ) {
+                return sanitizeProviderData(
+                  item,
+                  depth + 1
+                );
+              }
+
+              return null;
+            }
+          )
+          .filter(
+            (item) =>
+              item !== null
+          );
+
+      continue;
+    }
+
+    if (
+      isObject(value)
+    ) {
+      const nested =
+        sanitizeProviderData(
+          value,
+          depth + 1
+        );
+
+      if (nested) {
+        result[key] =
+          nested;
+      }
     }
   }
 
   return result;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Observation normalization                                                  */
+/* -------------------------------------------------------------------------- */
 
 function normalizeObservation(
   input = {}
@@ -216,6 +359,20 @@ function normalizeObservation(
       valid: false,
       reason:
         "Observation must be an object.",
+      data: null,
+    };
+  }
+
+  const userId =
+    normalizeUserId(
+      input.userId
+    );
+
+  if (!userId) {
+    return {
+      valid: false,
+      reason:
+        "userId is required.",
       data: null,
     };
   }
@@ -242,6 +399,7 @@ function normalizeObservation(
   const timestamp =
     normalizeDate(
       input.timestamp ??
+        input.observedAt ??
         input.periodEnd ??
         input.date ??
         input.retrievedAt
@@ -250,6 +408,11 @@ function normalizeObservation(
   const retrievedAt =
     normalizeDate(
       input.retrievedAt
+    ) || timestamp;
+
+  const observedAt =
+    normalizeDate(
+      input.observedAt
     ) || timestamp;
 
   const status =
@@ -312,7 +475,7 @@ function normalizeObservation(
   }
 
   if (
-    !VALID_STATUSES.has(
+    !VALID_STORAGE_STATUSES.has(
       status
     )
   ) {
@@ -324,12 +487,60 @@ function normalizeObservation(
     };
   }
 
+  const currency =
+    valueType ===
+    VALUE_TYPE.COST
+      ? normalizeCurrency(
+          input.currency
+        )
+      : undefined;
+
+  const unit =
+    valueType ===
+    VALUE_TYPE.USAGE
+      ? normalizeString(
+          input.unit,
+          100
+        )
+      : undefined;
+
+  if (
+    valueType ===
+      VALUE_TYPE.COST &&
+    !currency
+  ) {
+    return {
+      valid: false,
+      reason:
+        "Cost observation requires a verified currency.",
+      data: null,
+    };
+  }
+
+  if (
+    valueType ===
+      VALUE_TYPE.USAGE &&
+    !unit
+  ) {
+    return {
+      valid: false,
+      reason:
+        "Usage observation requires a verified unit.",
+      data: null,
+    };
+  }
+
   const data = {
+    userId,
+
     provider,
     valueType,
     value,
+
     timestamp,
+    observedAt,
     retrievedAt,
+
     status,
     source,
 
@@ -351,22 +562,23 @@ function normalizeObservation(
         300
       ),
 
-    currency:
-      valueType ===
-      VALUE_TYPE.COST
-        ? normalizeCurrency(
-            input.currency
-          )
-        : undefined,
+    service:
+      normalizeString(
+        input.service,
+        300
+      ),
 
-    unit:
-      valueType ===
-      VALUE_TYPE.USAGE
-        ? normalizeString(
-            input.unit,
-            100
-          )
-        : undefined,
+    resource:
+      normalizeString(
+        input.resource,
+        500
+      ),
+
+    region:
+      normalizeString(
+        input.region,
+        200
+      ),
 
     model:
       valueType ===
@@ -377,43 +589,37 @@ function normalizeObservation(
           )
         : undefined,
 
+    currency,
+    unit,
+
+    confidence:
+      normalizeString(
+        input.confidence,
+        50
+      ),
+
+    observationId:
+      normalizeString(
+        input.observationId,
+        300
+      ),
+
+    fingerprint:
+      normalizeString(
+        input.fingerprint,
+        500
+      ),
+
     providerData:
       sanitizeProviderData(
         input.providerData
       ),
+
+    metadata:
+      sanitizeProviderData(
+        input.metadata
+      ),
   };
-
-  /*
-   * Cost records require a currency.
-   * Usage records require a unit.
-   *
-   * Without these, cross-period/provider aggregation can become unsafe.
-   */
-  if (
-    valueType ===
-      VALUE_TYPE.COST &&
-    !data.currency
-  ) {
-    return {
-      valid: false,
-      reason:
-        "Cost observation requires a verified currency.",
-      data: null,
-    };
-  }
-
-  if (
-    valueType ===
-      VALUE_TYPE.USAGE &&
-    !data.unit
-  ) {
-    return {
-      valid: false,
-      reason:
-        "Usage observation requires a verified unit.",
-      data: null,
-    };
-  }
 
   return {
     valid: true,
@@ -422,10 +628,42 @@ function normalizeObservation(
   };
 }
 
+/* -------------------------------------------------------------------------- */
+/* Deduplication                                                              */
+/* -------------------------------------------------------------------------- */
+
 function buildDeduplicationFilter(
   observation
 ) {
+  if (!observation.userId) {
+    throw new Error(
+      "userId is required for financial observation deduplication."
+    );
+  }
+
+  /*
+   * IMPORTANT:
+   * userId is ALWAYS part of the filter.
+   */
+  if (
+    observation.observationId
+  ) {
+    return {
+      userId:
+        observation.userId,
+
+      provider:
+        observation.provider,
+
+      observationId:
+        observation.observationId,
+    };
+  }
+
   return {
+    userId:
+      observation.userId,
+
     provider:
       observation.provider,
 
@@ -475,8 +713,33 @@ function buildDeduplicationFilter(
             observation.projectId,
         }
       : {}),
+
+    ...(observation.service
+      ? {
+          service:
+            observation.service,
+        }
+      : {}),
+
+    ...(observation.resource
+      ? {
+          resource:
+            observation.resource,
+        }
+      : {}),
+
+    ...(observation.region
+      ? {
+          region:
+            observation.region,
+        }
+      : {}),
   };
 }
+
+/* -------------------------------------------------------------------------- */
+/* Save one observation                                                       */
+/* -------------------------------------------------------------------------- */
 
 async function saveObservation(
   input = {}
@@ -492,8 +755,7 @@ async function saveObservation(
     ) {
       return {
         success: false,
-        status:
-          "invalid",
+        status: "invalid",
         message:
           normalized.reason,
         data: null,
@@ -508,9 +770,6 @@ async function saveObservation(
         observation
       );
 
-    /*
-     * Upsert makes repeated provider polling idempotent.
-     */
     const result =
       await CostEvent.findOneAndUpdate(
         filter,
@@ -526,10 +785,20 @@ async function saveObservation(
         }
       ).lean();
 
+    if (!result) {
+      return {
+        success: false,
+        status: DATA_STATUS.ERROR,
+        message:
+          "Financial observation could not be persisted.",
+        data: null,
+      };
+    }
+
     return {
       success: true,
       status:
-        "verified",
+        DATA_STATUS.VERIFIED,
       message:
         "Financial observation persisted.",
       data: {
@@ -548,7 +817,7 @@ async function saveObservation(
     return {
       success: false,
       status:
-        "error",
+        DATA_STATUS.ERROR,
       message:
         "Failed to persist financial observation.",
       error:
@@ -561,6 +830,10 @@ async function saveObservation(
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Save multiple observations                                                 */
+/* -------------------------------------------------------------------------- */
+
 async function saveObservations(
   observations = []
 ) {
@@ -572,8 +845,7 @@ async function saveObservations(
     ) {
       return {
         success: false,
-        status:
-          "invalid",
+        status: "invalid",
         message:
           "Observations must be an array.",
         data: null,
@@ -586,14 +858,15 @@ async function saveObservations(
     ) {
       return {
         success: true,
-        status:
-          "empty",
+        status: "empty",
         message:
           "No observations supplied.",
         data: {
-          insertedCount: 0,
+          requestedCount: 0,
+          validCount: 0,
           rejectedCount: 0,
-          observations: [],
+          insertedCount: 0,
+          matchedExistingCount: 0,
         },
       };
     }
@@ -604,8 +877,7 @@ async function saveObservations(
     ) {
       return {
         success: false,
-        status:
-          "invalid",
+        status: "invalid",
         message:
           `A maximum of ${MAX_BULK_EVENTS} observations can be stored per request.`,
         data: null,
@@ -632,12 +904,13 @@ async function saveObservations(
     if (!valid.length) {
       return {
         success: false,
-        status:
-          "invalid",
+        status: "invalid",
         message:
           "No valid verified observations were supplied.",
         data: {
-          insertedCount: 0,
+          requestedCount:
+            observations.length,
+          validCount: 0,
           rejectedCount:
             rejected.length,
           rejectedReasons:
@@ -649,18 +922,49 @@ async function saveObservations(
       };
     }
 
+    const uniqueMap =
+      new Map();
+
+    for (
+      const item of valid
+    ) {
+      const filter =
+        buildDeduplicationFilter(
+          item.data
+        );
+
+      const key =
+        JSON.stringify(
+          filter
+        );
+
+      if (
+        !uniqueMap.has(key)
+      ) {
+        uniqueMap.set(
+          key,
+          item.data
+        );
+      }
+    }
+
+    const uniqueObservations =
+      Array.from(
+        uniqueMap.values()
+      );
+
     const operations =
-      valid.map(
-        (item) => ({
+      uniqueObservations.map(
+        (observation) => ({
           updateOne: {
             filter:
               buildDeduplicationFilter(
-                item.data
+                observation
               ),
 
             update: {
               $setOnInsert:
-                item.data,
+                observation,
             },
 
             upsert: true,
@@ -679,7 +983,7 @@ async function saveObservations(
     return {
       success: true,
       status:
-        "verified",
+        DATA_STATUS.VERIFIED,
       message:
         "Financial observations processed.",
       data: {
@@ -689,14 +993,23 @@ async function saveObservations(
         validCount:
           valid.length,
 
+        uniqueCount:
+          uniqueObservations.length,
+
+        duplicateInputCount:
+          valid.length -
+          uniqueObservations.length,
+
         rejectedCount:
           rejected.length,
 
         insertedCount:
-          result.upsertedCount || 0,
+          result.upsertedCount ||
+          0,
 
         matchedExistingCount:
-          result.matchedCount || 0,
+          result.matchedCount ||
+          0,
 
         rejectedReasons:
           rejected.map(
@@ -714,7 +1027,7 @@ async function saveObservations(
     return {
       success: false,
       status:
-        "error",
+        DATA_STATUS.ERROR,
       message:
         "Failed to persist financial observations.",
       error:
@@ -727,10 +1040,36 @@ async function saveObservations(
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Query builder                                                              */
+/* -------------------------------------------------------------------------- */
+
 function buildQuery(
   input = {}
 ) {
   const query = {};
+
+  if (!isObject(input)) {
+    return query;
+  }
+
+  /*
+   * SECURITY:
+   * Financial queries must always be user-scoped.
+   */
+  const userId =
+    normalizeUserId(
+      input.userId
+    );
+
+  if (!userId) {
+    throw new Error(
+      "userId is required for financial snapshot queries."
+    );
+  }
+
+  query.userId =
+    userId;
 
   const provider =
     normalizeProvider(
@@ -785,6 +1124,39 @@ function buildQuery(
       model;
   }
 
+  const service =
+    normalizeString(
+      input.service,
+      300
+    );
+
+  if (service) {
+    query.service =
+      service;
+  }
+
+  const resource =
+    normalizeString(
+      input.resource,
+      500
+    );
+
+  if (resource) {
+    query.resource =
+      resource;
+  }
+
+  const region =
+    normalizeString(
+      input.region,
+      200
+    );
+
+  if (region) {
+    query.region =
+      region;
+  }
+
   const status =
     normalizeStatus(
       input.status
@@ -795,14 +1167,37 @@ function buildQuery(
       status;
   }
 
+  const currency =
+    normalizeCurrency(
+      input.currency
+    );
+
+  if (currency) {
+    query.currency =
+      currency;
+  }
+
+  const unit =
+    normalizeString(
+      input.unit,
+      100
+    );
+
+  if (unit) {
+    query.unit =
+      unit;
+  }
+
   const startDate =
     normalizeDate(
-      input.startDate
+      input.startDate ||
+        input.start
     );
 
   const endDate =
     normalizeDate(
-      input.endDate
+      input.endDate ||
+        input.end
     );
 
   if (
@@ -822,41 +1217,17 @@ function buildQuery(
     }
   }
 
-  if (
-    input.currency
-  ) {
-    const currency =
-      normalizeCurrency(
-        input.currency
-      );
-
-    if (currency) {
-      query.currency =
-        currency;
-    }
-  }
-
-  if (
-    input.unit
-  ) {
-    const unit =
-      normalizeString(
-        input.unit,
-        100
-      );
-
-    if (unit) {
-      query.unit =
-        unit;
-    }
-  }
-
   return query;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Query limits                                                               */
+/* -------------------------------------------------------------------------- */
+
 function normalizeLimit(
   value,
-  fallback = 100
+  fallback = 100,
+  maximum = MAX_QUERY_LIMIT
 ) {
   const parsed =
     Number(value);
@@ -872,9 +1243,13 @@ function normalizeLimit(
 
   return Math.min(
     Math.floor(parsed),
-    1000
+    maximum
   );
 }
+
+/* -------------------------------------------------------------------------- */
+/* Read observations                                                          */
+/* -------------------------------------------------------------------------- */
 
 async function getObservations(
   input = {}
@@ -887,7 +1262,9 @@ async function getObservations(
 
     const limit =
       normalizeLimit(
-        input.limit
+        input.limit,
+        100,
+        MAX_QUERY_LIMIT
       );
 
     const sort =
@@ -910,14 +1287,17 @@ async function getObservations(
 
     return {
       success: true,
+
       status:
         observations.length
-          ? "verified"
-          : "unavailable",
+          ? DATA_STATUS.VERIFIED
+          : DATA_STATUS.UNAVAILABLE,
+
       message:
         observations.length
           ? "Financial observations retrieved."
           : "No matching financial observations found.",
+
       data: {
         observations,
         count:
@@ -934,7 +1314,7 @@ async function getObservations(
     return {
       success: false,
       status:
-        "error",
+        DATA_STATUS.ERROR,
       message:
         "Failed to retrieve financial observations.",
       error:
@@ -947,6 +1327,10 @@ async function getObservations(
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Historical series                                                          */
+/* -------------------------------------------------------------------------- */
+
 async function getHistoricalSeries(
   input = {}
 ) {
@@ -956,6 +1340,13 @@ async function getHistoricalSeries(
         input
       );
 
+    const limit =
+      normalizeLimit(
+        input.limit,
+        500,
+        MAX_HISTORY_LIMIT
+      );
+
     const observations =
       await CostEvent.find(
         query
@@ -963,24 +1354,22 @@ async function getHistoricalSeries(
         .sort({
           timestamp: 1,
         })
-        .limit(
-          normalizeLimit(
-            input.limit,
-            500
-          )
-        )
+        .limit(limit)
         .lean();
 
     return {
       success: true,
+
       status:
         observations.length
-          ? "verified"
-          : "unavailable",
+          ? DATA_STATUS.VERIFIED
+          : DATA_STATUS.UNAVAILABLE,
+
       message:
         observations.length
           ? "Historical financial series retrieved."
           : "No historical financial observations are available.",
+
       data: {
         observations,
         count:
@@ -997,7 +1386,7 @@ async function getHistoricalSeries(
     return {
       success: false,
       status:
-        "error",
+        DATA_STATUS.ERROR,
       message:
         "Failed to retrieve historical financial series.",
       error:
@@ -1009,6 +1398,10 @@ async function getHistoricalSeries(
     };
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* Latest observation                                                         */
+/* -------------------------------------------------------------------------- */
 
 async function getLatestObservation(
   input = {}
@@ -1032,7 +1425,7 @@ async function getLatestObservation(
       return {
         success: true,
         status:
-          "unavailable",
+          DATA_STATUS.UNAVAILABLE,
         message:
           "No verified financial observation is available.",
         data: {
@@ -1044,7 +1437,7 @@ async function getLatestObservation(
     return {
       success: true,
       status:
-        "verified",
+        DATA_STATUS.VERIFIED,
       message:
         "Latest financial observation retrieved.",
       data: {
@@ -1060,7 +1453,7 @@ async function getLatestObservation(
     return {
       success: false,
       status:
-        "error",
+        DATA_STATUS.ERROR,
       message:
         "Failed to retrieve latest financial observation.",
       error:
@@ -1073,6 +1466,10 @@ async function getLatestObservation(
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Provider summary                                                           */
+/* -------------------------------------------------------------------------- */
+
 async function getProviderSummary(
   input = {}
 ) {
@@ -1082,7 +1479,7 @@ async function getProviderSummary(
         input
       );
 
-    const match =
+    const summary =
       await CostEvent.aggregate([
         {
           $match:
@@ -1136,19 +1533,22 @@ async function getProviderSummary(
 
     return {
       success: true,
+
       status:
-        match.length
-          ? "verified"
-          : "unavailable",
+        summary.length
+          ? DATA_STATUS.VERIFIED
+          : DATA_STATUS.UNAVAILABLE,
+
       message:
-        match.length
+        summary.length
           ? "Provider financial summary retrieved."
           : "No verified financial summary is available.",
+
       data: {
         providers:
-          match,
+          summary,
         count:
-          match.length,
+          summary.length,
       },
     };
   } catch (error) {
@@ -1160,7 +1560,7 @@ async function getProviderSummary(
     return {
       success: false,
       status:
-        "error",
+        DATA_STATUS.ERROR,
       message:
         "Failed to build provider financial summary.",
       error:
@@ -1173,20 +1573,201 @@ async function getProviderSummary(
   }
 }
 
-async function deleteOldSnapshots(
-  beforeDate
+/* -------------------------------------------------------------------------- */
+/* Totals                                                                     */
+/* -------------------------------------------------------------------------- */
+
+async function getTotal(
+  input = {}
 ) {
   try {
+    const valueType =
+      normalizeValueType(
+        input.valueType
+      );
+
+    if (!valueType) {
+      return {
+        success: false,
+        status: "invalid",
+        message:
+          "valueType must be cost or usage.",
+        data: null,
+      };
+    }
+
+    const query =
+      buildQuery(
+        input
+      );
+
+    const rows =
+      await CostEvent.aggregate([
+        {
+          $match:
+            query,
+        },
+
+        {
+          $group: {
+            _id: {
+              currency:
+                "$currency",
+
+              unit:
+                "$unit",
+            },
+
+            total: {
+              $sum:
+                "$value",
+            },
+
+            count: {
+              $sum: 1,
+            },
+          },
+        },
+      ]);
+
+    if (
+      rows.length > 1
+    ) {
+      return {
+        success: true,
+        status:
+          DATA_STATUS.UNAVAILABLE,
+        message:
+          "Multiple currencies or usage units prevent safe aggregation.",
+        data: {
+          totals:
+            rows,
+        },
+      };
+    }
+
+    if (!rows.length) {
+      return {
+        success: true,
+        status:
+          DATA_STATUS.UNAVAILABLE,
+        message:
+          "No verified observations are available.",
+        data: {
+          total: null,
+
+          currency:
+            valueType ===
+            VALUE_TYPE.COST
+              ? null
+              : undefined,
+
+          unit:
+            valueType ===
+            VALUE_TYPE.USAGE
+              ? null
+              : undefined,
+
+          count: 0,
+        },
+      };
+    }
+
+    const row =
+      rows[0];
+
+    return {
+      success: true,
+      status:
+        DATA_STATUS.VERIFIED,
+      message:
+        "Financial total calculated from verified observations.",
+      data: {
+        total:
+          row.total,
+
+        currency:
+          valueType ===
+          VALUE_TYPE.COST
+            ? row._id.currency ||
+              null
+            : undefined,
+
+        unit:
+          valueType ===
+          VALUE_TYPE.USAGE
+            ? row._id.unit ||
+              null
+            : undefined,
+
+        count:
+          row.count,
+      },
+    };
+  } catch (error) {
+    console.error(
+      "[FinancialSnapshotService] getTotal:",
+      error.message
+    );
+
+    return {
+      success: false,
+      status:
+        DATA_STATUS.ERROR,
+      message:
+        "Failed to calculate financial total.",
+      error:
+        process.env.NODE_ENV ===
+        "production"
+          ? undefined
+          : error.message,
+      data: null,
+    };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Explicit cleanup                                                           */
+/* -------------------------------------------------------------------------- */
+
+async function deleteOldSnapshots(
+  input = {}
+) {
+  try {
+    if (!isObject(input)) {
+      return {
+        success: false,
+        status: "invalid",
+        message:
+          "Input must be an object containing userId and beforeDate.",
+        data: null,
+      };
+    }
+
+    const userId =
+      normalizeUserId(
+        input.userId
+      );
+
+    if (!userId) {
+      return {
+        success: false,
+        status: "invalid",
+        message:
+          "userId is required.",
+        data: null,
+      };
+    }
+
     const date =
       normalizeDate(
-        beforeDate
+        input.beforeDate
       );
 
     if (!date) {
       return {
         success: false,
-        status:
-          "invalid",
+        status: "invalid",
         message:
           "A valid beforeDate is required.",
         data: null,
@@ -1194,11 +1775,13 @@ async function deleteOldSnapshots(
     }
 
     /*
-     * This operation is intentionally explicit.
-     * Nothing is automatically deleted by the service.
+     * CRITICAL:
+     * Cleanup is ALWAYS scoped to the requesting user.
      */
     const result =
       await CostEvent.deleteMany({
+        userId,
+
         timestamp: {
           $lt: date,
         },
@@ -1206,13 +1789,14 @@ async function deleteOldSnapshots(
 
     return {
       success: true,
-      status:
-        "deleted",
+      status: "deleted",
       message:
         "Old financial snapshots deleted.",
       data: {
+        userId,
         deletedCount:
-          result.deletedCount || 0,
+          result.deletedCount ||
+          0,
         beforeDate:
           date.toISOString(),
       },
@@ -1226,7 +1810,7 @@ async function deleteOldSnapshots(
     return {
       success: false,
       status:
-        "error",
+        DATA_STATUS.ERROR,
       message:
         "Failed to delete old financial snapshots.",
       error:
@@ -1239,20 +1823,20 @@ async function deleteOldSnapshots(
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Exports                                                                    */
+/* -------------------------------------------------------------------------- */
+
 module.exports = {
   VALUE_TYPE,
-  DATA_STATUS: {
-    VERIFIED:
-      "verified",
-    AVAILABLE:
-      "available",
-    UNAVAILABLE:
-      "unavailable",
-    ERROR:
-      "error",
-  },
+  DATA_STATUS,
 
+  normalizeUserId,
   normalizeObservation,
+  sanitizeProviderData,
+
+  buildDeduplicationFilter,
+  buildQuery,
 
   saveObservation,
   saveObservations,
@@ -1261,8 +1845,7 @@ module.exports = {
   getHistoricalSeries,
   getLatestObservation,
   getProviderSummary,
-
-  buildQuery,
+  getTotal,
 
   deleteOldSnapshots,
 };
