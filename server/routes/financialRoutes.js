@@ -5,27 +5,33 @@
  * ZyrionOS FINANCIAL CONTROL ROUTES
  * =========================================================
  *
- * Security:
+ * Route architecture:
  *
- *   Request
- *      ↓
+ *   HTTP Request
+ *        ↓
  *   Authentication
- *      ↓
+ *        ↓
  *   Owner Authorization
- *      ↓
- *   Rate Limiter
- *      ↓
+ *        ↓
+ *   Optional Rate Limiter
+ *        ↓
  *   Financial Controller
- *      ↓
+ *        ↓
  *   Financial Control Service
+ *        ↓
+ *   Real Provider Adapters
  *
  * IMPORTANT:
- * - No payment execution here.
- * - No infrastructure execution here.
- * - No provider credentials accepted here.
  * - No fake financial data.
+ * - No provider credentials accepted.
+ * - No card/CVV/OTP/password accepted.
+ * - No payment execution from routes.
+ * - No infrastructure execution from routes.
  * - Owner-only access.
- * - Provider data must come from real provider adapters.
+ * - Provider data must come from real provider services.
+ *
+ * This file is deliberately defensive because Express requires
+ * every route callback/middleware to be a function.
  */
 
 const express = require("express");
@@ -33,14 +39,14 @@ const express = require("express");
 const router = express.Router();
 
 /* =========================================================
-   CONTROLLERS
+   CONTROLLER MODULE
 ========================================================= */
 
-const financialController =
+const financialControllerModule =
   require("../controllers/financialController");
 
 /* =========================================================
-   RAW MIDDLEWARE MODULES
+   MIDDLEWARE MODULES
 ========================================================= */
 
 const authMiddlewareModule =
@@ -57,7 +63,18 @@ function isFunction(value) {
   return typeof value === "function";
 }
 
-function cleanString(value, maxLength = 200) {
+function isObject(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+  );
+}
+
+function cleanString(
+  value,
+  maxLength = 200
+) {
   if (
     value === undefined ||
     value === null
@@ -65,62 +82,82 @@ function cleanString(value, maxLength = 200) {
     return null;
   }
 
-  const text = String(value).trim();
+  const text =
+    String(value).trim();
 
   if (!text) {
     return null;
   }
 
-  return text.slice(0, maxLength);
+  return text.slice(
+    0,
+    maxLength
+  );
 }
 
+/* =========================================================
+   MODULE FUNCTION RESOLVER
+========================================================= */
+
 /**
- * Resolve middleware exports safely.
+ * Supports all common CommonJS export shapes:
  *
- * Supports projects where middleware is exported as:
+ * 1. module.exports = middleware
  *
- * module.exports = middleware
+ * 2. module.exports = {
+ *      authMiddleware
+ *    }
  *
- * OR:
+ * 3. module.exports = {
+ *      authenticate
+ *    }
  *
- * module.exports = {
- *   middleware
- * }
+ * 4. module.exports = {
+ *      default: middleware
+ *    }
  *
- * OR:
+ * This prevents Express from receiving:
  *
- * module.exports = {
- *   authMiddleware
- * }
+ *   [object Object]
  *
- * OR owner middleware exposing:
- *
- * requireOwner
- *
- * This prevents Express from receiving an object as
- * a route callback.
+ * as a callback.
  */
-function resolveMiddleware(
+function resolveFunction(
   moduleValue,
   preferredNames = []
 ) {
-  if (isFunction(moduleValue)) {
+  /*
+   * Direct function export.
+   */
+  if (
+    isFunction(moduleValue)
+  ) {
     return moduleValue;
   }
 
+  /*
+   * ES/CommonJS default export.
+   */
   if (
-    moduleValue &&
-    isFunction(moduleValue.default)
+    isObject(moduleValue) &&
+    isFunction(
+      moduleValue.default
+    )
   ) {
     return moduleValue.default;
   }
 
+  /*
+   * Named exports.
+   */
   for (
     const name of preferredNames
   ) {
     if (
-      moduleValue &&
-      isFunction(moduleValue[name])
+      isObject(moduleValue) &&
+      isFunction(
+        moduleValue[name]
+      )
     ) {
       return moduleValue[name];
     }
@@ -129,81 +166,62 @@ function resolveMiddleware(
   return null;
 }
 
-/**
- * Resolve controller operation safely.
- *
- * Every returned route handler is guaranteed to be
- * a function or null.
- */
-function resolveController(
-  controller,
-  names = []
-) {
-  if (!controller) {
-    return null;
-  }
-
-  if (isFunction(controller)) {
-    return controller;
-  }
-
-  for (
-    const name of names
-  ) {
-    if (
-      controller &&
-      isFunction(controller[name])
-    ) {
-      return controller[name];
-    }
-  }
-
-  return null;
-}
-
 /* =========================================================
-   AUTHENTICATION
+   AUTHENTICATION MIDDLEWARE
 ========================================================= */
 
 const authenticationMiddleware =
-  resolveMiddleware(
+  resolveFunction(
     authMiddlewareModule,
     [
       "authMiddleware",
       "authenticate",
-      "requireAuth"
+      "requireAuth",
+      "authentication",
+      "auth"
     ]
   );
 
 /* =========================================================
-   OWNER AUTHORIZATION
+   OWNER AUTHORIZATION MIDDLEWARE
 ========================================================= */
 
 const ownerAuthorizationMiddleware =
-  resolveMiddleware(
+  resolveFunction(
     ownerOnlyMiddlewareModule,
     [
       "ownerOnlyMiddleware",
       "requireOwner",
       "ownerOnly",
-      "authorizeOwner"
+      "authorizeOwner",
+      "ownerAuthorization"
     ]
   );
 
+/* =========================================================
+   STARTUP VALIDATION
+========================================================= */
+
 /**
- * Fail closed during startup instead of allowing Express
- * to receive an object and crash with:
+ * Fail immediately with a clear error instead of allowing
+ * Express to produce:
  *
- * Route.get() requires a callback function
+ * Route.get() requires a callback function but got a [object Object]
  */
 if (
   !isFunction(
     authenticationMiddleware
   )
 ) {
-  throw new Error(
-    "FINANCIAL_AUTH_MIDDLEWARE_INVALID: authMiddleware must export a function."
-  );
+  const error =
+    new Error(
+      "FINANCIAL_AUTH_MIDDLEWARE_INVALID: authMiddleware must export a function."
+    );
+
+  error.code =
+    "FINANCIAL_AUTH_MIDDLEWARE_INVALID";
+
+  throw error;
 }
 
 if (
@@ -211,13 +229,19 @@ if (
     ownerAuthorizationMiddleware
   )
 ) {
-  throw new Error(
-    "FINANCIAL_OWNER_MIDDLEWARE_INVALID: ownerOnlyMiddleware must export a function."
-  );
+  const error =
+    new Error(
+      "FINANCIAL_OWNER_MIDDLEWARE_INVALID: ownerOnlyMiddleware must export a function."
+    );
+
+  error.code =
+    "FINANCIAL_OWNER_MIDDLEWARE_INVALID";
+
+  throw error;
 }
 
 /* =========================================================
-   OPTIONAL API RATE LIMITER
+   OPTIONAL RATE LIMITER
 ========================================================= */
 
 let apiLimiter = null;
@@ -227,20 +251,28 @@ try {
     require("../middleware/apiLimiter");
 
   apiLimiter =
-    resolveMiddleware(
+    resolveFunction(
       limiterModule,
       [
         "apiLimiter",
+        "rateLimiter",
         "limiter",
-        "rateLimiter"
+        "financialLimiter"
       ]
     );
 } catch (error) {
+  /*
+   * The financial API remains protected by:
+   *
+   * Authentication + Owner Authorization.
+   *
+   * We do not guess a missing limiter implementation.
+   */
   apiLimiter = null;
 }
 
 /* =========================================================
-   SECURITY MIDDLEWARE STACK
+   SECURITY STACK
 ========================================================= */
 
 const securityMiddleware = [
@@ -257,7 +289,43 @@ if (
 }
 
 /* =========================================================
-   CONTROLLER WRAPPER
+   CONTROLLER RESOLVER
+========================================================= */
+
+function resolveControllerOperation(
+  controller,
+  operationNames = []
+) {
+  /*
+   * A controller itself can be callable.
+   */
+  if (
+    isFunction(controller)
+  ) {
+    return controller;
+  }
+
+  /*
+   * Named controller method.
+   */
+  for (
+    const name of operationNames
+  ) {
+    if (
+      isObject(controller) &&
+      isFunction(
+        controller[name]
+      )
+    ) {
+      return controller[name];
+    }
+  }
+
+  return null;
+}
+
+/* =========================================================
+   CONTROLLER HANDLER
 ========================================================= */
 
 function controllerHandler(
@@ -279,6 +347,7 @@ function controllerHandler(
           error: {
             code:
               "FINANCIAL_CONTROLLER_OPERATION_UNAVAILABLE",
+
             message:
               `${operationName || "Financial"} controller operation is unavailable.`
           }
@@ -302,8 +371,8 @@ function controllerHandler(
 
 const assessment =
   controllerHandler(
-    resolveController(
-      financialController,
+    resolveControllerOperation(
+      financialControllerModule,
       [
         "assessment",
         "runAssessment"
@@ -314,8 +383,8 @@ const assessment =
 
 const status =
   controllerHandler(
-    resolveController(
-      financialController,
+    resolveControllerOperation(
+      financialControllerModule,
       [
         "status",
         "getStatus"
@@ -326,8 +395,8 @@ const status =
 
 const costs =
   controllerHandler(
-    resolveController(
-      financialController,
+    resolveControllerOperation(
+      financialControllerModule,
       [
         "costs",
         "getCosts"
@@ -338,8 +407,8 @@ const costs =
 
 const usage =
   controllerHandler(
-    resolveController(
-      financialController,
+    resolveControllerOperation(
+      financialControllerModule,
       [
         "usage",
         "getUsage"
@@ -350,8 +419,8 @@ const usage =
 
 const forecast =
   controllerHandler(
-    resolveController(
-      financialController,
+    resolveControllerOperation(
+      financialControllerModule,
       [
         "forecast",
         "getForecast"
@@ -362,8 +431,8 @@ const forecast =
 
 const emergency =
   controllerHandler(
-    resolveController(
-      financialController,
+    resolveControllerOperation(
+      financialControllerModule,
       [
         "emergency",
         "getEmergency"
@@ -374,8 +443,8 @@ const emergency =
 
 const paymentApproval =
   controllerHandler(
-    resolveController(
-      financialController,
+    resolveControllerOperation(
+      financialControllerModule,
       [
         "paymentApproval",
         "requestPaymentApproval"
@@ -386,8 +455,8 @@ const paymentApproval =
 
 const prepareAlerts =
   controllerHandler(
-    resolveController(
-      financialController,
+    resolveControllerOperation(
+      financialControllerModule,
       [
         "prepareAlerts",
         "alerts"
@@ -398,8 +467,8 @@ const prepareAlerts =
 
 const execute =
   controllerHandler(
-    resolveController(
-      financialController,
+    resolveControllerOperation(
+      financialControllerModule,
       [
         "execute",
         "control"
@@ -410,8 +479,8 @@ const execute =
 
 const controllerInfo =
   controllerHandler(
-    resolveController(
-      financialController,
+    resolveControllerOperation(
+      financialControllerModule,
       [
         "controllerInfo",
         "info"
@@ -421,20 +490,58 @@ const controllerInfo =
   );
 
 /* =========================================================
+   ROUTE CALLBACK VALIDATION
+========================================================= */
+
+/**
+ * Every callback passed to Express is already wrapped by
+ * controllerHandler(), which always returns a function.
+ *
+ * Therefore Express will never receive null/object as the
+ * controller callback.
+ */
+const routeCallbacks = {
+  controllerInfo,
+  assessment,
+  status,
+  costs,
+  usage,
+  forecast,
+  emergency,
+  paymentApproval,
+  prepareAlerts,
+  execute
+};
+
+for (
+  const [
+    name,
+    callback
+  ] of Object.entries(
+    routeCallbacks
+  )
+) {
+  if (
+    !isFunction(callback)
+  ) {
+    const error =
+      new Error(
+        `FINANCIAL_ROUTE_CALLBACK_INVALID: ${name} is not a function.`
+      );
+
+    error.code =
+      "FINANCIAL_ROUTE_CALLBACK_INVALID";
+
+    throw error;
+  }
+}
+
+/* =========================================================
    CONTROLLER INFO
 ========================================================= */
 
 /**
  * GET /api/financial
- *
- * Reports the financial-control capability.
- *
- * It does NOT claim:
- * - AWS is healthy
- * - OpenAI is healthy
- * - Stripe is healthy
- * - Razorpay is healthy
- * - WhatsApp is healthy
  */
 router.get(
   "/",
@@ -569,16 +676,16 @@ router.post(
 /**
  * POST /api/financial/payment-approval
  *
- * Approval request ONLY.
+ * This is ONLY an approval request.
  *
- * Does NOT:
- * - charge cards
- * - execute Stripe payments
- * - execute Razorpay payments
+ * It does NOT:
+ * - charge a card
+ * - execute Stripe payment
+ * - execute Razorpay payment
  * - accept CVV
  * - accept OTP
- * - accept card numbers
- * - accept banking passwords
+ * - accept card number
+ * - accept banking password
  */
 router.post(
   "/payment-approval",
@@ -609,9 +716,9 @@ router.post(
 /**
  * POST /api/financial/alerts/prepare
  *
- * Prepares safe owner-alert payloads.
+ * Creates safe alert payloads.
  *
- * Does NOT directly send WhatsApp messages.
+ * It does NOT directly send WhatsApp messages.
  */
 router.post(
   "/alerts/prepare",
@@ -620,13 +727,11 @@ router.post(
 );
 
 /* =========================================================
-   GENERIC EXECUTION
+   GENERIC CONTROL EXECUTION
 ========================================================= */
 
 /**
  * POST /api/financial/execute
- *
- * Generic financial-control operation endpoint.
  *
  * Actual operation validation remains inside the controller
  * and financial control service.
@@ -668,12 +773,12 @@ router.post(
 ========================================================= */
 
 router.use(
-  (
+  function financialRouteErrorHandler(
     error,
     req,
     res,
     next
-  ) => {
+  ) {
     if (
       res.headersSent
     ) {
