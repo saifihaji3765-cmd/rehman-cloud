@@ -4,19 +4,34 @@
  * ZyrionOS Financial Data Service
  *
  * Purpose:
- * - Common service layer between financial agents and provider adapters.
- * - Normalize real provider observations.
- * - Preserve source, provider, timestamp, period and status.
- * - Prepare data for Cost Monitor, Usage Monitor and Forecast agents.
+ * - Common normalization layer between Financial Control
+ *   agents and the real provider service.
+ * - Consume provider data through financialProviderService.
+ * - Normalize real cost/usage observations.
+ * - Preserve provider, source, timestamps, period and status.
+ * - Prevent fake/demo financial values.
+ * - Prevent aggregation across incompatible currencies/units.
+ *
+ * Architecture:
+ *
+ * Financial Agents
+ *        ↓
+ * financialDataService
+ *        ↓
+ * financialProviderService
+ *        ↓
+ * Provider Adapters
+ *        ↓
+ * OpenAI / AWS / Stripe / Razorpay / WhatsApp
  *
  * IMPORTANT:
- * This service does NOT call external providers by itself.
- * Provider-specific adapters must be registered through providerRegistry.
- *
- * No fake/demo financial values are generated.
+ * - This service does NOT contain provider credentials.
+ * - This service does NOT generate financial values.
+ * - Missing provider data remains unavailable/null.
+ * - Provider-specific API calls belong to provider adapters.
  */
 
-const providerRegistry = require("../../agents/financial/providerRegistry");
+const financialProviderService = require("./financialProviderService");
 
 const DATA_STATUS = Object.freeze({
   VERIFIED: "verified",
@@ -31,6 +46,9 @@ const VALUE_TYPE = Object.freeze({
   USAGE: "usage",
 });
 
+const MAX_PROVIDERS = 20;
+const MAX_OBSERVATIONS = 5000;
+
 function isObject(value) {
   return (
     value !== null &&
@@ -39,10 +57,7 @@ function isObject(value) {
   );
 }
 
-function normalizeString(
-  value,
-  maxLength = 500
-) {
+function normalizeString(value, maxLength = 500) {
   if (typeof value !== "string") {
     return null;
   }
@@ -57,12 +72,23 @@ function normalizeString(
 }
 
 function normalizeProvider(provider) {
-  const value =
-    normalizeString(provider, 100);
+  const value = normalizeString(provider, 100);
 
-  return value
-    ? value.toLowerCase()
-    : null;
+  return value ? value.toLowerCase() : null;
+}
+
+function normalizeProviderList(providers) {
+  if (!Array.isArray(providers)) {
+    return [];
+  }
+
+  return [
+    ...new Set(
+      providers
+        .map(normalizeProvider)
+        .filter(Boolean)
+    ),
+  ].slice(0, MAX_PROVIDERS);
 }
 
 function normalizeDate(value) {
@@ -80,34 +106,144 @@ function normalizeDate(value) {
 }
 
 function normalizeNumber(value) {
-  const number = Number(value);
-
-  return Number.isFinite(number)
-    ? number
-    : null;
-}
-
-function normalizeStatus(status) {
-  const value =
-    normalizeString(status, 50)
-      ?.toLowerCase();
-
-  if (!value) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
     return null;
   }
 
-  return value;
+  const number = Number(value);
+
+  return Number.isFinite(number) ? number : null;
+}
+
+function normalizeStatus(status) {
+  const value = normalizeString(status, 50);
+
+  return value ? value.toLowerCase() : null;
 }
 
 function normalizeCurrency(currency) {
-  const value =
-    normalizeString(currency, 10);
+  const value = normalizeString(currency, 10);
 
-  return value
-    ? value.toUpperCase()
-    : null;
+  return value ? value.toUpperCase() : null;
 }
 
+function sanitizeProviderData(data, depth = 0) {
+  if (!isObject(data)) {
+    return null;
+  }
+
+  if (depth > 3) {
+    return null;
+  }
+
+  const blockedKeys = new Set([
+    "apikey",
+    "api_key",
+    "authorization",
+    "auth",
+    "token",
+    "accesstoken",
+    "access_token",
+    "refresh_token",
+    "refreshtoken",
+    "secret",
+    "secretkey",
+    "secret_key",
+    "privatekey",
+    "private_key",
+    "password",
+    "passwd",
+    "credential",
+    "credentials",
+    "clientsecret",
+    "client_secret",
+    "cvv",
+    "cvc",
+    "otp",
+    "pin",
+    "cardnumber",
+    "card_number",
+    "accountnumber",
+    "account_number",
+  ]);
+
+  const result = {};
+
+  for (const [key, value] of Object.entries(data)) {
+    const normalizedKey = String(key)
+      .toLowerCase()
+      .replace(/[\s-]/g, "");
+
+    if (blockedKeys.has(normalizedKey)) {
+      continue;
+    }
+
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean" ||
+      value === null
+    ) {
+      result[key] =
+        typeof value === "string"
+          ? value.slice(0, 1000)
+          : value;
+
+      continue;
+    }
+
+    if (Array.isArray(value)) {
+      result[key] = value
+        .slice(0, 50)
+        .map((item) => {
+          if (
+            typeof item === "string" ||
+            typeof item === "number" ||
+            typeof item === "boolean" ||
+            item === null
+          ) {
+            return item;
+          }
+
+          if (isObject(item)) {
+            return sanitizeProviderData(
+              item,
+              depth + 1
+            );
+          }
+
+          return null;
+        })
+        .filter(
+          (item) => item !== null
+        );
+
+      continue;
+    }
+
+    if (isObject(value)) {
+      const nested =
+        sanitizeProviderData(
+          value,
+          depth + 1
+        );
+
+      if (nested) {
+        result[key] = nested;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Normalize a single provider observation.
+ */
 function normalizeObservation(
   observation,
   valueType,
@@ -117,44 +253,45 @@ function normalizeObservation(
     return null;
   }
 
-  const provider =
-    normalizeProvider(
-      observation.provider ||
-        providerFallback
-    );
+  const provider = normalizeProvider(
+    observation.provider ||
+      providerFallback
+  );
 
-  const value =
-    normalizeNumber(
-      observation.value ??
-        observation.amount ??
-        observation.cost ??
-        observation.usage ??
-        observation.total
-    );
+  const value = normalizeNumber(
+    observation.value ??
+      observation.amount ??
+      observation.cost ??
+      observation.usage ??
+      observation.total
+  );
 
-  const timestamp =
+  const timestamp = normalizeDate(
+    observation.timestamp ??
+      observation.observedAt ??
+      observation.retrievedAt ??
+      observation.date ??
+      observation.periodEnd
+  );
+
+  const retrievedAt =
     normalizeDate(
-      observation.timestamp ??
-        observation.retrievedAt ??
-        observation.date ??
-        observation.periodEnd
-    );
+      observation.retrievedAt
+    ) || timestamp;
 
   const status =
     normalizeStatus(
       observation.status
     );
 
-  const source =
-    normalizeString(
-      observation.source,
-      500
-    );
+  const source = normalizeString(
+    observation.source,
+    500
+  );
 
   /*
-   * A financial observation without a provider,
-   * numeric value, timestamp or source cannot be
-   * considered trustworthy.
+   * Financial observations must have:
+   * provider + numeric value + timestamp + source.
    */
   if (
     !provider ||
@@ -167,64 +304,72 @@ function normalizeObservation(
   }
 
   /*
-   * Only provider-confirmed/available data is accepted
-   * as a verified observation.
+   * Only provider-confirmed states are accepted.
    */
   if (
-    status !==
-      DATA_STATUS.VERIFIED &&
-    status !==
-      DATA_STATUS.AVAILABLE
+    status !== DATA_STATUS.VERIFIED &&
+    status !== DATA_STATUS.AVAILABLE
   ) {
     return null;
   }
 
   const normalized = {
     provider,
-    value,
     valueType,
+    value,
     status,
     source,
-    retrievedAt:
-      normalizeDate(
-        observation.retrievedAt
-      ) || timestamp,
-
     timestamp,
-
+    observedAt:
+      normalizeDate(
+        observation.observedAt
+      ) || timestamp,
+    retrievedAt,
     period:
       normalizeString(
         observation.period,
         200
       ),
-
     accountId:
       normalizeString(
         observation.accountId,
         300
       ),
-
     projectId:
       normalizeString(
         observation.projectId,
         300
       ),
+    service:
+      normalizeString(
+        observation.service,
+        300
+      ),
+    resource:
+      normalizeString(
+        observation.resource,
+        500
+      ),
+    region:
+      normalizeString(
+        observation.region,
+        200
+      ),
+    confidence:
+      normalizeString(
+        observation.confidence,
+        50
+      ),
   };
 
-  if (
-    valueType ===
-    VALUE_TYPE.COST
-  ) {
+  if (valueType === VALUE_TYPE.COST) {
     normalized.currency =
       normalizeCurrency(
         observation.currency
       );
   }
 
-  if (
-    valueType ===
-    VALUE_TYPE.USAGE
-  ) {
+  if (valueType === VALUE_TYPE.USAGE) {
     normalized.unit =
       normalizeString(
         observation.unit,
@@ -238,10 +383,6 @@ function normalizeObservation(
       );
   }
 
-  /*
-   * Preserve provider-specific information without
-   * copying credentials/secrets.
-   */
   if (
     isObject(
       observation.providerData
@@ -252,288 +393,290 @@ function normalizeObservation(
         observation.providerData
       );
   } else {
-    normalized.providerData =
-      null;
+    normalized.providerData = null;
+  }
+
+  if (
+    isObject(
+      observation.metadata
+    )
+  ) {
+    normalized.metadata =
+      sanitizeProviderData(
+        observation.metadata
+      );
+  } else {
+    normalized.metadata = null;
   }
 
   return normalized;
 }
 
-function sanitizeProviderData(
-  data
-) {
-  if (!isObject(data)) {
-    return null;
-  }
-
-  const result = {};
-
-  const blockedKeys = new Set([
-    "apikey",
-    "api_key",
-    "authorization",
-    "token",
-    "accesstoken",
-    "access_token",
-    "secret",
-    "secretkey",
-    "secret_key",
-    "privatekey",
-    "private_key",
-    "password",
-    "passwd",
-    "cvv",
-    "cvc",
-    "otp",
-    "pin",
-  ]);
-
-  for (
-    const [
-      key,
-      value,
-    ] of Object.entries(data)
-  ) {
-    const normalizedKey =
-      String(key)
-        .toLowerCase()
-        .replace(/[\s-]/g, "");
-
-    if (
-      blockedKeys.has(
-        normalizedKey
-      )
-    ) {
-      continue;
-    }
-
-    if (
-      typeof value ===
-        "string" ||
-      typeof value ===
-        "number" ||
-      typeof value ===
-        "boolean" ||
-      value === null
-    ) {
-      result[key] =
-        typeof value ===
-        "string"
-          ? value.slice(0, 1000)
-          : value;
-    }
-  }
-
-  return result;
-}
-
-function normalizeProviderList(
-  providers
-) {
-  if (!Array.isArray(providers)) {
+/**
+ * Extract observations from a provider-service result.
+ *
+ * Supports:
+ * {
+ *   observations: [...]
+ * }
+ *
+ * and:
+ * {
+ *   data: {
+ *     observations: [...]
+ *   }
+ * }
+ *
+ * and:
+ * {
+ *   data: [...]
+ * }
+ */
+function extractRawObservations(result) {
+  if (!isObject(result)) {
     return [];
   }
 
-  return [
-    ...new Set(
-      providers
-        .map(
-          normalizeProvider
-        )
-        .filter(Boolean)
-    ),
-  ];
+  if (
+    Array.isArray(
+      result.observations
+    )
+  ) {
+    return result.observations;
+  }
+
+  if (
+    isObject(result.data) &&
+    Array.isArray(
+      result.data.observations
+    )
+  ) {
+    return result.data.observations;
+  }
+
+  if (
+    Array.isArray(result.data)
+  ) {
+    return result.data;
+  }
+
+  return [];
 }
 
+/**
+ * Normalize result returned by financialProviderService.
+ */
+function normalizeProviderResult(
+  provider,
+  result,
+  valueType
+) {
+  const normalizedProvider =
+    normalizeProvider(provider);
+
+  if (!normalizedProvider) {
+    return {
+      provider: null,
+      status: DATA_STATUS.ERROR,
+      observations: [],
+      providerData: null,
+      error: "Provider name is required.",
+    };
+  }
+
+  if (!isObject(result)) {
+    return {
+      provider: normalizedProvider,
+      status: DATA_STATUS.UNAVAILABLE,
+      observations: [],
+      providerData: null,
+      error:
+        "Provider returned no usable financial data.",
+    };
+  }
+
+  const resultStatus =
+    normalizeStatus(
+      result.status
+    ) ||
+    DATA_STATUS.UNAVAILABLE;
+
+  const rawObservations =
+    extractRawObservations(result);
+
+  const observations =
+    rawObservations
+      .slice(0, MAX_OBSERVATIONS)
+      .map((observation) =>
+        normalizeObservation(
+          observation,
+          valueType,
+          normalizedProvider
+        )
+      )
+      .filter(Boolean);
+
+  const providerData =
+    sanitizeProviderData(
+      result.providerData ||
+        result.data?.providerData
+    );
+
+  const error =
+    normalizeString(
+      result.error ||
+        result.message ||
+        result.data?.error,
+      1000
+    );
+
+  /*
+   * A provider may be healthy/configured but return
+   * no financial observations. Do NOT turn that into
+   * fake zero values.
+   */
+  if (!observations.length) {
+    return {
+      provider: normalizedProvider,
+      status:
+        resultStatus ===
+        DATA_STATUS.ERROR
+          ? DATA_STATUS.ERROR
+          : resultStatus ===
+            DATA_STATUS.NOT_CONFIGURED
+          ? DATA_STATUS.NOT_CONFIGURED
+          : DATA_STATUS.UNAVAILABLE,
+      observations: [],
+      providerData,
+      retrievedAt:
+        normalizeDate(
+          result.retrievedAt ||
+            result.data?.retrievedAt
+        ),
+      error,
+    };
+  }
+
+  return {
+    provider: normalizedProvider,
+    status:
+      resultStatus ===
+      DATA_STATUS.ERROR
+        ? DATA_STATUS.ERROR
+        : resultStatus,
+    observations,
+    providerData,
+    retrievedAt:
+      normalizeDate(
+        result.retrievedAt ||
+          result.data?.retrievedAt
+      ),
+    error,
+  };
+}
+
+/**
+ * Call the new financialProviderService.
+ *
+ * Provider adapters remain the only layer that
+ * communicates with external providers.
+ */
 async function fetchProviderData(
   provider,
   input,
   valueType
 ) {
   const normalizedProvider =
-    normalizeProvider(
-      provider
-    );
+    normalizeProvider(provider);
 
   if (!normalizedProvider) {
     return {
       provider: null,
-      status:
-        DATA_STATUS.ERROR,
+      status: DATA_STATUS.ERROR,
       observations: [],
       error:
         "Provider name is required.",
     };
   }
 
-  let registeredProvider;
+  const payload = {
+    ...input,
+    provider:
+      normalizedProvider,
+    providers: [
+      normalizedProvider,
+    ],
+    valueType,
+  };
 
   try {
-    registeredProvider =
-      providerRegistry.getProvider(
-        normalizedProvider
-      );
-  } catch (error) {
-    return {
-      provider:
-        normalizedProvider,
-      status:
-        DATA_STATUS.ERROR,
-      observations: [],
-      error:
-        error.message,
-    };
-  }
+    let result;
 
-  if (!registeredProvider) {
-    return {
-      provider:
-        normalizedProvider,
-      status:
-        DATA_STATUS.NOT_CONFIGURED,
-      observations: [],
-      error:
-        "Provider adapter is not registered.",
-    };
-  }
+    if (
+      valueType ===
+      VALUE_TYPE.COST
+    ) {
+      result =
+        await financialProviderService.getCosts(
+          payload
+        );
+    } else {
+      result =
+        await financialProviderService.getUsage(
+          payload
+        );
+    }
 
-  /*
-   * providerRegistry#getProvider may expose an adapter,
-   * health state or provider object depending on the
-   * registered implementation.
-   */
-  const adapter =
-    registeredProvider.adapter ||
-    registeredProvider;
-
-  if (!isObject(adapter)) {
-    return {
-      provider:
-        normalizedProvider,
-      status:
-        DATA_STATUS.NOT_CONFIGURED,
-      observations: [],
-      error:
-        "Provider adapter is unavailable.",
-    };
-  }
-
-  const methodName =
-    valueType ===
-    VALUE_TYPE.COST
-      ? "getCosts"
-      : "getUsage";
-
-  const method =
-    typeof adapter[
-      methodName
-    ] === "function"
-      ? adapter[
-          methodName
-        ]
-      : null;
-
-  if (!method) {
-    return {
-      provider:
-        normalizedProvider,
-      status:
-        DATA_STATUS.NOT_CONFIGURED,
-      observations: [],
-      error:
-        `Provider adapter does not implement ${methodName}.`,
-    };
-  }
-
-  try {
-    const result =
-      await method.call(
-        adapter,
-        input
-      );
-
-    if (!isObject(result)) {
-      return {
-        provider:
-          normalizedProvider,
+    /*
+     * Some provider-service implementations may
+     * return an array directly. Normalize it safely.
+     */
+    if (Array.isArray(result)) {
+      result = {
         status:
-          DATA_STATUS.UNAVAILABLE,
-        observations: [],
-        error:
-          "Provider returned no usable financial data.",
+          DATA_STATUS.AVAILABLE,
+        observations: result,
       };
     }
 
-    const resultStatus =
-      normalizeStatus(
-        result.status
-      ) ||
-      DATA_STATUS.AVAILABLE;
-
-    const rawObservations =
-      Array.isArray(
-        result.observations
-      )
-        ? result.observations
-        : Array.isArray(
-            result.data
-          )
-        ? result.data
-        : [];
-
-    const observations =
-      rawObservations
-        .map(
-          (observation) =>
-            normalizeObservation(
-              observation,
-              valueType,
-              normalizedProvider
-            )
-        )
-        .filter(Boolean);
-
-    if (!observations.length) {
+    /*
+     * If the provider service returns:
+     * { success:false, ... }
+     */
+    if (
+      isObject(result) &&
+      result.success === false
+    ) {
       return {
         provider:
           normalizedProvider,
         status:
-          resultStatus ===
-          DATA_STATUS.ERROR
-            ? DATA_STATUS.ERROR
-            : DATA_STATUS.UNAVAILABLE,
+          normalizeStatus(
+            result.status
+          ) ||
+          DATA_STATUS.ERROR,
         observations: [],
+        providerData:
+          sanitizeProviderData(
+            result.providerData
+          ),
         error:
           normalizeString(
             result.message ||
               result.error,
             1000
           ),
-        providerData:
-          sanitizeProviderData(
-            result.providerData
-          ),
       };
     }
 
-    return {
-      provider:
-        normalizedProvider,
-      status:
-        resultStatus,
-      observations,
-      providerData:
-        sanitizeProviderData(
-          result.providerData
-        ),
-      retrievedAt:
-        normalizeDate(
-          result.retrievedAt
-        ),
-    };
+    return normalizeProviderResult(
+      normalizedProvider,
+      result,
+      valueType
+    );
   } catch (error) {
     console.error(
-      `[FinancialDataService] ${normalizedProvider} ${methodName} error:`,
+      `[FinancialDataService] ${normalizedProvider} ${valueType} error:`,
       error.message
     );
 
@@ -543,10 +686,11 @@ async function fetchProviderData(
       status:
         DATA_STATUS.ERROR,
       observations: [],
+      providerData: null,
       error:
         process.env.NODE_ENV ===
         "production"
-          ? "Provider data request failed."
+          ? "Provider financial data request failed."
           : error.message,
     };
   }
@@ -555,9 +699,7 @@ async function fetchProviderData(
 function sortObservations(
   observations
 ) {
-  return [
-    ...observations,
-  ].sort(
+  return [...observations].sort(
     (a, b) =>
       new Date(
         a.timestamp
@@ -568,33 +710,49 @@ function sortObservations(
   );
 }
 
+function observationFingerprint(
+  observation
+) {
+  return [
+    observation.provider || "",
+    observation.valueType || "",
+    observation.timestamp || "",
+    observation.observedAt || "",
+    observation.retrievedAt || "",
+    observation.source || "",
+    observation.value ?? "",
+    observation.currency || "",
+    observation.unit || "",
+    observation.model || "",
+    observation.accountId || "",
+    observation.projectId || "",
+    observation.service || "",
+    observation.resource || "",
+    observation.region || "",
+  ].join("|");
+}
+
 function deduplicateObservations(
   observations
 ) {
-  const map =
-    new Map();
+  const map = new Map();
 
-  for (
-    const observation of observations
-  ) {
-    const key = [
-      observation.provider,
-      observation.valueType,
-      observation.timestamp,
-      observation.source,
-      observation.value,
-      observation.currency ||
-        "",
-      observation.unit ||
-        "",
-      observation.model ||
-        "",
-    ].join("|");
+  for (const observation of observations) {
+    if (!isObject(observation)) {
+      continue;
+    }
 
-    map.set(
-      key,
-      observation
-    );
+    const key =
+      observationFingerprint(
+        observation
+      );
+
+    if (!map.has(key)) {
+      map.set(
+        key,
+        observation
+      );
+    }
   }
 
   return Array.from(
@@ -606,24 +764,27 @@ function filterObservations(
   observations,
   input = {}
 ) {
-  let result =
-    observations;
+  if (!Array.isArray(observations)) {
+    return [];
+  }
+
+  let result = observations;
 
   const start =
     normalizeDate(
-      input.startDate
+      input.startDate ||
+        input.start
     );
 
   const end =
     normalizeDate(
-      input.endDate
+      input.endDate ||
+        input.end
     );
 
   if (start) {
     const startTime =
-      new Date(
-        start
-      ).getTime();
+      new Date(start).getTime();
 
     result =
       result.filter(
@@ -637,9 +798,7 @@ function filterObservations(
 
   if (end) {
     const endTime =
-      new Date(
-        end
-      ).getTime();
+      new Date(end).getTime();
 
     result =
       result.filter(
@@ -651,64 +810,83 @@ function filterObservations(
       );
   }
 
-  if (
-    input.accountId
-  ) {
-    const accountId =
-      normalizeString(
-        input.accountId,
-        300
-      );
+  const accountId =
+    normalizeString(
+      input.accountId,
+      300
+    );
 
-    if (accountId) {
-      result =
-        result.filter(
-          (observation) =>
-            !observation.accountId ||
-            observation.accountId ===
-              accountId
-        );
-    }
+  if (accountId) {
+    result =
+      result.filter(
+        (observation) =>
+          !observation.accountId ||
+          observation.accountId ===
+            accountId
+      );
   }
 
-  if (
-    input.projectId
-  ) {
-    const projectId =
-      normalizeString(
-        input.projectId,
-        300
-      );
+  const projectId =
+    normalizeString(
+      input.projectId,
+      300
+    );
 
-    if (projectId) {
-      result =
-        result.filter(
-          (observation) =>
-            !observation.projectId ||
-            observation.projectId ===
-              projectId
-        );
-    }
+  if (projectId) {
+    result =
+      result.filter(
+        (observation) =>
+          !observation.projectId ||
+          observation.projectId ===
+            projectId
+      );
   }
 
-  if (
-    input.model
-  ) {
-    const model =
-      normalizeString(
-        input.model,
-        200
-      );
+  const model =
+    normalizeString(
+      input.model,
+      200
+    );
 
-    if (model) {
-      result =
-        result.filter(
-          (observation) =>
-            !observation.model ||
-            observation.model ===
-              model
-        );
-    }
+  if (model) {
+    result =
+      result.filter(
+        (observation) =>
+          !observation.model ||
+          observation.model === model
+      );
+  }
+
+  const service =
+    normalizeString(
+      input.service,
+      300
+    );
+
+  if (service) {
+    result =
+      result.filter(
+        (observation) =>
+          !observation.service ||
+          observation.service ===
+            service
+      );
+  }
+
+  const region =
+    normalizeString(
+      input.region,
+      200
+    );
+
+  if (region) {
+    result =
+      result.filter(
+        (observation) =>
+          !observation.region ||
+          observation.region ===
+            region
+      );
   }
 
   return result;
@@ -728,9 +906,7 @@ function validateCurrencyConsistency(
     ),
   ];
 
-  if (
-    currencies.length === 0
-  ) {
+  if (!currencies.length) {
     return {
       consistent: false,
       currency: null,
@@ -739,9 +915,7 @@ function validateCurrencyConsistency(
     };
   }
 
-  if (
-    currencies.length > 1
-  ) {
+  if (currencies.length > 1) {
     return {
       consistent: false,
       currency: null,
@@ -752,8 +926,7 @@ function validateCurrencyConsistency(
 
   return {
     consistent: true,
-    currency:
-      currencies[0],
+    currency: currencies[0],
     reason: null,
   };
 }
@@ -772,9 +945,7 @@ function validateUnitConsistency(
     ),
   ];
 
-  if (
-    units.length === 0
-  ) {
+  if (!units.length) {
     return {
       consistent: false,
       unit: null,
@@ -783,9 +954,7 @@ function validateUnitConsistency(
     };
   }
 
-  if (
-    units.length > 1
-  ) {
+  if (units.length > 1) {
     return {
       consistent: false,
       unit: null,
@@ -833,16 +1002,28 @@ function aggregateObservations(
       validateCurrencyConsistency(
         observations
       );
-  } else {
+  } else if (
+    valueType ===
+    VALUE_TYPE.USAGE
+  ) {
     consistency =
       validateUnitConsistency(
         observations
       );
+  } else {
+    return {
+      status:
+        DATA_STATUS.ERROR,
+      observations: [],
+      total: null,
+      currency: null,
+      unit: null,
+      reason:
+        "Unsupported financial value type.",
+    };
   }
 
-  if (
-    !consistency.consistent
-  ) {
+  if (!consistency.consistent) {
     return {
       status:
         DATA_STATUS.UNAVAILABLE,
@@ -866,21 +1047,20 @@ function aggregateObservations(
   const total =
     observations.reduce(
       (sum, observation) =>
-        sum +
-        observation.value,
+        sum + observation.value,
       0
     );
 
   if (
-    !Number.isFinite(
-      total
-    )
+    !Number.isFinite(total)
   ) {
     return {
       status:
         DATA_STATUS.ERROR,
       observations: [],
       total: null,
+      currency: null,
+      unit: null,
       reason:
         "Aggregated financial value is not finite.",
     };
@@ -913,6 +1093,9 @@ function aggregateObservations(
   };
 }
 
+/**
+ * Get financial data from requested providers.
+ */
 async function getFinancialData(
   input = {}
 ) {
@@ -951,26 +1134,40 @@ async function getFinancialData(
         observations: [],
         providerResults: [],
         aggregate: null,
+        quality: {
+          requestedProviderCount: 0,
+          availableProviderCount: 0,
+          errorProviderCount: 0,
+          verifiedObservationCount: 0,
+          generatedAt:
+            new Date().toISOString(),
+        },
       },
     };
   }
 
   const providerResults = [];
 
-  for (
-    const provider of providers
-  ) {
-    const result =
-      await fetchProviderData(
-        provider,
-        input,
-        valueType
-      );
-
-    providerResults.push(
-      result
+  /*
+   * Provider requests are isolated.
+   * One provider failure must not erase
+   * valid data from another provider.
+   */
+  const results =
+    await Promise.all(
+      providers.map(
+        (provider) =>
+          fetchProviderData(
+            provider,
+            input,
+            valueType
+          )
+      )
     );
-  }
+
+  providerResults.push(
+    ...results
+  );
 
   const allObservations =
     providerResults.flatMap(
@@ -1007,7 +1204,11 @@ async function getFinancialData(
   const availableProviderCount =
     providerResults.filter(
       (result) =>
-        result.observations?.length
+        Array.isArray(
+          result.observations
+        ) &&
+        result.observations.length >
+          0
     ).length;
 
   const errorProviderCount =
@@ -1015,6 +1216,15 @@ async function getFinancialData(
       (result) =>
         result.status ===
         DATA_STATUS.ERROR
+    ).length;
+
+  const unavailableProviderCount =
+    providerResults.filter(
+      (result) =>
+        result.status ===
+          DATA_STATUS.UNAVAILABLE ||
+        result.status ===
+          DATA_STATUS.NOT_CONFIGURED
     ).length;
 
   let overallStatus =
@@ -1029,7 +1239,8 @@ async function getFinancialData(
       DATA_STATUS.VERIFIED;
   } else if (
     errorProviderCount ===
-    providerResults.length
+      providers.length &&
+    providers.length > 0
   ) {
     overallStatus =
       DATA_STATUS.ERROR;
@@ -1064,6 +1275,8 @@ async function getFinancialData(
           providers.length,
 
         availableProviderCount,
+
+        unavailableProviderCount,
 
         errorProviderCount,
 
@@ -1115,14 +1328,21 @@ module.exports = {
   getCosts,
   getUsage,
 
+  fetchProviderData,
+  normalizeProviderResult,
+
   normalizeObservation,
   normalizeProviderList,
   sanitizeProviderData,
 
   filterObservations,
   aggregateObservations,
+
   validateCurrencyConsistency,
   validateUnitConsistency,
+
+  deduplicateObservations,
+  sortObservations,
 
   buildObservation,
 };
