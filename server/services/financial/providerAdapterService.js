@@ -1,16 +1,41 @@
 "use strict";
 
-const providerRegistry = require("../../agents/financial/providerRegistry");
+/*
+ * Central financial provider adapter service.
+ *
+ * Responsibilities:
+ * - Resolve registered real provider adapters
+ * - Execute provider operations safely
+ * - Normalize provider responses
+ * - Never invent provider data
+ * - Never expose credentials
+ * - Require real message IDs for confirmed delivery
+ *
+ * This service does NOT:
+ * - create fake costs
+ * - create fake usage
+ * - create fake health
+ * - process payments itself
+ * - expose API keys/secrets
+ */
+
+const providerRegistry = require(
+  "../../agents/financial/providerRegistry"
+);
+
+const providerAdapters = require(
+  "./providers"
+);
 
 const MAX_RESULT_ITEMS = 500;
 
-const SUPPORTED_PROVIDERS = [
+const SUPPORTED_PROVIDERS = Object.freeze([
   "openai",
   "aws",
   "whatsapp",
   "stripe",
-  "razorpay"
-];
+  "razorpay",
+]);
 
 function isObject(value) {
   return (
@@ -21,25 +46,35 @@ function isObject(value) {
 }
 
 function normalizeProvider(provider) {
-  if (!provider) {
+  if (
+    provider === undefined ||
+    provider === null
+  ) {
     return null;
   }
 
-  return String(provider)
+  const normalized = String(provider)
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, "");
+
+  return normalized || null;
 }
 
 function normalizeOperation(operation) {
-  if (!operation) {
+  if (
+    operation === undefined ||
+    operation === null
+  ) {
     return null;
   }
 
-  return String(operation)
+  const normalized = String(operation)
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, "");
+
+  return normalized || null;
 }
 
 function safeString(value, max = 1000) {
@@ -61,6 +96,67 @@ function safeString(value, max = 1000) {
   return null;
 }
 
+function safeError(error) {
+  if (!error) {
+    return null;
+  }
+
+  return {
+    code:
+      safeString(
+        error.code ||
+          error.name,
+        200
+      ) ||
+      "PROVIDER_OPERATION_FAILED",
+
+    message:
+      safeString(
+        error.message,
+        1000
+      ) ||
+      "Provider operation failed.",
+  };
+}
+
+/**
+ * Resolve adapter from the new central provider
+ * adapter collection.
+ */
+function getDirectProviderAdapter(
+  provider
+) {
+  const normalized =
+    normalizeProvider(provider);
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (
+    !providerAdapters ||
+    typeof providerAdapters.getProvider !==
+      "function"
+  ) {
+    return null;
+  }
+
+  try {
+    return providerAdapters.getProvider(
+      normalized
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Backward-compatible registry lookup.
+ *
+ * This allows older registered adapters to keep
+ * working while the new real provider adapter
+ * collection becomes the primary source.
+ */
 function getRegistryEntry(provider) {
   const normalized =
     normalizeProvider(provider);
@@ -78,7 +174,7 @@ function getRegistryEntry(provider) {
         normalized
       );
     } catch {
-      return null;
+      // Continue to fallback lookup.
     }
   }
 
@@ -98,7 +194,9 @@ function getRegistryEntry(provider) {
   return null;
 }
 
-function getAdapter(entry) {
+function getAdapterFromRegistryEntry(
+  entry
+) {
   if (!entry) {
     return null;
   }
@@ -109,171 +207,27 @@ function getAdapter(entry) {
     return entry.adapter;
   }
 
-  return entry;
-}
-
-function normalizeAdapterResult(
-  provider,
-  operation,
-  result
-) {
-  const normalizedProvider =
-    normalizeProvider(provider);
-
-  if (!isObject(result)) {
-    return {
-      success: true,
-      status: "available",
-      provider: normalizedProvider,
-      operation,
-      data: result,
-      source:
-        `provider:${normalizedProvider}`,
-      retrievedAt:
-        new Date().toISOString()
-    };
+  /*
+   * Some registries may directly store the
+   * adapter object.
+   */
+  if (
+    typeof entry === "object"
+  ) {
+    return entry;
   }
 
-  const data =
-    isObject(result.data)
-      ? result.data
-      : result;
-
-  return {
-    success:
-      typeof result.success ===
-      "boolean"
-        ? result.success
-        : true,
-
-    status:
-      safeString(
-        result.status ||
-        data.status,
-        100
-      ) || "available",
-
-    provider:
-      normalizedProvider,
-
-    operation,
-
-    data,
-
-    source:
-      safeString(
-        result.source ||
-        data.source,
-        500
-      ) ||
-      `provider:${normalizedProvider}`,
-
-    retrievedAt:
-      safeString(
-        result.retrievedAt ||
-        data.retrievedAt,
-        100
-      ) ||
-      new Date().toISOString(),
-
-    message:
-      safeString(
-        result.message ||
-        data.message,
-        1000
-      ),
-
-    errorCode:
-      safeString(
-        result.errorCode ||
-        data.errorCode,
-        200
-      )
-  };
-}
-
-function findMethod(
-  adapter,
-  operation
-) {
-  if (!adapter) {
-    return null;
-  }
-
-  const aliases = {
-    health: [
-      "health",
-      "healthCheck",
-      "checkHealth"
-    ],
-
-    usage: [
-      "usage",
-      "getUsage",
-      "fetchUsage",
-      "usageData"
-    ],
-
-    costs: [
-      "costs",
-      "getCosts",
-      "fetchCosts",
-      "costData"
-    ],
-
-    forecast: [
-      "forecast",
-      "getForecast",
-      "fetchForecast"
-    ],
-
-    budget: [
-      "budget",
-      "getBudget",
-      "fetchBudget"
-    ],
-
-    payment: [
-      "payment",
-      "createPayment",
-      "processPayment"
-    ],
-
-    paymentStatus: [
-      "paymentStatus",
-      "getPaymentStatus",
-      "fetchPaymentStatus"
-    ],
-
-    sendMessage: [
-      "sendMessage",
-      "sendWhatsAppMessage",
-      "send"
-    ],
-
-    verifyWebhook: [
-      "verifyWebhook",
-      "verifySignature",
-      "verify"
-    ]
-  };
-
-  const candidates =
-    aliases[operation] || [
-      operation
-    ];
-
-  return candidates.find(
-    (method) =>
-      typeof adapter[method] ===
-      "function"
-  ) || null;
+  return null;
 }
 
 /**
- * Return a provider adapter without exposing credentials.
+ * Primary adapter resolution:
+ *
+ * 1. New real provider adapter
+ * 2. Existing registry adapter for backward
+ *    compatibility
  */
-function getProviderAdapter(provider) {
+function resolveAdapter(provider) {
   const normalized =
     normalizeProvider(provider);
 
@@ -281,13 +235,15 @@ function getProviderAdapter(provider) {
     return {
       success: false,
       status: "invalid",
+      provider: null,
       adapter: null,
+      source: null,
       error: {
         code:
           "PROVIDER_REQUIRED",
         message:
-          "Provider is required."
-      }
+          "Provider is required.",
+      },
     };
   }
 
@@ -301,64 +257,327 @@ function getProviderAdapter(provider) {
       status: "unsupported",
       provider: normalized,
       adapter: null,
+      source: null,
       error: {
         code:
           "UNSUPPORTED_PROVIDER",
         message:
-          `Unsupported financial provider: ${normalized}`
-      }
+          `Unsupported financial provider: ${normalized}`,
+      },
     };
   }
 
-  const entry =
+  /*
+   * New real adapter collection.
+   */
+  const directAdapter =
+    getDirectProviderAdapter(
+      normalized
+    );
+
+  if (directAdapter) {
+    return {
+      success: true,
+      status: "available",
+      provider: normalized,
+      adapter: directAdapter,
+      source: "provider_adapters",
+      registry: null,
+    };
+  }
+
+  /*
+   * Backward-compatible registry.
+   */
+  const registryEntry =
     getRegistryEntry(normalized);
 
-  if (!entry) {
-    return {
-      success: false,
-      status: "not_configured",
-      provider: normalized,
-      adapter: null,
-      error: {
-        code:
-          "PROVIDER_NOT_REGISTERED",
-        message:
-          `Provider ${normalized} is not registered.`
-      }
-    };
-  }
+  const registryAdapter =
+    getAdapterFromRegistryEntry(
+      registryEntry
+    );
 
-  const adapter =
-    getAdapter(entry);
-
-  if (!adapter) {
+  if (registryAdapter) {
     return {
-      success: false,
-      status: "not_configured",
+      success: true,
+      status: "available",
       provider: normalized,
-      adapter: null,
-      error: {
-        code:
-          "PROVIDER_ADAPTER_NOT_CONFIGURED",
-        message:
-          `Provider ${normalized} has no adapter.`
-      }
+      adapter: registryAdapter,
+      source: "provider_registry",
+      registry: registryEntry,
     };
   }
 
   return {
-    success: true,
-    status: "available",
+    success: false,
+    status: "not_configured",
     provider: normalized,
-    adapter,
-    registry: entry
+    adapter: null,
+    source: null,
+    error: {
+      code:
+        "PROVIDER_ADAPTER_NOT_CONFIGURED",
+      message:
+        `Provider ${normalized} has no usable adapter.`,
+    },
   };
 }
 
 /**
- * Execute one adapter operation.
+ * Public adapter resolver.
  *
- * This service intentionally does not invent fallback values.
+ * Credentials are never returned.
+ */
+function getProviderAdapter(
+  provider
+) {
+  const result =
+    resolveAdapter(provider);
+
+  if (!result.success) {
+    return result;
+  }
+
+  return {
+    success: true,
+    status: result.status,
+    provider: result.provider,
+    adapter: result.adapter,
+    source: result.source,
+  };
+}
+
+const OPERATION_ALIASES =
+  Object.freeze({
+    health: [
+      "health",
+      "healthCheck",
+      "checkHealth",
+    ],
+
+    usage: [
+      "usage",
+      "getUsage",
+      "fetchUsage",
+      "usageData",
+    ],
+
+    costs: [
+      "costs",
+      "getCosts",
+      "fetchCosts",
+      "costData",
+    ],
+
+    forecast: [
+      "forecast",
+      "getForecast",
+      "fetchForecast",
+    ],
+
+    budget: [
+      "budget",
+      "getBudget",
+      "fetchBudget",
+    ],
+
+    payment: [
+      "payment",
+      "createPayment",
+      "processPayment",
+    ],
+
+    paymentStatus: [
+      "paymentStatus",
+      "getPaymentStatus",
+      "fetchPaymentStatus",
+      "getPayment",
+    ],
+
+    sendMessage: [
+      "sendMessage",
+      "sendWhatsAppMessage",
+      "send",
+    ],
+
+    sendTemplate: [
+      "sendTemplate",
+      "sendWhatsAppTemplate",
+    ],
+
+    verifyWebhook: [
+      "verifyWebhook",
+      "verifySignature",
+      "verify",
+    ],
+  });
+
+/**
+ * Find the actual method implemented by the adapter.
+ */
+function findMethod(
+  adapter,
+  operation
+) {
+  if (!adapter) {
+    return null;
+  }
+
+  const normalizedOperation =
+    normalizeOperation(
+      operation
+    );
+
+  if (!normalizedOperation) {
+    return null;
+  }
+
+  const candidates =
+    OPERATION_ALIASES[
+      normalizedOperation
+    ] || [
+      normalizedOperation,
+    ];
+
+  return (
+    candidates.find(
+      (method) =>
+        typeof adapter[method] ===
+        "function"
+    ) || null
+  );
+}
+
+/**
+ * Normalize a provider response without
+ * manufacturing missing values.
+ */
+function normalizeAdapterResult(
+  provider,
+  operation,
+  result
+) {
+  const normalizedProvider =
+    normalizeProvider(provider);
+
+  const normalizedOperation =
+    normalizeOperation(operation);
+
+  if (!isObject(result)) {
+    return {
+      success: true,
+      status: "available",
+      provider:
+        normalizedProvider,
+      operation:
+        normalizedOperation,
+      data: result,
+      source:
+        `provider:${normalizedProvider}`,
+      retrievedAt:
+        new Date().toISOString(),
+    };
+  }
+
+  const data =
+    isObject(result.data)
+      ? result.data
+      : result;
+
+  const success =
+    typeof result.success ===
+    "boolean"
+      ? result.success
+      : typeof data.success ===
+          "boolean"
+        ? data.success
+        : true;
+
+  const status =
+    safeString(
+      result.status ||
+        data.status,
+      100
+    ) || "available";
+
+  const source =
+    safeString(
+      result.source ||
+        data.source,
+      500
+    ) ||
+    `provider:${normalizedProvider}`;
+
+  const retrievedAt =
+    safeString(
+      result.retrievedAt ||
+        data.retrievedAt,
+      100
+    ) ||
+    new Date().toISOString();
+
+  const normalized = {
+    success,
+    status,
+    provider:
+      normalizedProvider,
+    operation:
+      normalizedOperation,
+    data,
+    source,
+    retrievedAt,
+
+    message:
+      safeString(
+        result.message ||
+          data.message,
+        1000
+      ),
+
+    errorCode:
+      safeString(
+        result.errorCode ||
+          data.errorCode,
+        200
+      ),
+  };
+
+  if (result.error) {
+    normalized.error =
+      isObject(result.error)
+        ? {
+            code:
+              safeString(
+                result.error.code,
+                200
+              ) ||
+              "PROVIDER_ERROR",
+
+            message:
+              safeString(
+                result.error.message,
+                1000
+              ) ||
+              "Provider error.",
+          }
+        : {
+            code:
+              "PROVIDER_ERROR",
+
+            message:
+              safeString(
+                result.error,
+                1000
+              ) ||
+              "Provider error.",
+          };
+  }
+
+  return normalized;
+}
+
+/**
+ * Execute one real provider operation.
  */
 async function executeProviderOperation(
   provider,
@@ -379,8 +598,8 @@ async function executeProviderOperation(
         code:
           "PROVIDER_REQUIRED",
         message:
-          "Provider is required."
-      }
+          "Provider is required.",
+      },
     };
   }
 
@@ -394,13 +613,13 @@ async function executeProviderOperation(
         code:
           "OPERATION_REQUIRED",
         message:
-          "Provider operation is required."
-      }
+          "Provider operation is required.",
+      },
     };
   }
 
   const providerResult =
-    getProviderAdapter(
+    resolveAdapter(
       normalizedProvider
     );
 
@@ -408,9 +627,8 @@ async function executeProviderOperation(
     return providerResult;
   }
 
-  const {
-    adapter
-  } = providerResult;
+  const adapter =
+    providerResult.adapter;
 
   const method =
     findMethod(
@@ -426,25 +644,30 @@ async function executeProviderOperation(
         normalizedProvider,
       operation:
         normalizedOperation,
+      source:
+        providerResult.source,
       error: {
         code:
           "PROVIDER_OPERATION_NOT_CONFIGURED",
         message:
-          `Operation ${normalizedOperation} is not configured for ${normalizedProvider}.`
-      }
+          `Operation ${normalizedOperation} is not configured for ${normalizedProvider}.`,
+      },
     };
   }
 
   /*
-   * The adapter receives only the context intentionally supplied
-   * by the caller. This service never adds credentials or secrets.
+   * Only caller-supplied context reaches the adapter.
+   * This service never adds credentials.
    */
+  const safeContext =
+    isObject(context)
+      ? context
+      : {};
+
   try {
     const rawResult =
       await adapter[method](
-        isObject(context)
-          ? context
-          : {}
+        safeContext
       );
 
     return normalizeAdapterResult(
@@ -460,34 +683,19 @@ async function executeProviderOperation(
         normalizedProvider,
       operation:
         normalizedOperation,
-
       source:
+        providerResult.source ||
         `provider:${normalizedProvider}`,
-
       retrievedAt:
         new Date().toISOString(),
-
-      error: {
-        code:
-          safeString(
-            error?.code,
-            200
-          ) ||
-          "PROVIDER_OPERATION_FAILED",
-
-        message:
-          safeString(
-            error?.message,
-            1000
-          ) ||
-          "Provider operation failed."
-      }
+      error:
+        safeError(error),
     };
   }
 }
 
 /**
- * Get real provider health.
+ * Provider health.
  */
 async function health(
   provider,
@@ -501,7 +709,7 @@ async function health(
 }
 
 /**
- * Get real provider usage.
+ * Provider usage.
  */
 async function usage(
   provider,
@@ -515,7 +723,7 @@ async function usage(
 }
 
 /**
- * Get real provider costs.
+ * Provider costs.
  */
 async function costs(
   provider,
@@ -529,7 +737,7 @@ async function costs(
 }
 
 /**
- * Get real provider forecast.
+ * Provider forecast.
  */
 async function forecast(
   provider,
@@ -543,7 +751,7 @@ async function forecast(
 }
 
 /**
- * Get real provider budget information.
+ * Provider budget.
  */
 async function budget(
   provider,
@@ -557,7 +765,9 @@ async function budget(
 }
 
 /**
- * Get payment status.
+ * Payment status.
+ *
+ * This does NOT create or execute a payment.
  */
 async function paymentStatus(
   provider,
@@ -571,10 +781,10 @@ async function paymentStatus(
 }
 
 /**
- * Send a message through a registered messaging adapter.
+ * Send message.
  *
- * The adapter must perform the actual delivery and return a real
- * provider message ID. This layer does not claim delivery itself.
+ * A successful delivery requires a real provider
+ * message ID.
  */
 async function sendMessage(
   provider,
@@ -602,6 +812,8 @@ async function sendMessage(
     data.providerMessageId ||
     data.messageId ||
     data.id ||
+    result.providerMessageId ||
+    result.messageId ||
     null;
 
   if (!providerMessageId) {
@@ -610,7 +822,8 @@ async function sendMessage(
       status: "unavailable",
       provider:
         normalizeProvider(provider),
-      operation: "sendMessage",
+      operation:
+        "sendMessage",
       source:
         result.source ||
         `provider:${normalizeProvider(
@@ -623,24 +836,96 @@ async function sendMessage(
         code:
           "MESSAGE_ID_NOT_RETURNED",
         message:
-          "Provider did not return a real message ID."
-      }
+          "Provider did not return a real message ID.",
+      },
     };
   }
 
   return {
     ...result,
+    success: true,
     status: "sent",
     providerMessageId:
       safeString(
         providerMessageId,
         500
-      )
+      ),
   };
 }
 
 /**
- * Verify a provider webhook.
+ * Send WhatsApp template/message through
+ * an adapter that explicitly supports it.
+ */
+async function sendTemplate(
+  provider,
+  context = {}
+) {
+  const result =
+    await executeProviderOperation(
+      provider,
+      "sendTemplate",
+      context
+    );
+
+  if (
+    result.success !== true
+  ) {
+    return result;
+  }
+
+  const data =
+    isObject(result.data)
+      ? result.data
+      : {};
+
+  const providerMessageId =
+    data.providerMessageId ||
+    data.messageId ||
+    data.id ||
+    result.providerMessageId ||
+    result.messageId ||
+    null;
+
+  if (!providerMessageId) {
+    return {
+      success: false,
+      status: "unavailable",
+      provider:
+        normalizeProvider(provider),
+      operation:
+        "sendTemplate",
+      source:
+        result.source ||
+        `provider:${normalizeProvider(
+          provider
+        )}`,
+      retrievedAt:
+        result.retrievedAt ||
+        new Date().toISOString(),
+      error: {
+        code:
+          "MESSAGE_ID_NOT_RETURNED",
+        message:
+          "Provider did not return a real template message ID.",
+      },
+    };
+  }
+
+  return {
+    ...result,
+    success: true,
+    status: "sent",
+    providerMessageId:
+      safeString(
+        providerMessageId,
+        500
+      ),
+  };
+}
+
+/**
+ * Verify provider webhook.
  */
 async function verifyWebhook(
   provider,
@@ -654,14 +939,15 @@ async function verifyWebhook(
 }
 
 /**
- * Check multiple providers for one operation.
+ * Execute one operation against multiple
+ * providers.
  */
 async function executeAcrossProviders(
   providers,
   operation,
   context = {}
 ) {
-  const list =
+  const requested =
     Array.isArray(providers)
       ? providers
       : SUPPORTED_PROVIDERS;
@@ -669,14 +955,51 @@ async function executeAcrossProviders(
   const normalizedProviders =
     [
       ...new Set(
-        list
+        requested
           .map(normalizeProvider)
           .filter(Boolean)
-      )
+      ),
     ].slice(
       0,
       MAX_RESULT_ITEMS
     );
+
+  if (
+    !normalizedProviders.length
+  ) {
+    return {
+      success: false,
+      status: "invalid",
+      operation:
+        normalizeOperation(operation),
+      results: [],
+      error: {
+        code:
+          "NO_PROVIDERS_SPECIFIED",
+        message:
+          "No financial providers were specified.",
+      },
+    };
+  }
+
+  const normalizedOperation =
+    normalizeOperation(
+      operation
+    );
+
+  if (!normalizedOperation) {
+    return {
+      success: false,
+      status: "invalid",
+      results: [],
+      error: {
+        code:
+          "OPERATION_REQUIRED",
+        message:
+          "Provider operation is required.",
+      },
+    };
+  }
 
   const results = [];
 
@@ -687,63 +1010,139 @@ async function executeAcrossProviders(
     results.push(
       await executeProviderOperation(
         provider,
-        operation,
+        normalizedOperation,
         context
       )
     );
   }
 
+  const successful =
+    results.filter(
+      (item) =>
+        item.success === true
+    ).length;
+
+  const failed =
+    results.length -
+    successful;
+
+  let status = "unavailable";
+
+  if (
+    successful ===
+    results.length
+  ) {
+    status = "available";
+  } else if (
+    successful > 0
+  ) {
+    status = "partial";
+  }
+
   return {
-    success: true,
-    status:
-      results.every(
-        (item) =>
-          item.success === true
-      )
-        ? "available"
-        : results.some(
-            (item) =>
-              item.success === true
-          )
-          ? "partial"
-          : "unavailable",
-
-    operation,
-
-    results
+    success:
+      successful > 0,
+    status,
+    operation:
+      normalizedOperation,
+    providerCount:
+      results.length,
+    successfulProviders:
+      successful,
+    failedProviders:
+      failed,
+    results,
   };
 }
 
 /**
- * List configured providers without exposing adapter internals
- * or credentials.
+ * Return provider information without exposing
+ * adapter credentials or internal secrets.
  */
 function listProviders() {
   return SUPPORTED_PROVIDERS.map(
     (provider) => {
-      const entry =
-        getRegistryEntry(provider);
+      let registered = false;
+      let source = null;
+
+      const directAdapter =
+        getDirectProviderAdapter(
+          provider
+        );
+
+      if (directAdapter) {
+        registered = true;
+        source =
+          "provider_adapters";
+      } else {
+        const registryEntry =
+          getRegistryEntry(
+            provider
+          );
+
+        if (
+          getAdapterFromRegistryEntry(
+            registryEntry
+          )
+        ) {
+          registered = true;
+          source =
+            "provider_registry";
+        }
+      }
+
+      let configured = false;
+
+      const adapter =
+        directAdapter ||
+        getAdapterFromRegistryEntry(
+          getRegistryEntry(provider)
+        );
+
+      if (
+        adapter &&
+        typeof adapter.isConfigured ===
+          "function"
+      ) {
+        try {
+          configured = Boolean(
+            adapter.isConfigured()
+          );
+        } catch {
+          configured = false;
+        }
+      }
 
       return {
         provider,
-
-        registered:
-          Boolean(entry),
-
-        status:
-          entry?.status ||
-          (
-            entry
-              ? "registered"
-              : "not_configured"
-          )
+        registered,
+        configured,
+        source,
       };
     }
   );
 }
 
 /**
- * Main service interface.
+ * Get all provider health states.
+ */
+async function getAllProviderHealth() {
+  const results = [];
+
+  for (
+    const provider
+    of SUPPORTED_PROVIDERS
+  ) {
+    results.push(
+      await health(provider)
+    );
+  }
+
+  return results;
+}
+
+/**
+ * Main callable service.
  */
 async function providerAdapterService(
   input = {}
@@ -756,15 +1155,15 @@ async function providerAdapterService(
         code:
           "INVALID_PROVIDER_ADAPTER_INPUT",
         message:
-          "Provider adapter input must be an object."
-      }
+          "Provider adapter input must be an object.",
+      },
     };
   }
 
   const operation =
     normalizeOperation(
       input.operation ||
-      "registry"
+        "registry"
     );
 
   switch (operation) {
@@ -774,26 +1173,60 @@ async function providerAdapterService(
         success: true,
         status: "available",
         providers:
-          listProviders()
+          listProviders(),
       };
 
     case "health":
-    case "usage":
-    case "costs":
-    case "forecast":
-    case "budget":
-    case "paymentstatus":
-    case "sendmessage":
-    case "verifywebhook":
-      return executeProviderOperation(
+      return health(
         input.provider,
-        operation ===
-        "paymentstatus"
-          ? "paymentStatus"
-          : operation ===
-              "sendmessage"
-            ? "sendMessage"
-            : operation,
+        input.context || {}
+      );
+
+    case "usage":
+      return usage(
+        input.provider,
+        input.context || {}
+      );
+
+    case "costs":
+      return costs(
+        input.provider,
+        input.context || {}
+      );
+
+    case "forecast":
+      return forecast(
+        input.provider,
+        input.context || {}
+      );
+
+    case "budget":
+      return budget(
+        input.provider,
+        input.context || {}
+      );
+
+    case "paymentstatus":
+      return paymentStatus(
+        input.provider,
+        input.context || {}
+      );
+
+    case "sendmessage":
+      return sendMessage(
+        input.provider,
+        input.context || {}
+      );
+
+    case "sendtemplate":
+      return sendTemplate(
+        input.provider,
+        input.context || {}
+      );
+
+    case "verifywebhook":
+      return verifyWebhook(
+        input.provider,
         input.context || {}
       );
 
@@ -812,6 +1245,14 @@ async function providerAdapterService(
         input.context || {}
       );
 
+    case "health_all":
+      return {
+        success: true,
+        status: "available",
+        providers:
+          await getAllProviderHealth(),
+      };
+
     default:
       return {
         success: false,
@@ -820,14 +1261,20 @@ async function providerAdapterService(
           code:
             "UNSUPPORTED_PROVIDER_OPERATION",
           message:
-            `Unsupported provider adapter operation: ${operation}`
-        }
+            `Unsupported provider adapter operation: ${operation}`,
+        },
       };
   }
 }
 
+/*
+ * Public helper methods.
+ */
 providerAdapterService.getProviderAdapter =
   getProviderAdapter;
+
+providerAdapterService.resolveAdapter =
+  resolveAdapter;
 
 providerAdapterService.executeProviderOperation =
   executeProviderOperation;
@@ -856,11 +1303,17 @@ providerAdapterService.paymentStatus =
 providerAdapterService.sendMessage =
   sendMessage;
 
+providerAdapterService.sendTemplate =
+  sendTemplate;
+
 providerAdapterService.verifyWebhook =
   verifyWebhook;
 
 providerAdapterService.listProviders =
   listProviders;
+
+providerAdapterService.getAllProviderHealth =
+  getAllProviderHealth;
 
 module.exports =
   providerAdapterService;
