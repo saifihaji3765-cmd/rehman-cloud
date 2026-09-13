@@ -1,835 +1,1883 @@
 "use strict";
 
-const mongoose = require("mongoose");
-const AgentAudit = require("../../models/agentAuditModel");
+/**
+ * ZyrionOS Financial Snapshot Service
+ *
+ * Purpose:
+ * - Persist verified financial observations.
+ * - Keep every observation strictly user-scoped.
+ * - Read historical observations for forecasting.
+ * - Prevent duplicate snapshots.
+ * - Preserve provider/source/timestamp/period/currency/unit.
+ * - Preserve account/project/model/service/resource context.
+ * - Never fabricate missing financial data.
+ *
+ * Architecture:
+ *
+ * Provider Adapters
+ *       ↓
+ * financialProviderService
+ *       ↓
+ * financialDataService
+ *       ↓
+ * financialSnapshotService
+ *       ↓
+ * CostEvent MongoDB
+ *
+ * SECURITY:
+ * - userId is mandatory for persistence and reads.
+ * - No global financial queries are allowed.
+ * - Provider credentials are never stored.
+ * - Card/OTP/CVV/password/token data is removed.
+ * - Payment execution is NOT performed here.
+ */
 
-const MAX_STRING_LENGTH = 2000;
-const MAX_MAP_ENTRIES = 50;
+const CostEvent =
+  require("../../models/costEventModel");
 
-const SENSITIVE_KEYS = [
-  "password",
-  "passwd",
-  "secret",
-  "apikey",
-  "api_key",
-  "access_token",
-  "accesstoken",
-  "refresh_token",
-  "refreshtoken",
-  "authorization",
-  "bearer",
-  "private_key",
-  "privatekey",
-  "client_secret",
-  "clientsecret",
-  "cvv",
-  "cvc",
-  "otp",
-  "pin",
-  "card_number",
-  "cardnumber",
-  "credit_card",
-  "creditcard",
-  "debit_card",
-  "debitcard"
-];
+/* -------------------------------------------------------------------------- */
+/* Constants                                                                  */
+/* -------------------------------------------------------------------------- */
+
+const VALUE_TYPE = Object.freeze({
+  COST: "cost",
+  USAGE: "usage",
+});
+
+const DATA_STATUS = Object.freeze({
+  VERIFIED: "verified",
+  AVAILABLE: "available",
+  UNAVAILABLE: "unavailable",
+  NOT_CONFIGURED: "not_configured",
+  ERROR: "error",
+});
+
+const VALID_STORAGE_STATUSES =
+  new Set([
+    DATA_STATUS.VERIFIED,
+    DATA_STATUS.AVAILABLE,
+  ]);
+
+const MAX_BULK_EVENTS = 500;
+const MAX_QUERY_LIMIT = 1000;
+const MAX_HISTORY_LIMIT = 5000;
+
+/* -------------------------------------------------------------------------- */
+/* Generic helpers                                                            */
+/* -------------------------------------------------------------------------- */
 
 function isObject(value) {
   return (
     value !== null &&
     typeof value === "object" &&
-    !Array.isArray(value) &&
-    !(value instanceof Date) &&
-    !(value instanceof mongoose.Types.ObjectId)
+    !Array.isArray(value)
   );
 }
 
-function isSensitiveKey(key) {
-  const normalized = String(key || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "");
-
-  return SENSITIVE_KEYS.some((blocked) => {
-    const normalizedBlocked = blocked.replace(
-      /[^a-z0-9]/g,
-      ""
-    );
-
-    return (
-      normalized === normalizedBlocked ||
-      normalized.includes(normalizedBlocked)
-    );
-  });
-}
-
-function safeString(value, maxLength = MAX_STRING_LENGTH) {
-  if (value === undefined || value === null) {
+function normalizeString(
+  value,
+  maxLength = 500
+) {
+  if (typeof value !== "string") {
     return null;
   }
 
-  if (
-    typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "boolean"
-  ) {
-    return String(value).slice(0, maxLength);
+  const normalized =
+    value.trim();
+
+  if (!normalized) {
+    return null;
   }
 
-  if (value instanceof Date) {
-    return value.toISOString();
-  }
-
-  if (value instanceof mongoose.Types.ObjectId) {
-    return value.toString();
-  }
-
-  return null;
+  return normalized.slice(
+    0,
+    maxLength
+  );
 }
 
-/**
- * Converts arbitrary metadata into a small, safe Map-compatible object.
- *
- * This is deliberately restrictive because audit logs should never become
- * a dumping ground for request bodies, credentials or provider responses.
- */
-function sanitizeMetadata(input) {
-  if (!isObject(input) && !(input instanceof Map)) {
-    return {};
-  }
-
-  const output = {};
-  let count = 0;
-
-  const entries =
-    input instanceof Map
-      ? Array.from(input.entries())
-      : Object.entries(input);
-
-  for (const [key, value] of entries) {
-    if (count >= MAX_MAP_ENTRIES) {
-      break;
-    }
-
-    if (isSensitiveKey(key)) {
-      continue;
-    }
-
-    const normalizedKey = String(key)
-      .trim()
-      .slice(0, 100);
-
-    if (!normalizedKey || isSensitiveKey(normalizedKey)) {
-      continue;
-    }
-
-    const safeValue = safeString(value, 1000);
-
-    if (safeValue === null) {
-      continue;
-    }
-
-    output[normalizedKey] = safeValue;
-    count += 1;
-  }
-
-  return output;
+function normalizeUserId(
+  userId
+) {
+  /*
+   * Do not invent, cast or silently replace
+   * a missing user identity.
+   *
+   * Authentication/controller layer should
+   * provide the authenticated user's ID.
+   */
+  return normalizeString(
+    userId,
+    200
+  );
 }
 
-function normalizeUserId(userId) {
-  if (!userId) {
-    throw new Error("userId is required.");
-  }
+function normalizeProvider(
+  provider
+) {
+  const value =
+    normalizeString(
+      provider,
+      100
+    );
 
-  if (
-    mongoose.Types.ObjectId.isValid(userId) &&
-    String(new mongoose.Types.ObjectId(userId)) ===
-      String(userId)
-  ) {
-    return new mongoose.Types.ObjectId(userId);
-  }
-
-  if (userId instanceof mongoose.Types.ObjectId) {
-    return userId;
-  }
-
-  throw new Error("Invalid userId.");
+  return value
+    ? value.toLowerCase()
+    : null;
 }
 
-function normalizeStatus(status) {
-  const allowed = [
-    "started",
-    "completed",
-    "partial",
-    "failed",
-    "blocked",
-    "rejected",
-    "pending",
-    "unavailable"
-  ];
-
-  const normalized = String(status || "completed")
-    .trim()
-    .toLowerCase();
-
-  return allowed.includes(normalized)
-    ? normalized
-    : "completed";
-}
-
-function normalizeDecision(decision) {
-  const allowed = [
-    "allow",
-    "deny",
-    "approve",
-    "reject",
-    "execute",
-    "defer",
-    "observe",
-    "alert",
-    "none"
-  ];
-
-  const normalized = String(decision || "none")
-    .trim()
-    .toLowerCase();
-
-  return allowed.includes(normalized)
-    ? normalized
-    : "none";
-}
-
-function normalizeRiskLevel(riskLevel) {
-  const allowed = [
-    "none",
-    "low",
-    "medium",
-    "high",
-    "critical"
-  ];
-
-  const normalized = String(riskLevel || "none")
-    .trim()
-    .toLowerCase();
-
-  return allowed.includes(normalized)
-    ? normalized
-    : "none";
-}
-
-function normalizeDate(value) {
+function normalizeDate(
+  value
+) {
   if (!value) {
     return null;
   }
 
-  const date =
+  if (
     value instanceof Date
-      ? value
-      : new Date(value);
+  ) {
+    return Number.isNaN(
+      value.getTime()
+    )
+      ? null
+      : new Date(
+          value.getTime()
+        );
+  }
 
-  if (Number.isNaN(date.getTime())) {
+  const date =
+    new Date(value);
+
+  if (
+    Number.isNaN(
+      date.getTime()
+    )
+  ) {
     return null;
   }
 
   return date;
 }
 
-/**
- * Create an audit entry.
- *
- * This function records what happened.
- * It does not execute the underlying action.
- */
-async function recordAudit(input = {}) {
-  if (!isObject(input)) {
-    throw new Error("Audit input must be an object.");
+function normalizeNumber(
+  value
+) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
+    return null;
   }
 
-  const userId = normalizeUserId(input.userId);
+  const number =
+    Number(value);
 
-  const agent = safeString(input.agent, 150);
+  return Number.isFinite(
+    number
+  )
+    ? number
+    : null;
+}
 
-  const operation = safeString(
-    input.operation,
-    200
-  );
+function normalizeCurrency(
+  currency
+) {
+  const value =
+    normalizeString(
+      currency,
+      10
+    );
 
-  const action = safeString(
-    input.action,
-    200
-  );
+  return value
+    ? value.toUpperCase()
+    : null;
+}
 
-  if (!agent) {
-    throw new Error("agent is required.");
-  }
+function normalizeStatus(
+  status
+) {
+  const value =
+    normalizeString(
+      status,
+      50
+    );
 
-  if (!operation) {
-    throw new Error("operation is required.");
-  }
+  return value
+    ? value.toLowerCase()
+    : null;
+}
 
-  if (!action) {
-    throw new Error("action is required.");
-  }
-
-  const startedAt =
-    normalizeDate(input.startedAt) ||
-    new Date();
-
-  const completedAt =
-    normalizeDate(input.completedAt);
-
-  let durationMs = null;
+function normalizeValueType(
+  valueType
+) {
+  const value =
+    normalizeString(
+      valueType,
+      50
+    );
 
   if (
-    completedAt &&
-    completedAt.getTime() >= startedAt.getTime()
+    value ===
+      VALUE_TYPE.COST ||
+    value ===
+      VALUE_TYPE.USAGE
   ) {
-    durationMs =
-      completedAt.getTime() -
-      startedAt.getTime();
+    return value;
   }
 
-  const audit = new AgentAudit({
-    userId,
+  return null;
+}
 
-    agent,
-    operation,
-    action,
+/* -------------------------------------------------------------------------- */
+/* Sensitive data protection                                                  */
+/* -------------------------------------------------------------------------- */
 
-    status: normalizeStatus(input.status),
+const BLOCKED_KEY_PATTERN =
+  /(^|[_\-.])(api.?key|access.?token|refresh.?token|token|secret|private.?key|password|passwd|credential|credentials|otp|pin|cvv|cvc|authorization|bearer|card.?number|security.?code)([_\-.]|$)/i;
 
-    success:
-      typeof input.success === "boolean"
-        ? input.success
-        : null,
+function isSensitiveKey(
+  key
+) {
+  return BLOCKED_KEY_PATTERN.test(
+    String(key)
+  );
+}
 
-    provider: safeString(input.provider, 100),
-    source: safeString(input.source, 500),
-
-    projectId: safeString(input.projectId, 200),
-    accountId: safeString(input.accountId, 200),
-    resourceId: safeString(input.resourceId, 300),
-
-    requestId: safeString(input.requestId, 300),
-    correlationId: safeString(
-      input.correlationId,
-      300
-    ),
-    idempotencyKey: safeString(
-      input.idempotencyKey,
-      300
-    ),
-
-    decision: normalizeDecision(
-      input.decision
-    ),
-
-    reason: safeString(input.reason, 2000),
-
-    riskLevel: normalizeRiskLevel(
-      input.riskLevel
-    ),
-
-    requiresOwnerApproval:
-      input.requiresOwnerApproval === true,
-
-    ownerApproved:
-      input.ownerApproved === true,
-
-    approvalId:
-      input.approvalId &&
-      mongoose.Types.ObjectId.isValid(
-        input.approvalId
-      )
-        ? input.approvalId
-        : null,
-
-    approvalReference: safeString(
-      input.approvalReference,
-      100
-    ),
-
-    inputSummary: sanitizeMetadata(
-      input.inputSummary
-    ),
-
-    resultSummary: sanitizeMetadata(
-      input.resultSummary
-    ),
-
-    errorCode: safeString(
-      input.errorCode,
-      200
-    ),
-
-    errorMessage: safeString(
-      input.errorMessage,
-      2000
-    ),
-
-    startedAt,
-    completedAt,
-    durationMs,
-
-    metadata: sanitizeMetadata(
-      input.metadata
-    )
-  });
+function sanitizeProviderData(
+  data,
+  depth = 0
+) {
+  if (!isObject(data)) {
+    return null;
+  }
 
   /*
-   * Important:
-   * Mongoose validation runs before the document is written.
+   * Protect MongoDB from excessively deep
+   * provider payloads.
    */
-  await audit.validate();
-
-  const saved = await audit.save();
-
-  return {
-    success: true,
-    status: "recorded",
-
-    audit: {
-      id: saved._id.toString(),
-      userId: saved.userId.toString(),
-
-      agent: saved.agent,
-      operation: saved.operation,
-      action: saved.action,
-
-      status: saved.status,
-      success: saved.success,
-
-      provider: saved.provider,
-      source: saved.source,
-
-      projectId: saved.projectId,
-      accountId: saved.accountId,
-      resourceId: saved.resourceId,
-
-      decision: saved.decision,
-      riskLevel: saved.riskLevel,
-
-      requiresOwnerApproval:
-        saved.requiresOwnerApproval,
-
-      ownerApproved:
-        saved.ownerApproved,
-
-      approvalId:
-        saved.approvalId
-          ? saved.approvalId.toString()
-          : null,
-
-      approvalReference:
-        saved.approvalReference,
-
-      startedAt: saved.startedAt,
-      completedAt: saved.completedAt,
-      durationMs: saved.durationMs,
-
-      createdAt: saved.createdAt
-    }
-  };
-}
-
-/**
- * Record the beginning of an operation.
- */
-async function startAudit(input = {}) {
-  return recordAudit({
-    ...input,
-    status: "started",
-    startedAt:
-      input.startedAt || new Date()
-  });
-}
-
-/**
- * Record a successful operation.
- */
-async function completeAudit(input = {}) {
-  return recordAudit({
-    ...input,
-    status: input.status || "completed",
-    success:
-      typeof input.success === "boolean"
-        ? input.success
-        : true,
-
-    completedAt:
-      input.completedAt || new Date()
-  });
-}
-
-/**
- * Record a failed operation.
- */
-async function failAudit(input = {}) {
-  return recordAudit({
-    ...input,
-    status: "failed",
-    success: false,
-    completedAt:
-      input.completedAt || new Date()
-  });
-}
-
-/**
- * Record a blocked high-risk action.
- */
-async function blockAudit(input = {}) {
-  return recordAudit({
-    ...input,
-    status: "blocked",
-    success: false,
-    decision: "deny",
-    completedAt:
-      input.completedAt || new Date()
-  });
-}
-
-/**
- * Query audit history for one owner.
- */
-async function getAuditHistory(input = {}) {
-  const userId = normalizeUserId(
-    input.userId
-  );
-
-  const filter = {
-    userId
-  };
-
-  if (input.agent) {
-    filter.agent = String(
-      input.agent
-    )
-      .trim()
-      .toLowerCase();
+  if (depth > 3) {
+    return null;
   }
 
-  if (input.operation) {
-    filter.operation = String(
-      input.operation
-    ).trim();
-  }
+  const result = {};
 
-  if (input.provider) {
-    filter.provider = String(
-      input.provider
-    )
-      .trim()
-      .toLowerCase();
-  }
-
-  if (input.status) {
-    filter.status = normalizeStatus(
-      input.status
-    );
-  }
-
-  if (input.riskLevel) {
-    filter.riskLevel =
-      normalizeRiskLevel(
-        input.riskLevel
-      );
-  }
-
-  if (input.projectId) {
-    filter.projectId = String(
-      input.projectId
-    ).trim();
-  }
-
-  if (input.correlationId) {
-    filter.correlationId = String(
-      input.correlationId
-    ).trim();
-  }
-
-  const startDate =
-    normalizeDate(input.start);
-
-  const endDate =
-    normalizeDate(input.end);
-
-  if (startDate || endDate) {
-    filter.createdAt = {};
-
-    if (startDate) {
-      filter.createdAt.$gte = startDate;
-    }
-
-    if (endDate) {
-      filter.createdAt.$lte = endDate;
-    }
-  }
-
-  let limit = Number(input.limit);
-
-  if (!Number.isFinite(limit)) {
-    limit = 50;
-  }
-
-  limit = Math.max(
-    1,
-    Math.min(200, Math.floor(limit))
-  );
-
-  const records = await AgentAudit.find(filter)
-    .sort({
-      createdAt: -1
-    })
-    .limit(limit)
-    .lean();
-
-  return {
-    success: true,
-    status: "available",
-
-    count: records.length,
-
-    records: records.map(
-      (record) => ({
-        ...record,
-        _id:
-          record._id?.toString?.() ||
-          record._id,
-
-        userId:
-          record.userId?.toString?.() ||
-          record.userId,
-
-        approvalId:
-          record.approvalId?.toString?.() ||
-          record.approvalId
-      })
-    )
-  };
-}
-
-/**
- * Get a single audit record.
- */
-async function getAuditById({
-  userId,
-  auditId
-} = {}) {
-  const normalizedUserId =
-    normalizeUserId(userId);
-
-  if (
-    !auditId ||
-    !mongoose.Types.ObjectId.isValid(
-      auditId
-    )
+  for (
+    const [
+      key,
+      value,
+    ] of Object.entries(data)
   ) {
-    throw new Error(
-      "Valid auditId is required."
-    );
+    if (
+      isSensitiveKey(key)
+    ) {
+      continue;
+    }
+
+    if (
+      typeof value ===
+        "string" ||
+      typeof value ===
+        "number" ||
+      typeof value ===
+        "boolean" ||
+      value === null
+    ) {
+      result[key] =
+        typeof value ===
+        "string"
+          ? value.slice(
+              0,
+              1000
+            )
+          : value;
+
+      continue;
+    }
+
+    if (
+      Array.isArray(value)
+    ) {
+      result[key] =
+        value
+          .slice(0, 50)
+          .map(
+            (item) => {
+              if (
+                typeof item ===
+                  "string" ||
+                typeof item ===
+                  "number" ||
+                typeof item ===
+                  "boolean" ||
+                item === null
+              ) {
+                return item;
+              }
+
+              if (
+                isObject(item)
+              ) {
+                return sanitizeProviderData(
+                  item,
+                  depth + 1
+                );
+              }
+
+              return null;
+            }
+          )
+          .filter(
+            (item) =>
+              item !== null
+          );
+
+      continue;
+    }
+
+    if (
+      isObject(value)
+    ) {
+      const nested =
+        sanitizeProviderData(
+          value,
+          depth + 1
+        );
+
+      if (nested) {
+        result[key] =
+          nested;
+      }
+    }
   }
 
-  const record =
-    await AgentAudit.findOne({
-      _id: auditId,
-      userId: normalizedUserId
-    }).lean();
+  return result;
+}
 
-  if (!record) {
+/* -------------------------------------------------------------------------- */
+/* Observation normalization                                                  */
+/* -------------------------------------------------------------------------- */
+
+function normalizeObservation(
+  input = {}
+) {
+  if (!isObject(input)) {
     return {
-      success: false,
-      status: "not_found",
-      audit: null
+      valid: false,
+      reason:
+        "Observation must be an object.",
+      data: null,
     };
   }
 
+  const userId =
+    normalizeUserId(
+      input.userId
+    );
+
+  if (!userId) {
+    return {
+      valid: false,
+      reason:
+        "userId is required.",
+      data: null,
+    };
+  }
+
+  const provider =
+    normalizeProvider(
+      input.provider
+    );
+
+  if (!provider) {
+    return {
+      valid: false,
+      reason:
+        "Provider is required.",
+      data: null,
+    };
+  }
+
+  const valueType =
+    normalizeValueType(
+      input.valueType
+    );
+
+  if (!valueType) {
+    return {
+      valid: false,
+      reason:
+        "valueType must be cost or usage.",
+      data: null,
+    };
+  }
+
+  const value =
+    normalizeNumber(
+      input.value ??
+        input.amount ??
+        input.cost ??
+        input.usage ??
+        input.total
+    );
+
+  if (
+    value === null ||
+    value < 0
+  ) {
+    return {
+      valid: false,
+      reason:
+        "A valid non-negative numeric value is required.",
+      data: null,
+    };
+  }
+
+  const timestamp =
+    normalizeDate(
+      input.timestamp ??
+        input.observedAt ??
+        input.periodEnd ??
+        input.date ??
+        input.retrievedAt
+    );
+
+  if (!timestamp) {
+    return {
+      valid: false,
+      reason:
+        "Observation timestamp is required.",
+      data: null,
+    };
+  }
+
+  const observedAt =
+    normalizeDate(
+      input.observedAt
+    ) || timestamp;
+
+  const retrievedAt =
+    normalizeDate(
+      input.retrievedAt
+    ) || timestamp;
+
+  const source =
+    normalizeString(
+      input.source,
+      500
+    );
+
+  if (!source) {
+    return {
+      valid: false,
+      reason:
+        "Observation source is required.",
+      data: null,
+    };
+  }
+
+  const status =
+    normalizeStatus(
+      input.status
+    );
+
+  if (
+    !VALID_STORAGE_STATUSES.has(
+      status
+    )
+  ) {
+    return {
+      valid: false,
+      reason:
+        "Only verified or available provider observations can be stored.",
+      data: null,
+    };
+  }
+
+  const currency =
+    valueType ===
+    VALUE_TYPE.COST
+      ? normalizeCurrency(
+          input.currency
+        )
+      : undefined;
+
+  const unit =
+    valueType ===
+    VALUE_TYPE.USAGE
+      ? normalizeString(
+          input.unit,
+          100
+        )
+      : undefined;
+
+  if (
+    valueType ===
+      VALUE_TYPE.COST &&
+    !currency
+  ) {
+    return {
+      valid: false,
+      reason:
+        "Cost observation requires a verified currency.",
+      data: null,
+    };
+  }
+
+  if (
+    valueType ===
+      VALUE_TYPE.USAGE &&
+    !unit
+  ) {
+    return {
+      valid: false,
+      reason:
+        "Usage observation requires a verified unit.",
+      data: null,
+    };
+  }
+
+  const data = {
+    userId,
+
+    provider,
+    valueType,
+    value,
+
+    timestamp,
+    observedAt,
+    retrievedAt,
+
+    status,
+    source,
+
+    period:
+      normalizeString(
+        input.period,
+        200
+      ),
+
+    accountId:
+      normalizeString(
+        input.accountId,
+        300
+      ),
+
+    projectId:
+      normalizeString(
+        input.projectId,
+        300
+      ),
+
+    service:
+      normalizeString(
+        input.service,
+        300
+      ),
+
+    resource:
+      normalizeString(
+        input.resource,
+        500
+      ),
+
+    region:
+      normalizeString(
+        input.region,
+        200
+      ),
+
+    model:
+      valueType ===
+      VALUE_TYPE.USAGE
+        ? normalizeString(
+            input.model,
+            200
+          )
+        : undefined,
+
+    currency,
+    unit,
+
+    confidence:
+      normalizeString(
+        input.confidence,
+        50
+      ),
+
+    observationId:
+      normalizeString(
+        input.observationId,
+        300
+      ),
+
+    fingerprint:
+      normalizeString(
+        input.fingerprint,
+        500
+      ),
+
+    providerData:
+      sanitizeProviderData(
+        input.providerData
+      ),
+
+    metadata:
+      sanitizeProviderData(
+        input.metadata
+      ),
+  };
+
   return {
-    success: true,
-    status: "available",
-
-    audit: {
-      ...record,
-
-      _id:
-        record._id?.toString?.() ||
-        record._id,
-
-      userId:
-        record.userId?.toString?.() ||
-        record.userId,
-
-      approvalId:
-        record.approvalId?.toString?.() ||
-        record.approvalId
-    }
+    valid: true,
+    reason: null,
+    data,
   };
 }
 
-/**
- * Convenience function for recording an agent decision.
- */
-async function recordDecision(input = {}) {
-  return recordAudit({
-    ...input,
+/* -------------------------------------------------------------------------- */
+/* Deduplication                                                              */
+/* -------------------------------------------------------------------------- */
 
-    operation:
-      input.operation || "decision",
+function buildDeduplicationFilter(
+  observation
+) {
+  if (
+    !isObject(
+      observation
+    )
+  ) {
+    throw new Error(
+      "Observation must be an object."
+    );
+  }
 
-    action:
-      input.action || "agent_decision",
+  const userId =
+    normalizeUserId(
+      observation.userId
+    );
 
-    decision:
-      input.decision || "observe",
+  if (!userId) {
+    throw new Error(
+      "userId is required for financial observation deduplication."
+    );
+  }
 
-    status:
-      input.status || "completed"
-  });
+  /*
+   * Provider-generated observation IDs are preferred.
+   */
+  if (
+    observation.observationId
+  ) {
+    return {
+      userId,
+
+      provider:
+        observation.provider,
+
+      observationId:
+        observation.observationId,
+    };
+  }
+
+  /*
+   * Fallback deterministic identity.
+   *
+   * userId is intentionally ALWAYS included.
+   */
+  return {
+    userId,
+
+    provider:
+      observation.provider,
+
+    valueType:
+      observation.valueType,
+
+    timestamp:
+      observation.timestamp,
+
+    source:
+      observation.source,
+
+    value:
+      observation.value,
+
+    ...(observation.currency
+      ? {
+          currency:
+            observation.currency,
+        }
+      : {}),
+
+    ...(observation.unit
+      ? {
+          unit:
+            observation.unit,
+        }
+      : {}),
+
+    ...(observation.model
+      ? {
+          model:
+            observation.model,
+        }
+      : {}),
+
+    ...(observation.accountId
+      ? {
+          accountId:
+            observation.accountId,
+        }
+      : {}),
+
+    ...(observation.projectId
+      ? {
+          projectId:
+            observation.projectId,
+        }
+      : {}),
+
+    ...(observation.service
+      ? {
+          service:
+            observation.service,
+        }
+      : {}),
+
+    ...(observation.resource
+      ? {
+          resource:
+            observation.resource,
+        }
+      : {}),
+
+    ...(observation.region
+      ? {
+          region:
+            observation.region,
+        }
+      : {}),
+  };
 }
 
-/**
- * Convenience function for recording an owner approval.
- */
-async function recordOwnerApproval(input = {}) {
-  return recordAudit({
-    ...input,
+/* -------------------------------------------------------------------------- */
+/* Save one observation                                                       */
+/* -------------------------------------------------------------------------- */
 
-    operation:
-      input.operation ||
-      "payment_approval",
-
-    action:
-      input.action ||
-      "owner_approval",
-
-    decision: "approve",
-
-    ownerApproved: true,
-
-    requiresOwnerApproval: true,
-
-    riskLevel:
-      input.riskLevel || "high",
-
-    status:
-      input.status || "completed",
-
-    success:
-      typeof input.success === "boolean"
-        ? input.success
-        : true
-  });
-}
-
-/**
- * Convenience function for recording a rejected action.
- */
-async function recordRejection(input = {}) {
-  return recordAudit({
-    ...input,
-
-    operation:
-      input.operation || "action",
-
-    action:
-      input.action || "action_rejected",
-
-    decision: "reject",
-
-    ownerApproved: false,
-
-    status: "rejected",
-
-    success: false
-  });
-}
-
-/*
- * -------------------------------------------------------------
- * MAIN CALLABLE SERVICE
- * -------------------------------------------------------------
- */
-
-async function financialAuditService(
+async function saveObservation(
   input = {}
 ) {
-  const operation = String(
-    input.operation || "record"
-  )
-    .trim()
-    .toLowerCase();
+  try {
+    const normalized =
+      normalizeObservation(
+        input
+      );
 
-  switch (operation) {
-    case "record":
-      return recordAudit(input);
-
-    case "start":
-      return startAudit(input);
-
-    case "complete":
-      return completeAudit(input);
-
-    case "fail":
-      return failAudit(input);
-
-    case "block":
-      return blockAudit(input);
-
-    case "decision":
-      return recordDecision(input);
-
-    case "owner_approval":
-      return recordOwnerApproval(input);
-
-    case "reject":
-      return recordRejection(input);
-
-    case "history":
-      return getAuditHistory(input);
-
-    case "get":
-      return getAuditById(input);
-
-    default:
+    if (
+      !normalized.valid
+    ) {
       return {
         success: false,
         status: "invalid",
-        error: {
-          code: "UNSUPPORTED_AUDIT_OPERATION",
-          message:
-            `Unsupported audit operation: ${operation}`
-        }
+        message:
+          normalized.reason,
+        data: null,
       };
+    }
+
+    const observation =
+      normalized.data;
+
+    const filter =
+      buildDeduplicationFilter(
+        observation
+      );
+
+    const result =
+      await CostEvent.findOneAndUpdate(
+        filter,
+        {
+          $setOnInsert:
+            observation,
+        },
+        {
+          upsert: true,
+          new: true,
+          setDefaultsOnInsert:
+            true,
+        }
+      ).lean();
+
+    if (!result) {
+      return {
+        success: false,
+        status:
+          DATA_STATUS.ERROR,
+        message:
+          "Financial observation could not be persisted.",
+        data: null,
+      };
+    }
+
+    return {
+      success: true,
+      status:
+        DATA_STATUS.VERIFIED,
+      message:
+        "Financial observation persisted.",
+      data: {
+        observation:
+          result,
+        insertedOrExisting:
+          true,
+      },
+    };
+  } catch (error) {
+    console.error(
+      "[FinancialSnapshotService] saveObservation:",
+      error.message
+    );
+
+    return {
+      success: false,
+      status:
+        DATA_STATUS.ERROR,
+      message:
+        "Failed to persist financial observation.",
+      error:
+        process.env.NODE_ENV ===
+        "production"
+          ? undefined
+          : error.message,
+      data: null,
+    };
   }
 }
 
-financialAuditService.recordAudit =
-  recordAudit;
+/* -------------------------------------------------------------------------- */
+/* Save many observations                                                     */
+/* -------------------------------------------------------------------------- */
 
-financialAuditService.startAudit =
-  startAudit;
+async function saveObservations(
+  observations = []
+) {
+  try {
+    if (
+      !Array.isArray(
+        observations
+      )
+    ) {
+      return {
+        success: false,
+        status: "invalid",
+        message:
+          "Observations must be an array.",
+        data: null,
+      };
+    }
 
-financialAuditService.completeAudit =
-  completeAudit;
+    if (
+      observations.length ===
+      0
+    ) {
+      return {
+        success: true,
+        status: "empty",
+        message:
+          "No observations supplied.",
+        data: {
+          requestedCount: 0,
+          validCount: 0,
+          rejectedCount: 0,
+          insertedCount: 0,
+          matchedExistingCount: 0,
+        },
+      };
+    }
 
-financialAuditService.failAudit =
-  failAudit;
+    if (
+      observations.length >
+      MAX_BULK_EVENTS
+    ) {
+      return {
+        success: false,
+        status: "invalid",
+        message:
+          `A maximum of ${MAX_BULK_EVENTS} observations can be stored per request.`,
+        data: null,
+      };
+    }
 
-financialAuditService.blockAudit =
-  blockAudit;
+    const normalized =
+      observations.map(
+        normalizeObservation
+      );
 
-financialAuditService.recordDecision =
-  recordDecision;
+    const valid =
+      normalized.filter(
+        (item) =>
+          item.valid
+      );
 
-financialAuditService.recordOwnerApproval =
-  recordOwnerApproval;
+    const rejected =
+      normalized.filter(
+        (item) =>
+          !item.valid
+      );
 
-financialAuditService.recordRejection =
-  recordRejection;
+    if (!valid.length) {
+      return {
+        success: false,
+        status: "invalid",
+        message:
+          "No valid verified observations were supplied.",
+        data: {
+          requestedCount:
+            observations.length,
+          validCount: 0,
+          rejectedCount:
+            rejected.length,
+          rejectedReasons:
+            rejected.map(
+              (item) =>
+                item.reason
+            ),
+        },
+      };
+    }
 
-financialAuditService.getAuditHistory =
-  getAuditHistory;
+    /*
+     * Deduplicate within the incoming batch.
+     */
+    const uniqueMap =
+      new Map();
 
-financialAuditService.getAuditById =
-  getAuditById;
+    for (
+      const item of valid
+    ) {
+      const filter =
+        buildDeduplicationFilter(
+          item.data
+        );
 
-module.exports =
-  financialAuditService;
+      const key =
+        JSON.stringify(
+          filter
+        );
+
+      if (
+        !uniqueMap.has(key)
+      ) {
+        uniqueMap.set(
+          key,
+          item.data
+        );
+      }
+    }
+
+    const uniqueObservations =
+      Array.from(
+        uniqueMap.values()
+      );
+
+    const operations =
+      uniqueObservations.map(
+        (observation) => ({
+          updateOne: {
+            filter:
+              buildDeduplicationFilter(
+                observation
+              ),
+
+            update: {
+              $setOnInsert:
+                observation,
+            },
+
+            upsert: true,
+          },
+        })
+      );
+
+    const result =
+      await CostEvent.bulkWrite(
+        operations,
+        {
+          ordered: false,
+        }
+      );
+
+    return {
+      success: true,
+      status:
+        DATA_STATUS.VERIFIED,
+      message:
+        "Financial observations processed.",
+      data: {
+        requestedCount:
+          observations.length,
+
+        validCount:
+          valid.length,
+
+        uniqueCount:
+          uniqueObservations.length,
+
+        duplicateInputCount:
+          valid.length -
+          uniqueObservations.length,
+
+        rejectedCount:
+          rejected.length,
+
+        insertedCount:
+          result.upsertedCount ||
+          0,
+
+        matchedExistingCount:
+          result.matchedCount ||
+          0,
+
+        rejectedReasons:
+          rejected.map(
+            (item) =>
+              item.reason
+          ),
+      },
+    };
+  } catch (error) {
+    console.error(
+      "[FinancialSnapshotService] saveObservations:",
+      error.message
+    );
+
+    return {
+      success: false,
+      status:
+        DATA_STATUS.ERROR,
+      message:
+        "Failed to persist financial observations.",
+      error:
+        process.env.NODE_ENV ===
+        "production"
+          ? undefined
+          : error.message,
+      data: null,
+    };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Query builder                                                              */
+/* -------------------------------------------------------------------------- */
+
+function buildQuery(
+  input = {}
+) {
+  if (!isObject(input)) {
+    throw new Error(
+      "Financial snapshot query must be an object."
+    );
+  }
+
+  const userId =
+    normalizeUserId(
+      input.userId
+    );
+
+  /*
+   * NEVER allow an unscoped financial query.
+   */
+  if (!userId) {
+    throw new Error(
+      "userId is required for financial snapshot queries."
+    );
+  }
+
+  const query = {
+    userId,
+  };
+
+  const provider =
+    normalizeProvider(
+      input.provider
+    );
+
+  if (provider) {
+    query.provider =
+      provider;
+  }
+
+  const valueType =
+    normalizeValueType(
+      input.valueType
+    );
+
+  if (valueType) {
+    query.valueType =
+      valueType;
+  }
+
+  const accountId =
+    normalizeString(
+      input.accountId,
+      300
+    );
+
+  if (accountId) {
+    query.accountId =
+      accountId;
+  }
+
+  const projectId =
+    normalizeString(
+      input.projectId,
+      300
+    );
+
+  if (projectId) {
+    query.projectId =
+      projectId;
+  }
+
+  const model =
+    normalizeString(
+      input.model,
+      200
+    );
+
+  if (model) {
+    query.model =
+      model;
+  }
+
+  const service =
+    normalizeString(
+      input.service,
+      300
+    );
+
+  if (service) {
+    query.service =
+      service;
+  }
+
+  const resource =
+    normalizeString(
+      input.resource,
+      500
+    );
+
+  if (resource) {
+    query.resource =
+      resource;
+  }
+
+  const region =
+    normalizeString(
+      input.region,
+      200
+    );
+
+  if (region) {
+    query.region =
+      region;
+  }
+
+  const status =
+    normalizeStatus(
+      input.status
+    );
+
+  if (status) {
+    query.status =
+      status;
+  }
+
+  const currency =
+    normalizeCurrency(
+      input.currency
+    );
+
+  if (currency) {
+    query.currency =
+      currency;
+  }
+
+  const unit =
+    normalizeString(
+      input.unit,
+      100
+    );
+
+  if (unit) {
+    query.unit =
+      unit;
+  }
+
+  const startDate =
+    normalizeDate(
+      input.startDate ||
+        input.start
+    );
+
+  const endDate =
+    normalizeDate(
+      input.endDate ||
+        input.end
+    );
+
+  if (
+    startDate ||
+    endDate
+  ) {
+    query.timestamp = {};
+
+    if (startDate) {
+      query.timestamp.$gte =
+        startDate;
+    }
+
+    if (endDate) {
+      query.timestamp.$lte =
+        endDate;
+    }
+  }
+
+  return query;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Limits                                                                     */
+/* -------------------------------------------------------------------------- */
+
+function normalizeLimit(
+  value,
+  fallback = 100,
+  maximum = MAX_QUERY_LIMIT
+) {
+  const parsed =
+    Number(value);
+
+  if (
+    !Number.isFinite(
+      parsed
+    ) ||
+    parsed <= 0
+  ) {
+    return fallback;
+  }
+
+  return Math.min(
+    Math.floor(parsed),
+    maximum
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Get observations                                                           */
+/* -------------------------------------------------------------------------- */
+
+async function getObservations(
+  input = {}
+) {
+  try {
+    const query =
+      buildQuery(
+        input
+      );
+
+    const limit =
+      normalizeLimit(
+        input.limit,
+        100,
+        MAX_QUERY_LIMIT
+      );
+
+    const sort =
+      input.sort ===
+      "asc"
+        ? {
+            timestamp: 1,
+          }
+        : {
+            timestamp: -1,
+          };
+
+    const observations =
+      await CostEvent.find(
+        query
+      )
+        .sort(sort)
+        .limit(limit)
+        .lean();
+
+    return {
+      success: true,
+
+      status:
+        observations.length
+          ? DATA_STATUS.VERIFIED
+          : DATA_STATUS.UNAVAILABLE,
+
+      message:
+        observations.length
+          ? "Financial observations retrieved."
+          : "No matching financial observations found.",
+
+      data: {
+        observations,
+        count:
+          observations.length,
+        query,
+      },
+    };
+  } catch (error) {
+    console.error(
+      "[FinancialSnapshotService] getObservations:",
+      error.message
+    );
+
+    return {
+      success: false,
+      status:
+        DATA_STATUS.ERROR,
+      message:
+        "Failed to retrieve financial observations.",
+      error:
+        process.env.NODE_ENV ===
+        "production"
+          ? undefined
+          : error.message,
+      data: null,
+    };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Historical series                                                          */
+/* -------------------------------------------------------------------------- */
+
+async function getHistoricalSeries(
+  input = {}
+) {
+  try {
+    const query =
+      buildQuery(
+        input
+      );
+
+    const limit =
+      normalizeLimit(
+        input.limit,
+        500,
+        MAX_HISTORY_LIMIT
+      );
+
+    const observations =
+      await CostEvent.find(
+        query
+      )
+        .sort({
+          timestamp: 1,
+        })
+        .limit(limit)
+        .lean();
+
+    return {
+      success: true,
+
+      status:
+        observations.length
+          ? DATA_STATUS.VERIFIED
+          : DATA_STATUS.UNAVAILABLE,
+
+      message:
+        observations.length
+          ? "Historical financial series retrieved."
+          : "No historical financial observations are available.",
+
+      data: {
+        observations,
+        count:
+          observations.length,
+        query,
+      },
+    };
+  } catch (error) {
+    console.error(
+      "[FinancialSnapshotService] getHistoricalSeries:",
+      error.message
+    );
+
+    return {
+      success: false,
+      status:
+        DATA_STATUS.ERROR,
+      message:
+        "Failed to retrieve historical financial series.",
+      error:
+        process.env.NODE_ENV ===
+        "production"
+          ? undefined
+          : error.message,
+      data: null,
+    };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Latest observation                                                         */
+/* -------------------------------------------------------------------------- */
+
+async function getLatestObservation(
+  input = {}
+) {
+  try {
+    const query =
+      buildQuery(
+        input
+      );
+
+    const observation =
+      await CostEvent.findOne(
+        query
+      )
+        .sort({
+          timestamp: -1,
+        })
+        .lean();
+
+    if (!observation) {
+      return {
+        success: true,
+        status:
+          DATA_STATUS.UNAVAILABLE,
+        message:
+          "No verified financial observation is available.",
+        data: {
+          observation: null,
+        },
+      };
+    }
+
+    return {
+      success: true,
+      status:
+        DATA_STATUS.VERIFIED,
+      message:
+        "Latest financial observation retrieved.",
+      data: {
+        observation,
+      },
+    };
+  } catch (error) {
+    console.error(
+      "[FinancialSnapshotService] getLatestObservation:",
+      error.message
+    );
+
+    return {
+      success: false,
+      status:
+        DATA_STATUS.ERROR,
+      message:
+        "Failed to retrieve latest financial observation.",
+      error:
+        process.env.NODE_ENV ===
+        "production"
+          ? undefined
+          : error.message,
+      data: null,
+    };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Provider summary                                                           */
+/* -------------------------------------------------------------------------- */
+
+async function getProviderSummary(
+  input = {}
+) {
+  try {
+    const query =
+      buildQuery(
+        input
+      );
+
+    const summary =
+      await CostEvent.aggregate([
+        {
+          $match:
+            query,
+        },
+
+        {
+          $group: {
+            _id: {
+              provider:
+                "$provider",
+
+              valueType:
+                "$valueType",
+
+              currency:
+                "$currency",
+
+              unit:
+                "$unit",
+            },
+
+            total: {
+              $sum:
+                "$value",
+            },
+
+            count: {
+              $sum: 1,
+            },
+
+            latestTimestamp: {
+              $max:
+                "$timestamp",
+            },
+
+            firstTimestamp: {
+              $min:
+                "$timestamp",
+            },
+          },
+        },
+
+        {
+          $sort: {
+            latestTimestamp:
+              -1,
+          },
+        },
+      ]);
+
+    return {
+      success: true,
+
+      status:
+        summary.length
+          ? DATA_STATUS.VERIFIED
+          : DATA_STATUS.UNAVAILABLE,
+
+      message:
+        summary.length
+          ? "Provider financial summary retrieved."
+          : "No verified financial summary is available.",
+
+      data: {
+        providers:
+          summary,
+        count:
+          summary.length,
+      },
+    };
+  } catch (error) {
+    console.error(
+      "[FinancialSnapshotService] getProviderSummary:",
+      error.message
+    );
+
+    return {
+      success: false,
+      status:
+        DATA_STATUS.ERROR,
+      message:
+        "Failed to build provider financial summary.",
+      error:
+        process.env.NODE_ENV ===
+        "production"
+          ? undefined
+          : error.message,
+      data: null,
+    };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Totals                                                                     */
+/* -------------------------------------------------------------------------- */
+
+async function getTotal(
+  input = {}
+) {
+  try {
+    const valueType =
+      normalizeValueType(
+        input.valueType
+      );
+
+    if (!valueType) {
+      return {
+        success: false,
+        status: "invalid",
+        message:
+          "valueType must be cost or usage.",
+        data: null,
+      };
+    }
+
+    const query =
+      buildQuery(
+        input
+      );
+
+    const rows =
+      await CostEvent.aggregate([
+        {
+          $match:
+            query,
+        },
+
+        {
+          $group: {
+            _id: {
+              currency:
+                "$currency",
+
+              unit:
+                "$unit",
+            },
+
+            total: {
+              $sum:
+                "$value",
+            },
+
+            count: {
+              $sum: 1,
+            },
+          },
+        },
+      ]);
+
+    /*
+     * Never combine incompatible currencies
+     * or usage units.
+     */
+    if (
+      rows.length > 1
+    ) {
+      return {
+        success: true,
+        status:
+          DATA_STATUS.UNAVAILABLE,
+        message:
+          "Multiple currencies or usage units prevent safe aggregation.",
+        data: {
+          totals:
+            rows,
+        },
+      };
+    }
+
+    if (!rows.length) {
+      return {
+        success: true,
+        status:
+          DATA_STATUS.UNAVAILABLE,
+        message:
+          "No verified observations are available.",
+        data: {
+          total: null,
+
+          currency:
+            valueType ===
+            VALUE_TYPE.COST
+              ? null
+              : undefined,
+
+          unit:
+            valueType ===
+            VALUE_TYPE.USAGE
+              ? null
+              : undefined,
+
+          count: 0,
+        },
+      };
+    }
+
+    const row =
+      rows[0];
+
+    return {
+      success: true,
+      status:
+        DATA_STATUS.VERIFIED,
+      message:
+        "Financial total calculated from verified observations.",
+      data: {
+        total:
+          row.total,
+
+        currency:
+          valueType ===
+          VALUE_TYPE.COST
+            ? row._id.currency ||
+              null
+            : undefined,
+
+        unit:
+          valueType ===
+          VALUE_TYPE.USAGE
+            ? row._id.unit ||
+              null
+            : undefined,
+
+        count:
+          row.count,
+      },
+    };
+  } catch (error) {
+    console.error(
+      "[FinancialSnapshotService] getTotal:",
+      error.message
+    );
+
+    return {
+      success: false,
+      status:
+        DATA_STATUS.ERROR,
+      message:
+        "Failed to calculate financial total.",
+      error:
+        process.env.NODE_ENV ===
+        "production"
+          ? undefined
+          : error.message,
+      data: null,
+    };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Explicit cleanup                                                           */
+/* -------------------------------------------------------------------------- */
+
+async function deleteOldSnapshots(
+  input = {}
+) {
+  try {
+    if (!isObject(input)) {
+      return {
+        success: false,
+        status: "invalid",
+        message:
+          "Input must be an object containing userId and beforeDate.",
+        data: null,
+      };
+    }
+
+    const userId =
+      normalizeUserId(
+        input.userId
+      );
+
+    if (!userId) {
+      return {
+        success: false,
+        status: "invalid",
+        message:
+          "userId is required.",
+        data: null,
+      };
+    }
+
+    const date =
+      normalizeDate(
+        input.beforeDate
+      );
+
+    if (!date) {
+      return {
+        success: false,
+        status: "invalid",
+        message:
+          "A valid beforeDate is required.",
+        data: null,
+      };
+    }
+
+    /*
+     * CRITICAL:
+     * Delete is always scoped to the authenticated
+     * user's financial data.
+     */
+    const result =
+      await CostEvent.deleteMany({
+        userId,
+
+        timestamp: {
+          $lt: date,
+        },
+      });
+
+    return {
+      success: true,
+      status: "deleted",
+      message:
+        "Old financial snapshots deleted.",
+      data: {
+        userId,
+        deletedCount:
+          result.deletedCount ||
+          0,
+        beforeDate:
+          date.toISOString(),
+      },
+    };
+  } catch (error) {
+    console.error(
+      "[FinancialSnapshotService] deleteOldSnapshots:",
+      error.message
+    );
+
+    return {
+      success: false,
+      status:
+        DATA_STATUS.ERROR,
+      message:
+        "Failed to delete old financial snapshots.",
+      error:
+        process.env.NODE_ENV ===
+        "production"
+          ? undefined
+          : error.message,
+      data: null,
+    };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Exports                                                                    */
+/* -------------------------------------------------------------------------- */
+
+module.exports = {
+  VALUE_TYPE,
+  DATA_STATUS,
+
+  normalizeUserId,
+  normalizeObservation,
+  sanitizeProviderData,
+
+  buildDeduplicationFilter,
+  buildQuery,
+
+  saveObservation,
+  saveObservations,
+
+  getObservations,
+  getHistoricalSeries,
+  getLatestObservation,
+  getProviderSummary,
+  getTotal,
+
+  deleteOldSnapshots,
+};
