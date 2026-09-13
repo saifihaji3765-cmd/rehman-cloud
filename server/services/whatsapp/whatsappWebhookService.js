@@ -1,12 +1,55 @@
 "use strict";
 
-const crypto = require("crypto");
+/**
+ * =========================================================
+ * ZyrionOS WHATSAPP WEBHOOK CONTROLLER
+ * =========================================================
+ *
+ * Responsibilities:
+ * - Meta webhook verification challenge
+ * - Raw-body signature verification
+ * - Safe webhook parsing
+ * - Owner authorization for incoming messages
+ * - Safe command extraction
+ *
+ * IMPORTANT:
+ * - Does NOT execute payments.
+ * - Does NOT execute infrastructure actions.
+ * - Does NOT send WhatsApp messages.
+ * - Does NOT trust client-supplied owner identity.
+ * - Does NOT expose secrets.
+ *
+ * Signature and payload parsing remain owned by:
+ *
+ *   services/whatsapp/whatsappWebhookService.js
+ *
+ * This controller is the HTTP boundary only.
+ */
 
-const whatsappProviderService = require("./whatsappProviderService");
+const whatsappWebhookService =
+  require(
+    "../services/whatsapp/whatsappWebhookService"
+  );
 
-const MAX_BODY_SIZE = 1024 * 1024;
-const MAX_TEXT_LENGTH = 4096;
-const MAX_ENTRIES = 100;
+const whatsappOwnerService =
+  require(
+    "../services/whatsapp/whatsappOwnerService"
+  );
+
+const whatsappSecurityService =
+  require(
+    "../services/whatsapp/whatsappSecurityService"
+  );
+
+const MAX_BODY_SIZE =
+  1024 * 1024;
+
+const MAX_TEXT_LENGTH =
+  4096;
+
+/* =========================================================
+   HELPERS
+========================================================= */
 
 function isObject(value) {
   return (
@@ -16,7 +59,10 @@ function isObject(value) {
   );
 }
 
-function safeString(value, max = 1000) {
+function cleanString(
+  value,
+  maxLength = 500
+) {
   if (
     value === undefined ||
     value === null
@@ -24,154 +70,290 @@ function safeString(value, max = 1000) {
     return null;
   }
 
-  return String(value)
-    .trim()
-    .slice(0, max);
-}
+  const valueString =
+    String(value).trim();
 
-function normalizePhoneNumber(
-  value
-) {
-  if (!value) {
+  if (!valueString) {
     return null;
   }
 
-  const normalized =
-    String(value)
-      .trim()
-      .replace(/[^\d]/g, "");
-
-  if (
-    normalized.length < 8 ||
-    normalized.length > 15
-  ) {
-    return null;
-  }
-
-  return normalized;
+  return valueString.slice(
+    0,
+    maxLength
+  );
 }
 
-/**
- * Convert the incoming request body into a Buffer.
- *
- * Signature verification must use the exact raw bytes received
- * from Meta, not a re-serialized JSON object.
- */
-function normalizeRawBody(
-  rawBody
-) {
+function safeError(error) {
+  return {
+    code:
+      cleanString(
+        error?.code,
+        200
+      ) ||
+      "WHATSAPP_WEBHOOK_ERROR",
+
+    message:
+      cleanString(
+        error?.message,
+        1000
+      ) ||
+      "WhatsApp webhook processing failed."
+  };
+}
+
+/* =========================================================
+   RAW BODY
+========================================================= */
+
+function getRawBody(req) {
   if (
-    Buffer.isBuffer(rawBody)
+    Buffer.isBuffer(
+      req?.body
+    )
   ) {
     if (
-      rawBody.length >
+      req.body.length >
       MAX_BODY_SIZE
     ) {
-      throw new Error(
-        "WhatsApp webhook body is too large."
-      );
+      const error =
+        new Error(
+          "WhatsApp webhook body is too large."
+        );
+
+      error.code =
+        "WEBHOOK_BODY_TOO_LARGE";
+
+      throw error;
     }
 
-    return rawBody;
+    return req.body;
   }
 
+  /*
+   * A string body can be used by some custom middleware
+   * configurations.
+   */
   if (
-    typeof rawBody === "string"
+    typeof req?.body ===
+    "string"
   ) {
-    const buffer =
+    const body =
       Buffer.from(
-        rawBody,
+        req.body,
         "utf8"
       );
 
     if (
-      buffer.length >
+      body.length >
       MAX_BODY_SIZE
     ) {
-      throw new Error(
-        "WhatsApp webhook body is too large."
-      );
+      const error =
+        new Error(
+          "WhatsApp webhook body is too large."
+        );
+
+      error.code =
+        "WEBHOOK_BODY_TOO_LARGE";
+
+      throw error;
     }
 
-    return buffer;
+    return body;
   }
 
-  if (isObject(rawBody)) {
-    const serialized =
-      JSON.stringify(
-        rawBody
+  /*
+   * Do NOT stringify a parsed JSON object here.
+   *
+   * Signature verification requires the original bytes.
+   */
+  return null;
+}
+
+/* =========================================================
+   META VERIFICATION CHALLENGE
+========================================================= */
+
+/**
+ * GET /api/webhook/whatsapp
+ *
+ * Meta sends:
+ *
+ * hub.mode
+ * hub.verify_token
+ * hub.challenge
+ *
+ * No authentication middleware is used.
+ */
+async function verify(
+  req,
+  res
+) {
+  try {
+    const mode =
+      cleanString(
+        req.query?.[
+          "hub.mode"
+        ],
+        100
       );
 
-    const buffer =
-      Buffer.from(
-        serialized,
-        "utf8"
+    const token =
+      cleanString(
+        req.query?.[
+          "hub.verify_token"
+        ],
+        500
+      );
+
+    const challenge =
+      cleanString(
+        req.query?.[
+          "hub.challenge"
+        ],
+        1000
       );
 
     if (
-      buffer.length >
-      MAX_BODY_SIZE
+      !mode ||
+      !token ||
+      !challenge
     ) {
-      throw new Error(
-        "WhatsApp webhook body is too large."
-      );
+      return res.status(400).json({
+        success: false,
+        status: "invalid",
+        error: {
+          code:
+            "WHATSAPP_VERIFICATION_PARAMETERS_MISSING",
+          message:
+            "Webhook verification parameters are missing."
+        }
+      });
     }
 
-    return buffer;
+    if (
+      mode !== "subscribe"
+    ) {
+      return res.status(403).json({
+        success: false,
+        status: "forbidden",
+        error: {
+          code:
+            "WHATSAPP_INVALID_VERIFY_MODE",
+          message:
+            "Invalid webhook verification mode."
+        }
+      });
+    }
+
+    /*
+     * IMPORTANT:
+     *
+     * whatsappWebhookService.verifyChallenge()
+     * expects ONE object.
+     */
+    const result =
+      await whatsappWebhookService.verifyChallenge(
+        {
+          mode,
+          token,
+          challenge
+        }
+      );
+
+    /*
+     * Provider service should be the authority for the
+     * verification result.
+     */
+    if (
+      result === true
+    ) {
+      return res
+        .status(200)
+        .send(challenge);
+    }
+
+    if (
+      isObject(result) &&
+      result.success === true
+    ) {
+      return res
+        .status(200)
+        .send(
+          result.challenge ||
+            challenge
+        );
+    }
+
+    return res.status(403).json({
+      success: false,
+      status: "forbidden",
+      error:
+        isObject(result) &&
+        isObject(result.error)
+          ? {
+              code:
+                cleanString(
+                  result.error.code,
+                  200
+                ) ||
+                "WHATSAPP_VERIFY_FAILED",
+
+              message:
+                cleanString(
+                  result.error.message,
+                  1000
+                ) ||
+                "Webhook verification failed."
+            }
+          : {
+              code:
+                "WHATSAPP_VERIFY_FAILED",
+              message:
+                "Webhook verification failed."
+            }
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      status: "error",
+      error: safeError(error)
+    });
   }
-
-  throw new Error(
-    "WhatsApp webhook body is required."
-  );
 }
 
-/**
- * Extract the Meta App Secret from environment.
- *
- * We intentionally do not expose the secret in responses.
- */
-function getAppSecret() {
-  return (
-    process.env.WHATSAPP_APP_SECRET ||
-    process.env.META_APP_SECRET ||
-    null
-  );
-}
+/* =========================================================
+   SIGNATURE VERIFICATION
+========================================================= */
 
-/**
- * Verify X-Hub-Signature-256.
- *
- * Returns false when the secret or signature is unavailable.
- * It never silently treats a missing signature as valid.
- */
-function verifySignature(
-  rawBody,
-  signature
+async function verifyRequestSignature(
+  req
 ) {
-  const appSecret =
-    getAppSecret();
+  const rawBody =
+    getRawBody(req);
 
-  if (!appSecret) {
+  if (!rawBody) {
     return {
       success: false,
-      status: "not_configured",
+      status: "invalid",
       verified: false,
       error: {
         code:
-          "WHATSAPP_APP_SECRET_MISSING",
+          "WHATSAPP_RAW_BODY_REQUIRED",
         message:
-          "WhatsApp webhook app secret is not configured."
+          "Raw webhook body is required for signature verification."
       }
     };
   }
 
-  const provided =
-    safeString(
-      signature,
+  const signature =
+    cleanString(
+      req.headers?.[
+        "x-hub-signature-256"
+      ],
       500
     );
 
-  if (!provided) {
+  if (!signature) {
     return {
       success: false,
       status: "unauthorized",
@@ -185,974 +367,612 @@ function verifySignature(
     };
   }
 
-  const normalized =
-    provided.startsWith(
-      "sha256="
-    )
-      ? provided.slice(
-          7
-        )
-      : provided;
-
-  if (
-    !/^[a-f0-9]{64}$/i.test(
-      normalized
-    )
-  ) {
-    return {
-      success: false,
-      status: "unauthorized",
-      verified: false,
-      error: {
-        code:
-          "WHATSAPP_SIGNATURE_INVALID",
-        message:
-          "WhatsApp webhook signature format is invalid."
-      }
-    };
-  }
-
-  const body =
-    normalizeRawBody(
-      rawBody
+  /*
+   * Existing service is the single source of truth.
+   */
+  const result =
+    whatsappWebhookService.verifySignature(
+      rawBody,
+      signature
     );
 
-  const expected =
-    crypto
-      .createHmac(
-        "sha256",
-        appSecret
-      )
-      .update(body)
-      .digest("hex");
-
-  const expectedBuffer =
-    Buffer.from(
-      expected,
-      "hex"
-    );
-
-  const providedBuffer =
-    Buffer.from(
-      normalized,
-      "hex"
-    );
-
-  if (
-    expectedBuffer.length !==
-    providedBuffer.length
-  ) {
-    return {
-      success: false,
-      status: "unauthorized",
-      verified: false,
-      error: {
-        code:
-          "WHATSAPP_SIGNATURE_MISMATCH",
-        message:
-          "WhatsApp webhook signature does not match."
-      }
-    };
-  }
-
-  const verified =
-    crypto.timingSafeEqual(
-      expectedBuffer,
-      providedBuffer
-    );
-
-  if (!verified) {
-    return {
-      success: false,
-      status: "unauthorized",
-      verified: false,
-      error: {
-        code:
-          "WHATSAPP_SIGNATURE_MISMATCH",
-        message:
-          "WhatsApp webhook signature does not match."
-      }
-    };
-  }
-
-  return {
-    success: true,
-    status: "verified",
-    verified: true
-  };
-}
-
-/**
- * Parse raw webhook body safely.
- */
-function parseBody(
-  rawBody
-) {
-  const body =
-    normalizeRawBody(
-      rawBody
-    );
-
-  let parsed;
-
-  try {
-    parsed =
-      JSON.parse(
-        body.toString(
-          "utf8"
-        )
-      );
-  } catch {
-    return {
-      success: false,
-      status: "invalid",
-      error: {
-        code:
-          "INVALID_WEBHOOK_JSON",
-        message:
-          "WhatsApp webhook body is not valid JSON."
-      }
-    };
-  }
-
-  if (!isObject(parsed)) {
-    return {
-      success: false,
-      status: "invalid",
-      error: {
-        code:
-          "INVALID_WEBHOOK_PAYLOAD",
-        message:
-          "WhatsApp webhook payload must be an object."
-      }
-    };
-  }
-
-  return {
-    success: true,
-    status: "parsed",
-    body: parsed
-  };
-}
-
-/**
- * Extract WhatsApp messages from a Meta webhook payload.
- *
- * Meta can deliver multiple entries/changes/messages in one
- * webhook request, so we return an array.
- */
-function extractMessages(
-  payload
-) {
-  if (!isObject(payload)) {
-    return [];
-  }
-
-  const messages = [];
-
-  const entries =
-    Array.isArray(
-      payload.entry
-    )
-      ? payload.entry
-      : [];
-
-  for (
-    const entry of entries.slice(
-      0,
-      MAX_ENTRIES
-    )
-  ) {
-    if (!isObject(entry)) {
-      continue;
-    }
-
-    const changes =
-      Array.isArray(
-        entry.changes
-      )
-        ? entry.changes
-        : [];
-
-    for (
-      const change of changes.slice(
-        0,
-        MAX_ENTRIES
-      )
-    ) {
-      if (!isObject(change)) {
-        continue;
-      }
-
-      const value =
-        isObject(change.value)
-          ? change.value
-          : null;
-
-      if (!value) {
-        continue;
-      }
-
-      const metadata =
-        isObject(
-          value.metadata
-        )
-          ? value.metadata
-          : {};
-
-      const phoneNumberId =
-        safeString(
-          metadata.phone_number_id,
-          200
-        );
-
-      const displayPhoneNumber =
-        safeString(
-          metadata.display_phone_number,
-          100
-        );
-
-      const contacts =
-        Array.isArray(
-          value.contacts
-        )
-          ? value.contacts
-          : [];
-
-      const contactsByWaId =
-        new Map();
-
-      for (
-        const contact of contacts
-      ) {
-        if (
-          !isObject(contact)
-        ) {
-          continue;
-        }
-
-        const waId =
-          normalizePhoneNumber(
-            contact.wa_id
-          );
-
-        if (waId) {
-          contactsByWaId.set(
-            waId,
-            contact
-          );
-        }
-      }
-
-      const messageList =
-        Array.isArray(
-          value.messages
-        )
-          ? value.messages
-          : [];
-
-      for (
-        const message of messageList.slice(
-          0,
-          MAX_ENTRIES
-        )
-      ) {
-        if (
-          !isObject(message)
-        ) {
-          continue;
-        }
-
-        const from =
-          normalizePhoneNumber(
-            message.from
-          );
-
-        if (!from) {
-          continue;
-        }
-
-        const messageType =
-          safeString(
-            message.type,
-            100
-          ) || "unknown";
-
-        let text = null;
-
-        /*
-         * Text message.
-         */
-        if (
-          isObject(
-            message.text
-          )
-        ) {
-          text =
-            safeString(
-              message.text.body,
-              MAX_TEXT_LENGTH
-            );
-        }
-
-        /*
-         * Button reply.
-         */
-        if (
-          !text &&
-          isObject(
-            message.button
-          )
-        ) {
-          text =
-            safeString(
-              message.button.text,
-              MAX_TEXT_LENGTH
-            );
-        }
-
-        /*
-         * Interactive button/list reply.
-         */
-        if (
-          !text &&
-          isObject(
-            message.interactive
-          )
-        ) {
-          if (
-            isObject(
-              message.interactive.button_reply
-            )
-          ) {
-            text =
-              safeString(
-                message.interactive
-                  .button_reply.title,
-                MAX_TEXT_LENGTH
-              );
-          }
-
-          if (
-            !text &&
-            isObject(
-              message.interactive.list_reply
-            )
-          ) {
-            text =
-              safeString(
-                message.interactive
-                  .list_reply.title,
-                MAX_TEXT_LENGTH
-              );
-          }
-        }
-
-        const contact =
-          contactsByWaId.get(
-            from
-          );
-
-        messages.push({
-          provider:
-            "whatsapp_cloud_api",
-
-          entryId:
-            safeString(
-              entry.id,
-              300
-            ),
-
-          changeField:
-            safeString(
-              change.field,
-              100
-            ),
-
-          phoneNumberId,
-
-          displayPhoneNumber,
-
-          messageId:
-            safeString(
-              message.id,
-              300
-            ),
-
-          from,
-
-          profileName:
-            safeString(
-              contact?.profile?.name,
-              300
-            ),
-
-          timestamp:
-            safeString(
-              message.timestamp,
-              100
-            ),
-
-          type:
-            messageType,
-
-          text,
-
-          context:
-            isObject(
-              message.context
-            )
-              ? {
-                  messageId:
-                    safeString(
-                      message.context
-                        .id,
-                      300
-                    ),
-
-                  from:
-                    normalizePhoneNumber(
-                      message.context
-                        .from
-                    )
-                }
-              : null
-        });
-      }
-    }
-  }
-
-  return messages.slice(
-    0,
-    MAX_ENTRIES
+  /*
+   * verifySignature() is synchronous in the current service,
+   * but Promise.resolve() also keeps this controller compatible
+   * if that service becomes asynchronous later.
+   */
+  return await Promise.resolve(
+    result
   );
 }
 
-/**
- * Extract delivery/read/status updates.
- */
-function extractStatuses(
-  payload
+/* =========================================================
+   PAYLOAD PROCESSING
+========================================================= */
+
+async function processWebhookRequest(
+  req
 ) {
-  if (!isObject(payload)) {
-    return [];
-  }
-
-  const statuses = [];
-
-  const entries =
-    Array.isArray(
-      payload.entry
-    )
-      ? payload.entry
-      : [];
-
-  for (
-    const entry of entries.slice(
-      0,
-      MAX_ENTRIES
-    )
-  ) {
-    const changes =
-      Array.isArray(
-        entry?.changes
-      )
-        ? entry.changes
-        : [];
-
-    for (
-      const change of changes.slice(
-        0,
-        MAX_ENTRIES
-      )
-    ) {
-      const value =
-        isObject(change?.value)
-          ? change.value
-          : {};
-
-      const statusList =
-        Array.isArray(
-          value.statuses
-        )
-          ? value.statuses
-          : [];
-
-      for (
-        const item of statusList.slice(
-          0,
-          MAX_ENTRIES
-        )
-      ) {
-        if (
-          !isObject(item)
-        ) {
-          continue;
-        }
-
-        statuses.push({
-          provider:
-            "whatsapp_cloud_api",
-
-          messageId:
-            safeString(
-              item.id,
-              300
-            ),
-
-          recipientId:
-            normalizePhoneNumber(
-              item.recipient_id
-            ),
-
-          status:
-            safeString(
-              item.status,
-              100
-            ),
-
-          timestamp:
-            safeString(
-              item.timestamp,
-              100
-            ),
-
-          conversation:
-            isObject(
-              item.conversation
-            )
-              ? {
-                  id:
-                    safeString(
-                      item.conversation.id,
-                      300
-                    ),
-
-                  origin:
-                    safeString(
-                      item.conversation
-                        .origin?.type,
-                      100
-                    )
-                }
-              : null,
-
-          pricing:
-            isObject(
-              item.pricing
-            )
-              ? {
-                  billable:
-                    item.pricing.billable,
-
-                  pricingModel:
-                    safeString(
-                      item.pricing
-                        .pricing_model,
-                      100
-                    ),
-
-                  category:
-                    safeString(
-                      item.pricing
-                        .category,
-                      100
-                    )
-                }
-              : null
-        });
-      }
-    }
-  }
-
-  return statuses.slice(
-    0,
-    MAX_ENTRIES
-  );
-}
-
-/**
- * Extract provider errors from webhook payload.
- */
-function extractErrors(
-  payload
-) {
-  if (!isObject(payload)) {
-    return [];
-  }
-
-  const errors = [];
-
-  const entries =
-    Array.isArray(
-      payload.entry
-    )
-      ? payload.entry
-      : [];
-
-  for (
-    const entry of entries.slice(
-      0,
-      MAX_ENTRIES
-    )
-  ) {
-    const changes =
-      Array.isArray(
-        entry?.changes
-      )
-        ? entry.changes
-        : [];
-
-    for (
-      const change of changes.slice(
-        0,
-        MAX_ENTRIES
-      )
-    ) {
-      const value =
-        isObject(change?.value)
-          ? change.value
-          : {};
-
-      const providerErrors =
-        Array.isArray(
-          value.errors
-        )
-          ? value.errors
-          : [];
-
-      for (
-        const error of providerErrors.slice(
-          0,
-          MAX_ENTRIES
-        )
-      ) {
-        if (
-          !isObject(error)
-        ) {
-          continue;
-        }
-
-        errors.push({
-          code:
-            safeString(
-              error.code,
-              200
-            ),
-
-          title:
-            safeString(
-              error.title,
-              500
-            ),
-
-          message:
-            safeString(
-              error.message,
-              2000
-            ),
-
-          details:
-            safeString(
-              error.error_data?.details,
-              2000
-            )
-        });
-      }
-    }
-  }
-
-  return errors.slice(
-    0,
-    MAX_ENTRIES
-  );
-}
-
-/**
- * Full webhook processing pipeline.
- *
- * It verifies the signature first, then parses the payload.
- */
-function processWebhook(
-  input = {}
-) {
-  if (!isObject(input)) {
-    return {
-      success: false,
-      status: "invalid",
-      error: {
-        code:
-          "INVALID_WEBHOOK_INPUT",
-        message:
-          "Webhook input must be an object."
-      }
-    };
-  }
-
   const rawBody =
-    input.rawBody ??
-    input.body;
+    getRawBody(req);
 
-  if (
-    rawBody === undefined ||
-    rawBody === null
-  ) {
+  if (!rawBody) {
     return {
       success: false,
       status: "invalid",
       error: {
         code:
-          "WEBHOOK_BODY_REQUIRED",
+          "WHATSAPP_RAW_BODY_REQUIRED",
         message:
           "Raw webhook body is required."
       }
     };
   }
 
-  let signatureResult;
-
-  try {
-    signatureResult =
-      verifySignature(
-        rawBody,
-        input.signature ||
-          input["x-hub-signature-256"]
-      );
-  } catch (error) {
-    return {
-      success: false,
-      status: "error",
-      error: {
-        code:
-          "WEBHOOK_SIGNATURE_CHECK_FAILED",
-        message:
-          safeString(
-            error?.message,
-            1000
-          ) ||
-          "Webhook signature verification failed."
-      }
-    };
-  }
+  /*
+   * First verify the exact bytes.
+   */
+  const signatureResult =
+    whatsappWebhookService.verifySignature(
+      rawBody,
+      req.headers?.[
+        "x-hub-signature-256"
+      ]
+    );
 
   if (
-    signatureResult.success !==
+    signatureResult?.verified !==
     true
   ) {
     return signatureResult;
   }
 
-  let parsed;
+  /*
+   * Now let the existing service parse and normalize the
+   * verified webhook.
+   */
+  const result =
+    whatsappWebhookService.processWebhook(
+      {
+        rawBody,
+        signature:
+          req.headers?.[
+            "x-hub-signature-256"
+          ]
+      }
+    );
 
-  try {
-    parsed =
-      parseBody(
-        rawBody
-      );
-  } catch (error) {
+  return await Promise.resolve(
+    result
+  );
+}
+
+/* =========================================================
+   OWNER AUTHORIZATION
+========================================================= */
+
+async function authorizeMessage(
+  message
+) {
+  if (
+    !isObject(message)
+  ) {
+    return {
+      authorized: false,
+      reason:
+        "INVALID_MESSAGE"
+    };
+  }
+
+  const phone =
+    cleanString(
+      message.from,
+      100
+    );
+
+  if (!phone) {
+    return {
+      authorized: false,
+      reason:
+        "SENDER_PHONE_MISSING"
+    };
+  }
+
+  /*
+   * Existing owner service is the authority.
+   */
+  if (
+    whatsappOwnerService &&
+    typeof
+      whatsappOwnerService.authorizeIncomingMessage ===
+        "function"
+  ) {
+    try {
+      const result =
+        await whatsappOwnerService.authorizeIncomingMessage(
+          {
+            from: phone,
+            message
+          }
+        );
+
+      if (
+        result === true
+      ) {
+        return {
+          authorized: true
+        };
+      }
+
+      if (
+        isObject(result)
+      ) {
+        return {
+          authorized:
+            result.authorized === true,
+
+          reason:
+            cleanString(
+              result.reason,
+              300
+            ) ||
+            (
+              result.authorized ===
+              true
+                ? null
+                : "OWNER_AUTHORIZATION_FAILED"
+            )
+        };
+      }
+    } catch (error) {
+      return {
+        authorized: false,
+        reason:
+          "OWNER_AUTHORIZATION_ERROR"
+      };
+    }
+  }
+
+  /*
+   * Fallback only if the existing owner service exposes
+   * isOwnerPhone().
+   */
+  if (
+    whatsappOwnerService &&
+    typeof
+      whatsappOwnerService.isOwnerPhone ===
+        "function"
+  ) {
+    try {
+      const authorized =
+        await whatsappOwnerService.isOwnerPhone(
+          phone
+        );
+
+      return {
+        authorized:
+          authorized === true,
+
+        reason:
+          authorized === true
+            ? null
+            : "OWNER_ACCESS_REQUIRED"
+      };
+    } catch (error) {
+      return {
+        authorized: false,
+        reason:
+          "OWNER_AUTHORIZATION_ERROR"
+      };
+    }
+  }
+
+  /*
+   * Fail closed.
+   */
+  return {
+    authorized: false,
+    reason:
+      "OWNER_AUTH_SERVICE_UNAVAILABLE"
+  };
+}
+
+/* =========================================================
+   COMMAND SECURITY
+========================================================= */
+
+function validateCommand(
+  text
+) {
+  const cleaned =
+    cleanString(
+      text,
+      MAX_TEXT_LENGTH
+    );
+
+  if (!cleaned) {
+    return {
+      valid: false,
+      reason:
+        "TEXT_MESSAGE_REQUIRED"
+    };
+  }
+
+  /*
+   * Use the existing security service when its current
+   * interface provides an incoming-message validator.
+   */
+  if (
+    whatsappSecurityService &&
+    typeof
+      whatsappSecurityService.validateIncoming ===
+        "function"
+  ) {
+    try {
+      const result =
+        whatsappSecurityService.validateIncoming(
+          cleaned
+        );
+
+      if (
+        result === false
+      ) {
+        return {
+          valid: false,
+          reason:
+            "MESSAGE_BLOCKED"
+        };
+      }
+
+      if (
+        isObject(result) &&
+        result.valid === false
+      ) {
+        return {
+          valid: false,
+          reason:
+            cleanString(
+              result.reason,
+              300
+            ) ||
+            "MESSAGE_BLOCKED"
+        };
+      }
+    } catch (error) {
+      return {
+        valid: false,
+        reason:
+          "MESSAGE_SECURITY_CHECK_FAILED"
+      };
+    }
+  }
+
+  return {
+    valid: true,
+    text: cleaned
+  };
+}
+
+/* =========================================================
+   NORMALIZED OWNER COMMAND
+========================================================= */
+
+async function processIncomingMessage(
+  message
+) {
+  const authorization =
+    await authorizeMessage(
+      message
+    );
+
+  /*
+   * Fail closed.
+   *
+   * We intentionally do not tell unauthorized senders
+   * why they were rejected.
+   */
+  if (
+    authorization.authorized !==
+    true
+  ) {
+    return {
+      success: true,
+      status:
+        "ignored_unauthorized",
+      processed: false
+    };
+  }
+
+  const command =
+    validateCommand(
+      message.text
+    );
+
+  if (
+    command.valid !== true
+  ) {
     return {
       success: false,
-      status: "error",
+      status:
+        "message_rejected",
+      processed: false,
       error: {
         code:
-          "WEBHOOK_PARSE_FAILED",
+          "WHATSAPP_MESSAGE_REJECTED",
         message:
-          safeString(
-            error?.message,
-            1000
-          ) ||
-          "Webhook parsing failed."
+          command.reason
       }
     };
   }
 
-  if (
-    parsed.success !==
-    true
-  ) {
-    return parsed;
-  }
-
-  const payload =
-    parsed.body;
-
-  const messages =
-    extractMessages(
-      payload
-    );
-
-  const statuses =
-    extractStatuses(
-      payload
-    );
-
-  const errors =
-    extractErrors(
-      payload
-    );
-
+  /*
+   * This controller ONLY produces an authorized,
+   * security-checked command.
+   *
+   * It deliberately does not execute it.
+   */
   return {
     success: true,
-
     status:
-      messages.length > 0
-        ? "received"
-        : statuses.length > 0
-          ? "status_update"
-          : errors.length > 0
-            ? "provider_error"
-            : "accepted",
+      "authorized_command",
+    processed: true,
 
-    provider:
-      "whatsapp_cloud_api",
+    command: {
+      messageId:
+        message.messageId || null,
 
-    receivedAt:
-      new Date().toISOString(),
+      from:
+        message.from || null,
 
-    messages,
+      text:
+        command.text,
 
-    statuses,
+      timestamp:
+        message.timestamp || null,
 
-    errors,
+      type:
+        message.type || "unknown",
 
-    counts: {
-      messages:
-        messages.length,
-
-      statuses:
-        statuses.length,
-
-      errors:
-        errors.length
+      provider:
+        message.provider ||
+        "whatsapp_cloud_api"
     }
   };
 }
 
-/**
- * Verify Meta's webhook GET challenge.
- */
-function verifyChallenge(
-  input = {}
-) {
-  return whatsappProviderService
-    .verifyWebhookChallenge(
-      input
-    );
-}
+/* =========================================================
+   RECEIVE WEBHOOK
+========================================================= */
 
 /**
- * Main service interface.
+ * POST /api/webhook/whatsapp
  */
-function whatsappWebhookService(
-  input = {}
+async function receive(
+  req,
+  res
 ) {
-  const operation =
-    String(
-      input.operation ||
-        "process"
-    )
-      .trim()
-      .toLowerCase();
+  try {
+    const rawBody =
+      getRawBody(req);
 
-  switch (operation) {
-    case "verify":
-    case "challenge":
-      return verifyChallenge(
-        input
-      );
-
-    case "signature":
-    case "verify_signature":
-      try {
-        return verifySignature(
-          input.rawBody ??
-            input.body,
-          input.signature ||
-            input[
-              "x-hub-signature-256"
-            ]
-        );
-      } catch (error) {
-        return {
-          success: false,
-          status: "error",
-          verified: false,
-          error: {
-            code:
-              "SIGNATURE_VERIFICATION_FAILED",
-            message:
-              safeString(
-                error?.message,
-                1000
-              ) ||
-              "Signature verification failed."
-          }
-        };
-      }
-
-    case "parse":
-      try {
-        return parseBody(
-          input.rawBody ??
-            input.body
-        );
-      } catch (error) {
-        return {
-          success: false,
-          status: "error",
-          error: {
-            code:
-              "WEBHOOK_PARSE_FAILED",
-            message:
-              safeString(
-                error?.message,
-                1000
-              ) ||
-              "Webhook parsing failed."
-          }
-        };
-      }
-
-    case "process":
-    case "handle":
-      return processWebhook(
-        input
-      );
-
-    default:
-      return {
+    if (!rawBody) {
+      return res.status(400).json({
         success: false,
         status: "invalid",
         error: {
           code:
-            "UNSUPPORTED_WEBHOOK_OPERATION",
+            "WHATSAPP_RAW_BODY_REQUIRED",
           message:
-            `Unsupported WhatsApp webhook operation: ${operation}`
+            "Raw webhook body is required."
         }
-      };
+      });
+    }
+
+    /*
+     * Verify exact raw bytes first.
+     */
+    const signatureResult =
+      whatsappWebhookService.verifySignature(
+        rawBody,
+        req.headers?.[
+          "x-hub-signature-256"
+        ]
+      );
+
+    if (
+      signatureResult?.verified !==
+      true
+    ) {
+      const statusCode =
+        signatureResult?.status ===
+        "not_configured"
+          ? 503
+          : 401;
+
+      return res
+        .status(statusCode)
+        .json(
+          signatureResult
+        );
+    }
+
+    /*
+     * Parse through the existing service.
+     */
+    const webhookResult =
+      whatsappWebhookService.processWebhook(
+        {
+          rawBody,
+          signature:
+            req.headers?.[
+              "x-hub-signature-256"
+            ]
+        }
+      );
+
+    if (
+      webhookResult?.success !==
+      true
+    ) {
+      return res.status(400).json(
+        webhookResult
+      );
+    }
+
+    const messages =
+      Array.isArray(
+        webhookResult.messages
+      )
+        ? webhookResult.messages
+        : [];
+
+    const statuses =
+      Array.isArray(
+        webhookResult.statuses
+      )
+        ? webhookResult.statuses
+        : [];
+
+    const providerErrors =
+      Array.isArray(
+        webhookResult.errors
+      )
+        ? webhookResult.errors
+        : [];
+
+    const processedMessages = [];
+
+    /*
+     * Owner authorization and command validation happen
+     * after signature verification.
+     */
+    for (
+      const message of messages
+    ) {
+      try {
+        const result =
+          await processIncomingMessage(
+            message
+          );
+
+        processedMessages.push(
+          result
+        );
+      } catch (error) {
+        processedMessages.push({
+          success: false,
+          status: "error",
+          processed: false,
+          error:
+            safeError(error)
+        });
+      }
+    }
+
+    /*
+     * Return a minimal response.
+     *
+     * Do NOT echo:
+     * - sender phone numbers
+     * - command text
+     * - provider secrets
+     * - raw webhook payload
+     */
+    return res.status(200).json({
+      success: true,
+      status: "received",
+
+      provider:
+        "whatsapp_cloud_api",
+
+      messagesReceived:
+        messages.length,
+
+      messagesProcessed:
+        processedMessages.filter(
+          (item) =>
+            item.processed === true
+        ).length,
+
+      unauthorizedMessages:
+        processedMessages.filter(
+          (item) =>
+            item.status ===
+            "ignored_unauthorized"
+        ).length,
+
+      rejectedMessages:
+        processedMessages.filter(
+          (item) =>
+            item.status ===
+            "message_rejected"
+        ).length,
+
+      statusesReceived:
+        statuses.length,
+
+      providerErrors:
+        providerErrors.length
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      status: "error",
+      error:
+        safeError(error)
+    });
   }
 }
 
-whatsappWebhookService.verifySignature =
-  verifySignature;
+/* =========================================================
+   STATUS
+========================================================= */
 
-whatsappWebhookService.parseBody =
-  parseBody;
+function status(
+  req,
+  res
+) {
+  return res.status(200).json({
+    success: true,
+    status: "available",
 
-whatsappWebhookService.extractMessages =
-  extractMessages;
+    controller:
+      "whatsappWebhookController",
 
-whatsappWebhookService.extractStatuses =
-  extractStatuses;
+    signatureVerification:
+      true,
 
-whatsappWebhookService.extractErrors =
-  extractErrors;
+    ownerAuthorization:
+      true,
 
-whatsappWebhookService.processWebhook =
-  processWebhook;
+    commandExecution:
+      false,
 
-whatsappWebhookService.verifyChallenge =
-  verifyChallenge;
+    paymentExecution:
+      false,
 
-module.exports =
-  whatsappWebhookService;
+    infrastructureExecution:
+      false,
+
+    secretExposure:
+      false
+  });
+}
+
+/* =========================================================
+   EXPORTS
+========================================================= */
+
+module.exports = {
+  verify,
+  receive,
+  status,
+
+  verifyWebhook:
+    verify,
+
+  receiveWebhook:
+    receive,
+
+  verifyRequestSignature
+};
