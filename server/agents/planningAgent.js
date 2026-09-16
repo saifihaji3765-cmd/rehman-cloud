@@ -1,15 +1,16 @@
 /* =========================================================
    ZyrionOS PLANNING AGENT
    Intent → Planning → Builder Contract
+
+   AI PROVIDER ARCHITECTURE:
+   Planning Agent
+        ↓
+   aiProviderService
+        ↓
+   Primary Provider (Gemini)
+        ↓
+   Fallback Provider (OpenAI)
 ========================================================= */
-
-
-/* =========================
-   PACKAGES
-========================= */
-
-const OpenAI =
-  require("openai");
 
 
 /* =========================
@@ -19,18 +20,10 @@ const OpenAI =
 const logger =
   require("../services/loggerService");
 
-
-/* =========================
-   OPENAI CLIENT
-========================= */
-
-const openai =
-  new OpenAI({
-
-    apiKey:
-      process.env.OPENAI_API_KEY
-
-  });
+const {
+  generateJSON
+} =
+  require("../services/ai/aiProviderService");
 
 
 /* =========================================================
@@ -120,66 +113,6 @@ function cleanString(
 
 
 /* =========================
-   SAFE JSON PARSER
-========================= */
-
-function safeJsonParse(
-  value
-) {
-
-  if (
-    !value ||
-    typeof value !== "string"
-  ) {
-
-    return null;
-
-  }
-
-
-  try {
-
-    return JSON.parse(
-      value.trim()
-    );
-
-  }
-
-  catch (error) {
-
-    try {
-
-      const cleaned =
-        value
-          .replace(
-            /```json/gi,
-            ""
-          )
-          .replace(
-            /```/g,
-            ""
-          )
-          .trim();
-
-
-      return JSON.parse(
-        cleaned
-      );
-
-    }
-
-    catch (secondError) {
-
-      return null;
-
-    }
-
-  }
-
-}
-
-
-/* =========================
    SAFE JSON SERIALIZER
 ========================= */
 
@@ -227,11 +160,13 @@ function normalizeArray(
 
 
   return value
+
     .filter(
       (item) =>
         item !== null &&
         item !== undefined
     )
+
     .map(
       (item) => {
 
@@ -241,7 +176,10 @@ function normalizeArray(
 
           return item
             .trim()
-            .slice(0, 1000);
+            .slice(
+              0,
+              1000
+            );
 
         }
 
@@ -250,6 +188,7 @@ function normalizeArray(
 
       }
     )
+
     .filter(Boolean);
 
 }
@@ -616,7 +555,7 @@ async function planningAgent(
 
        We extract the actual user prompt
        instead of passing the entire wrapper
-       blindly to OpenAI.
+       blindly to the AI provider.
     ===================================================== */
 
     let projectIdea = "";
@@ -768,29 +707,6 @@ async function planningAgent(
 
 
     /* =====================================================
-       OPENAI CONFIGURATION
-    ===================================================== */
-
-    if (
-      !process.env.OPENAI_API_KEY
-    ) {
-
-      return {
-
-        success: false,
-
-        message:
-          "Planning Agent configuration error",
-
-        error:
-          "OPENAI_API_KEY is not configured on the backend."
-
-      };
-
-    }
-
-
-    /* =====================================================
        MEMORY CONTEXT
     ===================================================== */
 
@@ -827,10 +743,16 @@ async function planningAgent(
 
       /*
        * Only non-sensitive planning context
-       * should be forwarded.
+       * is forwarded.
        *
-       * Do not expose tokens, cookies,
-       * passwords, or credentials.
+       * Never expose:
+       * - passwords
+       * - API keys
+       * - access tokens
+       * - refresh tokens
+       * - cookies
+       * - payment secrets
+       * - credentials
        */
 
       const safeUser = {
@@ -864,33 +786,39 @@ async function planningAgent(
     ===================================================== */
 
     currentStage =
-      "openai-planning";
+      "ai-planning";
 
 
-    const completion =
-      await openai
-        .chat
-        .completions
-        .create({
+    /*
+     * IMPORTANT:
+     *
+     * No direct OpenAI client.
+     * No direct Gemini client.
+     *
+     * Provider selection is centralized inside:
+     *
+     * server/services/ai/aiProviderService.js
+     *
+     * Expected flow:
+     *
+     * Gemini primary
+     *      ↓
+     * OpenAI fallback
+     *
+     * according to environment configuration.
+     */
 
-          model:
-            "gpt-4.1-mini",
+    const result =
+      await generateJSON({
 
-          response_format: {
+        messages: [
 
-            type:
-              "json_object"
+          {
 
-          },
+            role:
+              "system",
 
-          messages: [
-
-            {
-
-              role:
-                "system",
-
-              content: `
+            content: `
 
 You are the Planning Agent of ZyrionOS
 Autonomous AI OS.
@@ -936,7 +864,9 @@ requests, create only the planning context
 needed by downstream systems.
 
 Do not invent credentials, API keys,
-tokens, passwords, or deployment results.
+tokens, passwords, deployment results,
+URLs, infrastructure resources, or external
+services that were not requested or provided.
 
 Return ONLY valid JSON.
 
@@ -976,55 +906,87 @@ REQUIRED JSON STRUCTURE:
 RULES:
 
 1. projectName must be concise.
+
 2. description must explain the actual goal.
+
 3. framework should identify the primary
    application framework when known.
+
 4. frontend.framework should contain the
    frontend technology when applicable.
+
 5. backend.framework should contain the
    backend technology when applicable.
+
 6. pages must contain meaningful page/route
    planning information.
+
 7. routes must contain meaningful API route
    planning information.
+
 8. database.collections must contain the
    required data entities when a database
    is needed.
+
 9. authentication.providers must contain
    only authentication methods relevant to
    the request.
+
 10. aiSystems must contain actual AI
     components required by the project.
+
 11. deployment.services must contain
     infrastructure services that are actually
     relevant.
+
 12. projectStructure must describe folders
     and important files the Builder should
     create.
+
 13. security must describe concrete security
     requirements.
+
 14. scalability must describe concrete
     scalability requirements.
+
 15. performance must describe concrete
     performance requirements.
+
 16. Do not generate source code in this plan.
+
 17. Do not invent unavailable external
     resources.
+
 18. Keep the plan internally consistent.
+
 19. Return JSON only.
+
 20. No markdown.
+
 21. No explanation outside JSON.
+
+22. Do not claim that any resource has
+    already been created.
+
+23. Do not claim that any deployment has
+    already succeeded.
+
+24. Prefer production-ready architecture
+    over toy/demo architecture.
+
+25. Do not include placeholder credentials
+    or fake secrets.
 
 `
 
-            },
+          },
 
-            {
+          {
 
-              role:
-                "user",
+            role:
+              "user",
 
-              content: `
+            content: `
 
 USER REQUEST:
 
@@ -1048,47 +1010,58 @@ Create the implementation plan now.
 
 `
 
-            }
+          }
 
-          ],
+        ],
 
-          temperature:
-            0.3,
+        temperature:
+          0.3,
 
-          max_tokens:
-            3000
+        maxTokens:
+          3000
 
-        });
+      });
 
 
     /* =====================================================
-       RAW RESPONSE
+       PROVIDER RESULT VALIDATION
     ===================================================== */
 
-    const raw =
-      completion
-        ?.choices?.[0]
-        ?.message
-        ?.content;
-
-
     if (
-      !raw ||
-      typeof raw !== "string"
+      !result ||
+      result.success !== true
     ) {
+
+      const providerError =
+        result?.error ||
+        "AI provider returned an unsuccessful result.";
+
+
+      logger.error(
+        `Planning Agent AI Provider Failed: ${providerError}`
+      );
+
 
       return {
 
         success: false,
 
         message:
-          "Planning Agent received an empty AI response",
+          "Planning Agent AI provider failed",
 
         error:
-          "OpenAI returned no planning content.",
+          providerError,
 
         stage:
-          currentStage
+          currentStage,
+
+        provider:
+          result?.provider ||
+          null,
+
+        model:
+          result?.model ||
+          null
 
       };
 
@@ -1096,23 +1069,21 @@ Create the implementation plan now.
 
 
     /* =====================================================
-       PARSE JSON
+       RAW RESPONSE
     ===================================================== */
 
-    currentStage =
-      "planning-json-parse";
-
-
     const parsed =
-      safeJsonParse(
-        raw
-      );
+      result.data;
 
 
-    if (!parsed) {
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
 
       logger.warning(
-        "Planning Agent JSON Parse Failed"
+        "Planning Agent received invalid structured AI response"
       );
 
 
@@ -1121,13 +1092,21 @@ Create the implementation plan now.
         success: false,
 
         message:
-          "Invalid AI JSON response",
+          "Planning Agent received an invalid AI response",
 
         error:
-          "Planning Agent could not parse the AI planning response.",
+          "AI provider returned an invalid planning object.",
 
         stage:
-          currentStage
+          currentStage,
+
+        provider:
+          result.provider ||
+          null,
+
+        model:
+          result.model ||
+          null
 
       };
 
@@ -1169,7 +1148,15 @@ Create the implementation plan now.
           "projectName is required.",
 
         stage:
-          currentStage
+          currentStage,
+
+        provider:
+          result.provider ||
+          null,
+
+        model:
+          result.model ||
+          null
 
       };
 
@@ -1182,6 +1169,16 @@ Create the implementation plan now.
 
     logger.success(
       `Planning Agent Completed: ${normalizedPlan.projectName}`
+    );
+
+
+    logger.info(
+      `Planning Agent Provider: ${result.provider || "unknown"}`
+    );
+
+
+    logger.info(
+      `Planning Agent Model: ${result.model || "unknown"}`
     );
 
 
@@ -1199,7 +1196,12 @@ Create the implementation plan now.
       metadata: {
 
         model:
-          "gpt-4.1-mini",
+          result.model ||
+          null,
+
+        provider:
+          result.provider ||
+          null,
 
         agent:
           "planningAgent",
