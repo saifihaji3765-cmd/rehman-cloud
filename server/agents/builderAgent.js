@@ -1,15 +1,19 @@
 /* =========================================================
    ZyrionOS BUILDER AGENT
    Planning → Production Code Generation
+
+   AI PROVIDER ARCHITECTURE:
+
+   Builder Agent
+        ↓
+   aiProviderService
+        ↓
+   Primary Provider
+        ↓
+   Fallback Provider
+
+   No direct provider SDK is used here.
 ========================================================= */
-
-
-/* =========================
-   PACKAGES
-========================= */
-
-const OpenAI =
-  require("openai");
 
 
 /* =========================
@@ -19,18 +23,10 @@ const OpenAI =
 const logger =
   require("../services/loggerService");
 
-
-/* =========================
-   OPENAI CLIENT
-========================= */
-
-const openai =
-  new OpenAI({
-
-    apiKey:
-      process.env.OPENAI_API_KEY
-
-  });
+const {
+  generateJSON
+} =
+  require("../services/ai/aiProviderService");
 
 
 /* =========================================================
@@ -107,6 +103,59 @@ const COMMON_FRAMEWORKS = [
 
 
 /* =========================
+   SAFE STRING
+========================= */
+
+function cleanString(
+  value,
+  maxLength = 4000
+) {
+
+  if (
+    typeof value !== "string"
+  ) {
+
+    return "";
+
+  }
+
+
+  return value
+    .trim()
+    .slice(
+      0,
+      maxLength
+    );
+
+}
+
+
+/* =========================
+   SAFE JSON SERIALIZER
+========================= */
+
+function safeJson(
+  value
+) {
+
+  try {
+
+    return JSON.stringify(
+      value ?? null
+    );
+
+  }
+
+  catch (error) {
+
+    return "{}";
+
+  }
+
+}
+
+
+/* =========================
    SAFE JSON PARSER
 ========================= */
 
@@ -167,59 +216,6 @@ function safeJsonParse(
 
 
 /* =========================
-   SAFE STRING
-========================= */
-
-function cleanString(
-  value,
-  maxLength = 4000
-) {
-
-  if (
-    typeof value !== "string"
-  ) {
-
-    return "";
-
-  }
-
-
-  return value
-    .trim()
-    .slice(
-      0,
-      maxLength
-    );
-
-}
-
-
-/* =========================
-   SAFE JSON SERIALIZER
-========================= */
-
-function safeJson(
-  value
-) {
-
-  try {
-
-    return JSON.stringify(
-      value ?? null
-    );
-
-  }
-
-  catch (error) {
-
-    return "{}";
-
-  }
-
-}
-
-
-/* =========================
    NORMALIZE FRAMEWORK
 ========================= */
 
@@ -265,9 +261,11 @@ function normalizeFramework(
 
 
   /*
-   * Preserve unknown but valid-looking
-   * framework values rather than silently
-   * changing the user's architecture.
+   * Preserve known framework casing.
+   *
+   * Unknown but valid-looking values
+   * are preserved instead of silently
+   * changing the requested architecture.
    */
 
   const known =
@@ -353,11 +351,23 @@ function normalizeFilePath(
 
 
   /*
-   * Reject absolute paths.
+   * Reject absolute Unix paths.
    */
 
   if (
-    filePath.startsWith("/") ||
+    filePath.startsWith("/")
+  ) {
+
+    return null;
+
+  }
+
+
+  /*
+   * Reject Windows absolute paths.
+   */
+
+  if (
     /^[A-Za-z]:\//.test(
       filePath
     )
@@ -386,7 +396,7 @@ function normalizeFilePath(
 
 
   /*
-   * Reject empty or malformed paths.
+   * Reject empty or oversized paths.
    */
 
   if (
@@ -598,7 +608,7 @@ function normalizeBuildRequest(
 ) {
 
   /*
-   * Master Agent sends an object:
+   * Master Agent sends:
 
    {
      prompt,
@@ -609,7 +619,7 @@ function normalizeBuildRequest(
      intent
    }
 
-   We extract the actual plan.
+   We extract the actual build context.
    */
 
   if (
@@ -796,29 +806,6 @@ async function builderAgent(
 
 
     /* =====================================================
-       OPENAI CONFIGURATION
-    ===================================================== */
-
-    if (
-      !process.env.OPENAI_API_KEY
-    ) {
-
-      return {
-
-        success: false,
-
-        message:
-          "Builder Agent configuration error",
-
-        error:
-          "OPENAI_API_KEY is not configured on the backend."
-
-      };
-
-    }
-
-
-    /* =====================================================
        BUILD CONTEXT
     ===================================================== */
 
@@ -831,7 +818,15 @@ async function builderAgent(
         framework ||
         "Use the framework specified by the plan.",
 
-      plan
+      plan,
+
+      intent:
+        request.intent ||
+        null,
+
+      memoryContext:
+        request.memoryContext ||
+        null
 
     };
 
@@ -841,40 +836,45 @@ async function builderAgent(
     ===================================================== */
 
     currentStage =
-      "openai-build";
+      "ai-build";
 
 
-    const completion =
-      await openai
-        .chat
-        .completions
-        .create({
+    /*
+     * IMPORTANT:
+     *
+     * Builder Agent does NOT create an
+     * OpenAI or Gemini client.
+     *
+     * Provider routing is centralized
+     * inside aiProviderService.
+     *
+     * The provider service decides:
+     *
+     * Primary Provider
+     *        ↓
+     * Fallback Provider
+     *
+     * according to environment configuration.
+     */
 
-          model:
-            "gpt-4.1-mini",
+    const result =
+      await generateJSON({
 
-          response_format: {
+        messages: [
 
-            type:
-              "json_object"
+          {
 
-          },
+            role:
+              "system",
 
-          messages: [
-
-            {
-
-              role:
-                "system",
-
-              content: `
+            content: `
 
 You are the Builder Agent of ZyrionOS
 Autonomous AI OS.
 
 Your responsibility is to transform an
 implementation plan into a coherent set
-of source files.
+of production-ready source files.
 
 The Planning Agent has already produced
 the architecture.
@@ -907,47 +907,104 @@ REQUIRED OUTPUT:
 STRICT RULES:
 
 1. Generate complete file contents.
+
 2. Every file must have a unique relative
    path.
+
 3. Every file path must use forward slashes.
+
 4. Never use absolute file paths.
+
 5. Never use "../" path traversal.
+
 6. Never include API keys, passwords,
-   secrets, tokens, cookies, or private
-   credentials.
+   secrets, tokens, cookies, private
+   credentials, payment secrets, or
+   authentication secrets.
+
 7. Never hard-code credentials.
+
 8. Use environment variables for secrets.
+
 9. Keep frontend/backend architecture
    consistent with the planning document.
+
 10. Keep imports and file paths internally
     consistent.
+
 11. Do not reference files that you did not
     generate unless they are clearly external
     dependencies.
+
 12. Generate configuration files when they
     are required for the project to run.
+
 13. Generate package.json when a Node.js
     application requires it.
-14. Generate appropriate entry points.
+
+14. Generate appropriate application
+    entry points.
+
 15. Generate required API routes when they
     are part of the plan.
+
 16. Generate database models/schemas when
     they are part of the plan.
+
 17. Generate authentication code only when
     authentication is part of the plan.
+
 18. Do not claim that deployment has happened.
+
 19. Do not claim that AWS, Docker, databases,
     domains, SSL, payments, or external
     services are configured unless represented
     only as application configuration/code.
+
 20. Do not generate fake success responses
     for infrastructure operations.
+
 21. Do not create unnecessary files.
+
 22. Do not duplicate the same path.
+
 23. Make the generated project internally
     coherent.
+
 24. Follow the requested framework.
+
 25. Return JSON only.
+
+26. Do not place source code outside the
+    "content" property.
+
+27. Do not omit content for any generated file.
+
+28. Do not generate placeholder files whose
+    only purpose is to make the file count
+    larger.
+
+29. Do not invent external APIs, services,
+    URLs, credentials, infrastructure,
+    databases, or integrations.
+
+30. If a required external resource is not
+    available, represent the integration using
+    environment-based configuration rather
+    than inventing credentials or endpoints.
+
+31. Prefer real implementation over pseudo-code.
+
+32. Do not return explanations, comments outside
+    the JSON structure, or markdown.
+
+33. Ensure generated source files are compatible
+    with the framework identified in the plan.
+
+34. Preserve the architectural intent of the
+    Planning Agent.
+
+35. Return JSON only.
 
 IMPORTANT:
 
@@ -959,65 +1016,76 @@ Therefore:
 - "files" MUST be an array.
 - "path" MUST be a string.
 - "content" MUST be a string.
-- Do not omit file content.
+- Every file MUST contain complete content.
 - Do not put code outside "content".
 - Do not wrap JSON in markdown.
 
 `
 
-            },
+          },
 
-            {
+          {
 
-              role:
-                "user",
+            role:
+              "user",
 
-              content:
-                safeJson(
-                  buildContext
-                )
+            content:
+              safeJson(
+                buildContext
+              )
 
-            }
+          }
 
-          ],
+        ],
 
-          temperature:
-            0.2,
+        temperature:
+          0.2,
 
-          max_tokens:
-            12000
+        maxTokens:
+          12000
 
-        });
+      });
 
 
     /* =====================================================
-       RAW RESPONSE
+       PROVIDER RESULT VALIDATION
     ===================================================== */
 
-    const raw =
-      completion
-        ?.choices?.[0]
-        ?.message
-        ?.content;
-
-
     if (
-      !raw ||
-      typeof raw !== "string"
+      !result ||
+      result.success !== true
     ) {
+
+      const providerError =
+        result?.error ||
+        "AI provider returned an unsuccessful result.";
+
+
+      logger.error(
+        `Builder Agent AI Provider Failed: ${providerError}`
+      );
+
 
       return {
 
         success: false,
 
         message:
-          "Builder Agent received an empty AI response",
+          "Builder Agent AI provider failed",
 
         error:
-          "OpenAI returned no generated project data.",
+          providerError,
 
         stage:
-          currentStage
+          currentStage,
+
+        provider:
+          result?.provider ||
+          null,
+
+        model:
+          result?.model ||
+          null
 
       };
 
@@ -1025,38 +1093,39 @@ Therefore:
 
 
     /* =====================================================
-       PARSE RESPONSE
+       STRUCTURED RESPONSE
     ===================================================== */
 
-    currentStage =
-      "builder-json-parse";
-
-
     const parsed =
-      safeJsonParse(
-        raw
-      );
+      result.data;
 
 
-    if (!parsed) {
-
-      logger.warning(
-        "Builder Agent JSON Parse Failed"
-      );
-
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
 
       return {
 
         success: false,
 
         message:
-          "Invalid AI JSON response",
+          "Builder Agent received an invalid AI response",
 
         error:
-          "Builder Agent could not parse the generated project JSON.",
+          "AI provider returned an invalid project object.",
 
         stage:
-          currentStage
+          currentStage,
+
+        provider:
+          result.provider ||
+          null,
+
+        model:
+          result.model ||
+          null
 
       };
 
@@ -1084,7 +1153,15 @@ Therefore:
           "Builder Agent response does not contain a valid files array.",
 
         stage:
-          currentStage
+          currentStage,
+
+        provider:
+          result.provider ||
+          null,
+
+        model:
+          result.model ||
+          null
 
       };
 
@@ -1106,7 +1183,15 @@ Therefore:
           "The AI Builder completed but generated zero files.",
 
         stage:
-          currentStage
+          currentStage,
+
+        provider:
+          result.provider ||
+          null,
+
+        model:
+          result.model ||
+          null
 
       };
 
@@ -1152,7 +1237,15 @@ Therefore:
           duplicateFiles:
             fileResult.duplicateCount
 
-        }
+        },
+
+        provider:
+          result.provider ||
+          null,
+
+        model:
+          result.model ||
+          null
 
       };
 
@@ -1208,6 +1301,16 @@ Therefore:
     );
 
 
+    logger.info(
+      `Builder Agent Provider: ${result.provider || "unknown"}`
+    );
+
+
+    logger.info(
+      `Builder Agent Model: ${result.model || "unknown"}`
+    );
+
+
     /* =====================================================
        RESPONSE
     ===================================================== */
@@ -1224,8 +1327,13 @@ Therefore:
         agent:
           "builderAgent",
 
+        provider:
+          result.provider ||
+          null,
+
         model:
-          "gpt-4.1-mini",
+          result.model ||
+          null,
 
         totalFiles:
           fileResult.files.length,
