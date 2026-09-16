@@ -53,11 +53,56 @@ const env = {
 
 
   /* =======================================================
-     OPENAI
+     AI — OPENAI
   ======================================================= */
 
   OPENAI_API_KEY:
     process.env.OPENAI_API_KEY || "",
+
+  OPENAI_MODEL:
+    process.env.OPENAI_MODEL ||
+    "gpt-4.1-mini",
+
+
+  /* =======================================================
+     AI — GOOGLE GEMINI
+  ======================================================= */
+
+  GEMINI_API_KEY:
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    "",
+
+  GEMINI_MODEL:
+    process.env.GEMINI_MODEL ||
+    "gemini-3.8-flash",
+
+
+  /* =======================================================
+     AI PROVIDER CONTROL
+  =======================================================
+
+     OpenAI and Gemini are BOTH supported.
+
+     The provider router that we build next will decide
+     which provider should handle a request.
+
+     No API key is exposed to the frontend.
+  ======================================================= */
+
+  AI_PRIMARY_PROVIDER:
+    process.env.AI_PRIMARY_PROVIDER ||
+    "gemini",
+
+  AI_FALLBACK_PROVIDER:
+    process.env.AI_FALLBACK_PROVIDER ||
+    "openai",
+
+  AI_PROVIDER_TIMEOUT_MS:
+    Number(
+      process.env.AI_PROVIDER_TIMEOUT_MS ||
+      30000
+    ),
 
 
   /* =======================================================
