@@ -1,15 +1,10 @@
 /* =========================================================
    ZyrionOS INTENT AGENT
    Intent Classification & Agent Routing
+
+   AI Provider Chain:
+   Gemini → OpenAI fallback
 ========================================================= */
-
-
-/* =========================
-   PACKAGES
-========================= */
-
-const OpenAI =
-  require("openai");
 
 
 /* =========================
@@ -20,17 +15,10 @@ const logger =
   require("../services/loggerService");
 
 
-/* =========================
-   OPENAI CLIENT
-========================= */
-
-const openai =
-  new OpenAI({
-
-    apiKey:
-      process.env.OPENAI_API_KEY
-
-  });
+const {
+  generateJSON
+} =
+  require("../services/ai/aiProviderService");
 
 
 /* =========================================================
@@ -88,10 +76,6 @@ const VALID_COMPLEXITIES = [
 
 /* =========================
    KNOWN AGENTS
-
-   These names represent agents
-   currently connected to the
-   ZyrionOS Master Agent.
 ========================= */
 
 const KNOWN_AGENTS = [
@@ -158,7 +142,9 @@ function cleanString(
    SAFE JSON
 ========================= */
 
-function safeJson(value) {
+function safeJson(
+  value
+) {
 
   try {
 
@@ -176,64 +162,6 @@ function safeJson(value) {
         "Unable to serialize context"
 
     });
-
-  }
-
-}
-
-
-/* =========================
-   SAFE JSON PARSE
-========================= */
-
-function safeJsonParse(value) {
-
-  if (
-    !value ||
-    typeof value !== "string"
-  ) {
-
-    return null;
-
-  }
-
-
-  try {
-
-    return JSON.parse(
-      value.trim()
-    );
-
-  }
-
-  catch (error) {
-
-    try {
-
-      const cleaned =
-        value
-          .replace(
-            /```json/gi,
-            ""
-          )
-          .replace(
-            /```/g,
-            ""
-          )
-          .trim();
-
-
-      return JSON.parse(
-        cleaned
-      );
-
-    }
-
-    catch (secondError) {
-
-      return null;
-
-    }
 
   }
 
@@ -352,15 +280,6 @@ function getFallbackAgents(
       ];
 
 
-    /*
-     * There is currently no dedicated
-     * automation agent imported by the
-     * Master Agent.
-     *
-     * Planner can still understand and
-     * structure the request.
-     */
-
     case "automation":
 
       return [
@@ -370,14 +289,6 @@ function getFallbackAgents(
       ];
 
 
-    /*
-     * Infrastructure requests can be
-     * planned first.
-     *
-     * We do not falsely claim that a
-     * dedicated infrastructureAgent exists.
-     */
-
     case "infrastructure":
 
       return [
@@ -386,14 +297,6 @@ function getFallbackAgents(
 
       ];
 
-
-    /*
-     * There is currently no dedicated
-     * thumbnailAgent imported by Master.
-     *
-     * Therefore we intentionally return
-     * no fake agent dependency.
-     */
 
     case "thumbnail":
 
@@ -424,21 +327,27 @@ function normalizeRequiredAgents(
 
 
   if (
-    Array.isArray(agents)
+    Array.isArray(
+      agents
+    )
   ) {
 
     normalized =
       agents
+
         .filter(
           (agent) =>
             typeof agent ===
             "string"
         )
+
         .map(
           (agent) =>
             agent.trim()
         )
+
         .filter(Boolean)
+
         .filter(
           (agent) =>
             KNOWN_AGENTS.includes(
@@ -455,12 +364,6 @@ function normalizeRequiredAgents(
     )
   ];
 
-
-  /*
-   * If AI did not return any
-   * usable connected agents,
-   * use deterministic routing.
-   */
 
   if (
     normalized.length === 0
@@ -488,7 +391,9 @@ function normalizeConfidence(
 ) {
 
   let confidence =
-    Number(value);
+    Number(
+      value
+    );
 
 
   if (
@@ -549,7 +454,9 @@ function normalizeIntent(
   if (
     !parsed ||
     typeof parsed !== "object" ||
-    Array.isArray(parsed)
+    Array.isArray(
+      parsed
+    )
   ) {
 
     return fallback;
@@ -584,7 +491,9 @@ function normalizeIntent(
     );
 
 
-  if (!goal) {
+  if (
+    !goal
+  ) {
 
     goal =
       "general interaction";
@@ -643,146 +552,10 @@ function normalizeIntent(
 
 
 /* =========================================================
-   INTENT AGENT
+   SYSTEM PROMPT
 ========================================================= */
 
-async function intentAgent(
-  data = {}
-) {
-
-  try {
-
-    logger.info(
-      "🧠 ZyrionOS Intent Agent Started"
-    );
-
-
-    /* =====================================================
-       INPUT NORMALIZATION
-    ===================================================== */
-
-    const prompt =
-      cleanString(
-        data?.prompt,
-        4000
-      );
-
-
-    const memoryContext =
-      data?.memoryContext ||
-      null;
-
-
-    /* =====================================================
-       VALIDATION
-    ===================================================== */
-
-    if (!prompt) {
-
-      return {
-
-        success: false,
-
-        message:
-          "Prompt required",
-
-        type:
-          "chat",
-
-        data:
-          createDefaultIntent()
-
-      };
-
-    }
-
-
-    /* =====================================================
-       OPENAI CONFIGURATION
-    ===================================================== */
-
-    if (
-      !process.env.OPENAI_API_KEY
-    ) {
-
-      return {
-
-        success: false,
-
-        message:
-          "Intent Agent configuration error",
-
-        type:
-          "chat",
-
-        data:
-          createDefaultIntent(),
-
-        error:
-          "OPENAI_API_KEY is not configured on the backend."
-
-      };
-
-    }
-
-
-    /* =====================================================
-       MEMORY SUMMARY
-
-       Memory is only contextual information.
-       It must never override the current
-       explicit user request.
-    ===================================================== */
-
-    let memorySummary =
-      "";
-
-
-    if (memoryContext) {
-
-      memorySummary =
-        safeJson(
-          memoryContext
-        )
-          .slice(
-            0,
-            2500
-          );
-
-    }
-
-
-    /* =====================================================
-       AI INTENT ANALYSIS
-    ===================================================== */
-
-    const completion =
-      await openai
-        .chat
-        .completions
-        .create({
-
-          model:
-            "gpt-4.1-mini",
-
-          temperature:
-            0.1,
-
-          response_format: {
-
-            type:
-              "json_object"
-
-          },
-
-          messages: [
-
-            {
-
-              role:
-                "system",
-
-              content: `
+const INTENT_SYSTEM_PROMPT = `
 
 You are the Intent Detection Agent
 of ZyrionOS Autonomous AI OS.
@@ -888,9 +661,12 @@ or generate a thumbnail.
 
 CLASSIFICATION RULES:
 
-- Classify the CURRENT prompt.
+- Classify ONLY the CURRENT prompt.
 - Current explicit instructions have
   priority over memory/context.
+- Memory is contextual information only.
+- Do not let memory override the current
+  explicit user request.
 - Do not invent unsupported intents.
 - If the user asks to build software,
   classify as "build".
@@ -898,16 +674,45 @@ CLASSIFICATION RULES:
   classify as "fix".
 - If the user asks to deploy an existing
   project, classify as "deploy".
+- If the user asks about deployment health
+  or runtime metrics, classify as "monitor".
+- If the user asks to increase or decrease
+  capacity, classify as "scale".
+- If the request concerns prices, charges,
+  invoices, or billing, classify as "billing".
+- If the request concerns plans, limits,
+  subscription status, or subscription
+  lifecycle, classify as "subscription".
+- If the request concerns files directly,
+  classify as "file".
+- If the request concerns infrastructure
+  architecture or cloud resources, classify
+  as "infrastructure".
+- If the request concerns automated
+  workflows, classify as "automation".
+- If the request specifically asks for a
+  thumbnail, classify as "thumbnail".
 - If uncertain, use "chat".
-- complexity must be:
-  "low", "medium", or "high".
-- confidence must be a number from 0-100.
-- requiredAgents must be an array.
-- Only use names from CONNECTED AGENTS.
-- Do not invent agent names.
-- Return JSON only.
-- No markdown.
-- No explanation outside JSON.
+
+complexity must be:
+
+"low"
+"medium"
+"high"
+
+confidence must be a number from 0-100.
+
+requiredAgents must be an array.
+
+Only use names from CONNECTED AGENTS.
+
+Do not invent agent names.
+
+Return JSON only.
+
+No markdown.
+
+No explanation outside JSON.
 
 REQUIRED JSON FORMAT:
 
@@ -919,73 +724,61 @@ REQUIRED JSON FORMAT:
   "requiredAgents": []
 }
 
-`
+`;
 
-            },
 
-            {
+/* =========================================================
+   INTENT AGENT
+========================================================= */
 
-              role:
-                "user",
+async function intentAgent(
+  data = {}
+) {
 
-              content: `
+  try {
 
-CURRENT USER REQUEST:
-
-${prompt}
-
-OPTIONAL MEMORY CONTEXT:
-
-${memorySummary || "No memory context provided."}
-
-Classify only the current request.
-
-`
-
-            }
-
-          ]
-
-        });
+    logger.info(
+      "🧠 ZyrionOS Intent Agent Started"
+    );
 
 
     /* =====================================================
-       RESPONSE EXTRACTION
+       INPUT NORMALIZATION
     ===================================================== */
 
-    const raw =
-      completion
-        ?.choices?.[0]
-        ?.message
-        ?.content;
-
-
-    if (
-      !raw ||
-      typeof raw !== "string"
-    ) {
-
-      logger.warning(
-        "Intent Agent received empty AI response"
+    const prompt =
+      cleanString(
+        data?.prompt,
+        4000
       );
 
 
-      const fallback =
-        createDefaultIntent();
+    const memoryContext =
+      data?.memoryContext ||
+      null;
 
+
+    /* =====================================================
+       VALIDATION
+    ===================================================== */
+
+    if (
+      !prompt
+    ) {
 
       return {
 
-        success: false,
+        success:
+          false,
 
         message:
-          "Intent AI returned an empty response",
+          "Prompt required",
 
         type:
-          fallback.type,
+          "chat",
 
         data:
-          fallback
+          createDefaultIntent()
 
       };
 
@@ -993,40 +786,122 @@ Classify only the current request.
 
 
     /* =====================================================
-       JSON PARSING
+       MEMORY SUMMARY
     ===================================================== */
 
-    const parsed =
-      safeJsonParse(
-        raw
+    let memorySummary =
+      "";
+
+
+    if (
+      memoryContext
+    ) {
+
+      memorySummary =
+        safeJson(
+          memoryContext
+        )
+          .slice(
+            0,
+            2500
+          );
+
+    }
+
+
+    /* =====================================================
+       AI REQUEST
+    ===================================================== */
+
+    const result =
+      await generateJSON({
+
+        /*
+         * No provider is forced here.
+         *
+         * aiProviderService uses:
+         *
+         * Gemini → OpenAI fallback
+         *
+         * according to env.js.
+         */
+
+        messages: [
+
+          {
+
+            role:
+              "system",
+
+            content:
+              INTENT_SYSTEM_PROMPT
+
+          },
+
+          {
+
+            role:
+              "user",
+
+            content: `
+
+CURRENT USER REQUEST:
+
+${prompt}
+
+OPTIONAL MEMORY CONTEXT:
+
+${memorySummary ||
+  "No memory context provided."}
+
+Classify only the current request.
+
+`
+
+          }
+
+        ],
+
+        temperature:
+          0.1,
+
+        maxTokens:
+          1000
+
+      });
+
+
+    /* =====================================================
+       PROVIDER VALIDATION
+    ===================================================== */
+
+    if (
+      !result ||
+      result.success !== true
+    ) {
+
+      throw new Error(
+        "AI provider returned an unsuccessful result"
       );
 
+    }
 
-    if (!parsed) {
 
-      logger.warning(
-        "Intent JSON Parse Failed"
+    /* =====================================================
+       RESPONSE VALIDATION
+    ===================================================== */
+
+    if (
+      !result.data ||
+      typeof result.data !== "object" ||
+      Array.isArray(
+        result.data
+      )
+    ) {
+
+      throw new Error(
+        "Intent AI returned invalid structured data"
       );
-
-
-      const fallback =
-        createDefaultIntent();
-
-
-      return {
-
-        success: false,
-
-        message:
-          "Intent response could not be parsed",
-
-        type:
-          fallback.type,
-
-        data:
-          fallback
-
-      };
 
     }
 
@@ -1037,7 +912,7 @@ Classify only the current request.
 
     const normalized =
       normalizeIntent(
-        parsed
+        result.data
       );
 
 
@@ -1046,23 +921,18 @@ Classify only the current request.
     ===================================================== */
 
     logger.success(
-      `Intent Detected: ${normalized.type} | Confidence: ${normalized.confidence}%`
+      `Intent Detected: ${normalized.type} | Confidence: ${normalized.confidence}% | Provider: ${result.provider} | Model: ${result.model}`
     );
 
 
     /* =====================================================
        RESPONSE CONTRACT
-
-       Master Agent uses:
-       result.type
-
-       Planning Agent can use:
-       result.data
     ===================================================== */
 
     return {
 
-      success: true,
+      success:
+        true,
 
       type:
         normalized.type,
@@ -1074,7 +944,9 @@ Classify only the current request.
 
   }
 
-  catch (error) {
+  catch (
+    error
+  ) {
 
     const errorMessage =
       error?.message ||
@@ -1096,7 +968,8 @@ Classify only the current request.
 
     return {
 
-      success: false,
+      success:
+        false,
 
       type:
         fallback.type,
