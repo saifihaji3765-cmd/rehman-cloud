@@ -5,32 +5,16 @@
 
 
 /* =========================
-   PACKAGES
-========================= */
-
-const OpenAI =
-  require("openai");
-
-
-/* =========================
    SERVICES
 ========================= */
 
 const logger =
   require("../services/loggerService");
 
-
-/* =========================
-   OPENAI CLIENT
-========================= */
-
-const openai =
-  new OpenAI({
-
-    apiKey:
-      process.env.OPENAI_API_KEY
-
-  });
+const {
+  generateJSON
+} =
+  require("../services/ai/aiProviderService");
 
 
 /* =========================================================
@@ -81,65 +65,6 @@ function cleanString(
       0,
       maxLength
     );
-
-}
-
-
-/* =========================
-   SAFE JSON PARSER
-========================= */
-
-function safeJsonParse(
-  value
-) {
-
-  if (
-    !value ||
-    typeof value !== "string"
-  ) {
-
-    return null;
-
-  }
-
-
-  try {
-
-    return JSON.parse(
-      value.trim()
-    );
-
-  }
-
-  catch (error) {
-
-    try {
-
-      const cleaned =
-        value
-          .replace(
-            /```json/gi,
-            ""
-          )
-          .replace(
-            /```/g,
-            ""
-          )
-          .trim();
-
-      return JSON.parse(
-        cleaned
-      );
-
-    }
-
-    catch (secondError) {
-
-      return null;
-
-    }
-
-  }
 
 }
 
@@ -625,28 +550,6 @@ async function fixAgent(
     }
 
 
-    if (
-      !process.env.OPENAI_API_KEY
-    ) {
-
-      return {
-
-        success: false,
-
-        message:
-          "Fix Agent configuration error",
-
-        error:
-          "OPENAI_API_KEY is not configured on the backend.",
-
-        stage:
-          currentStage
-
-      };
-
-    }
-
-
     /* =====================================================
        PROJECT FILES
     ===================================================== */
@@ -726,6 +629,70 @@ async function fixAgent(
 
 
     /* =====================================================
+       INTENT CONTEXT
+    ===================================================== */
+
+    let intentContext =
+      "No intent context provided.";
+
+
+    if (
+      request.intent
+    ) {
+
+      intentContext =
+        safeJson(
+          request.intent
+        )
+          .slice(
+            0,
+            3000
+          );
+
+    }
+
+
+    /* =====================================================
+       USER CONTEXT
+    ===================================================== */
+
+    let userContext =
+      "No user context provided.";
+
+
+    if (
+      request.user &&
+      typeof request.user ===
+        "object"
+    ) {
+
+      /*
+       * Only send a bounded,
+       * non-sensitive user context.
+       */
+
+      userContext =
+        safeJson({
+
+          id:
+            request.user.id ||
+            request.user.userId ||
+            null,
+
+          role:
+            request.user.role ||
+            null
+
+        })
+          .slice(
+            0,
+            1500
+          );
+
+    }
+
+
+    /* =====================================================
        BUILD AI CONTEXT
     ===================================================== */
 
@@ -745,8 +712,14 @@ async function fixAgent(
       planning:
         planningContext,
 
+      intent:
+        intentContext,
+
       memory:
         memoryContext,
+
+      user:
+        userContext,
 
       files:
         filesContext
@@ -765,37 +738,24 @@ async function fixAgent(
 
 
     /* =====================================================
-       OPENAI FIX
+       PROVIDER-BASED AI FIX
     ===================================================== */
 
     currentStage =
-      "openai-fix";
+      "provider-fix";
 
 
-    const completion =
-      await openai
-        .chat
-        .completions
-        .create({
+    const result =
+      await generateJSON({
 
-          model:
-            "gpt-4.1-mini",
+        messages: [
 
-          response_format: {
+          {
 
-            type:
-              "json_object"
+            role:
+              "system",
 
-          },
-
-          messages: [
-
-            {
-
-              role:
-                "system",
-
-              content: `
+            content: `
 
 You are the Fix Agent of ZyrionOS
 Autonomous AI OS.
@@ -951,43 +911,36 @@ is appropriate.
 
 `
 
-            },
+          },
 
-            {
+          {
 
-              role:
-                "user",
+            role:
+              "user",
 
-              content:
-                serializedContext
+            content:
+              serializedContext
 
-            }
+          }
 
-          ],
+        ],
 
-          temperature:
-            0.2,
+        temperature:
+          0.2,
 
-          max_tokens:
-            12000
+        maxTokens:
+          12000
 
-        });
+      });
 
 
     /* =====================================================
-       RAW RESPONSE
+       PROVIDER RESULT VALIDATION
     ===================================================== */
 
-    const raw =
-      completion
-        ?.choices?.[0]
-        ?.message
-        ?.content;
-
-
     if (
-      !raw ||
-      typeof raw !== "string"
+      !result ||
+      result.success !== true
     ) {
 
       return {
@@ -995,13 +948,26 @@ is appropriate.
         success: false,
 
         message:
-          "Fix Agent received an empty AI response",
+          "Fix Agent AI provider failed",
 
         error:
-          "OpenAI returned no debugging or repair result.",
+          result?.error ||
+          "AI provider returned an unsuccessful result.",
 
         stage:
-          currentStage
+          currentStage,
+
+        metadata: {
+
+          provider:
+            result?.provider ||
+            null,
+
+          model:
+            result?.model ||
+            null
+
+        }
 
       };
 
@@ -1009,23 +975,20 @@ is appropriate.
 
 
     /* =====================================================
-       JSON PARSE
+       AI JSON DATA
     ===================================================== */
 
-    currentStage =
-      "fix-json-parse";
-
-
     const parsed =
-      safeJsonParse(
-        raw
-      );
+      result.data;
 
 
-    if (!parsed) {
+    if (
+      !parsed ||
+      typeof parsed !== "object"
+    ) {
 
       logger.warning(
-        "Fix Agent JSON Parse Failed"
+        "Fix Agent received invalid structured data"
       );
 
 
@@ -1034,10 +997,10 @@ is appropriate.
         success: false,
 
         message:
-          "Invalid AI JSON response",
+          "Invalid AI repair response",
 
         error:
-          "Fix Agent could not parse the AI repair response.",
+          "Fix Agent received invalid structured data from the AI provider.",
 
         stage:
           currentStage
@@ -1116,14 +1079,6 @@ is appropriate.
        NO FALSE SUCCESS
     ===================================================== */
 
-    /*
-     * If source files were provided and
-     * the AI claims a repair but returns
-     * no corrected files, we still return
-     * the analysis, but clearly mark that
-     * no file content was produced.
-     */
-
     const hasSourceFiles =
       projectFiles.length > 0;
 
@@ -1132,11 +1087,21 @@ is appropriate.
       fixedFileResult.files.length > 0;
 
 
+    /*
+     * If source files were provided but
+     * no corrected files were returned,
+     * the result remains an analysis result.
+     *
+     * We do not claim that a repair was
+     * actually applied.
+     */
+
+
     /* =====================================================
        RESULT
     ===================================================== */
 
-    const result = {
+    const finalResult = {
 
       success: true,
 
@@ -1158,8 +1123,13 @@ is appropriate.
         agent:
           "fixAgent",
 
+        provider:
+          result.provider ||
+          null,
+
         model:
-          "gpt-4.1-mini",
+          result.model ||
+          null,
 
         projectId:
           request.projectId ||
@@ -1198,7 +1168,7 @@ is appropriate.
     ===================================================== */
 
     logger.success(
-      `Fix Agent Completed: ${issues.length} issues, ${fixedFileResult.files.length} corrected files`
+      `Fix Agent Completed: ${issues.length} issues, ${fixedFileResult.files.length} corrected files via ${result.provider || "unknown"}`
     );
 
 
@@ -1206,7 +1176,7 @@ is appropriate.
        RETURN
     ===================================================== */
 
-    return result;
+    return finalResult;
 
   }
 
