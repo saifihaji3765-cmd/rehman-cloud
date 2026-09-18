@@ -1,4 +1,4 @@
-name: Build and Push to ECR
+name: Build, Push and Deploy to ECS
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - main
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
@@ -25,12 +25,33 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build Docker Image
-        run: docker build -t vertexcloud .
+        run: |
+          docker build -t vertexcloud .
 
       - name: Tag Docker Image
         run: |
-          docker tag vertexcloud:latest 387512138534.dkr.ecr.ap-south-1.amazonaws.com/vertexcloud:latest
+          docker tag vertexcloud:latest \
+            387512138534.dkr.ecr.ap-south-1.amazonaws.com/vertexcloud:latest
 
-      - name: Push Docker Image
+      - name: Push Docker Image to ECR
         run: |
-          docker push 387512138534.dkr.ecr.ap-south-1.amazonaws.com/vertexcloud:latest
+          docker push \
+            387512138534.dkr.ecr.ap-south-1.amazonaws.com/vertexcloud:latest
+
+      - name: Force ECS Deployment
+        run: |
+          aws ecs update-service \
+            --cluster vertexcloud_cluster \
+            --service vertexcloud-service \
+            --force-new-deployment
+
+      - name: Wait for ECS Deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster vertexcloud_cluster \
+            --services vertexcloud-service
+
+      - name: Deployment Completed
+        run: |
+          echo "ECR image pushed successfully."
+          echo "ECS service redeployment completed successfully."
