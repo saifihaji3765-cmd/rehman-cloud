@@ -5,9 +5,40 @@ const formatResponse =
   require("../utils/formatResponse");
 
 
-/* =========================
-   AI CHAT CONTROLLER
-========================= */
+/* =========================================================
+   COMMON HELPERS
+========================================================= */
+
+function sendError(
+  res,
+  status,
+  message,
+  error = null,
+  data = null
+) {
+  return res
+    .status(status)
+    .json(
+      formatResponse({
+        success: false,
+        message,
+        error,
+        data
+      })
+    );
+}
+
+
+function getCleanString(value) {
+  return typeof value === "string"
+    ? value.trim()
+    : "";
+}
+
+
+/* =========================================================
+   AI CHAT
+========================================================= */
 
 async function aiChatController(
   req,
@@ -16,50 +47,29 @@ async function aiChatController(
 
   try {
 
-    const {
-      prompt
-    } = req.body || {};
+    const prompt =
+      getCleanString(
+        req.body?.prompt
+      );
 
 
-    /* =========================
-       VALIDATION
-    ========================= */
+    if (!prompt) {
 
-    if (
-      typeof prompt !== "string" ||
-      !prompt.trim()
-    ) {
-
-      return res
-        .status(400)
-        .json(
-
-          formatResponse({
-
-            success: false,
-
-            message:
-              "Prompt is required"
-
-          })
-
-        );
+      return sendError(
+        res,
+        400,
+        "Prompt is required"
+      );
 
     }
 
 
-    /* =========================
-       AI RESPONSE
-    ========================= */
-
     const result =
-
       await masterAgent({
 
         type: "chat",
 
-        prompt:
-          prompt.trim(),
+        prompt,
 
         user:
           req.user || {}
@@ -67,39 +77,28 @@ async function aiChatController(
       });
 
 
-    /* =========================
-       MASTER AGENT FAILURE
-    ========================= */
-
     if (
       result?.success === false
     ) {
 
-      return res
-        .status(500)
-        .json(
+      return sendError(
 
-          formatResponse({
+        res,
 
-            success: false,
+        500,
 
-            message:
-              result?.message ||
-              "AI chat failed",
+        result?.message ||
+          "AI chat failed",
 
-            error:
-              result?.error || null
+        result?.error ||
+          null,
 
-          })
+        result
 
-        );
+      );
 
     }
 
-
-    /* =========================
-       RESPONSE
-    ========================= */
 
     return res.json(
 
@@ -126,32 +125,28 @@ async function aiChatController(
       error
     );
 
-    return res
-      .status(500)
-      .json(
 
-        formatResponse({
+    return sendError(
 
-          success: false,
+      res,
 
-          message:
-            "AI chat failed",
+      500,
 
-          error:
-            error.message
+      "AI chat failed",
 
-        })
+      error?.message ||
+        "Unknown AI chat error"
 
-      );
+    );
 
   }
 
 }
 
 
-/* =========================
-   AI CODE CONTROLLER
-========================= */
+/* =========================================================
+   AI CODE GENERATION
+========================================================= */
 
 async function aiCodeController(
   req,
@@ -160,61 +155,42 @@ async function aiCodeController(
 
   try {
 
-    const {
-
-      prompt,
-
-      framework
-
-    } = req.body || {};
+    const prompt =
+      getCleanString(
+        req.body?.prompt
+      );
 
 
-    /* =========================
-       VALIDATION
-    ========================= */
+    const framework =
+      getCleanString(
+        req.body?.framework
+      ) ||
+      "React";
 
-    if (
-      typeof prompt !== "string" ||
-      !prompt.trim()
-    ) {
 
-      return res
-        .status(400)
-        .json(
+    if (!prompt) {
 
-          formatResponse({
+      return sendError(
 
-            success: false,
+        res,
 
-            message:
-              "Code prompt required"
+        400,
 
-          })
+        "Code prompt required"
 
-        );
+      );
 
     }
 
 
-    /* =========================
-       AI CODE GENERATION
-    ========================= */
-
     const result =
-
       await masterAgent({
 
         type: "code",
 
-        prompt:
-          prompt.trim(),
+        prompt,
 
-        framework:
-
-          typeof framework === "string" &&
-          framework.trim()
-            ? framework.trim()
-            : "React",
+        framework,
 
         user:
           req.user || {}
@@ -222,42 +198,28 @@ async function aiCodeController(
       });
 
 
-    /* =========================
-       MASTER AGENT FAILURE
-    ========================= */
-
     if (
       result?.success === false
     ) {
 
-      return res
-        .status(500)
-        .json(
+      return sendError(
 
-          formatResponse({
+        res,
 
-            success: false,
+        500,
 
-            message:
-              result?.message ||
-              "Code generation failed",
+        result?.message ||
+          "Code generation failed",
 
-            error:
-              result?.error || null,
+        result?.error ||
+          null,
 
-            data:
-              result
+        result
 
-          })
-
-        );
+      );
 
     }
 
-
-    /* =========================
-       RESPONSE
-    ========================= */
 
     return res.json(
 
@@ -284,32 +246,28 @@ async function aiCodeController(
       error
     );
 
-    return res
-      .status(500)
-      .json(
 
-        formatResponse({
+    return sendError(
 
-          success: false,
+      res,
 
-          message:
-            "Code generation failed",
+      500,
 
-          error:
-            error.message
+      "Code generation failed",
 
-        })
+      error?.message ||
+        "Unknown AI code generation error"
 
-      );
+    );
 
   }
 
 }
 
 
-/* =========================
-   AI DEPLOY CONTROLLER
-========================= */
+/* =========================================================
+   AI DEPLOYMENT
+========================================================= */
 
 async function aiDeployController(
   req,
@@ -318,56 +276,36 @@ async function aiDeployController(
 
   try {
 
-    const {
+    const projectId =
+      getCleanString(
+        req.body?.projectId
+      );
 
-      projectId
 
-    } = req.body || {};
+    if (!projectId) {
 
+      return sendError(
 
-    /* =========================
-       VALIDATION
-    ========================= */
+        res,
 
-    if (
-      projectId === undefined ||
-      projectId === null ||
-      String(projectId).trim() === ""
-    ) {
+        400,
 
-      return res
-        .status(400)
-        .json(
+        "Project ID required"
 
-          formatResponse({
-
-            success: false,
-
-            message:
-              "Project ID required"
-
-          })
-
-        );
+      );
 
     }
 
 
-    /* =========================
-       DEPLOYMENT
-    ========================= */
-
     const result =
-
       await masterAgent({
 
         type: "deploy",
 
-        projectId:
-          String(projectId).trim(),
+        projectId,
 
         prompt:
-          `Deploy project ${String(projectId).trim()}`,
+          `Deploy project ${projectId}`,
 
         user:
           req.user || {}
@@ -375,42 +313,28 @@ async function aiDeployController(
       });
 
 
-    /* =========================
-       MASTER AGENT FAILURE
-    ========================= */
-
     if (
       result?.success === false
     ) {
 
-      return res
-        .status(500)
-        .json(
+      return sendError(
 
-          formatResponse({
+        res,
 
-            success: false,
+        500,
 
-            message:
-              result?.message ||
-              "Deployment failed",
+        result?.message ||
+          "Deployment failed",
 
-            error:
-              result?.error || null,
+        result?.error ||
+          null,
 
-            data:
-              result
+        result
 
-          })
-
-        );
+      );
 
     }
 
-
-    /* =========================
-       RESPONSE
-    ========================= */
 
     return res.json(
 
@@ -437,32 +361,28 @@ async function aiDeployController(
       error
     );
 
-    return res
-      .status(500)
-      .json(
 
-        formatResponse({
+    return sendError(
 
-          success: false,
+      res,
 
-          message:
-            "Deployment failed",
+      500,
 
-          error:
-            error.message
+      "Deployment failed",
 
-        })
+      error?.message ||
+        "Unknown deployment error"
 
-      );
+    );
 
   }
 
 }
 
 
-/* =========================
-   AI THUMBNAIL CONTROLLER
-========================= */
+/* =========================================================
+   AI THUMBNAIL
+========================================================= */
 
 async function aiThumbnailController(
   req,
@@ -471,52 +391,33 @@ async function aiThumbnailController(
 
   try {
 
-    const {
+    const prompt =
+      getCleanString(
+        req.body?.prompt
+      );
 
-      prompt
 
-    } = req.body || {};
+    if (!prompt) {
 
+      return sendError(
 
-    /* =========================
-       VALIDATION
-    ========================= */
+        res,
 
-    if (
-      typeof prompt !== "string" ||
-      !prompt.trim()
-    ) {
+        400,
 
-      return res
-        .status(400)
-        .json(
+        "Thumbnail prompt required"
 
-          formatResponse({
-
-            success: false,
-
-            message:
-              "Thumbnail prompt required"
-
-          })
-
-        );
+      );
 
     }
 
 
-    /* =========================
-       THUMBNAIL GENERATION
-    ========================= */
-
     const result =
-
       await masterAgent({
 
         type: "thumbnail",
 
-        prompt:
-          prompt.trim(),
+        prompt,
 
         user:
           req.user || {}
@@ -524,42 +425,28 @@ async function aiThumbnailController(
       });
 
 
-    /* =========================
-       MASTER AGENT FAILURE
-    ========================= */
-
     if (
       result?.success === false
     ) {
 
-      return res
-        .status(500)
-        .json(
+      return sendError(
 
-          formatResponse({
+        res,
 
-            success: false,
+        500,
 
-            message:
-              result?.message ||
-              "Thumbnail generation failed",
+        result?.message ||
+          "Thumbnail generation failed",
 
-            error:
-              result?.error || null,
+        result?.error ||
+          null,
 
-            data:
-              result
+        result
 
-          })
-
-        );
+      );
 
     }
 
-
-    /* =========================
-       RESPONSE
-    ========================= */
 
     return res.json(
 
@@ -586,32 +473,28 @@ async function aiThumbnailController(
       error
     );
 
-    return res
-      .status(500)
-      .json(
 
-        formatResponse({
+    return sendError(
 
-          success: false,
+      res,
 
-          message:
-            "Thumbnail generation failed",
+      500,
 
-          error:
-            error.message
+      "Thumbnail generation failed",
 
-        })
+      error?.message ||
+        "Unknown thumbnail generation error"
 
-      );
+    );
 
   }
 
 }
 
 
-/* =========================
+/* =========================================================
    EXPORTS
-========================= */
+========================================================= */
 
 module.exports = {
 
