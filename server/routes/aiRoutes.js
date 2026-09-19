@@ -1,116 +1,123 @@
 const express =
-require("express");
+  require("express");
 
 const router =
-express.Router();
+  express.Router();
 
-/* =========================
-CONTROLLERS
-========================= */
 
-const {
-
-aiChatController,
-
-aiCodeController,
-
-aiDeployController,
-
-aiThumbnailController
-
-} = require(
-"../controllers/aiController"
-);
-
-/* =========================
-MIDDLEWARE
-========================= */
+/* =========================================================
+   CONTROLLERS
+========================================================= */
 
 const {
 
-aiLimiter,
+  aiChatController,
 
-deployLimiter
+  aiCodeController,
+
+  aiDeployController,
+
+  aiThumbnailController
 
 } = require(
-"../middleware/rateLimiter"
+  "../controllers/aiController"
+);
+
+
+/* =========================================================
+   MIDDLEWARE
+========================================================= */
+
+const {
+
+  aiLimiter,
+
+  deployLimiter
+
+} = require(
+  "../middleware/rateLimiter"
 );
 
 const {
 
-authMiddleware
+  authMiddleware
 
 } = require(
-"../middleware/authMiddleware"
+  "../middleware/authMiddleware"
 );
 
-/* =========================
-AI CHAT
-========================= */
+
+/* =========================================================
+   AI CHAT
+========================================================= */
 
 router.post(
 
-"/chat",
+  "/chat",
 
-authMiddleware,
+  authMiddleware,
 
-aiLimiter,
+  aiLimiter,
 
-aiChatController
+  aiChatController
 
 );
 
-/* =========================
-AI CODE GENERATION
-========================= */
+
+/* =========================================================
+   AI CODE GENERATION
+========================================================= */
 
 router.post(
 
-"/generate-code",
+  "/generate-code",
 
-authMiddleware,
+  authMiddleware,
 
-aiLimiter,
+  aiLimiter,
 
-aiCodeController
+  aiCodeController
 
 );
 
-/* =========================
-AI DEPLOYMENT
-========================= */
+
+/* =========================================================
+   AI DEPLOYMENT
+========================================================= */
 
 router.post(
 
-"/deploy-agent",
+  "/deploy-agent",
 
-authMiddleware,
+  authMiddleware,
 
-deployLimiter,
+  deployLimiter,
 
-aiDeployController
+  aiDeployController
 
 );
 
-/* =========================
-AI THUMBNAIL
-========================= */
+
+/* =========================================================
+   AI THUMBNAIL
+========================================================= */
 
 router.post(
 
-"/thumbnail",
+  "/thumbnail",
 
-authMiddleware,
+  authMiddleware,
 
-aiLimiter,
+  aiLimiter,
 
-aiThumbnailController
+  aiThumbnailController
 
 );
 
-/* =========================
-EXPORT
-========================= */
+
+/* =========================================================
+   EXPORT
+========================================================= */
 
 module.exports =
-router;
+  router;
