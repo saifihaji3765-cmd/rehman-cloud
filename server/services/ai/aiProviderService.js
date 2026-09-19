@@ -1,7 +1,7 @@
 /* =========================================================
    ZYRIONOS AI PROVIDER SERVICE
    GEMINI ONLY - OPENAI TEMPORARILY DISABLED
-   ---------------------------------------------------------
+
    Production AI chain:
 
    Gemini 3.8 Flash
@@ -52,12 +52,7 @@ let geminiClient = null;
 
 
 /* =========================================================
-   OPENAI STATUS
-   ---------------------------------------------------------
-   OpenAI is intentionally disabled at provider-service level.
-
-   We do NOT delete OpenAI from package.json or env.js.
-   It simply cannot receive production AI requests.
+   OPENAI TEMPORARILY DISABLED
 ========================================================= */
 
 const OPENAI_TEMPORARILY_DISABLED =
@@ -74,10 +69,8 @@ if (
 
   geminiClient =
     new GoogleGenAI({
-
       apiKey:
         env.GEMINI_API_KEY
-
     });
 
 }
@@ -85,16 +78,6 @@ if (
 
 /* =========================================================
    GEMINI MODEL FALLBACK CHAIN
-   ---------------------------------------------------------
-   Primary:
-   1. Gemini 3.8 Flash
-
-   Fallback:
-   2. Gemini 3.7 Flash
-   3. Gemini 3.6 Flash
-
-   These are stable Gemini models according to
-   Google's current model documentation.
 ========================================================= */
 
 const GEMINI_MODEL_CHAIN = [
@@ -116,23 +99,8 @@ const GEMINI_MAX_RETRIES =
   1;
 
 
-/*
- * Small backoff between retry attempts.
- *
- * Attempt 1:
- * immediate
- *
- * Attempt 2:
- * short delay
- */
-
 const GEMINI_RETRY_BASE_DELAY_MS =
   800;
-
-
-/* =========================================================
-   PROVIDER HELPERS
-========================================================= */
 
 
 /* =========================================================
@@ -164,11 +132,7 @@ function isProviderAvailable(
 
 
   /*
-   * OpenAI intentionally unavailable.
-   *
-   * This does NOT mean OpenAI was deleted.
-   * It only means ZyrionOS will not send
-   * production requests to OpenAI.
+   * OpenAI intentionally disabled.
    */
 
   if (
@@ -242,12 +206,16 @@ function getGeminiModelOrder(
 
 
   /*
-   * If an agent explicitly requests a Gemini model,
-   * try that model first.
+   * Explicit Gemini model request first.
+   *
+   * OpenAI model names are intentionally ignored.
    */
 
   if (
-    requestedModel
+    requestedModel &&
+    requestedModel.startsWith(
+      "gemini-"
+    )
   ) {
 
     order.push(
@@ -258,17 +226,13 @@ function getGeminiModelOrder(
 
 
   /*
-   * Always keep the production fallback chain.
+   * Production Gemini fallback chain.
    */
 
   order.push(
     ...GEMINI_MODEL_CHAIN
   );
 
-
-  /*
-   * Remove duplicates while preserving order.
-   */
 
   return [
     ...new Set(
@@ -281,34 +245,32 @@ function getGeminiModelOrder(
 
 /* =========================================================
    GET PROVIDER ORDER
-   ---------------------------------------------------------
-   IMPORTANT:
-   OpenAI is intentionally NEVER returned here.
 ========================================================= */
 
 function getProviderOrder(
   options = {}
 ) {
 
+  const requested =
+    normalizeProvider(
+      options.provider
+    );
+
+
   /*
-   * Even if an old agent sends:
-
-   provider: "openai"
-
-   we intentionally route the work to Gemini.
-
-   This prevents old agent configuration from
-   accidentally sending a request to OpenAI.
+   * Older agents may still send:
+   *
+   * provider: "openai"
+   *
+   * Never allow that request to reach OpenAI.
    */
 
   if (
-    normalizeProvider(
-      options.provider
-    ) === "openai"
+    requested === "openai"
   ) {
 
     logger.warning(
-      "OpenAI provider request ignored: OpenAI is temporarily disabled. Routing to Gemini."
+      "OpenAI provider request blocked: Gemini-only mode is active."
     );
 
   }
@@ -321,9 +283,7 @@ function getProviderOrder(
   ) {
 
     return [
-
       "gemini"
-
     ];
 
   }
@@ -405,17 +365,11 @@ function withTimeout(
 
 
   return Promise.race(
-
     [
-
       promise,
-
       timeoutPromise
-
     ]
-
   ).finally(
-
     () => {
 
       if (
@@ -429,14 +383,13 @@ function withTimeout(
       }
 
     }
-
   );
 
 }
 
 
 /* =========================================================
-   RETRYABLE ERROR DETECTION
+   RETRYABLE GEMINI ERROR
 ========================================================= */
 
 function isRetryableGeminiError(
@@ -452,13 +405,46 @@ function isRetryableGeminiError(
   }
 
 
-  const status =
-    Number(
-      error.status ||
-      error.statusCode ||
-      error?.response?.status ||
-      error?.error?.code
-    );
+  const statusCandidates = [
+
+    error.status,
+
+    error.statusCode,
+
+    error?.response?.status,
+
+    error?.error?.code
+
+  ];
+
+
+  let status = null;
+
+
+  for (
+    const candidate of statusCandidates
+  ) {
+
+    const numeric =
+      Number(
+        candidate
+      );
+
+
+    if (
+      Number.isFinite(
+        numeric
+      )
+    ) {
+
+      status =
+        numeric;
+
+      break;
+
+    }
+
+  }
 
 
   const code =
@@ -467,6 +453,7 @@ function isRetryableGeminiError(
       error?.error?.status ||
       ""
     )
+      .trim()
       .toUpperCase();
 
 
@@ -479,7 +466,8 @@ function isRetryableGeminiError(
 
 
   /*
-   * Temporary infrastructure / capacity errors.
+   * Temporary provider/network/capacity
+   * failures.
    */
 
   if (
@@ -501,41 +489,14 @@ function isRetryableGeminiError(
 
 
   if (
-    code === "UNAVAILABLE" ||
-    code === "RESOURCE_EXHAUSTED" ||
-    code === "DEADLINE_EXCEEDED" ||
-    code === "INTERNAL"
-  ) {
-
-    return true;
-
-  }
-
-
-  if (
-    message.includes(
-      "high demand"
-    ) ||
-    message.includes(
-      "temporarily unavailable"
-    ) ||
-    message.includes(
-      "temporarily unavailable"
-    ) ||
-    message.includes(
-      "resource exhausted"
-    ) ||
-    message.includes(
-      "rate limit"
-    ) ||
-    message.includes(
-      "too many requests"
-    ) ||
-    message.includes(
-      "service unavailable"
-    ) ||
-    message.includes(
-      "deadline exceeded"
+    [
+      "UNAVAILABLE",
+      "RESOURCE_EXHAUSTED",
+      "DEADLINE_EXCEEDED",
+      "INTERNAL",
+      "ABORTED"
+    ].includes(
+      code
     )
   ) {
 
@@ -544,7 +505,37 @@ function isRetryableGeminiError(
   }
 
 
-  return false;
+  const retryableMessages = [
+
+    "high demand",
+
+    "temporarily unavailable",
+
+    "resource exhausted",
+
+    "rate limit",
+
+    "too many requests",
+
+    "service unavailable",
+
+    "deadline exceeded",
+
+    "try again later",
+
+    "overloaded",
+
+    "unavailable"
+
+  ];
+
+
+  return retryableMessages.some(
+    (phrase) =>
+      message.includes(
+        phrase
+      )
+  );
 
 }
 
@@ -571,11 +562,6 @@ function getRetryDelay(
       exponent
     );
 
-
-  /*
-   * Small jitter prevents many requests from
-   * retrying at exactly the same moment.
-   */
 
   const jitter =
     Math.floor(
@@ -625,15 +611,9 @@ function validateGeminiContents(
     typeof contents === "string"
   ) {
 
-    if (
+    return Boolean(
       contents.trim()
-    ) {
-
-      return true;
-
-    }
-
-    return false;
+    );
 
   }
 
@@ -655,6 +635,59 @@ function validateGeminiContents(
   return Boolean(
     contents
   );
+
+}
+
+
+/* =========================================================
+   THINKING LEVEL
+========================================================= */
+
+function getThinkingLevel(
+  value,
+  model
+) {
+
+  const normalized =
+    String(
+      value ||
+      "medium"
+    )
+      .trim()
+      .toLowerCase();
+
+
+  /*
+   * Gemini 3.8 / 3.7:
+   * low / medium / high
+   *
+   * Gemini 3.6:
+   * low / medium / high
+   *
+   * "minimal" intentionally NOT used.
+   */
+
+  switch (
+    normalized
+  ) {
+
+    case "low":
+
+      return ThinkingLevel.LOW;
+
+
+    case "high":
+
+      return ThinkingLevel.HIGH;
+
+
+    case "medium":
+
+    default:
+
+      return ThinkingLevel.MEDIUM;
+
+  }
 
 }
 
@@ -691,8 +724,8 @@ async function generateWithGemini(
 
 
   /*
-   * Convert messages to Gemini contents
-   * when caller uses OpenAI-style messages.
+   * Contents may already be provided
+   * or may come from OpenAI-style messages.
    */
 
   let contents =
@@ -750,32 +783,28 @@ async function generateWithGemini(
   }
 
 
-  /*
-   * Resolve model.
-   */
-
   const model =
     options.model ||
-    env.GEMINI_MODEL ||
     "gemini-3.8-flash";
 
 
   /*
-   * Gemini 3.8 migration:
+   * Gemini 3 generation config.
    *
-   * Do NOT send deprecated:
+   * We intentionally DO NOT send:
    * - temperature
-   * - top_p
-   * - top_k
+   * - topP
+   * - topK
    *
-   * Use thinkingLevel instead.
+   * Thinking is controlled through
+   * thinkingConfig.
    */
 
   const config = {};
 
 
   /*
-   * Structured JSON output.
+   * JSON output.
    */
 
   if (
@@ -810,54 +839,28 @@ async function generateWithGemini(
 
 
   /*
-   * Thinking level.
+   * Thinking configuration.
    *
-   * Default:
-   * medium
+   * Official Gemini 3 JS SDK usage:
    *
-   * User can explicitly pass:
-   * low
-   * medium
-   * high
+   * thinkingConfig: {
+   *   thinkingLevel: ThinkingLevel.MEDIUM
+   * }
    */
 
-  const thinkingLevel =
-    String(
-      options.thinkingLevel ||
-      "medium"
-    )
-      .trim()
-      .toLowerCase();
+  config.thinkingConfig = {
 
+    thinkingLevel:
+      getThinkingLevel(
+        options.thinkingLevel,
+        model
+      )
 
-  const allowedThinkingLevels = [
-
-    "low",
-
-    "medium",
-
-    "high"
-
-  ];
-
-
-  if (
-    allowedThinkingLevels.includes(
-      thinkingLevel
-    )
-  ) {
-
-    config.thinkingConfig = {
-
-      thinkingLevel
-
-    };
-
-  }
+  };
 
 
   /*
-   * Optional system instruction.
+   * System instruction.
    */
 
   if (
@@ -969,13 +972,6 @@ function messagesToGeminiContents(
     .map(
       (message) => {
 
-        /*
-         * Gemini accepts:
-         *
-         * user
-         * model
-         */
-
         const role =
           message.role === "assistant" ||
           message.role === "model"
@@ -1007,7 +1003,7 @@ function messagesToGeminiContents(
 
 
 /* =========================================================
-   GENERATE GEMINI WITH MODEL FAILOVER
+   GEMINI MODEL FAILOVER
 ========================================================= */
 
 async function generateGeminiWithFailover(
@@ -1061,11 +1057,6 @@ async function generateGeminiWithFailover(
 
       try {
 
-        /*
-         * Do not retry immediately after
-         * the first failed transient request.
-         */
-
         if (
           attempt > 0
         ) {
@@ -1112,7 +1103,9 @@ async function generateGeminiWithFailover(
 
       }
 
-      catch (error) {
+      catch (
+        error
+      ) {
 
         const message =
           error?.message ||
@@ -1152,7 +1145,7 @@ async function generateGeminiWithFailover(
 
 
         /*
-         * Non-retryable error:
+         * Non-retryable:
          * immediately move to next model.
          */
 
@@ -1206,13 +1199,7 @@ async function generateText(
 ) {
 
   /*
-   * OpenAI is intentionally ignored.
-   *
-   * No matter what an older agent sends:
-   *
-   * provider: "openai"
-   *
-   * ZyrionOS still uses Gemini.
+   * Explicitly block OpenAI.
    */
 
   if (
@@ -1286,7 +1273,9 @@ async function generateText(
 
   }
 
-  catch (error) {
+  catch (
+    error
+  ) {
 
     const providerErrors =
       Array.isArray(
@@ -1397,10 +1386,6 @@ async function generateJSON(
   catch (
     firstParseError
   ) {
-
-    /*
-     * Remove markdown JSON fences.
-     */
 
     try {
 
