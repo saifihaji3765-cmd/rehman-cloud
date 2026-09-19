@@ -2,19 +2,29 @@
    ZYRIONOS AI PROVIDER SERVICE
    GEMINI ONLY - OPENAI TEMPORARILY DISABLED
 
-   Production AI chain:
+   PRODUCTION PROVIDER ARCHITECTURE
 
-   Gemini 3.8 Flash
-        ↓ transient failure
-   Gemini 3.7 Flash
-        ↓ transient failure
-   Gemini 3.6 Flash
+   Primary:
+     Gemini 3.8 Flash
+
+   Temporary-failure fallback:
+     Gemini 3.7 Flash
+     Gemini 3.6 Flash
+
+   IMPORTANT:
+     429 QUOTA EXHAUSTED
+       -> NO RETRY
+       -> NO MODEL HOPPING
+       -> IMMEDIATE QUOTA ERROR
+
+     503 / 502 / 504 / temporary capacity failure
+       -> controlled retry/fallback
 
    OpenAI:
-   - NOT DELETED
-   - NOT USED
-   - NOT CALLED
-   - TEMPORARILY DISABLED
+     - NOT DELETED
+     - NOT CALLED
+     - NOT USED
+     - TEMPORARILY DISABLED
 ========================================================= */
 
 
@@ -60,6 +70,89 @@ const OPENAI_TEMPORARILY_DISABLED =
 
 
 /* =========================================================
+   GEMINI MODEL CONFIGURATION
+========================================================= */
+
+const PRIMARY_GEMINI_MODEL =
+  env.GEMINI_MODEL ||
+  "gemini-3.8-flash";
+
+
+const GEMINI_MODEL_CHAIN = [
+
+  PRIMARY_GEMINI_MODEL,
+
+  "gemini-3.7-flash",
+
+  "gemini-3.6-flash"
+
+].filter(
+  Boolean
+);
+
+
+/* =========================================================
+   RETRY CONFIGURATION
+========================================================= */
+
+/*
+ * IMPORTANT:
+ *
+ * Retries are ONLY for genuine transient failures.
+ *
+ * 429 quota exhaustion is NEVER retried.
+ */
+
+const GEMINI_MAX_RETRIES =
+  1;
+
+
+const GEMINI_RETRY_BASE_DELAY_MS =
+  1200;
+
+
+const GEMINI_MAX_RETRY_DELAY_MS =
+  5000;
+
+
+/* =========================================================
+   QUOTA COOLDOWN
+========================================================= */
+
+/*
+ * When Gemini explicitly reports quota exhaustion,
+ * temporarily mark the provider as quota-exhausted.
+ *
+ * This prevents multiple agents from repeatedly hammering
+ * the same exhausted project quota.
+ *
+ * Default:
+ * 60 seconds.
+ *
+ * This does NOT reset Google's quota.
+ * It only protects our application.
+ */
+
+const GEMINI_QUOTA_COOLDOWN_MS =
+  Number.isFinite(
+    Number(
+      env.GEMINI_QUOTA_COOLDOWN_MS
+    )
+  )
+    ? Math.max(
+        1000,
+        Number(
+          env.GEMINI_QUOTA_COOLDOWN_MS
+        )
+      )
+    : 60000;
+
+
+let geminiQuotaBlockedUntil =
+  0;
+
+
+/* =========================================================
    GEMINI INITIALIZATION
 ========================================================= */
 
@@ -69,82 +162,11 @@ if (
 
   geminiClient =
     new GoogleGenAI({
+
       apiKey:
         env.GEMINI_API_KEY
+
     });
-
-}
-
-
-/* =========================================================
-   GEMINI MODEL FALLBACK CHAIN
-========================================================= */
-
-const GEMINI_MODEL_CHAIN = [
-
-  "gemini-3.8-flash",
-
-  "gemini-3.7-flash",
-
-  "gemini-3.6-flash"
-
-];
-
-
-/* =========================================================
-   RETRY CONFIGURATION
-========================================================= */
-
-const GEMINI_MAX_RETRIES =
-  1;
-
-
-const GEMINI_RETRY_BASE_DELAY_MS =
-  800;
-
-
-/* =========================================================
-   PROVIDER AVAILABLE
-========================================================= */
-
-function isProviderAvailable(
-  provider
-) {
-
-  const normalized =
-    String(
-      provider || ""
-    )
-      .trim()
-      .toLowerCase();
-
-
-  if (
-    normalized === "gemini"
-  ) {
-
-    return Boolean(
-      geminiClient &&
-      env.GEMINI_API_KEY
-    );
-
-  }
-
-
-  /*
-   * OpenAI intentionally disabled.
-   */
-
-  if (
-    normalized === "openai"
-  ) {
-
-    return false;
-
-  }
-
-
-  return false;
 
 }
 
@@ -189,6 +211,112 @@ function normalizeProvider(
 
 
 /* =========================================================
+   PROVIDER AVAILABLE
+========================================================= */
+
+function isProviderAvailable(
+  provider
+) {
+
+  const normalized =
+    normalizeProvider(
+      provider
+    );
+
+
+  if (
+    normalized === "gemini"
+  ) {
+
+    return Boolean(
+      geminiClient &&
+      env.GEMINI_API_KEY
+    );
+
+  }
+
+
+  /*
+   * OpenAI intentionally disabled.
+   */
+
+  if (
+    normalized === "openai"
+  ) {
+
+    return false;
+
+  }
+
+
+  return false;
+
+}
+
+
+/* =========================================================
+   GEMINI QUOTA STATUS
+========================================================= */
+
+function isGeminiQuotaBlocked() {
+
+  return (
+    Date.now() <
+    geminiQuotaBlockedUntil
+  );
+
+}
+
+
+/* =========================================================
+   MARK GEMINI QUOTA EXHAUSTED
+========================================================= */
+
+function markGeminiQuotaExhausted(
+  error
+) {
+
+  geminiQuotaBlockedUntil =
+    Date.now() +
+    GEMINI_QUOTA_COOLDOWN_MS;
+
+
+  logger.warning(
+    `Gemini quota protection activated for ${GEMINI_QUOTA_COOLDOWN_MS}ms`
+  );
+
+
+  if (
+    error
+  ) {
+
+    error.quotaBlockedUntil =
+      geminiQuotaBlockedUntil;
+
+  }
+
+}
+
+
+/* =========================================================
+   CLEAR GEMINI QUOTA PROTECTION
+========================================================= */
+
+function clearGeminiQuotaProtection() {
+
+  if (
+    geminiQuotaBlockedUntil !== 0
+  ) {
+
+    geminiQuotaBlockedUntil =
+      0;
+
+  }
+
+}
+
+
+/* =========================================================
    GET GEMINI MODEL ORDER
 ========================================================= */
 
@@ -208,7 +336,7 @@ function getGeminiModelOrder(
   /*
    * Explicit Gemini model request first.
    *
-   * OpenAI model names are intentionally ignored.
+   * OpenAI model names are ignored.
    */
 
   if (
@@ -226,7 +354,7 @@ function getGeminiModelOrder(
 
 
   /*
-   * Production Gemini fallback chain.
+   * Production fallback chain.
    */
 
   order.push(
@@ -262,7 +390,7 @@ function getProviderOrder(
    *
    * provider: "openai"
    *
-   * Never allow that request to reach OpenAI.
+   * Never allow it to reach OpenAI.
    */
 
   if (
@@ -323,7 +451,8 @@ function withTimeout(
   }
 
 
-  let timer = null;
+  let timer =
+    null;
 
 
   const timeoutPromise =
@@ -389,10 +518,10 @@ function withTimeout(
 
 
 /* =========================================================
-   RETRYABLE GEMINI ERROR
+   EXTRACT ERROR STATUS
 ========================================================= */
 
-function isRetryableGeminiError(
+function getErrorStatus(
   error
 ) {
 
@@ -400,12 +529,12 @@ function isRetryableGeminiError(
     !error
   ) {
 
-    return false;
+    return null;
 
   }
 
 
-  const statusCandidates = [
+  const candidates = [
 
     error.status,
 
@@ -418,11 +547,8 @@ function isRetryableGeminiError(
   ];
 
 
-  let status = null;
-
-
   for (
-    const candidate of statusCandidates
+    const candidate of candidates
   ) {
 
     const numeric =
@@ -437,43 +563,219 @@ function isRetryableGeminiError(
       )
     ) {
 
-      status =
-        numeric;
-
-      break;
+      return numeric;
 
     }
 
   }
 
 
+  return null;
+
+}
+
+
+/* =========================================================
+   EXTRACT ERROR CODE
+========================================================= */
+
+function getErrorCode(
+  error
+) {
+
+  if (
+    !error
+  ) {
+
+    return "";
+
+  }
+
+
+  return String(
+
+    error.code ||
+
+    error?.error?.status ||
+
+    error?.statusText ||
+
+    ""
+
+  )
+    .trim()
+    .toUpperCase();
+
+}
+
+
+/* =========================================================
+   EXTRACT ERROR MESSAGE
+========================================================= */
+
+function getErrorMessage(
+  error
+) {
+
+  return String(
+    error?.message ||
+    error?.error?.message ||
+    ""
+  )
+    .trim();
+
+}
+
+
+/* =========================================================
+   QUOTA EXHAUSTION DETECTION
+========================================================= */
+
+function isGeminiQuotaExhausted(
+  error
+) {
+
+  if (
+    !error
+  ) {
+
+    return false;
+
+  }
+
+
+  const status =
+    getErrorStatus(
+      error
+    );
+
+
   const code =
-    String(
-      error.code ||
-      error?.error?.status ||
-      ""
-    )
-      .trim()
-      .toUpperCase();
+    getErrorCode(
+      error
+    );
 
 
   const message =
-    String(
-      error.message ||
-      ""
-    )
-      .toLowerCase();
+    getErrorMessage(
+      error
+    ).toLowerCase();
 
 
   /*
-   * Temporary provider/network/capacity
-   * failures.
+   * Gemini quota errors are generally 429
+   * with RESOURCE_EXHAUSTED.
+   */
+
+  if (
+    status === 429
+  ) {
+
+    return true;
+
+  }
+
+
+  if (
+    code === "RESOURCE_EXHAUSTED"
+  ) {
+
+    return true;
+
+  }
+
+
+  const quotaPhrases = [
+
+    "quota exceeded",
+
+    "quotaexceeded",
+
+    "resource exhausted",
+
+    "current quota",
+
+    "free tier",
+
+    "generaterequestsperdaypermodel",
+
+    "quotaid",
+
+    "rate limit exceeded",
+
+    "too many requests"
+
+  ];
+
+
+  return quotaPhrases.some(
+    (phrase) =>
+      message.includes(
+        phrase
+      )
+  );
+
+}
+
+
+/* =========================================================
+   TEMPORARY GEMINI FAILURE DETECTION
+========================================================= */
+
+function isTemporaryGeminiFailure(
+  error
+) {
+
+  if (
+    !error
+  ) {
+
+    return false;
+
+  }
+
+
+  /*
+   * QUOTA IS NOT A TEMPORARY FAILURE
+   * for our application retry logic.
+   */
+
+  if (
+    isGeminiQuotaExhausted(
+      error
+    )
+  ) {
+
+    return false;
+
+  }
+
+
+  const status =
+    getErrorStatus(
+      error
+    );
+
+
+  const code =
+    getErrorCode(
+      error
+    );
+
+
+  const message =
+    getErrorMessage(
+      error
+    ).toLowerCase();
+
+
+  /*
+   * Genuine transient HTTP failures.
    */
 
   if (
     [
       408,
-      429,
       500,
       502,
       503,
@@ -488,10 +790,13 @@ function isRetryableGeminiError(
   }
 
 
+  /*
+   * Gemini transient statuses.
+   */
+
   if (
     [
       "UNAVAILABLE",
-      "RESOURCE_EXHAUSTED",
       "DEADLINE_EXCEEDED",
       "INTERNAL",
       "ABORTED"
@@ -505,17 +810,11 @@ function isRetryableGeminiError(
   }
 
 
-  const retryableMessages = [
+  const temporaryMessages = [
 
     "high demand",
 
     "temporarily unavailable",
-
-    "resource exhausted",
-
-    "rate limit",
-
-    "too many requests",
 
     "service unavailable",
 
@@ -525,12 +824,18 @@ function isRetryableGeminiError(
 
     "overloaded",
 
-    "unavailable"
+    "temporarily overloaded",
+
+    "internal server error",
+
+    "bad gateway",
+
+    "gateway timeout"
 
   ];
 
 
-  return retryableMessages.some(
+  return temporaryMessages.some(
     (phrase) =>
       message.includes(
         phrase
@@ -541,12 +846,107 @@ function isRetryableGeminiError(
 
 
 /* =========================================================
+   RETRYABLE GEMINI ERROR
+========================================================= */
+
+function isRetryableGeminiError(
+  error
+) {
+
+  /*
+   * Explicit quota errors NEVER retry.
+   */
+
+  if (
+    isGeminiQuotaExhausted(
+      error
+    )
+  ) {
+
+    return false;
+
+  }
+
+
+  return isTemporaryGeminiFailure(
+    error
+  );
+
+}
+
+
+/* =========================================================
    RETRY DELAY
 ========================================================= */
 
 function getRetryDelay(
-  attempt
+  attempt,
+  error = null
 ) {
+
+  /*
+   * If SDK exposes retry-after information,
+   * respect it where possible.
+   */
+
+  const retryAfterCandidates = [
+
+    error?.retryAfter,
+
+    error?.retryAfterMs,
+
+    error?.response?.headers?.["retry-after"],
+
+    error?.response?.headers?.["Retry-After"]
+
+  ];
+
+
+  for (
+    const candidate of retryAfterCandidates
+  ) {
+
+    const numeric =
+      Number(
+        candidate
+      );
+
+
+    if (
+      Number.isFinite(
+        numeric
+      ) &&
+      numeric > 0
+    ) {
+
+      /*
+       * Retry-After may be seconds.
+       * Large values are treated as milliseconds
+       * only when explicitly named retryAfterMs.
+       */
+
+      if (
+        candidate ===
+        error?.retryAfterMs
+      ) {
+
+        return Math.min(
+          numeric,
+          GEMINI_MAX_RETRY_DELAY_MS
+        );
+
+      }
+
+
+      return Math.min(
+        numeric * 1000,
+        GEMINI_MAX_RETRY_DELAY_MS
+      );
+
+    }
+
+  }
+
 
   const exponent =
     Math.max(
@@ -569,9 +969,9 @@ function getRetryDelay(
     );
 
 
-  return (
-    base +
-    jitter
+  return Math.min(
+    base + jitter,
+    GEMINI_MAX_RETRY_DELAY_MS
   );
 
 }
@@ -657,16 +1057,6 @@ function getThinkingLevel(
       .toLowerCase();
 
 
-  /*
-   * Gemini 3.8 / 3.7:
-   * low / medium / high
-   *
-   * Gemini 3.6:
-   * low / medium / high
-   *
-   * "minimal" intentionally NOT used.
-   */
-
   switch (
     normalized
   ) {
@@ -724,13 +1114,46 @@ async function generateWithGemini(
 
 
   /*
-   * Contents may already be provided
-   * or may come from OpenAI-style messages.
+   * Application-level quota protection.
+   *
+   * This prevents multiple agents from repeatedly
+   * calling a project whose quota was just exhausted.
    */
+
+  if (
+    isGeminiQuotaBlocked()
+  ) {
+
+    const error =
+      new Error(
+        "Gemini quota is temporarily blocked because the project quota was exhausted."
+      );
+
+
+    error.code =
+      "AI_QUOTA_EXHAUSTED";
+
+
+    error.provider =
+      "gemini";
+
+
+    error.quotaBlockedUntil =
+      geminiQuotaBlockedUntil;
+
+
+    throw error;
+
+  }
+
 
   let contents =
     options.contents;
 
+
+  /*
+   * Convert OpenAI-style messages if necessary.
+   */
 
   if (
     !contents &&
@@ -746,6 +1169,10 @@ async function generateWithGemini(
 
   }
 
+
+  /*
+   * Plain prompt fallback.
+   */
 
   if (
     !contents &&
@@ -785,26 +1212,14 @@ async function generateWithGemini(
 
   const model =
     options.model ||
-    "gemini-3.8-flash";
+    PRIMARY_GEMINI_MODEL;
 
-
-  /*
-   * Gemini 3 generation config.
-   *
-   * We intentionally DO NOT send:
-   * - temperature
-   * - topP
-   * - topK
-   *
-   * Thinking is controlled through
-   * thinkingConfig.
-   */
 
   const config = {};
 
 
   /*
-   * JSON output.
+   * JSON response.
    */
 
   if (
@@ -840,12 +1255,6 @@ async function generateWithGemini(
 
   /*
    * Thinking configuration.
-   *
-   * Official Gemini 3 JS SDK usage:
-   *
-   * thinkingConfig: {
-   *   thinkingLevel: ThinkingLevel.MEDIUM
-   * }
    */
 
   config.thinkingConfig = {
@@ -874,75 +1283,159 @@ async function generateWithGemini(
   }
 
 
-  const response =
-    await withTimeout(
+  try {
 
-      geminiClient.models.generateContent({
+    const response =
+      await withTimeout(
 
-        model,
+        geminiClient.models.generateContent({
 
-        contents,
+          model,
 
-        config
+          contents,
 
-      }),
+          config
 
-      env.AI_PROVIDER_TIMEOUT_MS,
+        }),
 
-      "gemini",
+        env.AI_PROVIDER_TIMEOUT_MS,
 
-      model
+        "gemini",
 
-    );
+        model
 
-
-  const text =
-    typeof response?.text === "string"
-      ? response.text
-      : "";
-
-
-  if (
-    !text.trim()
-  ) {
-
-    const error =
-      new Error(
-        "Gemini returned an empty response"
       );
 
 
-    error.code =
-      "AI_EMPTY_RESPONSE";
+    const text =
+      typeof response?.text === "string"
+        ? response.text
+        : "";
 
 
-    error.provider =
-      "gemini";
+    if (
+      !text.trim()
+    ) {
+
+      const error =
+        new Error(
+          "Gemini returned an empty response"
+        );
 
 
-    error.model =
-      model;
+      error.code =
+        "AI_EMPTY_RESPONSE";
+
+
+      error.provider =
+        "gemini";
+
+
+      error.model =
+        model;
+
+
+      throw error;
+
+    }
+
+
+    /*
+     * Successful Gemini request.
+     *
+     * Clear local quota protection if an actual
+     * successful request reaches Gemini.
+     */
+
+    clearGeminiQuotaProtection();
+
+
+    return {
+
+      provider:
+        "gemini",
+
+      model,
+
+      text:
+        text.trim(),
+
+      raw:
+        response
+
+    };
+
+  }
+
+  catch (
+    error
+  ) {
+
+    /*
+     * Convert Gemini quota errors into a stable
+     * application-level error.
+     */
+
+    if (
+      isGeminiQuotaExhausted(
+        error
+      )
+    ) {
+
+      markGeminiQuotaExhausted(
+        error
+      );
+
+
+      const quotaError =
+        new Error(
+          "Gemini API quota exhausted. No retry or model fallback will be attempted until the quota becomes available."
+        );
+
+
+      quotaError.code =
+        "AI_QUOTA_EXHAUSTED";
+
+
+      quotaError.provider =
+        "gemini";
+
+
+      quotaError.model =
+        model;
+
+
+      quotaError.status =
+        getErrorStatus(
+          error
+        ) ||
+        429;
+
+
+      quotaError.originalCode =
+        getErrorCode(
+          error
+        );
+
+
+      quotaError.originalMessage =
+        getErrorMessage(
+          error
+        );
+
+
+      quotaError.quotaBlockedUntil =
+        geminiQuotaBlockedUntil;
+
+
+      throw quotaError;
+
+    }
 
 
     throw error;
 
   }
-
-
-  return {
-
-    provider:
-      "gemini",
-
-    model,
-
-    text:
-      text.trim(),
-
-    raw:
-      response
-
-  };
 
 }
 
@@ -1010,6 +1503,38 @@ async function generateGeminiWithFailover(
   options = {}
 ) {
 
+  /*
+   * If project quota was recently exhausted,
+   * do not even start the model chain.
+   */
+
+  if (
+    isGeminiQuotaBlocked()
+  ) {
+
+    const error =
+      new Error(
+        "Gemini quota is currently exhausted. Model fallback is intentionally skipped."
+      );
+
+
+    error.code =
+      "AI_QUOTA_EXHAUSTED";
+
+
+    error.provider =
+      "gemini";
+
+
+    error.quotaBlockedUntil =
+      geminiQuotaBlockedUntil;
+
+
+    throw error;
+
+  }
+
+
   const modelOrder =
     getGeminiModelOrder(
       options
@@ -1057,18 +1582,28 @@ async function generateGeminiWithFailover(
 
       try {
 
+        /*
+         * Retry delay only happens after a
+         * genuine transient failure.
+         */
+
         if (
           attempt > 0
         ) {
 
           const delay =
             getRetryDelay(
-              attempt
+              attempt,
+              errors.length > 0
+                ? errors[
+                    errors.length - 1
+                  ]
+                : null
             );
 
 
           logger.warning(
-            `Gemini retry: ${model} | attempt=${attempt + 1} | delay=${delay}ms`
+            `Gemini transient retry: ${model} | attempt=${attempt + 1} | delay=${delay}ms`
           );
 
 
@@ -1108,8 +1643,87 @@ async function generateGeminiWithFailover(
       ) {
 
         const message =
-          error?.message ||
+          getErrorMessage(
+            error
+          ) ||
           "Unknown Gemini error";
+
+
+        /*
+         * =================================================
+         * QUOTA ERROR
+         * =================================================
+         *
+         * NEVER retry.
+         * NEVER move to another Gemini model.
+         */
+
+        if (
+          error?.code ===
+            "AI_QUOTA_EXHAUSTED" ||
+          isGeminiQuotaExhausted(
+            error
+          )
+        ) {
+
+          logger.error(
+            `Gemini QUOTA EXHAUSTED: ${model} | fallback stopped immediately | ${message}`
+          );
+
+
+          errors.push({
+
+            provider:
+              "gemini",
+
+            model,
+
+            attempt:
+              attempt + 1,
+
+            retryable:
+              false,
+
+            quotaExhausted:
+              true,
+
+            message,
+
+            code:
+              "AI_QUOTA_EXHAUSTED"
+
+          });
+
+
+          const quotaError =
+            new Error(
+              "Gemini API quota exhausted. All Gemini retries and model fallback have been stopped."
+            );
+
+
+          quotaError.code =
+            "AI_QUOTA_EXHAUSTED";
+
+
+          quotaError.provider =
+            "gemini";
+
+
+          quotaError.model =
+            model;
+
+
+          quotaError.providers =
+            errors;
+
+
+          quotaError.quotaBlockedUntil =
+            geminiQuotaBlockedUntil;
+
+
+          throw quotaError;
+
+        }
 
 
         const retryable =
@@ -1119,7 +1733,7 @@ async function generateGeminiWithFailover(
 
 
         logger.warning(
-          `Gemini Failed: ${model} | attempt=${attempt + 1} | retryable=${retryable} | ${message}`
+          `Gemini Failed: ${model} | attempt=${attempt + 1} | temporary=${retryable} | ${message}`
         );
 
 
@@ -1135,6 +1749,9 @@ async function generateGeminiWithFailover(
 
           retryable,
 
+          quotaExhausted:
+            false,
+
           message,
 
           code:
@@ -1145,8 +1762,8 @@ async function generateGeminiWithFailover(
 
 
         /*
-         * Non-retryable:
-         * immediately move to next model.
+         * Non-temporary error:
+         * move to next model.
          */
 
         if (
@@ -1157,6 +1774,11 @@ async function generateGeminiWithFailover(
 
         }
 
+
+        /*
+         * Temporary failure:
+         * retry same model once.
+         */
 
         attempt += 1;
 
@@ -1169,7 +1791,7 @@ async function generateGeminiWithFailover(
 
   const error =
     new Error(
-      "All Gemini AI models failed"
+      "All Gemini AI models failed due to temporary/provider errors."
     );
 
 
@@ -1199,7 +1821,7 @@ async function generateText(
 ) {
 
   /*
-   * Explicitly block OpenAI.
+   * Explicit OpenAI request is blocked.
    */
 
   if (
@@ -1244,6 +1866,38 @@ async function generateText(
   }
 
 
+  /*
+   * If local quota protection is active,
+   * return a precise error immediately.
+   */
+
+  if (
+    isGeminiQuotaBlocked()
+  ) {
+
+    const error =
+      new Error(
+        "Gemini API quota is temporarily exhausted."
+      );
+
+
+    error.code =
+      "AI_QUOTA_EXHAUSTED";
+
+
+    error.provider =
+      "gemini";
+
+
+    error.quotaBlockedUntil =
+      geminiQuotaBlockedUntil;
+
+
+    throw error;
+
+  }
+
+
   try {
 
     const result =
@@ -1276,6 +1930,28 @@ async function generateText(
   catch (
     error
   ) {
+
+    /*
+     * Preserve exact quota error.
+     *
+     * DO NOT convert it into the generic
+     * AI_ALL_PROVIDERS_FAILED error.
+     */
+
+    if (
+      error?.code ===
+      "AI_QUOTA_EXHAUSTED"
+    ) {
+
+      logger.error(
+        "Gemini AI request stopped: quota exhausted."
+      );
+
+
+      throw error;
+
+    }
+
 
     const providerErrors =
       Array.isArray(
@@ -1329,7 +2005,7 @@ async function generateText(
 
     const finalError =
       new Error(
-        "All Gemini AI providers/models failed"
+        "All Gemini AI models failed due to temporary/provider errors."
       );
 
 
@@ -1511,11 +2187,22 @@ function getProviderStatus() {
           true,
 
         model:
-          env.GEMINI_MODEL ||
-          "gemini-3.8-flash",
+          PRIMARY_GEMINI_MODEL,
 
         fallbackModels:
-          GEMINI_MODEL_CHAIN
+          GEMINI_MODEL_CHAIN.filter(
+            (model) =>
+              model !==
+              PRIMARY_GEMINI_MODEL
+          ),
+
+        quotaBlocked:
+          isGeminiQuotaBlocked(),
+
+        quotaBlockedUntil:
+          isGeminiQuotaBlocked()
+            ? geminiQuotaBlockedUntil
+            : null
 
       },
 
@@ -1544,7 +2231,34 @@ function getProviderStatus() {
         GEMINI_MAX_RETRIES,
 
       baseDelayMs:
-        GEMINI_RETRY_BASE_DELAY_MS
+        GEMINI_RETRY_BASE_DELAY_MS,
+
+      maxDelayMs:
+        GEMINI_MAX_RETRY_DELAY_MS,
+
+      quotaRetries:
+        0,
+
+      quotaFallback:
+        false
+
+    },
+
+    quotaProtection: {
+
+      enabled:
+        true,
+
+      cooldownMs:
+        GEMINI_QUOTA_COOLDOWN_MS,
+
+      blocked:
+        isGeminiQuotaBlocked(),
+
+      blockedUntil:
+        isGeminiQuotaBlocked()
+          ? geminiQuotaBlockedUntil
+          : null
 
     },
 
