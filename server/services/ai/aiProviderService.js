@@ -1,65 +1,72 @@
 /* =========================================================
    ZYRIONOS AI PROVIDER SERVICE
-   Gemini Primary + OpenAI Fallback
+   GEMINI ONLY - OPENAI TEMPORARILY DISABLED
+   ---------------------------------------------------------
+   Production AI chain:
+
+   Gemini 3.8 Flash
+        ↓ transient failure
+   Gemini 3.7 Flash
+        ↓ transient failure
+   Gemini 3.6 Flash
+
+   OpenAI:
+   - NOT DELETED
+   - NOT USED
+   - NOT CALLED
+   - TEMPORARILY DISABLED
 ========================================================= */
 
 
-/* =========================
+/* =========================================================
    PACKAGES
-========================= */
+========================================================= */
 
-const OpenAI = require("openai");
-const { GoogleGenAI } = require("@google/genai");
+const {
+  GoogleGenAI,
+  ThinkingLevel
+} = require("@google/genai");
 
 
-/* =========================
+/* =========================================================
    CONFIG
-========================= */
+========================================================= */
 
-const env = require("../../config/env");
+const env =
+  require("../../config/env");
 
 
-/* =========================
+/* =========================================================
    LOGGER
-========================= */
+========================================================= */
 
 const logger =
   require("../loggerService");
 
 
 /* =========================================================
-   PROVIDER CLIENTS
+   GEMINI CLIENT
 ========================================================= */
 
-let openaiClient = null;
 let geminiClient = null;
 
 
-/* =========================
-   OPENAI CLIENT
-========================= */
+/* =========================================================
+   OPENAI STATUS
+   ---------------------------------------------------------
+   OpenAI is intentionally disabled at provider-service level.
 
-if (
-  env.OPENAI_API_KEY
-) {
+   We do NOT delete OpenAI from package.json or env.js.
+   It simply cannot receive production AI requests.
+========================================================= */
 
-  openaiClient =
-    new OpenAI({
-
-      apiKey:
-        env.OPENAI_API_KEY,
-
-      timeout:
-        env.AI_PROVIDER_TIMEOUT_MS
-
-    });
-
-}
+const OPENAI_TEMPORARILY_DISABLED =
+  true;
 
 
-/* =========================
-   GEMINI CLIENT
-========================= */
+/* =========================================================
+   GEMINI INITIALIZATION
+========================================================= */
 
 if (
   env.GEMINI_API_KEY
@@ -77,32 +84,75 @@ if (
 
 
 /* =========================================================
+   GEMINI MODEL FALLBACK CHAIN
+   ---------------------------------------------------------
+   Primary:
+   1. Gemini 3.8 Flash
+
+   Fallback:
+   2. Gemini 3.7 Flash
+   3. Gemini 3.6 Flash
+
+   These are stable Gemini models according to
+   Google's current model documentation.
+========================================================= */
+
+const GEMINI_MODEL_CHAIN = [
+
+  "gemini-3.8-flash",
+
+  "gemini-3.7-flash",
+
+  "gemini-3.6-flash"
+
+];
+
+
+/* =========================================================
+   RETRY CONFIGURATION
+========================================================= */
+
+const GEMINI_MAX_RETRIES =
+  1;
+
+
+/*
+ * Small backoff between retry attempts.
+ *
+ * Attempt 1:
+ * immediate
+ *
+ * Attempt 2:
+ * short delay
+ */
+
+const GEMINI_RETRY_BASE_DELAY_MS =
+  800;
+
+
+/* =========================================================
    PROVIDER HELPERS
 ========================================================= */
 
 
-/* =========================
+/* =========================================================
    PROVIDER AVAILABLE
-========================= */
+========================================================= */
 
 function isProviderAvailable(
   provider
 ) {
 
-  if (
-    provider === "openai"
-  ) {
-
-    return Boolean(
-      openaiClient &&
-      env.OPENAI_API_KEY
-    );
-
-  }
+  const normalized =
+    String(
+      provider || ""
+    )
+      .trim()
+      .toLowerCase();
 
 
   if (
-    provider === "gemini"
+    normalized === "gemini"
   ) {
 
     return Boolean(
@@ -113,14 +163,31 @@ function isProviderAvailable(
   }
 
 
+  /*
+   * OpenAI intentionally unavailable.
+   *
+   * This does NOT mean OpenAI was deleted.
+   * It only means ZyrionOS will not send
+   * production requests to OpenAI.
+   */
+
+  if (
+    normalized === "openai"
+  ) {
+
+    return false;
+
+  }
+
+
   return false;
 
 }
 
 
-/* =========================
+/* =========================================================
    NORMALIZE PROVIDER
-========================= */
+========================================================= */
 
 function normalizeProvider(
   provider
@@ -135,11 +202,19 @@ function normalizeProvider(
 
 
   if (
-    value === "openai" ||
     value === "gemini"
   ) {
 
-    return value;
+    return "gemini";
+
+  }
+
+
+  if (
+    value === "openai"
+  ) {
+
+    return "openai";
 
   }
 
@@ -149,102 +224,51 @@ function normalizeProvider(
 }
 
 
-/* =========================
-   GET PROVIDER ORDER
-========================= */
+/* =========================================================
+   GET GEMINI MODEL ORDER
+========================================================= */
 
-function getProviderOrder(
+function getGeminiModelOrder(
   options = {}
 ) {
 
-  const requested =
-    normalizeProvider(
-      options.provider
-    );
-
-
-  const primary =
-    requested ||
-    normalizeProvider(
-      env.AI_PRIMARY_PROVIDER
-    ) ||
-    "gemini";
-
-
-  const fallback =
-    normalizeProvider(
-      env.AI_FALLBACK_PROVIDER
-    ) ||
-    "openai";
+  const requestedModel =
+    typeof options.model === "string"
+      ? options.model.trim()
+      : "";
 
 
   const order = [];
 
 
+  /*
+   * If an agent explicitly requests a Gemini model,
+   * try that model first.
+   */
+
   if (
-    isProviderAvailable(
-      primary
-    )
+    requestedModel
   ) {
 
     order.push(
-      primary
-    );
-
-  }
-
-
-  if (
-    fallback !== primary &&
-    isProviderAvailable(
-      fallback
-    )
-  ) {
-
-    order.push(
-      fallback
+      requestedModel
     );
 
   }
 
 
   /*
-   * If configuration points to an
-   * unavailable provider, include
-   * any available supported provider.
+   * Always keep the production fallback chain.
    */
 
-  if (
-    order.length === 0
-  ) {
-
-    if (
-      isProviderAvailable(
-        "gemini"
-      )
-    ) {
-
-      order.push(
-        "gemini"
-      );
-
-    }
+  order.push(
+    ...GEMINI_MODEL_CHAIN
+  );
 
 
-    if (
-      isProviderAvailable(
-        "openai"
-      )
-    ) {
-
-      order.push(
-        "openai"
-      );
-
-    }
-
-  }
-
+  /*
+   * Remove duplicates while preserving order.
+   */
 
   return [
     ...new Set(
@@ -256,17 +280,75 @@ function getProviderOrder(
 
 
 /* =========================================================
+   GET PROVIDER ORDER
+   ---------------------------------------------------------
+   IMPORTANT:
+   OpenAI is intentionally NEVER returned here.
+========================================================= */
+
+function getProviderOrder(
+  options = {}
+) {
+
+  /*
+   * Even if an old agent sends:
+
+   provider: "openai"
+
+   we intentionally route the work to Gemini.
+
+   This prevents old agent configuration from
+   accidentally sending a request to OpenAI.
+   */
+
+  if (
+    normalizeProvider(
+      options.provider
+    ) === "openai"
+  ) {
+
+    logger.warning(
+      "OpenAI provider request ignored: OpenAI is temporarily disabled. Routing to Gemini."
+    );
+
+  }
+
+
+  if (
+    isProviderAvailable(
+      "gemini"
+    )
+  ) {
+
+    return [
+
+      "gemini"
+
+    ];
+
+  }
+
+
+  return [];
+
+}
+
+
+/* =========================================================
    TIMEOUT
 ========================================================= */
 
 function withTimeout(
   promise,
   timeoutMs,
-  provider
+  provider,
+  model
 ) {
 
   const timeout =
-    Number(timeoutMs);
+    Number(
+      timeoutMs
+    );
 
 
   if (
@@ -301,8 +383,13 @@ function withTimeout(
               error.code =
                 "AI_PROVIDER_TIMEOUT";
 
+
               error.provider =
                 provider;
+
+
+              error.model =
+                model;
 
 
               reject(
@@ -318,16 +405,22 @@ function withTimeout(
 
 
   return Promise.race(
+
     [
+
       promise,
 
       timeoutPromise
 
     ]
+
   ).finally(
+
     () => {
 
-      if (timer) {
+      if (
+        timer
+      ) {
 
         clearTimeout(
           timer
@@ -336,174 +429,232 @@ function withTimeout(
       }
 
     }
+
   );
 
 }
 
 
 /* =========================================================
-   OPENAI GENERATION
+   RETRYABLE ERROR DETECTION
 ========================================================= */
 
-async function generateWithOpenAI(
-  options = {}
+function isRetryableGeminiError(
+  error
 ) {
 
   if (
-    !openaiClient
+    !error
   ) {
 
-    const error =
-      new Error(
-        "OpenAI provider is not configured"
-      );
-
-
-    error.code =
-      "AI_PROVIDER_NOT_CONFIGURED";
-
-    error.provider =
-      "openai";
-
-
-    throw error;
+    return false;
 
   }
 
 
-  const messages =
-    Array.isArray(
-      options.messages
-    )
-      ? options.messages
-      : [];
-
-
-  if (
-    messages.length === 0
-  ) {
-
-    const error =
-      new Error(
-        "OpenAI messages are required"
-      );
-
-
-    error.code =
-      "AI_INVALID_REQUEST";
-
-    error.provider =
-      "openai";
-
-
-    throw error;
-
-  }
-
-
-  const request = {
-
-    model:
-      options.model ||
-      env.OPENAI_MODEL ||
-      "gpt-4.1-mini",
-
-    temperature:
-      typeof options.temperature === "number"
-        ? options.temperature
-        : 0.1,
-
-    messages
-
-  };
-
-
-  if (
-    options.json === true
-  ) {
-
-    request.response_format = {
-
-      type:
-        "json_object"
-
-    };
-
-  }
-
-
-  if (
-    Number.isFinite(
-      options.maxTokens
-    )
-  ) {
-
-    request.max_tokens =
-      Math.max(
-        1,
-        Math.floor(
-          options.maxTokens
-        )
-      );
-
-  }
-
-
-  const response =
-    await withTimeout(
-      openaiClient.chat.completions.create(
-        request
-      ),
-      env.AI_PROVIDER_TIMEOUT_MS,
-      "openai"
+  const status =
+    Number(
+      error.status ||
+      error.statusCode ||
+      error?.response?.status ||
+      error?.error?.code
     );
 
 
-  const content =
-    response
-      ?.choices?.[0]
-      ?.message
-      ?.content;
+  const code =
+    String(
+      error.code ||
+      error?.error?.status ||
+      ""
+    )
+      .toUpperCase();
 
+
+  const message =
+    String(
+      error.message ||
+      ""
+    )
+      .toLowerCase();
+
+
+  /*
+   * Temporary infrastructure / capacity errors.
+   */
 
   if (
-    typeof content !== "string" ||
-    !content.trim()
+    [
+      408,
+      429,
+      500,
+      502,
+      503,
+      504
+    ].includes(
+      status
+    )
   ) {
 
-    const error =
-      new Error(
-        "OpenAI returned an empty response"
-      );
-
-
-    error.code =
-      "AI_EMPTY_RESPONSE";
-
-    error.provider =
-      "openai";
-
-
-    throw error;
+    return true;
 
   }
 
 
-  return {
+  if (
+    code === "UNAVAILABLE" ||
+    code === "RESOURCE_EXHAUSTED" ||
+    code === "DEADLINE_EXCEEDED" ||
+    code === "INTERNAL"
+  ) {
 
-    provider:
-      "openai",
+    return true;
 
-    model:
-      request.model,
+  }
 
-    text:
-      content.trim(),
 
-    raw:
-      response
+  if (
+    message.includes(
+      "high demand"
+    ) ||
+    message.includes(
+      "temporarily unavailable"
+    ) ||
+    message.includes(
+      "temporarily unavailable"
+    ) ||
+    message.includes(
+      "resource exhausted"
+    ) ||
+    message.includes(
+      "rate limit"
+    ) ||
+    message.includes(
+      "too many requests"
+    ) ||
+    message.includes(
+      "service unavailable"
+    ) ||
+    message.includes(
+      "deadline exceeded"
+    )
+  ) {
 
-  };
+    return true;
+
+  }
+
+
+  return false;
+
+}
+
+
+/* =========================================================
+   RETRY DELAY
+========================================================= */
+
+function getRetryDelay(
+  attempt
+) {
+
+  const exponent =
+    Math.max(
+      0,
+      attempt - 1
+    );
+
+
+  const base =
+    GEMINI_RETRY_BASE_DELAY_MS *
+    Math.pow(
+      2,
+      exponent
+    );
+
+
+  /*
+   * Small jitter prevents many requests from
+   * retrying at exactly the same moment.
+   */
+
+  const jitter =
+    Math.floor(
+      Math.random() * 300
+    );
+
+
+  return (
+    base +
+    jitter
+  );
+
+}
+
+
+/* =========================================================
+   SLEEP
+========================================================= */
+
+function sleep(
+  ms
+) {
+
+  return new Promise(
+    (resolve) => {
+
+      setTimeout(
+        resolve,
+        ms
+      );
+
+    }
+  );
+
+}
+
+
+/* =========================================================
+   VALIDATE GEMINI CONTENTS
+========================================================= */
+
+function validateGeminiContents(
+  contents
+) {
+
+  if (
+    typeof contents === "string"
+  ) {
+
+    if (
+      contents.trim()
+    ) {
+
+      return true;
+
+    }
+
+    return false;
+
+  }
+
+
+  if (
+    Array.isArray(
+      contents
+    )
+  ) {
+
+    return (
+      contents.length >
+      0
+    );
+
+  }
+
+
+  return Boolean(
+    contents
+  );
 
 }
 
@@ -529,6 +680,7 @@ async function generateWithGemini(
     error.code =
       "AI_PROVIDER_NOT_CONFIGURED";
 
+
     error.provider =
       "gemini";
 
@@ -538,21 +690,44 @@ async function generateWithGemini(
   }
 
 
-  const contents =
-    Array.isArray(
-      options.contents
-    )
-      ? options.contents
-      : typeof options.prompt === "string"
-        ? options.prompt
-        : "";
+  /*
+   * Convert messages to Gemini contents
+   * when caller uses OpenAI-style messages.
+   */
+
+  let contents =
+    options.contents;
 
 
   if (
-    !contents ||
-    (
-      Array.isArray(contents) &&
-      contents.length === 0
+    !contents &&
+    Array.isArray(
+      options.messages
+    )
+  ) {
+
+    contents =
+      messagesToGeminiContents(
+        options.messages
+      );
+
+  }
+
+
+  if (
+    !contents &&
+    typeof options.prompt === "string"
+  ) {
+
+    contents =
+      options.prompt;
+
+  }
+
+
+  if (
+    !validateGeminiContents(
+      contents
     )
   ) {
 
@@ -565,6 +740,7 @@ async function generateWithGemini(
     error.code =
       "AI_INVALID_REQUEST";
 
+
     error.provider =
       "gemini";
 
@@ -574,15 +750,33 @@ async function generateWithGemini(
   }
 
 
-  const config = {
+  /*
+   * Resolve model.
+   */
 
-    temperature:
-      typeof options.temperature === "number"
-        ? options.temperature
-        : 0.1
+  const model =
+    options.model ||
+    env.GEMINI_MODEL ||
+    "gemini-3.8-flash";
 
-  };
 
+  /*
+   * Gemini 3.8 migration:
+   *
+   * Do NOT send deprecated:
+   * - temperature
+   * - top_p
+   * - top_k
+   *
+   * Use thinkingLevel instead.
+   */
+
+  const config = {};
+
+
+  /*
+   * Structured JSON output.
+   */
 
   if (
     options.json === true
@@ -593,6 +787,10 @@ async function generateWithGemini(
 
   }
 
+
+  /*
+   * Maximum output tokens.
+   */
 
   if (
     Number.isFinite(
@@ -611,14 +809,71 @@ async function generateWithGemini(
   }
 
 
-  const model =
-    options.model ||
-    env.GEMINI_MODEL ||
-    "gemini-3.8-flash";
+  /*
+   * Thinking level.
+   *
+   * Default:
+   * medium
+   *
+   * User can explicitly pass:
+   * low
+   * medium
+   * high
+   */
+
+  const thinkingLevel =
+    String(
+      options.thinkingLevel ||
+      "medium"
+    )
+      .trim()
+      .toLowerCase();
+
+
+  const allowedThinkingLevels = [
+
+    "low",
+
+    "medium",
+
+    "high"
+
+  ];
+
+
+  if (
+    allowedThinkingLevels.includes(
+      thinkingLevel
+    )
+  ) {
+
+    config.thinkingConfig = {
+
+      thinkingLevel
+
+    };
+
+  }
+
+
+  /*
+   * Optional system instruction.
+   */
+
+  if (
+    typeof options.systemInstruction === "string" &&
+    options.systemInstruction.trim()
+  ) {
+
+    config.systemInstruction =
+      options.systemInstruction.trim();
+
+  }
 
 
   const response =
     await withTimeout(
+
       geminiClient.models.generateContent({
 
         model,
@@ -628,8 +883,13 @@ async function generateWithGemini(
         config
 
       }),
+
       env.AI_PROVIDER_TIMEOUT_MS,
-      "gemini"
+
+      "gemini",
+
+      model
+
     );
 
 
@@ -652,8 +912,13 @@ async function generateWithGemini(
     error.code =
       "AI_EMPTY_RESPONSE";
 
+
     error.provider =
       "gemini";
+
+
+    error.model =
+      model;
 
 
     throw error;
@@ -688,16 +953,32 @@ function messagesToGeminiContents(
 ) {
 
   return messages
+
     .filter(
-      (message) =>
-        message &&
-        typeof message.content === "string"
+      (message) => {
+
+        return (
+          message &&
+          typeof message.content === "string" &&
+          message.content.trim()
+        );
+
+      }
     )
+
     .map(
       (message) => {
 
+        /*
+         * Gemini accepts:
+         *
+         * user
+         * model
+         */
+
         const role =
-          message.role === "assistant"
+          message.role === "assistant" ||
+          message.role === "model"
             ? "model"
             : "user";
 
@@ -709,8 +990,10 @@ function messagesToGeminiContents(
           parts: [
 
             {
+
               text:
                 message.content
+
             }
 
           ]
@@ -724,12 +1007,226 @@ function messagesToGeminiContents(
 
 
 /* =========================================================
+   GENERATE GEMINI WITH MODEL FAILOVER
+========================================================= */
+
+async function generateGeminiWithFailover(
+  options = {}
+) {
+
+  const modelOrder =
+    getGeminiModelOrder(
+      options
+    );
+
+
+  if (
+    modelOrder.length === 0
+  ) {
+
+    const error =
+      new Error(
+        "No Gemini models are configured"
+      );
+
+
+    error.code =
+      "AI_NO_GEMINI_MODEL";
+
+
+    error.provider =
+      "gemini";
+
+
+    throw error;
+
+  }
+
+
+  const errors = [];
+
+
+  for (
+    const model of modelOrder
+  ) {
+
+    let attempt =
+      0;
+
+
+    while (
+      attempt <=
+      GEMINI_MAX_RETRIES
+    ) {
+
+      try {
+
+        /*
+         * Do not retry immediately after
+         * the first failed transient request.
+         */
+
+        if (
+          attempt > 0
+        ) {
+
+          const delay =
+            getRetryDelay(
+              attempt
+            );
+
+
+          logger.warning(
+            `Gemini retry: ${model} | attempt=${attempt + 1} | delay=${delay}ms`
+          );
+
+
+          await sleep(
+            delay
+          );
+
+        }
+
+
+        logger.info(
+          `Gemini Request: ${model} | attempt=${attempt + 1}`
+        );
+
+
+        const result =
+          await generateWithGemini({
+
+            ...options,
+
+            model
+
+          });
+
+
+        logger.success(
+          `Gemini Success: ${model}`
+        );
+
+
+        return result;
+
+      }
+
+      catch (error) {
+
+        const message =
+          error?.message ||
+          "Unknown Gemini error";
+
+
+        const retryable =
+          isRetryableGeminiError(
+            error
+          );
+
+
+        logger.warning(
+          `Gemini Failed: ${model} | attempt=${attempt + 1} | retryable=${retryable} | ${message}`
+        );
+
+
+        errors.push({
+
+          provider:
+            "gemini",
+
+          model,
+
+          attempt:
+            attempt + 1,
+
+          retryable,
+
+          message,
+
+          code:
+            error?.code ||
+            "AI_PROVIDER_ERROR"
+
+        });
+
+
+        /*
+         * Non-retryable error:
+         * immediately move to next model.
+         */
+
+        if (
+          !retryable
+        ) {
+
+          break;
+
+        }
+
+
+        attempt += 1;
+
+      }
+
+    }
+
+  }
+
+
+  const error =
+    new Error(
+      "All Gemini AI models failed"
+    );
+
+
+  error.code =
+    "AI_ALL_GEMINI_MODELS_FAILED";
+
+
+  error.provider =
+    "gemini";
+
+
+  error.providers =
+    errors;
+
+
+  throw error;
+
+}
+
+
+/* =========================================================
    GENERATE TEXT
 ========================================================= */
 
 async function generateText(
   options = {}
 ) {
+
+  /*
+   * OpenAI is intentionally ignored.
+   *
+   * No matter what an older agent sends:
+   *
+   * provider: "openai"
+   *
+   * ZyrionOS still uses Gemini.
+   */
+
+  if (
+    normalizeProvider(
+      options.provider
+    ) === "openai"
+  ) {
+
+    logger.warning(
+      "OpenAI request blocked. Gemini-only mode is active."
+    );
+
+  }
+
 
   const providerOrder =
     getProviderOrder(
@@ -743,157 +1240,125 @@ async function generateText(
 
     const error =
       new Error(
-        "No AI provider is configured"
+        "Gemini AI provider is not configured"
       );
 
 
     error.code =
       "AI_NO_PROVIDER";
 
+
+    error.provider =
+      "gemini";
+
+
     throw error;
 
   }
 
 
-  const errors = [];
+  try {
 
-
-  for (
-    const provider of providerOrder
-  ) {
-
-    try {
-
-      logger.info(
-        `AI Provider Request: ${provider}`
+    const result =
+      await generateGeminiWithFailover(
+        options
       );
 
 
-      let result;
+    return {
 
+      success:
+        true,
 
-      if (
-        provider === "openai"
-      ) {
+      provider:
+        result.provider,
 
-        result =
-          await generateWithOpenAI(
-            options
-          );
+      model:
+        result.model,
 
-      }
+      text:
+        result.text,
 
-      else if (
-        provider === "gemini"
-      ) {
+      raw:
+        result.raw
 
-        let geminiOptions =
-          {
-            ...options
-          };
-
-
-        if (
-          Array.isArray(
-            options.messages
-          )
-        ) {
-
-          geminiOptions.contents =
-            messagesToGeminiContents(
-              options.messages
-            );
-
-        }
-
-
-        result =
-          await generateWithGemini(
-            geminiOptions
-          );
-
-      }
-
-
-      logger.success(
-        `AI Provider Success: ${provider}`
-      );
-
-
-      return {
-
-        success:
-          true,
-
-        provider:
-          result.provider,
-
-        model:
-          result.model,
-
-        text:
-          result.text,
-
-        raw:
-          result.raw
-
-      };
-
-    }
-
-    catch (error) {
-
-      const message =
-        error?.message ||
-        "Unknown provider error";
-
-
-      logger.warning(
-        `AI Provider Failed: ${provider} | ${message}`
-      );
-
-
-      errors.push({
-
-        provider,
-
-        message,
-
-        code:
-          error?.code ||
-          "AI_PROVIDER_ERROR"
-
-      });
-
-    }
+    };
 
   }
 
+  catch (error) {
 
-  const error =
-    new Error(
-      "All configured AI providers failed"
+    const providerErrors =
+      Array.isArray(
+        error.providers
+      )
+        ? error.providers
+        : [
+
+            {
+
+              provider:
+                "gemini",
+
+              model:
+                error.model ||
+                null,
+
+              message:
+                error.message ||
+                "Unknown Gemini error",
+
+              code:
+                error.code ||
+                "AI_PROVIDER_ERROR"
+
+            }
+
+          ];
+
+
+    logger.error(
+      `Gemini AI Chain Failed: ${providerErrors
+        .map(
+          (item) => {
+
+            const model =
+              item.model
+                ? `/${item.model}`
+                : "";
+
+
+            return (
+              `${item.provider}${model}: ${item.message}`
+            );
+
+          }
+        )
+        .join(" | ")}`
     );
 
 
-  error.code =
-    "AI_ALL_PROVIDERS_FAILED";
-
-  error.providers =
-    errors;
-
-
-  logger.error(
-    `AI Provider Chain Failed: ${errors
-      .map(
-        (item) =>
-          `${item.provider}: ${item.message}`
-      )
-      .join(" | ")}`
-  );
+    const finalError =
+      new Error(
+        "All Gemini AI providers/models failed"
+      );
 
 
-  throw error;
+    finalError.code =
+      "AI_ALL_PROVIDERS_FAILED";
+
+
+    finalError.provider =
+      "gemini";
+
+
+    finalError.providers =
+      providerErrors;
+
+
+    throw finalError;
+
+  }
 
 }
 
@@ -929,30 +1394,34 @@ async function generateJSON(
 
   }
 
-  catch (error) {
+  catch (
+    firstParseError
+  ) {
 
     /*
-     * Some provider responses may
-     * contain fenced JSON even when
-     * JSON output was requested.
+     * Remove markdown JSON fences.
      */
 
     try {
 
       const cleaned =
         result.text
+
           .replace(
-            /^```json\s*/i,
+            /^\s*```json\s*/i,
             ""
           )
+
           .replace(
-            /^```\s*/i,
+            /^\s*```\s*/i,
             ""
           )
+
           .replace(
-            /\s*```$/i,
+            /\s*```\s*$/i,
             ""
           )
+
           .trim();
 
 
@@ -963,19 +1432,27 @@ async function generateJSON(
 
     }
 
-    catch (secondError) {
+    catch (
+      secondParseError
+    ) {
 
       const parseError =
         new Error(
-          `AI provider returned invalid JSON: ${secondError.message}`
+          `Gemini returned invalid JSON: ${secondParseError.message}`
         );
 
 
       parseError.code =
         "AI_INVALID_JSON";
 
+
       parseError.provider =
         result.provider;
+
+
+      parseError.model =
+        result.model;
+
 
       parseError.rawText =
         result.text;
@@ -1008,15 +1485,30 @@ function getProviderStatus() {
 
   return {
 
+    mode:
+      "gemini-only",
+
     primary:
-      normalizeProvider(
-        env.AI_PRIMARY_PROVIDER
-      ),
+      "gemini",
 
     fallback:
-      normalizeProvider(
-        env.AI_FALLBACK_PROVIDER
-      ),
+      null,
+
+    openai: {
+
+      configured:
+        false,
+
+      enabled:
+        false,
+
+      temporarilyDisabled:
+        OPENAI_TEMPORARILY_DISABLED,
+
+      reason:
+        "OpenAI is intentionally disabled. Gemini handles all production AI requests."
+
+    },
 
     providers: {
 
@@ -1027,22 +1519,47 @@ function getProviderStatus() {
             "gemini"
           ),
 
+        enabled:
+          true,
+
+        primary:
+          true,
+
         model:
-          env.GEMINI_MODEL
+          env.GEMINI_MODEL ||
+          "gemini-3.8-flash",
+
+        fallbackModels:
+          GEMINI_MODEL_CHAIN
 
       },
 
       openai: {
 
         configured:
-          isProviderAvailable(
-            "openai"
-          ),
+          false,
+
+        enabled:
+          false,
 
         model:
-          env.OPENAI_MODEL
+          env.OPENAI_MODEL ||
+          "gpt-4.1-mini"
 
       }
+
+    },
+
+    geminiModelChain:
+      GEMINI_MODEL_CHAIN,
+
+    retry: {
+
+      maxRetries:
+        GEMINI_MAX_RETRIES,
+
+      baseDelayMs:
+        GEMINI_RETRY_BASE_DELAY_MS
 
     },
 
