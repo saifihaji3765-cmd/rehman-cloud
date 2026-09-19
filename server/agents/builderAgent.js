@@ -1,24 +1,28 @@
 /* =========================================================
-   ZyrionOS BUILDER AGENT
+   ZYRIONOS BUILDER AGENT
+   ---------------------------------------------------------
    Planning → Production Code Generation
 
-   AI PROVIDER ARCHITECTURE:
+   AI ROUTING:
 
    Builder Agent
         ↓
    aiProviderService
         ↓
-   Primary Provider
+   Gemini 3.8 Flash
         ↓
-   Fallback Provider
+   Gemini 3.7 Flash
+        ↓
+   Gemini 3.6 Flash
 
-   No direct provider SDK is used here.
+   OpenAI is NOT called by this agent.
+   Provider logic remains centralized.
 ========================================================= */
 
 
-/* =========================
+/* =========================================================
    SERVICES
-========================= */
+========================================================= */
 
 const logger =
   require("../services/loggerService");
@@ -33,11 +37,6 @@ const {
    CONSTANTS
 ========================================================= */
 
-
-/* =========================
-   MAXIMUM LIMITS
-========================= */
-
 const MAX_FILES =
   100;
 
@@ -47,64 +46,46 @@ const MAX_PATH_LENGTH =
 const MAX_FILE_SIZE =
   200000;
 
+const MAX_PROMPT_LENGTH =
+  12000;
 
-/* =========================
-   ALLOWED FRAMEWORK VALUES
-========================= */
+const MAX_PLAN_SIZE =
+  100000;
+
+
+/* =========================================================
+   COMMON FRAMEWORKS
+========================================================= */
 
 const COMMON_FRAMEWORKS = [
 
   "React",
-
   "Next.js",
-
   "Node.js",
-
   "Express",
-
   "NestJS",
-
   "Vue",
-
   "Nuxt",
-
   "Angular",
-
   "Svelte",
-
   "SvelteKit",
-
   "Python",
-
   "FastAPI",
-
   "Django",
-
   "Flask",
-
   "Java",
-
   "Spring Boot",
-
   "PHP",
-
   "Laravel",
-
   "Flutter",
-
   "React Native"
 
 ];
 
 
 /* =========================================================
-   HELPERS
-========================================================= */
-
-
-/* =========================
    SAFE STRING
-========================= */
+========================================================= */
 
 function cleanString(
   value,
@@ -119,20 +100,16 @@ function cleanString(
 
   }
 
-
   return value
     .trim()
-    .slice(
-      0,
-      maxLength
-    );
+    .slice(0, maxLength);
 
 }
 
 
-/* =========================
-   SAFE JSON SERIALIZER
-========================= */
+/* =========================================================
+   SAFE JSON
+========================================================= */
 
 function safeJson(
   value
@@ -155,9 +132,9 @@ function safeJson(
 }
 
 
-/* =========================
+/* =========================================================
    SAFE JSON PARSER
-========================= */
+========================================================= */
 
 function safeJsonParse(
   value
@@ -171,7 +148,6 @@ function safeJsonParse(
     return null;
 
   }
-
 
   try {
 
@@ -188,15 +164,18 @@ function safeJsonParse(
       const cleaned =
         value
           .replace(
-            /```json/gi,
+            /^\s*```json\s*/i,
             ""
           )
           .replace(
-            /```/g,
+            /^\s*```\s*/i,
+            ""
+          )
+          .replace(
+            /\s*```\s*$/i,
             ""
           )
           .trim();
-
 
       return JSON.parse(
         cleaned
@@ -215,9 +194,9 @@ function safeJsonParse(
 }
 
 
-/* =========================
+/* =========================================================
    NORMALIZE FRAMEWORK
-========================= */
+========================================================= */
 
 function normalizeFramework(
   framework,
@@ -230,7 +209,6 @@ function normalizeFramework(
       200
     );
 
-
   if (!value) {
 
     value =
@@ -240,7 +218,6 @@ function normalizeFramework(
       );
 
   }
-
 
   if (!value) {
 
@@ -252,38 +229,30 @@ function normalizeFramework(
 
   }
 
-
   if (!value) {
 
     return "";
 
   }
 
-
-  /*
-   * Preserve known framework casing.
-   *
-   * Unknown but valid-looking values
-   * are preserved instead of silently
-   * changing the requested architecture.
-   */
-
-  const known =
+  const knownFramework =
     COMMON_FRAMEWORKS.find(
       (item) =>
         item.toLowerCase() ===
         value.toLowerCase()
     );
 
-
-  return known || value;
+  return (
+    knownFramework ||
+    value
+  );
 
 }
 
 
-/* =========================
+/* =========================================================
    NORMALIZE PROJECT NAME
-========================= */
+========================================================= */
 
 function normalizeProjectName(
   value
@@ -295,24 +264,17 @@ function normalizeProjectName(
       200
     );
 
-
-  if (
-    projectName
-  ) {
-
-    return projectName;
-
-  }
-
-
-  return "ZyrionOS Project";
+  return (
+    projectName ||
+    "ZyrionOS Project"
+  );
 
 }
 
 
-/* =========================
+/* =========================================================
    NORMALIZE FILE PATH
-========================= */
+========================================================= */
 
 function normalizeFilePath(
   value
@@ -326,7 +288,6 @@ function normalizeFilePath(
 
   }
 
-
   let filePath =
     value
       .trim()
@@ -334,11 +295,6 @@ function normalizeFilePath(
         /\\/g,
         "/"
       );
-
-
-  /*
-   * Remove accidental leading "./"
-   */
 
   while (
     filePath.startsWith("./")
@@ -349,10 +305,13 @@ function normalizeFilePath(
 
   }
 
+  if (
+    !filePath
+  ) {
 
-  /*
-   * Reject absolute Unix paths.
-   */
+    return null;
+
+  }
 
   if (
     filePath.startsWith("/")
@@ -361,11 +320,6 @@ function normalizeFilePath(
     return null;
 
   }
-
-
-  /*
-   * Reject Windows absolute paths.
-   */
 
   if (
     /^[A-Za-z]:\//.test(
@@ -377,14 +331,16 @@ function normalizeFilePath(
 
   }
 
+  if (
+    filePath.includes("\0")
+  ) {
 
-  /*
-   * Reject path traversal.
-   */
+    return null;
+
+  }
 
   const segments =
     filePath.split("/");
-
 
   if (
     segments.includes("..")
@@ -394,43 +350,23 @@ function normalizeFilePath(
 
   }
 
-
-  /*
-   * Reject empty or oversized paths.
-   */
-
   if (
-    !filePath ||
     filePath.length >
-      MAX_PATH_LENGTH
+    MAX_PATH_LENGTH
   ) {
 
     return null;
 
   }
-
-
-  /*
-   * Reject null bytes.
-   */
-
-  if (
-    filePath.includes("\0")
-  ) {
-
-    return null;
-
-  }
-
 
   return filePath;
 
 }
 
 
-/* =========================
+/* =========================================================
    NORMALIZE FILE CONTENT
-========================= */
+========================================================= */
 
 function normalizeFileContent(
   value
@@ -444,7 +380,6 @@ function normalizeFileContent(
 
   }
 
-
   if (
     value.length >
     MAX_FILE_SIZE
@@ -454,15 +389,14 @@ function normalizeFileContent(
 
   }
 
-
   return value;
 
 }
 
 
-/* =========================
-   NORMALIZE GENERATED FILES
-========================= */
+/* =========================================================
+   NORMALIZE FILES
+========================================================= */
 
 function normalizeFiles(
   files
@@ -476,16 +410,13 @@ function normalizeFiles(
 
       files: [],
 
-      invalidCount:
-        0,
+      invalidCount: 0,
 
-      duplicateCount:
-        0
+      duplicateCount: 0
 
     };
 
   }
-
 
   const normalizedFiles =
     [];
@@ -498,7 +429,6 @@ function normalizeFiles(
 
   let duplicateCount =
     0;
-
 
   for (
     const file of files
@@ -515,19 +445,16 @@ function normalizeFiles(
 
     }
 
-
     const filePath =
       normalizeFilePath(
         file.path ||
         file.name
       );
 
-
     const content =
       normalizeFileContent(
         file.content
       );
-
 
     if (
       !filePath ||
@@ -540,14 +467,9 @@ function normalizeFiles(
 
     }
 
-
-    const normalizedPath =
-      filePath;
-
-
     if (
       seenPaths.has(
-        normalizedPath
+        filePath
       )
     ) {
 
@@ -557,21 +479,18 @@ function normalizeFiles(
 
     }
 
-
     seenPaths.add(
-      normalizedPath
+      filePath
     );
-
 
     normalizedFiles.push({
 
       path:
-        normalizedPath,
+        filePath,
 
       content
 
     });
-
 
     if (
       normalizedFiles.length >=
@@ -583,7 +502,6 @@ function normalizeFiles(
     }
 
   }
-
 
   return {
 
@@ -599,28 +517,13 @@ function normalizeFiles(
 }
 
 
-/* =========================
-   EXTRACT BUILD REQUEST
-========================= */
+/* =========================================================
+   NORMALIZE BUILD REQUEST
+========================================================= */
 
 function normalizeBuildRequest(
   input
 ) {
-
-  /*
-   * Master Agent sends:
-
-   {
-     prompt,
-     plan,
-     framework,
-     user,
-     memoryContext,
-     intent
-   }
-
-   We extract the actual build context.
-   */
 
   if (
     typeof input === "string"
@@ -631,7 +534,7 @@ function normalizeBuildRequest(
       prompt:
         cleanString(
           input,
-          4000
+          MAX_PROMPT_LENGTH
         ),
 
       plan:
@@ -653,7 +556,6 @@ function normalizeBuildRequest(
 
   }
 
-
   if (
     !input ||
     typeof input !== "object"
@@ -661,35 +563,28 @@ function normalizeBuildRequest(
 
     return {
 
-      prompt:
-        "",
+      prompt: "",
 
-      plan:
-        null,
+      plan: null,
 
-      framework:
-        "",
+      framework: "",
 
-      user:
-        {},
+      user: {},
 
-      memoryContext:
-        null,
+      memoryContext: null,
 
-      intent:
-        null
+      intent: null
 
     };
 
   }
-
 
   return {
 
     prompt:
       cleanString(
         input.prompt,
-        4000
+        MAX_PROMPT_LENGTH
       ),
 
     plan:
@@ -704,8 +599,10 @@ function normalizeBuildRequest(
       ),
 
     user:
-      input.user ||
-      {},
+      input.user &&
+      typeof input.user === "object"
+        ? input.user
+        : {},
 
     memoryContext:
       input.memoryContext ||
@@ -721,6 +618,200 @@ function normalizeBuildRequest(
 
 
 /* =========================================================
+   BUILD SYSTEM PROMPT
+========================================================= */
+
+function createBuilderSystemPrompt() {
+
+  return `You are the Builder Agent of ZyrionOS.
+
+Your job is to transform a validated Planning Agent output into a REAL, coherent, production-ready source-code project.
+
+The Planning Agent already decided the architecture.
+
+You MUST follow the plan.
+
+Your response is consumed directly by backend code.
+
+RETURN ONLY VALID JSON.
+
+NO markdown.
+NO triple backticks.
+NO explanations outside JSON.
+NO fake implementation.
+NO demo implementation.
+NO placeholder-only files.
+
+REQUIRED JSON:
+
+{
+  "projectName": "string",
+  "framework": "string",
+  "files": [
+    {
+      "path": "string",
+      "content": "string"
+    }
+  ]
+}
+
+STRICT REQUIREMENTS:
+
+1. Generate complete source files.
+
+2. Every generated file must contain real implementation.
+
+3. Every file must have a unique relative path.
+
+4. Use forward slashes in paths.
+
+5. Never use absolute paths.
+
+6. Never use ../ path traversal.
+
+7. Never include secrets.
+
+8. Never include API keys.
+
+9. Never include passwords.
+
+10. Never include private credentials.
+
+11. Never include real payment secrets.
+
+12. Use environment variables for external secrets.
+
+13. Follow the Planning Agent architecture.
+
+14. Keep frontend and backend architecture consistent.
+
+15. Keep imports internally consistent.
+
+16. Generated files must reference only:
+   - generated files,
+   - declared project dependencies,
+   - legitimate external packages,
+   - legitimate standard-library modules.
+
+17. Generate package.json whenever required.
+
+18. Generate the correct application entry point.
+
+19. Generate required configuration files.
+
+20. Generate required API routes when the plan requires them.
+
+21. Generate database models when required by the plan.
+
+22. Generate authentication only when required by the plan.
+
+23. Generate real error handling.
+
+24. Generate real validation.
+
+25. Do not claim that deployment happened.
+
+26. Do not claim that AWS is configured.
+
+27. Do not claim that a database is configured.
+
+28. Do not claim that a domain is configured.
+
+29. Do not claim that SSL is configured.
+
+30. Do not claim that payments are configured.
+
+31. Infrastructure integrations must be represented as real application configuration/code only.
+
+32. Never invent credentials.
+
+33. Never invent unavailable infrastructure.
+
+34. Never invent external APIs.
+
+35. Never invent external URLs.
+
+36. Do not generate unnecessary files.
+
+37. Do not duplicate files.
+
+38. Do not create files merely to increase file count.
+
+39. Preserve the exact architectural intent of the Planning Agent.
+
+40. Follow the requested framework.
+
+41. If the plan specifies a technology, use that technology.
+
+42. If the plan specifies a file, generate that file.
+
+43. If the plan does not require a technology, do not randomly introduce it.
+
+44. Ensure generated imports match generated paths.
+
+45. Ensure package dependencies match imported packages.
+
+46. Ensure configuration names match code usage.
+
+47. Ensure environment variable names are consistent.
+
+48. Ensure API route paths are consistent.
+
+49. Ensure exported functions match their imports.
+
+50. Do not output pseudo-code.
+
+51. Do not output TODO-only implementations.
+
+52. Do not output "coming soon" implementations.
+
+53. Do not output fake success responses.
+
+54. Do not omit file content.
+
+55. The "files" property MUST be an array.
+
+56. "path" MUST be a string.
+
+57. "content" MUST be a string.
+
+58. Return JSON only.
+
+QUALITY REQUIREMENTS:
+
+- Think through the complete dependency graph before generating files.
+- Make the generated project internally coherent.
+- Prefer fewer complete files over many incomplete files.
+- Do not sacrifice correctness to increase file count.
+- Preserve existing architecture when the plan references an existing project.
+- Do not silently replace the framework.
+- Do not silently change database technology.
+- Do not silently change authentication architecture.
+- Do not silently change API architecture.
+
+SECURITY:
+
+Never generate:
+- secrets
+- access tokens
+- private keys
+- passwords
+- payment credentials
+- authentication cookies
+- production API keys
+
+Use environment variables instead.
+
+FINAL RULE:
+
+The output is parsed automatically.
+
+Therefore the entire response MUST be valid JSON and nothing else.`;
+
+}
+
+
+/* =========================================================
    BUILDER AGENT
 ========================================================= */
 
@@ -731,7 +822,6 @@ async function builderAgent(
   let currentStage =
     "request-normalization";
 
-
   try {
 
     logger.info(
@@ -740,7 +830,7 @@ async function builderAgent(
 
 
     /* =====================================================
-       NORMALIZE INPUT
+       REQUEST NORMALIZATION
     ===================================================== */
 
     const request =
@@ -748,14 +838,11 @@ async function builderAgent(
         input
       );
 
-
     const prompt =
       request.prompt;
 
-
     const plan =
       request.plan;
-
 
     const framework =
       normalizeFramework(
@@ -768,7 +855,9 @@ async function builderAgent(
        VALIDATION
     ===================================================== */
 
-    if (!prompt) {
+    if (
+      !prompt
+    ) {
 
       return {
 
@@ -778,16 +867,19 @@ async function builderAgent(
           "Build prompt required",
 
         error:
-          "Builder Agent received an empty build prompt."
+          "Builder Agent received an empty build prompt.",
+
+        stage:
+          currentStage
 
       };
 
     }
 
-
     if (
       !plan ||
-      typeof plan !== "object"
+      typeof plan !== "object" ||
+      Array.isArray(plan)
     ) {
 
       return {
@@ -798,9 +890,52 @@ async function builderAgent(
           "Project plan required",
 
         error:
-          "Builder Agent did not receive a valid Planning Agent output."
+          "Builder Agent did not receive a valid Planning Agent output.",
+
+        stage:
+          currentStage
 
       };
+
+    }
+
+
+    /* =====================================================
+       PLAN SIZE SAFETY
+    ===================================================== */
+
+    let planForAI =
+      plan;
+
+    try {
+
+      const serializedPlan =
+        JSON.stringify(
+          plan
+        );
+
+      if (
+        serializedPlan.length >
+        MAX_PLAN_SIZE
+      ) {
+
+        planForAI = {
+
+          ...plan,
+
+          _builderNotice:
+            "Planning output exceeded builder context limit. Preserve the essential architecture and implementation requirements from the supplied plan."
+
+        };
+
+      }
+
+    }
+
+    catch (error) {
+
+      planForAI =
+        plan;
 
     }
 
@@ -816,9 +951,10 @@ async function builderAgent(
 
       framework:
         framework ||
-        "Use the framework specified by the plan.",
+        "Use the framework specified by the Planning Agent.",
 
-      plan,
+      plan:
+        planForAI,
 
       intent:
         request.intent ||
@@ -838,24 +974,10 @@ async function builderAgent(
     currentStage =
       "ai-build";
 
+    logger.info(
+      "Builder Agent requesting structured code generation from centralized AI provider."
+    );
 
-    /*
-     * IMPORTANT:
-     *
-     * Builder Agent does NOT create an
-     * OpenAI or Gemini client.
-     *
-     * Provider routing is centralized
-     * inside aiProviderService.
-     *
-     * The provider service decides:
-     *
-     * Primary Provider
-     *        ↓
-     * Fallback Provider
-     *
-     * according to environment configuration.
-     */
 
     const result =
       await generateJSON({
@@ -867,160 +989,8 @@ async function builderAgent(
             role:
               "system",
 
-            content: `
-
-You are the Builder Agent of ZyrionOS
-Autonomous AI OS.
-
-Your responsibility is to transform an
-implementation plan into a coherent set
-of production-ready source files.
-
-The Planning Agent has already produced
-the architecture.
-
-You must follow that architecture.
-
-You generate source files only.
-
-Do not explain the implementation.
-
-Do not return markdown.
-
-Do not return triple backticks.
-
-Return ONLY valid JSON.
-
-REQUIRED OUTPUT:
-
-{
-  "projectName": "",
-  "framework": "",
-  "files": [
-    {
-      "path": "",
-      "content": ""
-    }
-  ]
-}
-
-STRICT RULES:
-
-1. Generate complete file contents.
-
-2. Every file must have a unique relative
-   path.
-
-3. Every file path must use forward slashes.
-
-4. Never use absolute file paths.
-
-5. Never use "../" path traversal.
-
-6. Never include API keys, passwords,
-   secrets, tokens, cookies, private
-   credentials, payment secrets, or
-   authentication secrets.
-
-7. Never hard-code credentials.
-
-8. Use environment variables for secrets.
-
-9. Keep frontend/backend architecture
-   consistent with the planning document.
-
-10. Keep imports and file paths internally
-    consistent.
-
-11. Do not reference files that you did not
-    generate unless they are clearly external
-    dependencies.
-
-12. Generate configuration files when they
-    are required for the project to run.
-
-13. Generate package.json when a Node.js
-    application requires it.
-
-14. Generate appropriate application
-    entry points.
-
-15. Generate required API routes when they
-    are part of the plan.
-
-16. Generate database models/schemas when
-    they are part of the plan.
-
-17. Generate authentication code only when
-    authentication is part of the plan.
-
-18. Do not claim that deployment has happened.
-
-19. Do not claim that AWS, Docker, databases,
-    domains, SSL, payments, or external
-    services are configured unless represented
-    only as application configuration/code.
-
-20. Do not generate fake success responses
-    for infrastructure operations.
-
-21. Do not create unnecessary files.
-
-22. Do not duplicate the same path.
-
-23. Make the generated project internally
-    coherent.
-
-24. Follow the requested framework.
-
-25. Return JSON only.
-
-26. Do not place source code outside the
-    "content" property.
-
-27. Do not omit content for any generated file.
-
-28. Do not generate placeholder files whose
-    only purpose is to make the file count
-    larger.
-
-29. Do not invent external APIs, services,
-    URLs, credentials, infrastructure,
-    databases, or integrations.
-
-30. If a required external resource is not
-    available, represent the integration using
-    environment-based configuration rather
-    than inventing credentials or endpoints.
-
-31. Prefer real implementation over pseudo-code.
-
-32. Do not return explanations, comments outside
-    the JSON structure, or markdown.
-
-33. Ensure generated source files are compatible
-    with the framework identified in the plan.
-
-34. Preserve the architectural intent of the
-    Planning Agent.
-
-35. Return JSON only.
-
-IMPORTANT:
-
-The output will be consumed directly by
-the ZyrionOS backend.
-
-Therefore:
-
-- "files" MUST be an array.
-- "path" MUST be a string.
-- "content" MUST be a string.
-- Every file MUST contain complete content.
-- Do not put code outside "content".
-- Do not wrap JSON in markdown.
-
-`
+            content:
+              createBuilderSystemPrompt()
 
           },
 
@@ -1038,17 +1008,35 @@ Therefore:
 
         ],
 
-        temperature:
-          0.2,
+        /*
+         * IMPORTANT:
+         *
+         * Do NOT specify:
+         *
+         * provider: "openai"
+         * provider: "gemini"
+         * model: ...
+         *
+         * here.
+         *
+         * Provider service owns the Gemini
+         * model failover chain.
+         */
+
+        json:
+          true,
 
         maxTokens:
-          12000
+          12000,
+
+        thinkingLevel:
+          "high"
 
       });
 
 
     /* =====================================================
-       PROVIDER RESULT VALIDATION
+       PROVIDER VALIDATION
     ===================================================== */
 
     if (
@@ -1058,13 +1046,11 @@ Therefore:
 
       const providerError =
         result?.error ||
-        "AI provider returned an unsuccessful result.";
-
+        "Centralized AI provider returned an unsuccessful result.";
 
       logger.error(
         `Builder Agent AI Provider Failed: ${providerError}`
       );
-
 
       return {
 
@@ -1093,11 +1079,31 @@ Therefore:
 
 
     /* =====================================================
-       STRUCTURED RESPONSE
+       STRUCTURED RESPONSE VALIDATION
     ===================================================== */
 
-    const parsed =
+    let parsed =
       result.data;
+
+
+    /*
+     * Normally generateJSON already parses
+     * the provider response.
+     *
+     * This additional safety layer handles
+     * accidental stringified JSON.
+     */
+
+    if (
+      typeof parsed === "string"
+    ) {
+
+      parsed =
+        safeJsonParse(
+          parsed
+        );
+
+    }
 
 
     if (
@@ -1133,7 +1139,7 @@ Therefore:
 
 
     /* =====================================================
-       BASIC FILE VALIDATION
+       FILE ARRAY VALIDATION
     ===================================================== */
 
     if (
@@ -1199,12 +1205,11 @@ Therefore:
 
 
     /* =====================================================
-       NORMALIZE FILES
+       FILE NORMALIZATION
     ===================================================== */
 
     currentStage =
       "file-validation";
-
 
     const fileResult =
       normalizeFiles(
@@ -1300,11 +1305,9 @@ Therefore:
       `Builder Agent Completed: ${fileResult.files.length} files generated`
     );
 
-
     logger.info(
       `Builder Agent Provider: ${result.provider || "unknown"}`
     );
-
 
     logger.info(
       `Builder Agent Model: ${result.model || "unknown"}`
@@ -1381,7 +1384,15 @@ Therefore:
         errorMessage,
 
       stage:
-        currentStage
+        currentStage,
+
+      provider:
+        error?.provider ||
+        null,
+
+      model:
+        error?.model ||
+        null
 
     };
 
