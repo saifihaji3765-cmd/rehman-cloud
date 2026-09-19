@@ -1,19 +1,22 @@
 /* =========================================================
-   ZyrionOS INTENT AGENT
-   Intent Classification & Agent Routing
+   ZYRIONOS INTENT AGENT
+   ---------------------------------------------------------
+   Purpose:
+   - Classify the CURRENT user request
+   - Gemini-only production AI
+   - No OpenAI routing
+   - No execution
+   - No code generation
+   - No deployment claims
+   ========================================================= */
 
-   AI Provider Chain:
-   Gemini → OpenAI fallback
-========================================================= */
 
-
-/* =========================
+/* =========================================================
    SERVICES
-========================= */
+========================================================= */
 
 const logger =
   require("../services/loggerService");
-
 
 const {
   generateJSON
@@ -25,81 +28,45 @@ const {
    CONSTANTS
 ========================================================= */
 
-
-/* =========================
-   VALID INTENTS
-========================= */
-
 const VALID_INTENTS = [
 
   "chat",
-
   "build",
-
   "deploy",
-
   "monitor",
-
   "scale",
-
   "billing",
-
   "subscription",
-
   "fix",
-
   "file",
-
   "automation",
-
   "infrastructure",
-
   "thumbnail"
 
 ];
 
 
-/* =========================
-   VALID COMPLEXITIES
-========================= */
-
 const VALID_COMPLEXITIES = [
 
   "low",
-
   "medium",
-
   "high"
 
 ];
 
 
-/* =========================
-   KNOWN AGENTS
-========================= */
-
 const KNOWN_AGENTS = [
 
   "intentAgent",
-
   "plannerAgent",
-
   "builderAgent",
-
   "deployAgent",
-
   "monitoringAgent",
-
   "scalingAgent",
-
   "billingAgent",
-
   "subscriptionAgent",
-
   "memoryAgent",
-
   "fixAgent",
-
   "fileAgent"
 
 ];
@@ -108,11 +75,6 @@ const KNOWN_AGENTS = [
 /* =========================================================
    HELPERS
 ========================================================= */
-
-
-/* =========================
-   SAFE STRING
-========================= */
 
 function cleanString(
   value,
@@ -138,9 +100,9 @@ function cleanString(
 }
 
 
-/* =========================
+/* =========================================================
    SAFE JSON
-========================= */
+========================================================= */
 
 function safeJson(
   value
@@ -154,7 +116,9 @@ function safeJson(
 
   }
 
-  catch (error) {
+  catch (
+    error
+  ) {
 
     return JSON.stringify({
 
@@ -168,9 +132,9 @@ function safeJson(
 }
 
 
-/* =========================
+/* =========================================================
    DEFAULT INTENT
-========================= */
+========================================================= */
 
 function createDefaultIntent() {
 
@@ -196,22 +160,23 @@ function createDefaultIntent() {
 }
 
 
-/* =========================
+/* =========================================================
    FALLBACK AGENTS
-========================= */
+========================================================= */
 
 function getFallbackAgents(
   type
 ) {
 
-  switch (type) {
+  switch (
+    type
+  ) {
 
     case "build":
 
       return [
 
         "plannerAgent",
-
         "builderAgent"
 
       ];
@@ -314,9 +279,9 @@ function getFallbackAgents(
 }
 
 
-/* =========================
+/* =========================================================
    NORMALIZE REQUIRED AGENTS
-========================= */
+========================================================= */
 
 function normalizeRequiredAgents(
   agents,
@@ -337,8 +302,7 @@ function normalizeRequiredAgents(
 
         .filter(
           (agent) =>
-            typeof agent ===
-            "string"
+            typeof agent === "string"
         )
 
         .map(
@@ -359,9 +323,11 @@ function normalizeRequiredAgents(
 
 
   normalized = [
+
     ...new Set(
       normalized
     )
+
   ];
 
 
@@ -382,9 +348,9 @@ function normalizeRequiredAgents(
 }
 
 
-/* =========================
+/* =========================================================
    NORMALIZE CONFIDENCE
-========================= */
+========================================================= */
 
 function normalizeConfidence(
   value
@@ -414,34 +380,20 @@ function normalizeConfidence(
     );
 
 
-  if (
-    confidence > 100
-  ) {
-
-    confidence =
-      100;
-
-  }
-
-
-  if (
-    confidence < 0
-  ) {
-
-    confidence =
-      0;
-
-  }
-
-
-  return confidence;
+  return Math.max(
+    0,
+    Math.min(
+      100,
+      confidence
+    )
+  );
 
 }
 
 
-/* =========================
+/* =========================================================
    NORMALIZE INTENT
-========================= */
+========================================================= */
 
 function normalizeIntent(
   parsed
@@ -561,19 +513,17 @@ You are the Intent Detection Agent
 of ZyrionOS Autonomous AI OS.
 
 Your ONLY responsibility is to classify
-the user's CURRENT request.
+the CURRENT user request.
 
 You do NOT execute actions.
+
 You do NOT generate project code.
+
 You do NOT deploy infrastructure.
+
 You do NOT claim that anything succeeded.
 
-Determine:
-
-1. the primary intent
-2. the user's concrete goal
-3. request complexity
-4. which connected agents are relevant
+You must classify ONLY the current request.
 
 VALID INTENTS:
 
@@ -592,6 +542,7 @@ VALID INTENTS:
 
 CONNECTED AGENTS:
 
+- intentAgent
 - plannerAgent
 - builderAgent
 - deployAgent
@@ -607,102 +558,110 @@ INTENT DEFINITIONS:
 
 chat:
 General questions, explanations,
-conversation, advice, or requests that
-do not require a specialized operation.
+conversation, or advice.
 
 build:
 Create, generate, develop, or modify
-an application, website, backend,
-frontend, API, feature, software project,
+software, applications, websites,
+frontend, backend, APIs, features,
 or source code.
 
 deploy:
-Deploy, publish, host, release, or make
-an existing project live.
+Deploy, publish, host, release,
+or make an existing project live.
 
 monitor:
-Inspect deployment health, CPU, RAM,
-service health, availability, or runtime
-infrastructure metrics.
+Inspect deployment health, runtime
+health, CPU, RAM, availability,
+service health, or infrastructure metrics.
 
 scale:
 Increase or decrease infrastructure
-capacity or application instances.
+or application capacity.
 
 billing:
-Questions or operations involving
-pricing, billing information, charges,
-or plan billing.
+Pricing, charges, invoices,
+billing information, or payment charges.
 
 subscription:
-Subscription plan, limits, status,
-features, or subscription lifecycle.
+Plans, limits, subscription status,
+subscription features, upgrades,
+downgrades, cancellation, or lifecycle.
 
 fix:
 Debug, repair, diagnose, optimize,
-or correct broken code or a project.
+or correct broken code or software.
 
 file:
-Read, inspect, manage, save, delete,
-or work directly with project files.
+Read, inspect, create, modify, save,
+delete, or manage project files.
 
 automation:
-Create or reason about an automated
-workflow or repeated software process.
+Create or reason about automated
+workflows or repeated software processes.
 
 infrastructure:
-Infrastructure architecture,
-cloud resources, containers,
-networking, or infrastructure planning.
+Cloud architecture, containers,
+networking, servers, databases,
+AWS resources, or infrastructure planning.
 
 thumbnail:
-Requests specifically asking to create
-or generate a thumbnail.
+Specifically create or generate a thumbnail.
 
 CLASSIFICATION RULES:
 
-- Classify ONLY the CURRENT prompt.
-- Current explicit instructions have
-  priority over memory/context.
-- Memory is contextual information only.
-- Do not let memory override the current
-  explicit user request.
-- Do not invent unsupported intents.
-- If the user asks to build software,
-  classify as "build".
-- If the user asks to fix broken code,
-  classify as "fix".
-- If the user asks to deploy an existing
-  project, classify as "deploy".
-- If the user asks about deployment health
-  or runtime metrics, classify as "monitor".
-- If the user asks to increase or decrease
-  capacity, classify as "scale".
-- If the request concerns prices, charges,
-  invoices, or billing, classify as "billing".
-- If the request concerns plans, limits,
-  subscription status, or subscription
-  lifecycle, classify as "subscription".
-- If the request concerns files directly,
-  classify as "file".
-- If the request concerns infrastructure
-  architecture or cloud resources, classify
-  as "infrastructure".
-- If the request concerns automated
-  workflows, classify as "automation".
-- If the request specifically asks for a
-  thumbnail, classify as "thumbnail".
-- If uncertain, use "chat".
+1. Classify ONLY the CURRENT request.
 
-complexity must be:
+2. Current explicit instructions have
+   priority over memory/context.
+
+3. Memory is contextual information only.
+
+4. If the user asks to build software,
+   use "build".
+
+5. If the user asks to fix broken code,
+   use "fix".
+
+6. If the user asks to deploy an existing
+   project, use "deploy".
+
+7. If the user asks about runtime health,
+   use "monitor".
+
+8. If the user asks to increase or decrease
+   capacity, use "scale".
+
+9. Pricing, charges and invoices:
+   use "billing".
+
+10. Subscription plans, limits and lifecycle:
+    use "subscription".
+
+11. Direct file operations:
+    use "file".
+
+12. Cloud architecture or cloud resources:
+    use "infrastructure".
+
+13. Automated workflows:
+    use "automation".
+
+14. Thumbnail generation:
+    use "thumbnail".
+
+15. If uncertain:
+    use "chat".
+
+complexity MUST be one of:
 
 "low"
 "medium"
 "high"
 
-confidence must be a number from 0-100.
+confidence MUST be a number from 0 to 100.
 
-requiredAgents must be an array.
+requiredAgents MUST be an array.
 
 Only use names from CONNECTED AGENTS.
 
@@ -714,7 +673,7 @@ No markdown.
 
 No explanation outside JSON.
 
-REQUIRED JSON FORMAT:
+REQUIRED JSON:
 
 {
   "type": "",
@@ -743,7 +702,7 @@ async function intentAgent(
 
 
     /* =====================================================
-       INPUT NORMALIZATION
+       INPUT
     ===================================================== */
 
     const prompt =
@@ -810,21 +769,19 @@ async function intentAgent(
 
 
     /* =====================================================
-       AI REQUEST
+       GEMINI REQUEST
+       -----------------------------------------------------
+       IMPORTANT:
+       Do NOT send temperature.
+       Gemini 3.x provider service handles
+       its own thinking configuration.
     ===================================================== */
 
     const result =
       await generateJSON({
 
-        /*
-         * No provider is forced here.
-         *
-         * aiProviderService uses:
-         *
-         * Gemini → OpenAI fallback
-         *
-         * according to env.js.
-         */
+        provider:
+          "gemini",
 
         messages: [
 
@@ -854,7 +811,7 @@ OPTIONAL MEMORY CONTEXT:
 ${memorySummary ||
   "No memory context provided."}
 
-Classify only the current request.
+Classify ONLY the current request.
 
 `
 
@@ -862,11 +819,11 @@ Classify only the current request.
 
         ],
 
-        temperature:
-          0.1,
-
         maxTokens:
-          1000
+          1000,
+
+        thinkingLevel:
+          "low"
 
       });
 
@@ -881,7 +838,7 @@ Classify only the current request.
     ) {
 
       throw new Error(
-        "AI provider returned an unsuccessful result"
+        "Gemini provider returned an unsuccessful result"
       );
 
     }
@@ -900,7 +857,7 @@ Classify only the current request.
     ) {
 
       throw new Error(
-        "Intent AI returned invalid structured data"
+        "Gemini Intent Agent returned invalid structured data"
       );
 
     }
@@ -926,7 +883,7 @@ Classify only the current request.
 
 
     /* =====================================================
-       RESPONSE CONTRACT
+       RESPONSE
     ===================================================== */
 
     return {
@@ -938,7 +895,13 @@ Classify only the current request.
         normalized.type,
 
       data:
-        normalized
+        normalized,
+
+      provider:
+        result.provider,
+
+      model:
+        result.model
 
     };
 
@@ -957,10 +920,6 @@ Classify only the current request.
       `Intent Agent Failed: ${errorMessage}`
     );
 
-
-    /* =====================================================
-       SAFE FALLBACK
-    ===================================================== */
 
     const fallback =
       createDefaultIntent();
