@@ -1,21 +1,31 @@
 /* =========================================================
-   ZyrionOS PLANNING AGENT
+   ZYRIONOS PLANNING AGENT
    Intent → Planning → Builder Contract
 
    AI PROVIDER ARCHITECTURE:
+
    Planning Agent
         ↓
-   aiProviderService
+   Central AI Provider Service
         ↓
-   Primary Provider (Gemini)
+   Gemini ONLY
         ↓
-   Fallback Provider (OpenAI)
+   Gemini 3.8 Flash
+        ↓ transient failure
+   Gemini 3.7 Flash
+        ↓ transient failure
+   Gemini 3.6 Flash
+
+   OpenAI:
+   - NOT USED
+   - NOT CALLED
+   - TEMPORARILY DISABLED
 ========================================================= */
 
 
-/* =========================
+/* =========================================================
    SERVICES
-========================= */
+========================================================= */
 
 const logger =
   require("../services/loggerService");
@@ -27,66 +37,30 @@ const {
 
 
 /* =========================================================
-   CONSTANTS
-========================================================= */
-
-
-/* =========================
    VALID INTENTS
-========================= */
+========================================================= */
 
 const VALID_INTENTS = [
 
   "chat",
-
   "build",
-
   "deploy",
-
   "monitor",
-
   "scale",
-
   "billing",
-
   "subscription",
-
   "fix",
-
   "file",
-
   "automation",
-
   "infrastructure",
-
   "thumbnail"
 
 ];
 
 
-/* =========================
-   VALID COMPLEXITIES
-========================= */
-
-const VALID_COMPLEXITIES = [
-
-  "low",
-
-  "medium",
-
-  "high"
-
-];
-
-
 /* =========================================================
-   HELPERS
-========================================================= */
-
-
-/* =========================
    SAFE STRING
-========================= */
+========================================================= */
 
 function cleanString(
   value,
@@ -101,20 +75,16 @@ function cleanString(
 
   }
 
-
   return value
     .trim()
-    .slice(
-      0,
-      maxLength
-    );
+    .slice(0, maxLength);
 
 }
 
 
-/* =========================
-   SAFE JSON SERIALIZER
-========================= */
+/* =========================================================
+   SAFE JSON
+========================================================= */
 
 function safeJson(
   value
@@ -128,7 +98,9 @@ function safeJson(
 
   }
 
-  catch (error) {
+  catch (
+    error
+  ) {
 
     return JSON.stringify({
 
@@ -142,9 +114,9 @@ function safeJson(
 }
 
 
-/* =========================
+/* =========================================================
    NORMALIZE ARRAY
-========================= */
+========================================================= */
 
 function normalizeArray(
   value
@@ -157,7 +129,6 @@ function normalizeArray(
     return [];
 
   }
-
 
   return value
 
@@ -176,27 +147,25 @@ function normalizeArray(
 
           return item
             .trim()
-            .slice(
-              0,
-              1000
-            );
+            .slice(0, 1000);
 
         }
-
 
         return item;
 
       }
     )
 
-    .filter(Boolean);
+    .filter(
+      Boolean
+    );
 
 }
 
 
-/* =========================
+/* =========================================================
    NORMALIZE OBJECT
-========================= */
+========================================================= */
 
 function normalizeObject(
   value
@@ -212,15 +181,14 @@ function normalizeObject(
 
   }
 
-
   return value;
 
 }
 
 
-/* =========================
+/* =========================================================
    DEFAULT PLAN
-========================= */
+========================================================= */
 
 function createDefaultPlan(
   prompt,
@@ -305,16 +273,16 @@ function createDefaultPlan(
 
     intent:
       intent?.type ||
-      "chat"
+      "build"
 
   };
 
 }
 
 
-/* =========================
+/* =========================================================
    NORMALIZE PLAN
-========================= */
+========================================================= */
 
 function normalizePlan(
   parsed,
@@ -400,12 +368,6 @@ function normalizePlan(
     description:
       description ||
       fallback.description,
-
-    /*
-     * Top-level framework is deliberately
-     * preserved because downstream agents
-     * such as Builder and Deploy can use it.
-     */
 
     framework:
       framework ||
@@ -515,7 +477,7 @@ function normalizePlan(
 
     intent:
       intent?.type ||
-      "chat"
+      "build"
 
   };
 
@@ -543,19 +505,6 @@ async function planningAgent(
 
     /* =====================================================
        INPUT CONTRACT
-
-       Master sends:
-
-       {
-         prompt,
-         intent,
-         user,
-         memoryContext
-       }
-
-       We extract the actual user prompt
-       instead of passing the entire wrapper
-       blindly to the AI provider.
     ===================================================== */
 
     let projectIdea = "";
@@ -609,7 +558,9 @@ async function planningAgent(
        VALIDATION
     ===================================================== */
 
-    if (!projectIdea) {
+    if (
+      !projectIdea
+    ) {
 
       return {
 
@@ -619,7 +570,10 @@ async function planningAgent(
           "Project idea required",
 
         error:
-          "Planning Agent received an empty project prompt."
+          "Planning Agent received an empty project prompt.",
+
+        stage:
+          currentStage
 
       };
 
@@ -640,8 +594,7 @@ async function planningAgent(
     ) {
 
       if (
-        typeof intent.type ===
-        "string"
+        typeof intent.type === "string"
       ) {
 
         const intentType =
@@ -665,8 +618,7 @@ async function planningAgent(
 
       else if (
         intent.data &&
-        typeof intent.data.type ===
-        "string"
+        typeof intent.data.type === "string"
       ) {
 
         const intentType =
@@ -714,22 +666,23 @@ async function planningAgent(
       "No memory context provided.";
 
 
-    if (memoryContext) {
+    if (
+      memoryContext
+    ) {
 
       memorySummary =
         safeJson(
           memoryContext
-        )
-          .slice(
-            0,
-            4000
-          );
+        ).slice(
+          0,
+          4000
+        );
 
     }
 
 
     /* =====================================================
-       USER CONTEXT
+       SAFE USER CONTEXT
     ===================================================== */
 
     let userSummary =
@@ -740,20 +693,6 @@ async function planningAgent(
       user &&
       typeof user === "object"
     ) {
-
-      /*
-       * Only non-sensitive planning context
-       * is forwarded.
-       *
-       * Never expose:
-       * - passwords
-       * - API keys
-       * - access tokens
-       * - refresh tokens
-       * - cookies
-       * - payment secrets
-       * - credentials
-       */
 
       const safeUser = {
 
@@ -772,44 +711,64 @@ async function planningAgent(
       userSummary =
         safeJson(
           safeUser
-        )
-          .slice(
-            0,
-            1500
-          );
+        ).slice(
+          0,
+          1500
+        );
 
     }
 
 
     /* =====================================================
        AI PLANNING
+       -----------------------------------------------------
+       IMPORTANT:
+
+       This agent NEVER calls OpenAI directly.
+
+       The centralized provider service is responsible
+       for Gemini model selection and Gemini failover.
+
+       Current production chain:
+
+       Gemini 3.8 Flash
+            ↓
+       Gemini 3.7 Flash
+            ↓
+       Gemini 3.6 Flash
+
+       OpenAI is intentionally disabled.
     ===================================================== */
 
     currentStage =
       "ai-planning";
 
 
-    /*
-     * IMPORTANT:
-     *
-     * No direct OpenAI client.
-     * No direct Gemini client.
-     *
-     * Provider selection is centralized inside:
-     *
-     * server/services/ai/aiProviderService.js
-     *
-     * Expected flow:
-     *
-     * Gemini primary
-     *      ↓
-     * OpenAI fallback
-     *
-     * according to environment configuration.
-     */
-
     const result =
       await generateJSON({
+
+        /*
+         * Explicitly request Gemini.
+         *
+         * aiProviderService still controls the actual
+         * Gemini model fallback chain.
+         */
+
+        provider:
+          "gemini",
+
+        /*
+         * Do not specify a model here.
+         *
+         * This allows aiProviderService to use its
+         * complete Gemini model fallback chain.
+         */
+
+        thinkingLevel:
+          "medium",
+
+        maxTokens:
+          3000,
 
         messages: [
 
@@ -820,57 +779,79 @@ async function planningAgent(
 
             content: `
 
-You are the Planning Agent of ZyrionOS
-Autonomous AI OS.
+You are the Planning Agent of ZyrionOS,
+an autonomous production AI software system.
 
-Your responsibility is to transform a
-user request and detected intent into a
-clear, implementation-ready project plan.
+Your responsibility is to transform the
+user request into an implementation-ready
+software architecture plan.
 
-You DO NOT write the final source code.
+You DO NOT write final source code.
 
-You DO NOT claim that a project was built.
+You DO NOT claim that code was created.
 
 You DO NOT claim that deployment happened.
 
-You create the structured plan that the
-Builder Agent will consume next.
+You DO NOT invent infrastructure,
+credentials, API keys, URLs, secrets,
+external resources, or successful operations.
 
-Your plan must be practical, internally
-consistent, secure, scalable, and suitable
-for a real software project.
+Your output is consumed by the Builder Agent.
 
 CURRENT INTENT:
 
 ${normalizedIntent}
 
-IMPORTANT:
+PLANNING OBJECTIVE:
 
-The current intent is the primary signal.
+Create a practical production-ready plan
+that another engineering agent can directly
+use to build the requested system.
 
-For a BUILD request, create an implementation
-plan for the Builder Agent.
+For BUILD:
+Create the complete implementation plan.
 
-For a DEPLOY request, describe the project
-and deployment requirements but do not claim
-deployment success.
+For FIX:
+Identify the relevant technical areas,
+files/components likely involved, and
+required verification steps.
 
-For a FIX request, describe the likely
-technical areas that need investigation.
+For DEPLOY:
+Describe deployment architecture and
+requirements without claiming deployment
+success.
 
-For MONITOR/SCALE/BILLING/SUBSCRIPTION/
-FILE/AUTOMATION/INFRASTRUCTURE/THUMBNAIL
-requests, create only the planning context
-needed by downstream systems.
+For MONITOR:
+Describe monitoring requirements.
 
-Do not invent credentials, API keys,
-tokens, passwords, deployment results,
-URLs, infrastructure resources, or external
-services that were not requested or provided.
+For SCALE:
+Describe scalability requirements.
+
+For BILLING or SUBSCRIPTION:
+Describe the required application and
+financial integration architecture.
+
+For AUTOMATION:
+Describe triggers, workflows, workers,
+and required integrations.
+
+For INFRASTRUCTURE:
+Describe the required infrastructure
+architecture.
+
+For THUMBNAIL:
+Describe the required generation pipeline.
+
+For FILE:
+Describe required file operations.
 
 Return ONLY valid JSON.
 
-REQUIRED JSON STRUCTURE:
+NO markdown.
+
+NO explanation outside JSON.
+
+REQUIRED JSON:
 
 {
   "projectName": "",
@@ -905,77 +886,59 @@ REQUIRED JSON STRUCTURE:
 
 RULES:
 
-1. projectName must be concise.
+1. Keep projectName concise.
 
-2. description must explain the actual goal.
+2. description must describe the actual
+   requested objective.
 
-3. framework should identify the primary
-   application framework when known.
+3. Identify frameworks only when known
+   or reasonably required.
 
-4. frontend.framework should contain the
-   frontend technology when applicable.
+4. frontend.pages must contain meaningful
+   UI pages/routes when a frontend exists.
 
-5. backend.framework should contain the
-   backend technology when applicable.
+5. backend.routes must contain meaningful
+   API routes when a backend exists.
 
-6. pages must contain meaningful page/route
-   planning information.
+6. database.collections must contain actual
+   entities required by the project.
 
-7. routes must contain meaningful API route
-   planning information.
+7. authentication.providers must contain
+   only authentication methods actually
+   relevant to the project.
 
-8. database.collections must contain the
-   required data entities when a database
-   is needed.
+8. aiSystems must contain actual AI components.
 
-9. authentication.providers must contain
-   only authentication methods relevant to
-   the request.
+9. deployment.services must contain only
+   relevant infrastructure services.
 
-10. aiSystems must contain actual AI
-    components required by the project.
-
-11. deployment.services must contain
-    infrastructure services that are actually
-    relevant.
-
-12. projectStructure must describe folders
-    and important files the Builder should
+10. projectStructure must describe folders
+    and important files that Builder should
     create.
 
-13. security must describe concrete security
+11. security must contain concrete security
     requirements.
 
-14. scalability must describe concrete
+12. scalability must contain concrete
     scalability requirements.
 
-15. performance must describe concrete
+13. performance must contain concrete
     performance requirements.
 
-16. Do not generate source code in this plan.
+14. Do not generate source code.
 
-17. Do not invent unavailable external
-    resources.
+15. Do not generate fake credentials.
 
-18. Keep the plan internally consistent.
+16. Do not generate placeholder secrets.
 
-19. Return JSON only.
+17. Do not claim resources already exist.
 
-20. No markdown.
+18. Do not claim deployment succeeded.
 
-21. No explanation outside JSON.
+19. Prefer production architecture over
+    toy/demo architecture.
 
-22. Do not claim that any resource has
-    already been created.
-
-23. Do not claim that any deployment has
-    already succeeded.
-
-24. Prefer production-ready architecture
-    over toy/demo architecture.
-
-25. Do not include placeholder credentials
-    or fake secrets.
+20. Keep every section internally consistent.
 
 `
 
@@ -1012,13 +975,7 @@ Create the implementation plan now.
 
           }
 
-        ],
-
-        temperature:
-          0.3,
-
-        maxTokens:
-          3000
+        ]
 
       });
 
@@ -1034,11 +991,11 @@ Create the implementation plan now.
 
       const providerError =
         result?.error ||
-        "AI provider returned an unsuccessful result.";
+        "Gemini provider returned an unsuccessful result.";
 
 
       logger.error(
-        `Planning Agent AI Provider Failed: ${providerError}`
+        `Planning Agent Gemini Provider Failed: ${providerError}`
       );
 
 
@@ -1047,7 +1004,7 @@ Create the implementation plan now.
         success: false,
 
         message:
-          "Planning Agent AI provider failed",
+          "Planning Agent Gemini provider failed",
 
         error:
           providerError,
@@ -1057,7 +1014,7 @@ Create the implementation plan now.
 
         provider:
           result?.provider ||
-          null,
+          "gemini",
 
         model:
           result?.model ||
@@ -1069,7 +1026,7 @@ Create the implementation plan now.
 
 
     /* =====================================================
-       RAW RESPONSE
+       RAW RESPONSE VALIDATION
     ===================================================== */
 
     const parsed =
@@ -1083,7 +1040,7 @@ Create the implementation plan now.
     ) {
 
       logger.warning(
-        "Planning Agent received invalid structured AI response"
+        "Planning Agent received invalid structured Gemini response"
       );
 
 
@@ -1095,14 +1052,14 @@ Create the implementation plan now.
           "Planning Agent received an invalid AI response",
 
         error:
-          "AI provider returned an invalid planning object.",
+          "Gemini returned an invalid planning object.",
 
         stage:
           currentStage,
 
         provider:
           result.provider ||
-          null,
+          "gemini",
 
         model:
           result.model ||
@@ -1152,7 +1109,7 @@ Create the implementation plan now.
 
         provider:
           result.provider ||
-          null,
+          "gemini",
 
         model:
           result.model ||
@@ -1164,7 +1121,7 @@ Create the implementation plan now.
 
 
     /* =====================================================
-       SUCCESS LOG
+       SUCCESS
     ===================================================== */
 
     logger.success(
@@ -1173,7 +1130,7 @@ Create the implementation plan now.
 
 
     logger.info(
-      `Planning Agent Provider: ${result.provider || "unknown"}`
+      `Planning Agent Provider: ${result.provider || "gemini"}`
     );
 
 
@@ -1201,7 +1158,7 @@ Create the implementation plan now.
 
         provider:
           result.provider ||
-          null,
+          "gemini",
 
         agent:
           "planningAgent",
@@ -1218,7 +1175,9 @@ Create the implementation plan now.
 
   }
 
-  catch (error) {
+  catch (
+    error
+  ) {
 
     const errorMessage =
       error?.message ||
@@ -1241,7 +1200,14 @@ Create the implementation plan now.
         errorMessage,
 
       stage:
-        currentStage
+        currentStage,
+
+      provider:
+        "gemini",
+
+      model:
+        error?.model ||
+        null
 
     };
 
