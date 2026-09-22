@@ -1,30 +1,41 @@
 /* =========================================================
    ZYRIONOS AI PROVIDER SERVICE
-   GEMINI ONLY - OPENAI TEMPORARILY DISABLED
+   DEEPSEEK PRIMARY + CLAUDE FALLBACK
 
    PRODUCTION PROVIDER ARCHITECTURE
 
    Primary:
-     Gemini 3.8 Flash
+     DeepSeek
 
-   Temporary-failure fallback:
-     Gemini 3.7 Flash
-     Gemini 3.6 Flash
+   Fallback:
+     Anthropic Claude
 
    IMPORTANT:
-     429 QUOTA EXHAUSTED
-       -> NO RETRY
-       -> NO MODEL HOPPING
-       -> IMMEDIATE QUOTA ERROR
+     - Gemini is completely removed from the active provider layer.
+     - OpenAI is NOT an active provider.
+     - The "openai" npm package is used only as the
+       OpenAI-compatible SDK client for DeepSeek.
+     - Agents must call this service, never providers directly.
 
-     503 / 502 / 504 / temporary capacity failure
-       -> controlled retry/fallback
+   Provider order:
+     1. DeepSeek
+     2. Claude
 
-   OpenAI:
-     - NOT DELETED
-     - NOT CALLED
-     - NOT USED
-     - TEMPORARILY DISABLED
+   Failure policy:
+     - Temporary failures:
+         controlled retry
+         then provider fallback
+     - Quota / balance:
+         no retry
+         fallback immediately
+     - Authentication / configuration:
+         no retry
+         fallback immediately
+     - Invalid request:
+         no retry
+         no pointless retry loop
+     - Timeout:
+         treated as temporary
 ========================================================= */
 
 
@@ -32,10 +43,11 @@
    PACKAGES
 ========================================================= */
 
-const {
-  GoogleGenAI,
-  ThinkingLevel
-} = require("@google/genai");
+const OpenAI =
+  require("openai");
+
+const Anthropic =
+  require("@anthropic-ai/sdk");
 
 
 /* =========================================================
@@ -55,116 +67,187 @@ const logger =
 
 
 /* =========================================================
-   GEMINI CLIENT
+   PROVIDER CLIENTS
 ========================================================= */
 
-let geminiClient = null;
+let deepseekClient = null;
+
+let claudeClient = null;
 
 
 /* =========================================================
-   OPENAI TEMPORARILY DISABLED
+   PROVIDER CONFIGURATION
 ========================================================= */
 
-const OPENAI_TEMPORARILY_DISABLED =
-  true;
+const PRIMARY_PROVIDER =
+  "deepseek";
+
+const FALLBACK_PROVIDER =
+  "claude";
 
 
 /* =========================================================
-   GEMINI MODEL CONFIGURATION
+   MODEL CONFIGURATION
 ========================================================= */
 
-const PRIMARY_GEMINI_MODEL =
-  env.GEMINI_MODEL ||
-  "gemini-3.8-flash";
+/*
+ * Current DeepSeek API model names:
+ *
+ * deepseek-flash
+ * deepseek-v4-pro
+ *
+ * deepseek-flash currently maps to the current
+ * DeepSeek V4.1 Flash API model.
+ */
+
+const PRIMARY_DEEPSEEK_MODEL =
+  env.DEEPSEEK_MODEL ||
+  "deepseek-flash";
 
 
-const GEMINI_MODEL_CHAIN = [
+/*
+ * Claude fallback.
+ *
+ * Keep this configurable through environment variables
+ * so the model can be changed without modifying source code.
+ */
 
-  PRIMARY_GEMINI_MODEL,
-
-  "gemini-3.7-flash",
-
-  "gemini-3.6-flash"
-
-].filter(
-  Boolean
-);
+const PRIMARY_CLAUDE_MODEL =
+  env.CLAUDE_MODEL ||
+  "claude-sonnet-4-6";
 
 
 /* =========================================================
    RETRY CONFIGURATION
 ========================================================= */
 
-/*
- * IMPORTANT:
- *
- * Retries are ONLY for genuine transient failures.
- *
- * 429 quota exhaustion is NEVER retried.
- */
+const AI_MAX_RETRIES =
+  Number.isFinite(
+    Number(
+      env.AI_PROVIDER_MAX_RETRIES
+    )
+  )
+    ? Math.max(
+        0,
+        Math.floor(
+          Number(
+            env.AI_PROVIDER_MAX_RETRIES
+          )
+        )
+      )
+    : 1;
 
-const GEMINI_MAX_RETRIES =
-  1;
+
+const AI_RETRY_BASE_DELAY_MS =
+  Number.isFinite(
+    Number(
+      env.AI_PROVIDER_RETRY_BASE_DELAY_MS
+    )
+  )
+    ? Math.max(
+        100,
+        Number(
+          env.AI_PROVIDER_RETRY_BASE_DELAY_MS
+        )
+      )
+    : 1200;
 
 
-const GEMINI_RETRY_BASE_DELAY_MS =
-  1200;
-
-
-const GEMINI_MAX_RETRY_DELAY_MS =
-  5000;
+const AI_MAX_RETRY_DELAY_MS =
+  Number.isFinite(
+    Number(
+      env.AI_PROVIDER_MAX_RETRY_DELAY_MS
+    )
+  )
+    ? Math.max(
+        AI_RETRY_BASE_DELAY_MS,
+        Number(
+          env.AI_PROVIDER_MAX_RETRY_DELAY_MS
+        )
+      )
+    : 5000;
 
 
 /* =========================================================
-   QUOTA COOLDOWN
+   TIMEOUT
 ========================================================= */
 
-/*
- * When Gemini explicitly reports quota exhaustion,
- * temporarily mark the provider as quota-exhausted.
- *
- * This prevents multiple agents from repeatedly hammering
- * the same exhausted project quota.
- *
- * Default:
- * 60 seconds.
- *
- * This does NOT reset Google's quota.
- * It only protects our application.
- */
-
-const GEMINI_QUOTA_COOLDOWN_MS =
+const AI_PROVIDER_TIMEOUT_MS =
   Number.isFinite(
     Number(
-      env.GEMINI_QUOTA_COOLDOWN_MS
+      env.AI_PROVIDER_TIMEOUT_MS
     )
   )
     ? Math.max(
         1000,
         Number(
-          env.GEMINI_QUOTA_COOLDOWN_MS
+          env.AI_PROVIDER_TIMEOUT_MS
         )
       )
-    : 60000;
-
-
-let geminiQuotaBlockedUntil =
-  0;
+    : 120000;
 
 
 /* =========================================================
-   GEMINI INITIALIZATION
+   CLIENT INITIALIZATION
 ========================================================= */
 
+
+/*
+ * DeepSeek
+ *
+ * DeepSeek exposes an OpenAI-compatible API.
+ *
+ * IMPORTANT:
+ * This is NOT OpenAI provider usage.
+ *
+ * The OpenAI SDK is simply being used as the compatible
+ * HTTP client for DeepSeek.
+ */
+
 if (
-  env.GEMINI_API_KEY
+  env.DEEPSEEK_API_KEY
 ) {
 
-  geminiClient =
-    new GoogleGenAI({
+  deepseekClient =
+    new OpenAI({
 
       apiKey:
-        env.GEMINI_API_KEY
+        env.DEEPSEEK_API_KEY,
+
+      baseURL:
+        env.DEEPSEEK_BASE_URL ||
+        "https://api.deepseek.com",
+
+      timeout:
+        AI_PROVIDER_TIMEOUT_MS,
+
+      maxRetries:
+        0
+
+    });
+
+}
+
+
+/*
+ * Anthropic Claude
+ */
+
+if (
+  env.ANTHROPIC_API_KEY
+) {
+
+  claudeClient =
+    new Anthropic({
+
+      apiKey:
+        env.ANTHROPIC_API_KEY,
+
+      timeout:
+        AI_PROVIDER_TIMEOUT_MS,
+
+      maxRetries:
+        0
 
     });
 
@@ -188,19 +271,56 @@ function normalizeProvider(
 
 
   if (
-    value === "gemini"
+    [
+      "deepseek",
+      "deep-seek"
+    ].includes(
+      value
+    )
   ) {
 
-    return "gemini";
+    return "deepseek";
 
   }
 
 
   if (
+    [
+      "claude",
+      "anthropic"
+    ].includes(
+      value
+    )
+  ) {
+
+    return "claude";
+
+  }
+
+
+  /*
+   * Gemini is intentionally no longer supported.
+   */
+
+  if (
+    value === "gemini"
+  ) {
+
+    return null;
+
+  }
+
+
+  /*
+   * OpenAI is intentionally no longer supported
+   * as a production provider.
+   */
+
+  if (
     value === "openai"
   ) {
 
-    return "openai";
+    return null;
 
   }
 
@@ -225,26 +345,25 @@ function isProviderAvailable(
 
 
   if (
-    normalized === "gemini"
+    normalized === "deepseek"
   ) {
 
     return Boolean(
-      geminiClient &&
-      env.GEMINI_API_KEY
+      deepseekClient &&
+      env.DEEPSEEK_API_KEY
     );
 
   }
 
 
-  /*
-   * OpenAI intentionally disabled.
-   */
-
   if (
-    normalized === "openai"
+    normalized === "claude"
   ) {
 
-    return false;
+    return Boolean(
+      claudeClient &&
+      env.ANTHROPIC_API_KEY
+    );
 
   }
 
@@ -255,124 +374,7 @@ function isProviderAvailable(
 
 
 /* =========================================================
-   GEMINI QUOTA STATUS
-========================================================= */
-
-function isGeminiQuotaBlocked() {
-
-  return (
-    Date.now() <
-    geminiQuotaBlockedUntil
-  );
-
-}
-
-
-/* =========================================================
-   MARK GEMINI QUOTA EXHAUSTED
-========================================================= */
-
-function markGeminiQuotaExhausted(
-  error
-) {
-
-  geminiQuotaBlockedUntil =
-    Date.now() +
-    GEMINI_QUOTA_COOLDOWN_MS;
-
-
-  logger.warning(
-    `Gemini quota protection activated for ${GEMINI_QUOTA_COOLDOWN_MS}ms`
-  );
-
-
-  if (
-    error
-  ) {
-
-    error.quotaBlockedUntil =
-      geminiQuotaBlockedUntil;
-
-  }
-
-}
-
-
-/* =========================================================
-   CLEAR GEMINI QUOTA PROTECTION
-========================================================= */
-
-function clearGeminiQuotaProtection() {
-
-  if (
-    geminiQuotaBlockedUntil !== 0
-  ) {
-
-    geminiQuotaBlockedUntil =
-      0;
-
-  }
-
-}
-
-
-/* =========================================================
-   GET GEMINI MODEL ORDER
-========================================================= */
-
-function getGeminiModelOrder(
-  options = {}
-) {
-
-  const requestedModel =
-    typeof options.model === "string"
-      ? options.model.trim()
-      : "";
-
-
-  const order = [];
-
-
-  /*
-   * Explicit Gemini model request first.
-   *
-   * OpenAI model names are ignored.
-   */
-
-  if (
-    requestedModel &&
-    requestedModel.startsWith(
-      "gemini-"
-    )
-  ) {
-
-    order.push(
-      requestedModel
-    );
-
-  }
-
-
-  /*
-   * Production fallback chain.
-   */
-
-  order.push(
-    ...GEMINI_MODEL_CHAIN
-  );
-
-
-  return [
-    ...new Set(
-      order
-    )
-  ];
-
-}
-
-
-/* =========================================================
-   GET PROVIDER ORDER
+   PROVIDER ORDER
 ========================================================= */
 
 function getProviderOrder(
@@ -386,44 +388,46 @@ function getProviderOrder(
 
 
   /*
-   * Older agents may still send:
+   * Explicit valid provider request.
    *
-   * provider: "openai"
+   * If a caller specifically asks for Claude,
+   * Claude is attempted first.
    *
-   * Never allow it to reach OpenAI.
+   * Otherwise DeepSeek remains primary.
    */
 
   if (
-    requested === "openai"
-  ) {
-
-    logger.warning(
-      "OpenAI provider request blocked: Gemini-only mode is active."
-    );
-
-  }
-
-
-  if (
-    isProviderAvailable(
-      "gemini"
-    )
+    requested === "claude"
   ) {
 
     return [
-      "gemini"
+
+      "claude",
+
+      "deepseek"
+
     ];
 
   }
 
 
-  return [];
+  /*
+   * DeepSeek is always the production primary.
+   */
+
+  return [
+
+    "deepseek",
+
+    "claude"
+
+  ];
 
 }
 
 
 /* =========================================================
-   TIMEOUT
+   TIMEOUT WRAPPER
 ========================================================= */
 
 function withTimeout(
@@ -495,8 +499,11 @@ function withTimeout(
 
   return Promise.race(
     [
+
       promise,
+
       timeoutPromise
+
     ]
   ).finally(
     () => {
@@ -518,7 +525,7 @@ function withTimeout(
 
 
 /* =========================================================
-   EXTRACT ERROR STATUS
+   ERROR STATUS
 ========================================================= */
 
 function getErrorStatus(
@@ -541,6 +548,8 @@ function getErrorStatus(
     error.statusCode,
 
     error?.response?.status,
+
+    error?.error?.status,
 
     error?.error?.code
 
@@ -576,7 +585,7 @@ function getErrorStatus(
 
 
 /* =========================================================
-   EXTRACT ERROR CODE
+   ERROR CODE
 ========================================================= */
 
 function getErrorCode(
@@ -596,6 +605,8 @@ function getErrorCode(
 
     error.code ||
 
+    error?.error?.code ||
+
     error?.error?.status ||
 
     error?.statusText ||
@@ -610,7 +621,7 @@ function getErrorCode(
 
 
 /* =========================================================
-   EXTRACT ERROR MESSAGE
+   ERROR MESSAGE
 ========================================================= */
 
 function getErrorMessage(
@@ -618,9 +629,15 @@ function getErrorMessage(
 ) {
 
   return String(
+
     error?.message ||
+
     error?.error?.message ||
+
+    error?.response?.data?.message ||
+
     ""
+
   )
     .trim();
 
@@ -628,21 +645,12 @@ function getErrorMessage(
 
 
 /* =========================================================
-   QUOTA EXHAUSTION DETECTION
+   ERROR CLASSIFICATION
 ========================================================= */
 
-function isGeminiQuotaExhausted(
+function classifyProviderError(
   error
 ) {
-
-  if (
-    !error
-  ) {
-
-    return false;
-
-  }
-
 
   const status =
     getErrorStatus(
@@ -663,114 +671,200 @@ function isGeminiQuotaExhausted(
 
 
   /*
-   * Gemini quota errors are generally 429
-   * with RESOURCE_EXHAUSTED.
+   * =======================================================
+   * TIMEOUT
+   * =======================================================
    */
 
   if (
-    status === 429
+    error?.code ===
+      "AI_PROVIDER_TIMEOUT" ||
+    error?.code ===
+      "ETIMEDOUT" ||
+    error?.code ===
+      "ECONNRESET"
   ) {
 
-    return true;
+    return {
+
+      category:
+        "temporary",
+
+      retryable:
+        true,
+
+      fallback:
+        true
+
+    };
 
   }
 
 
-  if (
-    code === "RESOURCE_EXHAUSTED"
-  ) {
-
-    return true;
-
-  }
-
+  /*
+   * =======================================================
+   * QUOTA / BALANCE / RATE LIMIT
+   * =======================================================
+   *
+   * These are not blindly retried.
+   *
+   * The next provider gets a chance.
+   */
 
   const quotaPhrases = [
 
-    "quota exceeded",
-
-    "quotaexceeded",
+    "quota",
 
     "resource exhausted",
 
-    "current quota",
+    "rate limit",
 
-    "free tier",
+    "too many requests",
 
-    "generaterequestsperdaypermodel",
+    "insufficient balance",
 
-    "quotaid",
+    "insufficient funds",
 
-    "rate limit exceeded",
+    "billing",
 
-    "too many requests"
+    "credit balance",
+
+    "usage limit",
+
+    "exceeded your current quota"
 
   ];
 
 
-  return quotaPhrases.some(
-    (phrase) =>
-      message.includes(
-        phrase
-      )
-  );
-
-}
-
-
-/* =========================================================
-   TEMPORARY GEMINI FAILURE DETECTION
-========================================================= */
-
-function isTemporaryGeminiFailure(
-  error
-) {
-
   if (
-    !error
-  ) {
-
-    return false;
-
-  }
-
-
-  /*
-   * QUOTA IS NOT A TEMPORARY FAILURE
-   * for our application retry logic.
-   */
-
-  if (
-    isGeminiQuotaExhausted(
-      error
+    status === 429 ||
+    quotaPhrases.some(
+      (phrase) =>
+        message.includes(
+          phrase
+        )
     )
   ) {
 
-    return false;
+    return {
+
+      category:
+        "quota",
+
+      retryable:
+        false,
+
+      fallback:
+        true
+
+    };
 
   }
 
 
-  const status =
-    getErrorStatus(
-      error
-    );
+  /*
+   * =======================================================
+   * AUTHENTICATION
+   * =======================================================
+   */
 
+  if (
+    [
+      401,
+      403
+    ].includes(
+      status
+    ) ||
+    [
+      "UNAUTHORIZED",
+      "AUTHENTICATION_ERROR",
+      "PERMISSION_DENIED",
+      "INVALID_API_KEY"
+    ].includes(
+      code
+    ) ||
+    message.includes(
+      "invalid api key"
+    ) ||
+    message.includes(
+      "authentication"
+    )
+  ) {
 
-  const code =
-    getErrorCode(
-      error
-    );
+    return {
 
+      category:
+        "authentication",
 
-  const message =
-    getErrorMessage(
-      error
-    ).toLowerCase();
+      retryable:
+        false,
+
+      fallback:
+        true
+
+    };
+
+  }
 
 
   /*
-   * Genuine transient HTTP failures.
+   * =======================================================
+   * CONFIGURATION
+   * =======================================================
+   */
+
+  if (
+    error?.code ===
+      "AI_PROVIDER_NOT_CONFIGURED"
+  ) {
+
+    return {
+
+      category:
+        "configuration",
+
+      retryable:
+        false,
+
+      fallback:
+        true
+
+    };
+
+  }
+
+
+  /*
+   * =======================================================
+   * INVALID REQUEST
+   * =======================================================
+   */
+
+  if (
+    status === 400 ||
+    status === 422
+  ) {
+
+    return {
+
+      category:
+        "invalid_request",
+
+      retryable:
+        false,
+
+      fallback:
+        false
+
+    };
+
+  }
+
+
+  /*
+   * =======================================================
+   * TEMPORARY SERVER FAILURE
+   * =======================================================
    */
 
   if (
@@ -785,92 +879,95 @@ function isTemporaryGeminiFailure(
     )
   ) {
 
-    return true;
+    return {
+
+      category:
+        "temporary",
+
+      retryable:
+        true,
+
+      fallback:
+        true
+
+    };
 
   }
 
 
-  /*
-   * Gemini transient statuses.
-   */
-
-  if (
-    [
-      "UNAVAILABLE",
-      "DEADLINE_EXCEEDED",
-      "INTERNAL",
-      "ABORTED"
-    ].includes(
-      code
-    )
-  ) {
-
-    return true;
-
-  }
-
-
-  const temporaryMessages = [
-
-    "high demand",
+  const temporaryPhrases = [
 
     "temporarily unavailable",
 
     "service unavailable",
 
-    "deadline exceeded",
+    "internal server error",
+
+    "bad gateway",
+
+    "gateway timeout",
 
     "try again later",
 
     "overloaded",
 
-    "temporarily overloaded",
+    "high demand",
 
-    "internal server error",
+    "capacity",
 
-    "bad gateway",
+    "deadline exceeded",
 
-    "gateway timeout"
+    "server error"
 
   ];
 
 
-  return temporaryMessages.some(
-    (phrase) =>
-      message.includes(
-        phrase
-      )
-  );
-
-}
-
-
-/* =========================================================
-   RETRYABLE GEMINI ERROR
-========================================================= */
-
-function isRetryableGeminiError(
-  error
-) {
-
-  /*
-   * Explicit quota errors NEVER retry.
-   */
-
   if (
-    isGeminiQuotaExhausted(
-      error
+    temporaryPhrases.some(
+      (phrase) =>
+        message.includes(
+          phrase
+        )
     )
   ) {
 
-    return false;
+    return {
+
+      category:
+        "temporary",
+
+      retryable:
+        true,
+
+      fallback:
+        true
+
+    };
 
   }
 
 
-  return isTemporaryGeminiFailure(
-    error
-  );
+  /*
+   * =======================================================
+   * UNKNOWN PROVIDER FAILURE
+   * =======================================================
+   *
+   * Do not endlessly retry unknown failures.
+   * Give the fallback provider a chance.
+   */
+
+  return {
+
+    category:
+      "provider_error",
+
+    retryable:
+      false,
+
+    fallback:
+      true
+
+  };
 
 }
 
@@ -884,16 +981,11 @@ function getRetryDelay(
   error = null
 ) {
 
-  /*
-   * If SDK exposes retry-after information,
-   * respect it where possible.
-   */
-
   const retryAfterCandidates = [
 
-    error?.retryAfter,
-
     error?.retryAfterMs,
+
+    error?.retryAfter,
 
     error?.response?.headers?.["retry-after"],
 
@@ -919,12 +1011,6 @@ function getRetryDelay(
       numeric > 0
     ) {
 
-      /*
-       * Retry-After may be seconds.
-       * Large values are treated as milliseconds
-       * only when explicitly named retryAfterMs.
-       */
-
       if (
         candidate ===
         error?.retryAfterMs
@@ -932,7 +1018,7 @@ function getRetryDelay(
 
         return Math.min(
           numeric,
-          GEMINI_MAX_RETRY_DELAY_MS
+          AI_MAX_RETRY_DELAY_MS
         );
 
       }
@@ -940,7 +1026,7 @@ function getRetryDelay(
 
       return Math.min(
         numeric * 1000,
-        GEMINI_MAX_RETRY_DELAY_MS
+        AI_MAX_RETRY_DELAY_MS
       );
 
     }
@@ -956,7 +1042,7 @@ function getRetryDelay(
 
 
   const base =
-    GEMINI_RETRY_BASE_DELAY_MS *
+    AI_RETRY_BASE_DELAY_MS *
     Math.pow(
       2,
       exponent
@@ -965,13 +1051,14 @@ function getRetryDelay(
 
   const jitter =
     Math.floor(
-      Math.random() * 300
+      Math.random() *
+      300
     );
 
 
   return Math.min(
     base + jitter,
-    GEMINI_MAX_RETRY_DELAY_MS
+    AI_MAX_RETRY_DELAY_MS
   );
 
 }
@@ -1000,103 +1087,312 @@ function sleep(
 
 
 /* =========================================================
-   VALIDATE GEMINI CONTENTS
+   NORMALIZE MESSAGES
 ========================================================= */
 
-function validateGeminiContents(
-  contents
+function normalizeMessages(
+  messages = []
 ) {
 
   if (
-    typeof contents === "string"
-  ) {
-
-    return Boolean(
-      contents.trim()
-    );
-
-  }
-
-
-  if (
-    Array.isArray(
-      contents
+    !Array.isArray(
+      messages
     )
   ) {
 
-    return (
-      contents.length >
-      0
-    );
+    return [];
 
   }
 
 
-  return Boolean(
-    contents
+  return messages
+
+    .filter(
+      (message) =>
+        message &&
+        typeof message.content ===
+          "string" &&
+        message.content.trim()
+    )
+
+    .map(
+      (message) => {
+
+        const role =
+          [
+
+            "system",
+
+            "user",
+
+            "assistant"
+
+          ].includes(
+            message.role
+          )
+            ? message.role
+            : "user";
+
+
+        return {
+
+          role,
+
+          content:
+            message.content
+
+        };
+
+      }
+    );
+
+}
+
+
+/* =========================================================
+   BUILD MESSAGES
+========================================================= */
+
+function buildMessages(
+  options = {}
+) {
+
+  let messages = [];
+
+
+  /*
+   * Existing OpenAI-style messages.
+   *
+   * This format is intentionally kept because it makes
+   * migration easier for existing ZyrionOS agents.
+   */
+
+  if (
+    Array.isArray(
+      options.messages
+    )
+  ) {
+
+    messages =
+      normalizeMessages(
+        options.messages
+      );
+
+  }
+
+
+  /*
+   * Plain prompt.
+   */
+
+  if (
+    messages.length === 0 &&
+    typeof options.prompt === "string" &&
+    options.prompt.trim()
+  ) {
+
+    messages = [
+
+      {
+
+        role:
+          "user",
+
+        content:
+          options.prompt.trim()
+
+      }
+
+    ];
+
+  }
+
+
+  /*
+   * Contents compatibility.
+   */
+
+  if (
+    messages.length === 0 &&
+    typeof options.contents === "string" &&
+    options.contents.trim()
+  ) {
+
+    messages = [
+
+      {
+
+        role:
+          "user",
+
+        content:
+          options.contents.trim()
+
+      }
+
+    ];
+
+  }
+
+
+  /*
+   * System instruction.
+   */
+
+  if (
+    typeof options.systemInstruction ===
+      "string" &&
+    options.systemInstruction.trim()
+  ) {
+
+    const existingSystemIndex =
+      messages.findIndex(
+        (message) =>
+          message.role ===
+          "system"
+      );
+
+
+    if (
+      existingSystemIndex >= 0
+    ) {
+
+      messages[
+        existingSystemIndex
+      ] = {
+
+        role:
+          "system",
+
+        content:
+          options.systemInstruction.trim()
+
+      };
+
+    }
+
+    else {
+
+      messages.unshift({
+
+        role:
+          "system",
+
+        content:
+          options.systemInstruction.trim()
+
+      });
+
+    }
+
+  }
+
+
+  return messages;
+
+}
+
+
+/* =========================================================
+   VALIDATE MESSAGES
+========================================================= */
+
+function validateMessages(
+  messages
+) {
+
+  return (
+
+    Array.isArray(
+      messages
+    ) &&
+
+    messages.length > 0 &&
+
+    messages.some(
+      (message) =>
+        message &&
+        typeof message.content ===
+          "string" &&
+        message.content.trim()
+    )
+
   );
 
 }
 
 
 /* =========================================================
-   THINKING LEVEL
+   THINKING / REASONING EFFORT
 ========================================================= */
 
-function getThinkingLevel(
-  value,
-  model
+function normalizeReasoningEffort(
+  value
 ) {
 
   const normalized =
     String(
       value ||
-      "medium"
+      "high"
     )
       .trim()
       .toLowerCase();
 
 
-  switch (
-    normalized
+  if (
+    [
+      "low",
+      "high",
+      "max"
+    ].includes(
+      normalized
+    )
   ) {
 
-    case "low":
-
-      return ThinkingLevel.LOW;
-
-
-    case "high":
-
-      return ThinkingLevel.HIGH;
-
-
-    case "medium":
-
-    default:
-
-      return ThinkingLevel.MEDIUM;
+    return normalized;
 
   }
+
+
+  /*
+   * Backwards compatibility:
+   * "medium" previously existed in the Gemini service.
+   *
+   * DeepSeek's current V4 reasoning levels are
+   * low / high / max.
+   */
+
+  if (
+    normalized ===
+    "medium"
+  ) {
+
+    return "high";
+
+  }
+
+
+  return "high";
 
 }
 
 
 /* =========================================================
-   GEMINI GENERATION
+   DEEPSEEK GENERATION
 ========================================================= */
 
-async function generateWithGemini(
+async function generateWithDeepSeek(
   options = {}
 ) {
 
   if (
-    !geminiClient
+    !deepseekClient ||
+    !env.DEEPSEEK_API_KEY
   ) {
 
     const error =
       new Error(
-        "Gemini provider is not configured"
+        "DeepSeek provider is not configured"
       );
 
 
@@ -1105,7 +1401,7 @@ async function generateWithGemini(
 
 
     error.provider =
-      "gemini";
+      "deepseek";
 
 
     throw error;
@@ -1113,87 +1409,21 @@ async function generateWithGemini(
   }
 
 
-  /*
-   * Application-level quota protection.
-   *
-   * This prevents multiple agents from repeatedly
-   * calling a project whose quota was just exhausted.
-   */
-
-  if (
-    isGeminiQuotaBlocked()
-  ) {
-
-    const error =
-      new Error(
-        "Gemini quota is temporarily blocked because the project quota was exhausted."
-      );
-
-
-    error.code =
-      "AI_QUOTA_EXHAUSTED";
-
-
-    error.provider =
-      "gemini";
-
-
-    error.quotaBlockedUntil =
-      geminiQuotaBlockedUntil;
-
-
-    throw error;
-
-  }
-
-
-  let contents =
-    options.contents;
-
-
-  /*
-   * Convert OpenAI-style messages if necessary.
-   */
-
-  if (
-    !contents &&
-    Array.isArray(
-      options.messages
-    )
-  ) {
-
-    contents =
-      messagesToGeminiContents(
-        options.messages
-      );
-
-  }
-
-
-  /*
-   * Plain prompt fallback.
-   */
-
-  if (
-    !contents &&
-    typeof options.prompt === "string"
-  ) {
-
-    contents =
-      options.prompt;
-
-  }
+  const messages =
+    buildMessages(
+      options
+    );
 
 
   if (
-    !validateGeminiContents(
-      contents
+    !validateMessages(
+      messages
     )
   ) {
 
     const error =
       new Error(
-        "Gemini contents are required"
+        "AI messages are required"
       );
 
 
@@ -1202,7 +1432,7 @@ async function generateWithGemini(
 
 
     error.provider =
-      "gemini";
+      "deepseek";
 
 
     throw error;
@@ -1211,25 +1441,26 @@ async function generateWithGemini(
 
 
   const model =
-    options.model ||
-    PRIMARY_GEMINI_MODEL;
+    options.model &&
+    String(
+      options.model
+    ).startsWith(
+      "deepseek-"
+    )
+      ? options.model
+      : PRIMARY_DEEPSEEK_MODEL;
 
 
-  const config = {};
+  const request = {
 
+    model,
 
-  /*
-   * JSON response.
-   */
+    messages,
 
-  if (
-    options.json === true
-  ) {
+    stream:
+      false
 
-    config.responseMimeType =
-      "application/json";
-
-  }
+  };
 
 
   /*
@@ -1242,7 +1473,7 @@ async function generateWithGemini(
     )
   ) {
 
-    config.maxOutputTokens =
+    request.max_tokens =
       Math.max(
         1,
         Math.floor(
@@ -1254,31 +1485,66 @@ async function generateWithGemini(
 
 
   /*
-   * Thinking configuration.
-   */
-
-  config.thinkingConfig = {
-
-    thinkingLevel:
-      getThinkingLevel(
-        options.thinkingLevel,
-        model
-      )
-
-  };
-
-
-  /*
-   * System instruction.
+   * JSON output.
    */
 
   if (
-    typeof options.systemInstruction === "string" &&
-    options.systemInstruction.trim()
+    options.json === true
   ) {
 
-    config.systemInstruction =
-      options.systemInstruction.trim();
+    request.response_format = {
+
+      type:
+        "json_object"
+
+    };
+
+  }
+
+
+  /*
+   * Current DeepSeek thinking configuration.
+   *
+   * "low" / "high" / "max".
+   */
+
+  if (
+    options.thinking !== false
+  ) {
+
+    request.thinking = {
+
+      type:
+        "enabled"
+
+    };
+
+
+    request.reasoning_effort =
+      normalizeReasoningEffort(
+        options.thinkingLevel ||
+        options.reasoningEffort
+      );
+
+  }
+
+
+  /*
+   * Optional temperature.
+   *
+   * Only pass it when explicitly supplied.
+   */
+
+  if (
+    Number.isFinite(
+      options.temperature
+    )
+  ) {
+
+    request.temperature =
+      Number(
+        options.temperature
+      );
 
   }
 
@@ -1288,28 +1554,27 @@ async function generateWithGemini(
     const response =
       await withTimeout(
 
-        geminiClient.models.generateContent({
+        deepseekClient.chat.completions.create(
+          request
+        ),
 
-          model,
+        AI_PROVIDER_TIMEOUT_MS,
 
-          contents,
-
-          config
-
-        }),
-
-        env.AI_PROVIDER_TIMEOUT_MS,
-
-        "gemini",
+        "deepseek",
 
         model
 
       );
 
 
+    const choice =
+      response?.choices?.[0];
+
+
     const text =
-      typeof response?.text === "string"
-        ? response.text
+      typeof choice?.message?.content ===
+        "string"
+        ? choice.message.content
         : "";
 
 
@@ -1319,7 +1584,7 @@ async function generateWithGemini(
 
       const error =
         new Error(
-          "Gemini returned an empty response"
+          "DeepSeek returned an empty response"
         );
 
 
@@ -1328,7 +1593,7 @@ async function generateWithGemini(
 
 
       error.provider =
-        "gemini";
+        "deepseek";
 
 
       error.model =
@@ -1340,20 +1605,13 @@ async function generateWithGemini(
     }
 
 
-    /*
-     * Successful Gemini request.
-     *
-     * Clear local quota protection if an actual
-     * successful request reaches Gemini.
-     */
-
-    clearGeminiQuotaProtection();
-
-
     return {
 
+      success:
+        true,
+
       provider:
-        "gemini",
+        "deepseek",
 
       model,
 
@@ -1361,7 +1619,11 @@ async function generateWithGemini(
         text.trim(),
 
       raw:
-        response
+        response,
+
+      usage:
+        response?.usage ||
+        null
 
     };
 
@@ -1371,66 +1633,14 @@ async function generateWithGemini(
     error
   ) {
 
-    /*
-     * Convert Gemini quota errors into a stable
-     * application-level error.
-     */
-
-    if (
-      isGeminiQuotaExhausted(
-        error
-      )
-    ) {
-
-      markGeminiQuotaExhausted(
-        error
-      );
+    error.provider =
+      error.provider ||
+      "deepseek";
 
 
-      const quotaError =
-        new Error(
-          "Gemini API quota exhausted. No retry or model fallback will be attempted until the quota becomes available."
-        );
-
-
-      quotaError.code =
-        "AI_QUOTA_EXHAUSTED";
-
-
-      quotaError.provider =
-        "gemini";
-
-
-      quotaError.model =
-        model;
-
-
-      quotaError.status =
-        getErrorStatus(
-          error
-        ) ||
-        429;
-
-
-      quotaError.originalCode =
-        getErrorCode(
-          error
-        );
-
-
-      quotaError.originalMessage =
-        getErrorMessage(
-          error
-        );
-
-
-      quotaError.quotaBlockedUntil =
-        geminiQuotaBlockedUntil;
-
-
-      throw quotaError;
-
-    }
+    error.model =
+      error.model ||
+      model;
 
 
     throw error;
@@ -1441,93 +1651,30 @@ async function generateWithGemini(
 
 
 /* =========================================================
-   NORMALIZE GEMINI MESSAGES
+   CLAUDE GENERATION
 ========================================================= */
 
-function messagesToGeminiContents(
-  messages = []
-) {
-
-  return messages
-
-    .filter(
-      (message) => {
-
-        return (
-          message &&
-          typeof message.content === "string" &&
-          message.content.trim()
-        );
-
-      }
-    )
-
-    .map(
-      (message) => {
-
-        const role =
-          message.role === "assistant" ||
-          message.role === "model"
-            ? "model"
-            : "user";
-
-
-        return {
-
-          role,
-
-          parts: [
-
-            {
-
-              text:
-                message.content
-
-            }
-
-          ]
-
-        };
-
-      }
-    );
-
-}
-
-
-/* =========================================================
-   GEMINI MODEL FAILOVER
-========================================================= */
-
-async function generateGeminiWithFailover(
+async function generateWithClaude(
   options = {}
 ) {
 
-  /*
-   * If project quota was recently exhausted,
-   * do not even start the model chain.
-   */
-
   if (
-    isGeminiQuotaBlocked()
+    !claudeClient ||
+    !env.ANTHROPIC_API_KEY
   ) {
 
     const error =
       new Error(
-        "Gemini quota is currently exhausted. Model fallback is intentionally skipped."
+        "Claude provider is not configured"
       );
 
 
     error.code =
-      "AI_QUOTA_EXHAUSTED";
+      "AI_PROVIDER_NOT_CONFIGURED";
 
 
     error.provider =
-      "gemini";
-
-
-    error.quotaBlockedUntil =
-      geminiQuotaBlockedUntil;
+      "claude";
 
 
     throw error;
@@ -1535,28 +1682,30 @@ async function generateGeminiWithFailover(
   }
 
 
-  const modelOrder =
-    getGeminiModelOrder(
+  const messages =
+    buildMessages(
       options
     );
 
 
   if (
-    modelOrder.length === 0
+    !validateMessages(
+      messages
+    )
   ) {
 
     const error =
       new Error(
-        "No Gemini models are configured"
+        "AI messages are required"
       );
 
 
     error.code =
-      "AI_NO_GEMINI_MODEL";
+      "AI_INVALID_REQUEST";
 
 
     error.provider =
-      "gemini";
+      "claude";
 
 
     throw error;
@@ -1564,247 +1713,315 @@ async function generateGeminiWithFailover(
   }
 
 
-  const errors = [];
+  const model =
+    options.model &&
+    String(
+      options.model
+    ).startsWith(
+      "claude-"
+    )
+      ? options.model
+      : PRIMARY_CLAUDE_MODEL;
 
 
-  for (
-    const model of modelOrder
+  /*
+   * Anthropic Messages API keeps system
+   * outside the messages array.
+   */
+
+  const systemMessages =
+    messages.filter(
+      (message) =>
+        message.role ===
+        "system"
+    );
+
+
+  const conversationMessages =
+    messages
+
+      .filter(
+        (message) =>
+          message.role !==
+          "system"
+      )
+
+      .map(
+        (message) => ({
+
+          role:
+            message.role ===
+            "assistant"
+              ? "assistant"
+              : "user",
+
+          content:
+            message.content
+
+        })
+      );
+
+
+  if (
+    conversationMessages.length === 0
   ) {
 
-    let attempt =
-      0;
+    const error =
+      new Error(
+        "Claude requires at least one user or assistant message"
+      );
 
 
-    while (
-      attempt <=
-      GEMINI_MAX_RETRIES
+    error.code =
+      "AI_INVALID_REQUEST";
+
+
+    error.provider =
+      "claude";
+
+
+    throw error;
+
+  }
+
+
+  const request = {
+
+    model,
+
+    max_tokens:
+      Number.isFinite(
+        options.maxTokens
+      )
+        ? Math.max(
+            1,
+            Math.floor(
+              options.maxTokens
+            )
+          )
+        : 8192,
+
+    messages:
+      conversationMessages
+
+  };
+
+
+  if (
+    systemMessages.length > 0
+  ) {
+
+    request.system =
+      systemMessages
+        .map(
+          (message) =>
+            message.content
+        )
+        .join(
+          "\n\n"
+        );
+
+  }
+
+
+  /*
+   * JSON output is handled through prompting
+   * plus parser validation below.
+   *
+   * Do not pass unsupported provider-specific
+   * parameters blindly.
+   */
+
+  /*
+   * Extended thinking can be enabled when requested.
+   *
+   * Keep it opt-in for Claude because thinking budgets
+   * affect output-token requirements.
+   */
+
+  if (
+    options.thinking === true &&
+    Number.isFinite(
+      options.thinkingBudget
+    )
+  ) {
+
+    request.thinking = {
+
+      type:
+        "enabled",
+
+      budget_tokens:
+        Math.max(
+          1024,
+          Math.floor(
+            options.thinkingBudget
+          )
+        )
+
+    };
+
+  }
+
+
+  try {
+
+    const response =
+      await withTimeout(
+
+        claudeClient.messages.create(
+          request
+        ),
+
+        AI_PROVIDER_TIMEOUT_MS,
+
+        "claude",
+
+        model
+
+      );
+
+
+    const text =
+      Array.isArray(
+        response?.content
+      )
+        ? response.content
+
+            .filter(
+              (block) =>
+                block?.type ===
+                "text"
+            )
+
+            .map(
+              (block) =>
+                block.text
+            )
+
+            .join(
+              ""
+            )
+        : "";
+
+
+    if (
+      !text.trim()
     ) {
 
-      try {
-
-        /*
-         * Retry delay only happens after a
-         * genuine transient failure.
-         */
-
-        if (
-          attempt > 0
-        ) {
-
-          const delay =
-            getRetryDelay(
-              attempt,
-              errors.length > 0
-                ? errors[
-                    errors.length - 1
-                  ]
-                : null
-            );
-
-
-          logger.warning(
-            `Gemini transient retry: ${model} | attempt=${attempt + 1} | delay=${delay}ms`
-          );
-
-
-          await sleep(
-            delay
-          );
-
-        }
-
-
-        logger.info(
-          `Gemini Request: ${model} | attempt=${attempt + 1}`
+      const error =
+        new Error(
+          "Claude returned an empty response"
         );
 
 
-        const result =
-          await generateWithGemini({
-
-            ...options,
-
-            model
-
-          });
+      error.code =
+        "AI_EMPTY_RESPONSE";
 
 
-        logger.success(
-          `Gemini Success: ${model}`
-        );
+      error.provider =
+        "claude";
 
 
-        return result;
-
-      }
-
-      catch (
-        error
-      ) {
-
-        const message =
-          getErrorMessage(
-            error
-          ) ||
-          "Unknown Gemini error";
+      error.model =
+        model;
 
 
-        /*
-         * =================================================
-         * QUOTA ERROR
-         * =================================================
-         *
-         * NEVER retry.
-         * NEVER move to another Gemini model.
-         */
-
-        if (
-          error?.code ===
-            "AI_QUOTA_EXHAUSTED" ||
-          isGeminiQuotaExhausted(
-            error
-          )
-        ) {
-
-          logger.error(
-            `Gemini QUOTA EXHAUSTED: ${model} | fallback stopped immediately | ${message}`
-          );
-
-
-          errors.push({
-
-            provider:
-              "gemini",
-
-            model,
-
-            attempt:
-              attempt + 1,
-
-            retryable:
-              false,
-
-            quotaExhausted:
-              true,
-
-            message,
-
-            code:
-              "AI_QUOTA_EXHAUSTED"
-
-          });
-
-
-          const quotaError =
-            new Error(
-              "Gemini API quota exhausted. All Gemini retries and model fallback have been stopped."
-            );
-
-
-          quotaError.code =
-            "AI_QUOTA_EXHAUSTED";
-
-
-          quotaError.provider =
-            "gemini";
-
-
-          quotaError.model =
-            model;
-
-
-          quotaError.providers =
-            errors;
-
-
-          quotaError.quotaBlockedUntil =
-            geminiQuotaBlockedUntil;
-
-
-          throw quotaError;
-
-        }
-
-
-        const retryable =
-          isRetryableGeminiError(
-            error
-          );
-
-
-        logger.warning(
-          `Gemini Failed: ${model} | attempt=${attempt + 1} | temporary=${retryable} | ${message}`
-        );
-
-
-        errors.push({
-
-          provider:
-            "gemini",
-
-          model,
-
-          attempt:
-            attempt + 1,
-
-          retryable,
-
-          quotaExhausted:
-            false,
-
-          message,
-
-          code:
-            error?.code ||
-            "AI_PROVIDER_ERROR"
-
-        });
-
-
-        /*
-         * Non-temporary error:
-         * move to next model.
-         */
-
-        if (
-          !retryable
-        ) {
-
-          break;
-
-        }
-
-
-        /*
-         * Temporary failure:
-         * retry same model once.
-         */
-
-        attempt += 1;
-
-      }
+      throw error;
 
     }
+
+
+    return {
+
+      success:
+        true,
+
+      provider:
+        "claude",
+
+      model,
+
+      text:
+        text.trim(),
+
+      raw:
+        response,
+
+      usage:
+        response?.usage ||
+        null
+
+    };
+
+  }
+
+  catch (
+    error
+  ) {
+
+    error.provider =
+      error.provider ||
+      "claude";
+
+
+    error.model =
+      error.model ||
+      model;
+
+
+    throw error;
+
+  }
+
+}
+
+
+/* =========================================================
+   PROVIDER GENERATOR
+========================================================= */
+
+async function generateWithProvider(
+  provider,
+  options
+) {
+
+  if (
+    provider ===
+    "deepseek"
+  ) {
+
+    return generateWithDeepSeek(
+      options
+    );
+
+  }
+
+
+  if (
+    provider ===
+    "claude"
+  ) {
+
+    return generateWithClaude(
+      options
+    );
 
   }
 
 
   const error =
     new Error(
-      "All Gemini AI models failed due to temporary/provider errors."
+      `Unsupported AI provider: ${provider}`
     );
 
 
   error.code =
-    "AI_ALL_GEMINI_MODELS_FAILED";
+    "AI_UNSUPPORTED_PROVIDER";
 
 
   error.provider =
-    "gemini";
-
-
-  error.providers =
-    errors;
+    provider;
 
 
   throw error;
@@ -1820,36 +2037,25 @@ async function generateText(
   options = {}
 ) {
 
-  /*
-   * Explicit OpenAI request is blocked.
-   */
-
-  if (
-    normalizeProvider(
-      options.provider
-    ) === "openai"
-  ) {
-
-    logger.warning(
-      "OpenAI request blocked. Gemini-only mode is active."
-    );
-
-  }
-
-
   const providerOrder =
     getProviderOrder(
       options
     );
 
 
+  const configuredProviders =
+    providerOrder.filter(
+      isProviderAvailable
+    );
+
+
   if (
-    providerOrder.length === 0
+    configuredProviders.length === 0
   ) {
 
     const error =
       new Error(
-        "Gemini AI provider is not configured"
+        "No AI provider is configured. Configure DEEPSEEK_API_KEY and/or ANTHROPIC_API_KEY."
       );
 
 
@@ -1858,172 +2064,306 @@ async function generateText(
 
 
     error.provider =
-      "gemini";
+      null;
 
 
     throw error;
+
+  }
+
+
+  const providerErrors = [];
+
+
+  for (
+    const provider of configuredProviders
+  ) {
+
+    let attempt =
+      0;
+
+
+    while (
+      attempt <=
+      AI_MAX_RETRIES
+    ) {
+
+      try {
+
+        if (
+          attempt > 0
+        ) {
+
+          const previousError =
+            providerErrors[
+              providerErrors.length - 1
+            ]?.error;
+
+
+          const delay =
+            getRetryDelay(
+              attempt,
+              previousError
+            );
+
+
+          logger.warning(
+            `${provider} transient retry | attempt=${attempt + 1} | delay=${delay}ms`
+          );
+
+
+          await sleep(
+            delay
+          );
+
+        }
+
+
+        const model =
+          provider ===
+          "deepseek"
+            ? (
+                options.model &&
+                String(
+                  options.model
+                ).startsWith(
+                  "deepseek-"
+                )
+                  ? options.model
+                  : PRIMARY_DEEPSEEK_MODEL
+              )
+            : (
+                options.model &&
+                String(
+                  options.model
+                ).startsWith(
+                  "claude-"
+                )
+                  ? options.model
+                  : PRIMARY_CLAUDE_MODEL
+              );
+
+
+        logger.info(
+          `AI Request: ${provider}/${model} | attempt=${attempt + 1}`
+        );
+
+
+        const result =
+          await generateWithProvider(
+            provider,
+            options
+          );
+
+
+        logger.success(
+          `AI Success: ${provider}/${result.model}`
+        );
+
+
+        return result;
+
+      }
+
+      catch (
+        error
+      ) {
+
+        const classification =
+          classifyProviderError(
+            error
+          );
+
+
+        const message =
+          getErrorMessage(
+            error
+          ) ||
+          "Unknown provider error";
+
+
+        providerErrors.push({
+
+          provider,
+
+          model:
+            error?.model ||
+            null,
+
+          attempt:
+            attempt + 1,
+
+          category:
+            classification.category,
+
+          retryable:
+            classification.retryable,
+
+          fallback:
+            classification.fallback,
+
+          message,
+
+          code:
+            error?.code ||
+            "AI_PROVIDER_ERROR",
+
+          status:
+            getErrorStatus(
+              error
+            ),
+
+          error
+
+        });
+
+
+        logger.warning(
+          `AI Provider Failed: ${provider} | attempt=${attempt + 1} | category=${classification.category} | retryable=${classification.retryable} | ${message}`
+        );
+
+
+        /*
+         * Invalid request:
+         * do not switch provider.
+         *
+         * The request itself is the problem.
+         */
+
+        if (
+          classification.category ===
+          "invalid_request"
+        ) {
+
+          throw error;
+
+        }
+
+
+        /*
+         * Retry only genuine temporary failures.
+         */
+
+        if (
+          classification.retryable &&
+          attempt <
+            AI_MAX_RETRIES
+        ) {
+
+          attempt += 1;
+
+          continue;
+
+        }
+
+
+        /*
+         * Provider exhausted.
+         *
+         * Move to next provider.
+         */
+
+        break;
+
+      }
+
+    }
 
   }
 
 
   /*
-   * If local quota protection is active,
-   * return a precise error immediately.
+   * =======================================================
+   * ALL PROVIDERS FAILED
+   * =======================================================
    */
 
-  if (
-    isGeminiQuotaBlocked()
-  ) {
-
-    const error =
-      new Error(
-        "Gemini API quota is temporarily exhausted."
-      );
-
-
-    error.code =
-      "AI_QUOTA_EXHAUSTED";
-
-
-    error.provider =
-      "gemini";
-
-
-    error.quotaBlockedUntil =
-      geminiQuotaBlockedUntil;
-
-
-    throw error;
-
-  }
-
-
-  try {
-
-    const result =
-      await generateGeminiWithFailover(
-        options
-      );
-
-
-    return {
-
-      success:
-        true,
-
-      provider:
-        result.provider,
-
-      model:
-        result.model,
-
-      text:
-        result.text,
-
-      raw:
-        result.raw
-
-    };
-
-  }
-
-  catch (
-    error
-  ) {
-
-    /*
-     * Preserve exact quota error.
-     *
-     * DO NOT convert it into the generic
-     * AI_ALL_PROVIDERS_FAILED error.
-     */
-
-    if (
-      error?.code ===
-      "AI_QUOTA_EXHAUSTED"
-    ) {
-
-      logger.error(
-        "Gemini AI request stopped: quota exhausted."
-      );
-
-
-      throw error;
-
-    }
-
-
-    const providerErrors =
-      Array.isArray(
-        error.providers
-      )
-        ? error.providers
-        : [
-
-            {
-
-              provider:
-                "gemini",
-
-              model:
-                error.model ||
-                null,
-
-              message:
-                error.message ||
-                "Unknown Gemini error",
-
-              code:
-                error.code ||
-                "AI_PROVIDER_ERROR"
-
-            }
-
-          ];
-
-
-    logger.error(
-      `Gemini AI Chain Failed: ${providerErrors
-        .map(
-          (item) => {
-
-            const model =
-              item.model
-                ? `/${item.model}`
-                : "";
-
-
-            return (
-              `${item.provider}${model}: ${item.message}`
-            );
-
-          }
-        )
-        .join(" | ")}`
+  const finalError =
+    new Error(
+      "All configured AI providers failed."
     );
 
 
-    const finalError =
-      new Error(
-        "All Gemini AI models failed due to temporary/provider errors."
-      );
+  finalError.code =
+    "AI_ALL_PROVIDERS_FAILED";
 
 
-    finalError.code =
-      "AI_ALL_PROVIDERS_FAILED";
+  finalError.provider =
+    null;
 
 
-    finalError.provider =
-      "gemini";
+  /*
+   * Do not expose raw SDK errors as the main
+   * application message.
+   *
+   * Keep structured diagnostics for logging/debugging.
+   */
+
+  finalError.providers =
+    providerErrors.map(
+      (item) => ({
+
+        provider:
+          item.provider,
+
+        model:
+          item.model,
+
+        attempt:
+          item.attempt,
+
+        category:
+          item.category,
+
+        retryable:
+          item.retryable,
+
+        fallback:
+          item.fallback,
+
+        message:
+          item.message,
+
+        code:
+          item.code,
+
+        status:
+          item.status
+
+      })
+    );
 
 
-    finalError.providers =
-      providerErrors;
+  logger.error(
+    `AI Provider Chain Failed: ${finalError.providers
+      .map(
+        (item) => {
+
+          const model =
+            item.model
+              ? `/${item.model}`
+              : "";
 
 
-    throw finalError;
+          return (
 
-  }
+            `${item.provider}${model}: ` +
+
+            `${item.category}: ` +
+
+            `${item.message}`
+
+          );
+
+        }
+      )
+      .join(
+        " | "
+      )}`
+  );
+
+
+  throw finalError;
 
 }
 
@@ -2099,7 +2439,7 @@ async function generateJSON(
 
       const parseError =
         new Error(
-          `Gemini returned invalid JSON: ${secondParseError.message}`
+          `${result.provider} returned invalid JSON: ${secondParseError.message}`
         );
 
 
@@ -2144,41 +2484,35 @@ async function generateJSON(
 
 function getProviderStatus() {
 
+  const deepseekConfigured =
+    isProviderAvailable(
+      "deepseek"
+    );
+
+
+  const claudeConfigured =
+    isProviderAvailable(
+      "claude"
+    );
+
+
   return {
 
     mode:
-      "gemini-only",
+      "deepseek-primary-claude-fallback",
 
     primary:
-      "gemini",
+      PRIMARY_PROVIDER,
 
     fallback:
-      null,
-
-    openai: {
-
-      configured:
-        false,
-
-      enabled:
-        false,
-
-      temporarilyDisabled:
-        OPENAI_TEMPORARILY_DISABLED,
-
-      reason:
-        "OpenAI is intentionally disabled. Gemini handles all production AI requests."
-
-    },
+      FALLBACK_PROVIDER,
 
     providers: {
 
-      gemini: {
+      deepseek: {
 
         configured:
-          isProviderAvailable(
-            "gemini"
-          ),
+          deepseekConfigured,
 
         enabled:
           true,
@@ -2187,24 +2521,60 @@ function getProviderStatus() {
           true,
 
         model:
-          PRIMARY_GEMINI_MODEL,
+          PRIMARY_DEEPSEEK_MODEL,
 
-        fallbackModels:
-          GEMINI_MODEL_CHAIN.filter(
-            (model) =>
-              model !==
-              PRIMARY_GEMINI_MODEL
-          ),
-
-        quotaBlocked:
-          isGeminiQuotaBlocked(),
-
-        quotaBlockedUntil:
-          isGeminiQuotaBlocked()
-            ? geminiQuotaBlockedUntil
-            : null
+        baseURL:
+          env.DEEPSEEK_BASE_URL ||
+          "https://api.deepseek.com"
 
       },
+
+      claude: {
+
+        configured:
+          claudeConfigured,
+
+        enabled:
+          true,
+
+        primary:
+          false,
+
+        fallback:
+          true,
+
+        model:
+          PRIMARY_CLAUDE_MODEL
+
+      },
+
+      /*
+       * Gemini intentionally appears only as
+       * a disabled legacy status entry.
+       *
+       * No Gemini client, SDK, model or API call
+       * exists in this service.
+       */
+
+      gemini: {
+
+        configured:
+          false,
+
+        enabled:
+          false,
+
+        removed:
+          true
+
+      },
+
+      /*
+       * OpenAI is NOT a production provider.
+       *
+       * The openai package may exist solely because
+       * DeepSeek exposes an OpenAI-compatible API.
+       */
 
       openai: {
 
@@ -2214,56 +2584,46 @@ function getProviderStatus() {
         enabled:
           false,
 
-        model:
-          env.OPENAI_MODEL ||
-          "gpt-4.1-mini"
+        productionProvider:
+          false,
+
+        reason:
+          "OpenAI is not configured or called as a provider. The OpenAI-compatible SDK is used only as the DeepSeek client."
 
       }
 
     },
 
-    geminiModelChain:
-      GEMINI_MODEL_CHAIN,
-
     retry: {
 
       maxRetries:
-        GEMINI_MAX_RETRIES,
+        AI_MAX_RETRIES,
 
       baseDelayMs:
-        GEMINI_RETRY_BASE_DELAY_MS,
+        AI_RETRY_BASE_DELAY_MS,
 
       maxDelayMs:
-        GEMINI_MAX_RETRY_DELAY_MS,
-
-      quotaRetries:
-        0,
-
-      quotaFallback:
-        false
+        AI_MAX_RETRY_DELAY_MS
 
     },
 
-    quotaProtection: {
+    fallback: {
 
       enabled:
         true,
 
-      cooldownMs:
-        GEMINI_QUOTA_COOLDOWN_MS,
+      order: [
 
-      blocked:
-        isGeminiQuotaBlocked(),
+        "deepseek",
 
-      blockedUntil:
-        isGeminiQuotaBlocked()
-          ? geminiQuotaBlockedUntil
-          : null
+        "claude"
+
+      ]
 
     },
 
     timeoutMs:
-      env.AI_PROVIDER_TIMEOUT_MS
+      AI_PROVIDER_TIMEOUT_MS
 
   };
 
