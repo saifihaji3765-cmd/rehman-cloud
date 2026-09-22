@@ -2,6 +2,27 @@ const env = require("./env");
 
 /* =========================================================
    VALIDATE ENVIRONMENT
+
+   Production AI Architecture:
+
+     Primary:
+       DeepSeek
+
+     Fallback:
+       Anthropic Claude
+
+   IMPORTANT:
+
+     - Gemini is removed from active AI architecture.
+     - OpenAI is removed from active AI architecture.
+     - At least one supported AI provider must be configured.
+     - Provider routing is handled by the centralized
+       AI Provider Service.
+========================================================= */
+
+
+/* =========================================================
+   VALIDATE ENVIRONMENT
 ========================================================= */
 
 function validateEnv() {
@@ -92,26 +113,32 @@ function validateEnv() {
      AI PROVIDER AVAILABILITY
   =======================================================
 
-     ZYRIONOS supports multiple AI providers.
+     ZYRIONOS production AI architecture:
 
-     OpenAI and Gemini are independent providers.
+       DeepSeek
+          ↓
+       Claude fallback
 
-     At least ONE provider must be configured for the
-     AI platform to operate.
+     Gemini:
+       Removed.
 
-     The provider router will handle fallback logic.
+     OpenAI:
+       Removed.
+
+     At least one supported provider must be configured.
   ======================================================= */
 
-  const hasOpenAI =
+  const hasDeepSeek =
     Boolean(
-      env.OPENAI_API_KEY &&
-      env.OPENAI_API_KEY.toString().trim()
+      env.DEEPSEEK_API_KEY &&
+      env.DEEPSEEK_API_KEY.toString().trim()
     );
 
-  const hasGemini =
+
+  const hasClaude =
     Boolean(
-      env.GEMINI_API_KEY &&
-      env.GEMINI_API_KEY.toString().trim()
+      env.ANTHROPIC_API_KEY &&
+      env.ANTHROPIC_API_KEY.toString().trim()
     );
 
 
@@ -120,8 +147,8 @@ function validateEnv() {
   ======================================================= */
 
   if (
-    !hasOpenAI &&
-    !hasGemini
+    !hasDeepSeek &&
+    !hasClaude
   ) {
 
     console.log("\n");
@@ -135,11 +162,11 @@ function validateEnv() {
     );
 
     console.log(
-      "- OPENAI_API_KEY"
+      "- DEEPSEEK_API_KEY"
     );
 
     console.log(
-      "- GEMINI_API_KEY"
+      "- ANTHROPIC_API_KEY"
     );
 
     console.log("\n");
@@ -160,16 +187,16 @@ function validateEnv() {
   );
 
   console.log(
-    `- OpenAI: ${
-      hasOpenAI
+    `- DeepSeek: ${
+      hasDeepSeek
         ? "AVAILABLE"
         : "NOT CONFIGURED"
     }`
   );
 
   console.log(
-    `- Gemini: ${
-      hasGemini
+    `- Claude: ${
+      hasClaude
         ? "AVAILABLE"
         : "NOT CONFIGURED"
     }`
@@ -177,31 +204,36 @@ function validateEnv() {
 
 
   /* =======================================================
-     PRIMARY / FALLBACK PROVIDER VALIDATION
-  ======================================================= */
+     PRIMARY / FALLBACK PROVIDER
+========================================================= */
 
   const primaryProvider =
     (
       env.AI_PRIMARY_PROVIDER ||
-      "gemini"
+      "deepseek"
     )
       .toString()
       .trim()
       .toLowerCase();
+
 
   const fallbackProvider =
     (
       env.AI_FALLBACK_PROVIDER ||
-      "openai"
+      "claude"
     )
       .toString()
       .trim()
       .toLowerCase();
 
 
+  /* =======================================================
+     SUPPORTED PROVIDERS
+  ======================================================= */
+
   const supportedProviders = [
-    "openai",
-    "gemini"
+    "deepseek",
+    "claude"
   ];
 
 
@@ -226,7 +258,7 @@ function validateEnv() {
     );
 
     console.log(
-      "Allowed: openai, gemini"
+      "Allowed: deepseek, claude"
     );
 
     console.log("\n");
@@ -257,7 +289,7 @@ function validateEnv() {
     );
 
     console.log(
-      "Allowed: openai, gemini"
+      "Allowed: deepseek, claude"
     );
 
     console.log("\n");
@@ -268,59 +300,56 @@ function validateEnv() {
 
 
   /* =======================================================
-     PROVIDER AVAILABILITY CHECK
-  =======================================================
-
-     If the selected primary provider is not configured,
-     we do NOT crash immediately.
-
-     The future provider router can use the configured
-     provider and apply fallback logic.
+     PRIMARY PROVIDER AVAILABILITY
   ======================================================= */
 
   if (
-    primaryProvider === "openai" &&
-    !hasOpenAI
+    primaryProvider === "deepseek" &&
+    !hasDeepSeek
   ) {
 
     console.log(
-      "⚠️ Primary AI provider OpenAI is not configured."
+      "⚠️ Primary AI provider DeepSeek is not configured."
     );
 
   }
 
 
   if (
-    primaryProvider === "gemini" &&
-    !hasGemini
+    primaryProvider === "claude" &&
+    !hasClaude
   ) {
 
     console.log(
-      "⚠️ Primary AI provider Gemini is not configured."
+      "⚠️ Primary AI provider Claude is not configured."
+    );
+
+  }
+
+
+  /* =======================================================
+     FALLBACK PROVIDER AVAILABILITY
+  ======================================================= */
+
+  if (
+    fallbackProvider === "deepseek" &&
+    !hasDeepSeek
+  ) {
+
+    console.log(
+      "⚠️ Fallback AI provider DeepSeek is not configured."
     );
 
   }
 
 
   if (
-    fallbackProvider === "openai" &&
-    !hasOpenAI
+    fallbackProvider === "claude" &&
+    !hasClaude
   ) {
 
     console.log(
-      "⚠️ Fallback AI provider OpenAI is not configured."
-    );
-
-  }
-
-
-  if (
-    fallbackProvider === "gemini" &&
-    !hasGemini
-  ) {
-
-    console.log(
-      "⚠️ Fallback AI provider Gemini is not configured."
+      "⚠️ Fallback AI provider Claude is not configured."
     );
 
   }
