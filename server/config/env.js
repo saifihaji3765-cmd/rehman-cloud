@@ -1,6 +1,25 @@
 require("dotenv").config();
 
 /* =========================================================
+   ZYRIONOS ENV CONFIGURATION
+
+   Production AI Architecture:
+
+   Primary:
+     DeepSeek
+
+   Fallback:
+     Anthropic Claude
+
+   IMPORTANT:
+     - Gemini is no longer an active AI provider.
+     - OpenAI is no longer an active AI provider.
+     - API keys are loaded only from environment variables.
+     - Never expose provider keys to the frontend.
+========================================================= */
+
+
+/* =========================================================
    ENV CONFIG
 ========================================================= */
 
@@ -53,55 +72,118 @@ const env = {
 
 
   /* =======================================================
-     AI — OPENAI
+     AI — DEEPSEEK
+  =======================================================
+
+     DeepSeek is the PRIMARY production AI provider.
+
+     The API key must be supplied through the backend
+     environment only.
+
+     Example environment variable:
+
+       DEEPSEEK_API_KEY=...
+
+     Never expose this value to the frontend.
   ======================================================= */
 
-  OPENAI_API_KEY:
-    process.env.OPENAI_API_KEY || "",
+  DEEPSEEK_API_KEY:
+    process.env.DEEPSEEK_API_KEY || "",
 
-  OPENAI_MODEL:
-    process.env.OPENAI_MODEL ||
-    "gpt-4.1-mini",
+  DEEPSEEK_MODEL:
+    process.env.DEEPSEEK_MODEL ||
+    "deepseek-flash",
+
+  DEEPSEEK_BASE_URL:
+    process.env.DEEPSEEK_BASE_URL ||
+    "https://api.deepseek.com",
 
 
   /* =======================================================
-     AI — GOOGLE GEMINI
+     AI — ANTHROPIC CLAUDE
+  =======================================================
+
+     Claude is the FALLBACK production provider.
+
+     The API key must be supplied through the backend
+     environment only.
+
+     Example environment variable:
+
+       ANTHROPIC_API_KEY=...
+
+     Never expose this value to the frontend.
   ======================================================= */
 
-  GEMINI_API_KEY:
-    process.env.GEMINI_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    "",
+  ANTHROPIC_API_KEY:
+    process.env.ANTHROPIC_API_KEY || "",
 
-  GEMINI_MODEL:
-    process.env.GEMINI_MODEL ||
-    "gemini-3.8-flash",
+  CLAUDE_MODEL:
+    process.env.CLAUDE_MODEL ||
+    "claude-sonnet-4-6",
 
 
   /* =======================================================
      AI PROVIDER CONTROL
   =======================================================
 
-     OpenAI and Gemini are BOTH supported.
+     Central provider architecture:
 
-     The provider router that we build next will decide
-     which provider should handle a request.
+       DeepSeek
+          ↓
+       Claude fallback
 
-     No API key is exposed to the frontend.
+     Agents must NOT directly call DeepSeek or Claude.
+
+     They should use the centralized AI Provider Service.
+
+     Gemini:
+       removed from active provider configuration.
+
+     OpenAI:
+       removed from active provider configuration.
   ======================================================= */
 
   AI_PRIMARY_PROVIDER:
     process.env.AI_PRIMARY_PROVIDER ||
-    "gemini",
+    "deepseek",
 
   AI_FALLBACK_PROVIDER:
     process.env.AI_FALLBACK_PROVIDER ||
-    "openai",
+    "claude",
+
+
+  /* =======================================================
+     AI PROVIDER TIMEOUT
+  ======================================================= */
 
   AI_PROVIDER_TIMEOUT_MS:
     Number(
       process.env.AI_PROVIDER_TIMEOUT_MS ||
-      30000
+      120000
+    ),
+
+
+  /* =======================================================
+     AI PROVIDER RETRY
+  ======================================================= */
+
+  AI_PROVIDER_MAX_RETRIES:
+    Number(
+      process.env.AI_PROVIDER_MAX_RETRIES ||
+      1
+    ),
+
+  AI_PROVIDER_RETRY_BASE_DELAY_MS:
+    Number(
+      process.env.AI_PROVIDER_RETRY_BASE_DELAY_MS ||
+      1200
+    ),
+
+  AI_PROVIDER_MAX_RETRY_DELAY_MS:
+    Number(
+      process.env.AI_PROVIDER_MAX_RETRY_DELAY_MS ||
+      5000
     ),
 
 
