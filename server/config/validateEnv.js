@@ -1,24 +1,219 @@
 const env = require("./env");
 
 /* =========================================================
-   VALIDATE ENVIRONMENT
+   ZYRIONOS ENVIRONMENT VALIDATION
 
    Production AI Architecture:
 
-     Primary:
-       DeepSeek
-
-     Fallback:
-       Anthropic Claude
+     ┌──────────────────────────────┐
+     │     ZYRIONOS AI SERVICE      │
+     └──────────────┬───────────────┘
+                    │
+        ┌───────────┼───────────┐
+        │           │           │
+     Bedrock     Sarvam      BharatRouter
+        │           │           │
+     IndieRouter ───┴────── Google Vertex AI
 
    IMPORTANT:
 
-     - Gemini is removed from active AI architecture.
-     - OpenAI is removed from active AI architecture.
-     - At least one supported AI provider must be configured.
+     - DeepSeek is completely removed.
+     - Anthropic Claude is completely removed.
+     - Gemini direct provider is not used.
+     - OpenAI direct provider is not used.
      - Provider routing is handled by the centralized
        AI Provider Service.
+     - At least one supported AI provider must be configured.
+     - Individual providers may remain unconfigured.
+     - Provider availability is checked without exposing
+       secret values.
 ========================================================= */
+
+
+/* =========================================================
+   CONSTANTS
+========================================================= */
+
+const SUPPORTED_PROVIDERS = [
+  "bedrock",
+  "sarvam",
+  "bharatrouter",
+  "indierouter",
+  "vertex"
+];
+
+
+/* =========================================================
+   SMALL HELPERS
+========================================================= */
+
+function hasValue(value) {
+  return Boolean(
+    value !== undefined &&
+    value !== null &&
+    value.toString().trim() !== ""
+  );
+}
+
+
+function normalizeProvider(value) {
+
+  if (!hasValue(value)) {
+    return "";
+  }
+
+  return value
+    .toString()
+    .trim()
+    .toLowerCase();
+
+}
+
+
+/* =========================================================
+   PROVIDER AVAILABILITY
+========================================================= */
+
+/*
+ * Amazon Bedrock
+ *
+ * Bedrock can authenticate through:
+ *
+ *   1. AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+ *   2. ECS task role / IAM role
+ *
+ * Therefore we consider it configured when:
+ *
+ *   - explicit AWS credentials exist
+ *   OR
+ *   - an AWS region exists and the application can rely
+ *     on the AWS runtime credential chain.
+ */
+
+function isBedrockConfigured() {
+
+  const explicitCredentials =
+    hasValue(env.AWS_ACCESS_KEY_ID) &&
+    hasValue(env.AWS_SECRET_ACCESS_KEY);
+
+  const awsRuntimeAvailable =
+    hasValue(env.BEDROCK_REGION) ||
+    hasValue(env.AWS_REGION);
+
+  return (
+    explicitCredentials ||
+    awsRuntimeAvailable
+  );
+
+}
+
+
+/*
+ * Sarvam
+ */
+
+function isSarvamConfigured() {
+
+  return hasValue(
+    env.SARVAM_API_KEY
+  );
+
+}
+
+
+/*
+ * BharatRouter
+ *
+ * API key + model + base URL are required because the
+ * provider service uses an OpenAI-compatible HTTP route.
+ */
+
+function isBharatRouterConfigured() {
+
+  return (
+    hasValue(env.BHARATROUTER_API_KEY) &&
+    hasValue(env.BHARATROUTER_MODEL) &&
+    hasValue(env.BHARATROUTER_BASE_URL)
+  );
+
+}
+
+
+/*
+ * IndieRouter
+ */
+
+function isIndieRouterConfigured() {
+
+  return (
+    hasValue(env.INDIEROUTER_API_KEY) &&
+    hasValue(env.INDIEROUTER_MODEL) &&
+    hasValue(env.INDIEROUTER_BASE_URL)
+  );
+
+}
+
+
+/*
+ * Google Vertex AI
+ *
+ * Vertex can authenticate through:
+ *
+ *   - Application Default Credentials
+ *   - service-account credentials
+ *   - GOOGLE_APPLICATION_CREDENTIALS
+ *   - GCP runtime identity
+ */
+
+function isVertexConfigured() {
+
+  const hasProject =
+    hasValue(env.VERTEX_PROJECT_ID) ||
+    hasValue(env.GOOGLE_CLOUD_PROJECT);
+
+  const hasCredentials =
+    hasValue(env.GOOGLE_APPLICATION_CREDENTIALS);
+
+  /*
+   * In managed GCP environments credentials can come from
+   * Application Default Credentials, so a project alone can
+   * be sufficient.
+   */
+
+  return (
+    hasProject ||
+    hasCredentials
+  );
+
+}
+
+
+/* =========================================================
+   BUILD PROVIDER STATUS
+========================================================= */
+
+function getProviderStatus() {
+
+  return {
+
+    bedrock:
+      isBedrockConfigured(),
+
+    sarvam:
+      isSarvamConfigured(),
+
+    bharatrouter:
+      isBharatRouterConfigured(),
+
+    indierouter:
+      isIndieRouterConfigured(),
+
+    vertex:
+      isVertexConfigured()
+
+  };
+
+}
 
 
 /* =========================================================
@@ -70,10 +265,7 @@ function validateEnv() {
 
   requiredEnv.forEach((key) => {
 
-    if (
-      !env[key] ||
-      env[key].toString().trim() === ""
-    ) {
+    if (!hasValue(env[key])) {
 
       missingEnv.push(key);
 
@@ -110,63 +302,56 @@ function validateEnv() {
 
 
   /* =======================================================
-     AI PROVIDER AVAILABILITY
-  =======================================================
-
-     ZYRIONOS production AI architecture:
-
-       DeepSeek
-          ↓
-       Claude fallback
-
-     Gemini:
-       Removed.
-
-     OpenAI:
-       Removed.
-
-     At least one supported provider must be configured.
+     AI PROVIDER STATUS
   ======================================================= */
 
-  const hasDeepSeek =
-    Boolean(
-      env.DEEPSEEK_API_KEY &&
-      env.DEEPSEEK_API_KEY.toString().trim()
-    );
+  const providerStatus =
+    getProviderStatus();
 
 
-  const hasClaude =
-    Boolean(
-      env.ANTHROPIC_API_KEY &&
-      env.ANTHROPIC_API_KEY.toString().trim()
+  const availableProviders =
+    SUPPORTED_PROVIDERS.filter(
+      (provider) =>
+        providerStatus[provider] === true
     );
 
 
   /* =======================================================
-     FAIL ONLY WHEN BOTH AI PROVIDERS ARE UNAVAILABLE
+     FAIL ONLY WHEN NO AI PROVIDER IS AVAILABLE
   ======================================================= */
 
   if (
-    !hasDeepSeek &&
-    !hasClaude
+    availableProviders.length === 0
   ) {
 
     console.log("\n");
 
     console.log(
-      "❌ No AI Provider Configured"
+      "❌ No ZyrionOS AI Provider Configured"
     );
 
     console.log(
-      "Configure at least one of:"
+      "Configure at least one supported provider:"
     );
 
     console.log(
-      "- DEEPSEEK_API_KEY"
+      "- Amazon Bedrock"
     );
 
     console.log(
-      "- ANTHROPIC_API_KEY"
+      "- Sarvam AI"
+    );
+
+    console.log(
+      "- BharatRouter"
+    );
+
+    console.log(
+      "- IndieRouter"
+    );
+
+    console.log(
+      "- Google Vertex AI"
     );
 
     console.log("\n");
@@ -177,26 +362,50 @@ function validateEnv() {
 
 
   /* =======================================================
-     AI PROVIDER STATUS
+     AI PROVIDER CONFIGURATION DISPLAY
   ======================================================= */
 
   console.log("\n");
 
   console.log(
-    "🤖 AI Provider Configuration"
+    "🤖 ZyrionOS AI Provider Configuration"
   );
 
   console.log(
-    `- DeepSeek: ${
-      hasDeepSeek
+    `- Amazon Bedrock: ${
+      providerStatus.bedrock
         ? "AVAILABLE"
         : "NOT CONFIGURED"
     }`
   );
 
   console.log(
-    `- Claude: ${
-      hasClaude
+    `- Sarvam AI: ${
+      providerStatus.sarvam
+        ? "AVAILABLE"
+        : "NOT CONFIGURED"
+    }`
+  );
+
+  console.log(
+    `- BharatRouter: ${
+      providerStatus.bharatrouter
+        ? "AVAILABLE"
+        : "NOT CONFIGURED"
+    }`
+  );
+
+  console.log(
+    `- IndieRouter: ${
+      providerStatus.indierouter
+        ? "AVAILABLE"
+        : "NOT CONFIGURED"
+    }`
+  );
+
+  console.log(
+    `- Google Vertex AI: ${
+      providerStatus.vertex
         ? "AVAILABLE"
         : "NOT CONFIGURED"
     }`
@@ -204,61 +413,112 @@ function validateEnv() {
 
 
   /* =======================================================
-     PRIMARY / FALLBACK PROVIDER
-========================================================= */
-
-  const primaryProvider =
-    (
-      env.AI_PRIMARY_PROVIDER ||
-      "deepseek"
-    )
-      .toString()
-      .trim()
-      .toLowerCase();
-
-
-  const fallbackProvider =
-    (
-      env.AI_FALLBACK_PROVIDER ||
-      "claude"
-    )
-      .toString()
-      .trim()
-      .toLowerCase();
-
-
-  /* =======================================================
-     SUPPORTED PROVIDERS
+     PROVIDER AVAILABILITY WARNINGS
   ======================================================= */
 
-  const supportedProviders = [
-    "deepseek",
-    "claude"
-  ];
+  SUPPORTED_PROVIDERS.forEach(
+    (provider) => {
+
+      if (
+        !providerStatus[provider]
+      ) {
+
+        console.log(
+          `⚠️ AI Provider not configured: ${provider}`
+        );
+
+      }
+
+    }
+  );
 
 
   /* =======================================================
-     VALIDATE PRIMARY PROVIDER NAME
+     LEGACY PROVIDER PROTECTION
+  ======================================================= */
+
+  /*
+   * These providers are intentionally removed from the
+   * active architecture.
+   *
+   * We do NOT use them for routing.
+   *
+   * We also do not print their secret values.
+   */
+
+  if (hasValue(env.DEEPSEEK_API_KEY)) {
+
+    console.log(
+      "⚠️ Legacy DeepSeek configuration detected. It is ignored by ZyrionOS."
+    );
+
+  }
+
+
+  if (hasValue(env.ANTHROPIC_API_KEY)) {
+
+    console.log(
+      "⚠️ Legacy Anthropic configuration detected. It is ignored by ZyrionOS."
+    );
+
+  }
+
+
+  /* =======================================================
+     LEGACY PROVIDER SETTINGS PROTECTION
   ======================================================= */
 
   if (
-    !supportedProviders.includes(
-      primaryProvider
+    hasValue(env.AI_PRIMARY_PROVIDER)
+  ) {
+
+    console.log(
+      "⚠️ Legacy AI_PRIMARY_PROVIDER detected. Centralized provider routing is now active."
+    );
+
+  }
+
+
+  if (
+    hasValue(env.AI_FALLBACK_PROVIDER)
+  ) {
+
+    console.log(
+      "⚠️ Legacy AI_FALLBACK_PROVIDER detected. Centralized provider routing is now active."
+    );
+
+  }
+
+
+  /* =======================================================
+     ACTIVE DEFAULT PROVIDER
+  ======================================================= */
+
+  const configuredDefaultProvider =
+    normalizeProvider(
+      env.AI_DEFAULT_PROVIDER
+    );
+
+
+  if (
+    configuredDefaultProvider &&
+    !SUPPORTED_PROVIDERS.includes(
+      configuredDefaultProvider
     )
   ) {
 
     console.log("\n");
 
     console.log(
-      "❌ Invalid AI_PRIMARY_PROVIDER"
+      "❌ Invalid AI_DEFAULT_PROVIDER"
     );
 
     console.log(
-      `Received: ${primaryProvider}`
+      `Received: ${configuredDefaultProvider}`
     );
 
     console.log(
-      "Allowed: deepseek, claude"
+      `Allowed: ${SUPPORTED_PROVIDERS.join(", ")}`
     );
 
     console.log("\n");
@@ -268,88 +528,27 @@ function validateEnv() {
   }
 
 
-  /* =======================================================
-     VALIDATE FALLBACK PROVIDER NAME
-  ======================================================= */
+  /*
+   * If a default provider is explicitly selected but
+   * not configured, warn instead of killing the server.
+   *
+   * The centralized provider service can still route to
+   * another available provider.
+   */
 
   if (
-    !supportedProviders.includes(
-      fallbackProvider
-    )
-  ) {
-
-    console.log("\n");
-
-    console.log(
-      "❌ Invalid AI_FALLBACK_PROVIDER"
-    );
-
-    console.log(
-      `Received: ${fallbackProvider}`
-    );
-
-    console.log(
-      "Allowed: deepseek, claude"
-    );
-
-    console.log("\n");
-
-    process.exit(1);
-
-  }
-
-
-  /* =======================================================
-     PRIMARY PROVIDER AVAILABILITY
-  ======================================================= */
-
-  if (
-    primaryProvider === "deepseek" &&
-    !hasDeepSeek
+    configuredDefaultProvider &&
+    !providerStatus[
+      configuredDefaultProvider
+    ]
   ) {
 
     console.log(
-      "⚠️ Primary AI provider DeepSeek is not configured."
+      `⚠️ AI_DEFAULT_PROVIDER "${configuredDefaultProvider}" is not currently configured.`
     );
 
-  }
-
-
-  if (
-    primaryProvider === "claude" &&
-    !hasClaude
-  ) {
-
     console.log(
-      "⚠️ Primary AI provider Claude is not configured."
-    );
-
-  }
-
-
-  /* =======================================================
-     FALLBACK PROVIDER AVAILABILITY
-  ======================================================= */
-
-  if (
-    fallbackProvider === "deepseek" &&
-    !hasDeepSeek
-  ) {
-
-    console.log(
-      "⚠️ Fallback AI provider DeepSeek is not configured."
-    );
-
-  }
-
-
-  if (
-    fallbackProvider === "claude" &&
-    !hasClaude
-  ) {
-
-    console.log(
-      "⚠️ Fallback AI provider Claude is not configured."
+      "⚠️ Centralized AI routing will use available providers."
     );
 
   }
@@ -382,10 +581,7 @@ function validateEnv() {
 
   optionalEnv.forEach((key) => {
 
-    if (
-      !env[key] ||
-      env[key].toString().trim() === ""
-    ) {
+    if (!hasValue(env[key])) {
 
       console.log(
         `⚠️ Optional ENV Missing: ${key}`
@@ -397,16 +593,39 @@ function validateEnv() {
 
 
   /* =======================================================
-     AI CONFIGURATION SUMMARY
+     AI ROUTING SUMMARY
   ======================================================= */
 
   console.log(
-    `- Primary AI Provider: ${primaryProvider}`
+    `- Configured AI Providers: ${
+      availableProviders.length
+    }`
   );
 
   console.log(
-    `- Fallback AI Provider: ${fallbackProvider}`
+    `- Active Providers: ${
+      availableProviders.join(", ")
+    }`
   );
+
+
+  if (
+    configuredDefaultProvider
+  ) {
+
+    console.log(
+      `- AI Default Provider: ${
+        configuredDefaultProvider
+      }`
+    );
+
+  } else {
+
+    console.log(
+      "- AI Default Provider: centralized capability-based routing"
+    );
+
+  }
 
 
   /* =======================================================
@@ -418,6 +637,7 @@ function validateEnv() {
   );
 
   console.log("\n");
+
 }
 
 
