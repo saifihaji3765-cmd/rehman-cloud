@@ -3,19 +3,25 @@ require("dotenv").config();
 /* =========================================================
    ZYRIONOS ENV CONFIGURATION
 
-   Production AI Architecture:
+   PRODUCTION AI ARCHITECTURE
 
-   Primary:
-     DeepSeek
+   Active AI Providers:
 
-   Fallback:
-     Anthropic Claude
+     1. Amazon Bedrock
+     2. Sarvam AI
+     3. BharatRouter
+     4. IndieRouter
+     5. Google Vertex AI
 
-   IMPORTANT:
-     - Gemini is no longer an active AI provider.
-     - OpenAI is no longer an active AI provider.
-     - API keys are loaded only from environment variables.
-     - Never expose provider keys to the frontend.
+   IMPORTANT
+   ---------------------------------------------------------
+   - DeepSeek has been completely removed.
+   - Claude / Anthropic has been completely removed.
+   - Gemini is NOT configured as a direct provider here.
+   - OpenAI is NOT configured as a provider.
+   - Provider credentials remain backend-only.
+   - Never expose provider API keys to the frontend.
+   - Agents must use the centralized AI Provider Service.
 ========================================================= */
 
 
@@ -72,85 +78,194 @@ const env = {
 
 
   /* =======================================================
-     AI — DEEPSEEK
+     AI — AMAZON BEDROCK
   =======================================================
 
-     DeepSeek is the PRIMARY production AI provider.
+     Amazon Bedrock is one of the primary AI routes.
 
-     The API key must be supplied through the backend
-     environment only.
+     AWS credentials should preferably be provided through
+     the ECS task IAM role / AWS credential provider chain.
 
-     Example environment variable:
+     Explicit AWS credentials are supported for compatibility
+     with the existing deployment configuration.
 
-       DEEPSEEK_API_KEY=...
-
-     Never expose this value to the frontend.
+     Never expose these values to the frontend.
   ======================================================= */
 
-  DEEPSEEK_API_KEY:
-    process.env.DEEPSEEK_API_KEY || "",
+  BEDROCK_MODEL_ID:
+    process.env.BEDROCK_MODEL_ID ||
+    process.env.BEDROCK_MODEL ||
+    "",
 
-  DEEPSEEK_MODEL:
-    process.env.DEEPSEEK_MODEL ||
-    "deepseek-flash",
+  BEDROCK_MODEL:
+    process.env.BEDROCK_MODEL ||
+    process.env.BEDROCK_MODEL_ID ||
+    "",
 
-  DEEPSEEK_BASE_URL:
-    process.env.DEEPSEEK_BASE_URL ||
-    "https://api.deepseek.com",
+  BEDROCK_REGION:
+    process.env.BEDROCK_REGION ||
+    process.env.AWS_REGION ||
+    "ap-south-1",
 
 
   /* =======================================================
-     AI — ANTHROPIC CLAUDE
+     AI — SARVAM AI
   =======================================================
 
-     Claude is the FALLBACK production provider.
+     Sarvam is an active ZyrionOS AI provider route.
 
-     The API key must be supplied through the backend
-     environment only.
+     API credentials remain backend-only.
 
-     Example environment variable:
-
-       ANTHROPIC_API_KEY=...
-
-     Never expose this value to the frontend.
+     The model can be changed through environment
+     configuration without changing application code.
   ======================================================= */
 
-  ANTHROPIC_API_KEY:
-    process.env.ANTHROPIC_API_KEY || "",
+  SARVAM_API_KEY:
+    process.env.SARVAM_API_KEY || "",
 
-  CLAUDE_MODEL:
-    process.env.CLAUDE_MODEL ||
-    "claude-sonnet-4-6",
+  SARVAM_MODEL:
+    process.env.SARVAM_MODEL ||
+    "sarvam-105b",
+
+  SARVAM_BASE_URL:
+    process.env.SARVAM_BASE_URL ||
+    "https://api.sarvam.ai",
+
+
+  /* =======================================================
+     AI — BHARATROUTER
+  =======================================================
+
+     BharatRouter is treated as an AI routing/gateway
+     provider route.
+
+     API credentials remain backend-only.
+
+     The endpoint and model are configurable because the
+     gateway may expose different routes/models over time.
+  ======================================================= */
+
+  BHARATROUTER_API_KEY:
+    process.env.BHARATROUTER_API_KEY || "",
+
+  BHARATROUTER_MODEL:
+    process.env.BHARATROUTER_MODEL || "",
+
+  BHARATROUTER_BASE_URL:
+    process.env.BHARATROUTER_BASE_URL || "",
+
+
+  /* =======================================================
+     AI — INDIEROUTER
+  =======================================================
+
+     IndieRouter is treated as an AI routing/provider route.
+
+     API credentials remain backend-only.
+
+     Endpoint and model remain environment configurable.
+  ======================================================= */
+
+  INDIEROUTER_API_KEY:
+    process.env.INDIEROUTER_API_KEY || "",
+
+  INDIEROUTER_MODEL:
+    process.env.INDIEROUTER_MODEL || "",
+
+  INDIEROUTER_BASE_URL:
+    process.env.INDIEROUTER_BASE_URL || "",
+
+
+  /* =======================================================
+     AI — GOOGLE VERTEX AI
+  =======================================================
+
+     Google Vertex AI is an active ZyrionOS AI route.
+
+     Prefer Google Application Default Credentials,
+     workload identity, or another secure server-side
+     Google credential mechanism.
+
+     Do NOT expose Google service credentials to the frontend.
+  ======================================================= */
+
+  VERTEX_PROJECT_ID:
+    process.env.VERTEX_PROJECT_ID ||
+    process.env.GOOGLE_CLOUD_PROJECT ||
+    process.env.GCP_PROJECT_ID ||
+    "",
+
+  VERTEX_LOCATION:
+    process.env.VERTEX_LOCATION ||
+    process.env.GOOGLE_CLOUD_LOCATION ||
+    "us-central1",
+
+  VERTEX_MODEL:
+    process.env.VERTEX_MODEL ||
+    process.env.VERTEX_AI_MODEL ||
+    "gemini-2.5-flash",
+
+
+  /* =======================================================
+     GOOGLE CLOUD CREDENTIALS
+  =======================================================
+
+     Optional compatibility values.
+
+     Prefer a secure credential mechanism rather than
+     storing long-lived service-account secrets directly
+     inside application source code.
+  ======================================================= */
+
+  GOOGLE_APPLICATION_CREDENTIALS:
+    process.env.GOOGLE_APPLICATION_CREDENTIALS || "",
+
+  GOOGLE_CLOUD_PROJECT:
+    process.env.GOOGLE_CLOUD_PROJECT ||
+    process.env.VERTEX_PROJECT_ID ||
+    "",
+
+  GOOGLE_CLOUD_LOCATION:
+    process.env.GOOGLE_CLOUD_LOCATION ||
+    process.env.VERTEX_LOCATION ||
+    "us-central1",
 
 
   /* =======================================================
      AI PROVIDER CONTROL
   =======================================================
 
-     Central provider architecture:
+     There is intentionally NO fixed DeepSeek/Claude
+     primary/fallback configuration anymore.
 
-       DeepSeek
+     The centralized AI Provider Service performs:
+
+       capability detection
           ↓
-       Claude fallback
+       provider availability
+          ↓
+       provider routing
+          ↓
+       retry
+          ↓
+       alternate provider
 
-     Agents must NOT directly call DeepSeek or Claude.
+     Supported provider identifiers:
 
-     They should use the centralized AI Provider Service.
-
-     Gemini:
-       removed from active provider configuration.
-
-     OpenAI:
-       removed from active provider configuration.
+       bedrock
+       sarvam
+       bharatrouter
+       indierouter
+       vertex
   ======================================================= */
 
-  AI_PRIMARY_PROVIDER:
-    process.env.AI_PRIMARY_PROVIDER ||
-    "deepseek",
+  AI_PROVIDER:
+    process.env.AI_PROVIDER ||
+    "",
 
-  AI_FALLBACK_PROVIDER:
-    process.env.AI_FALLBACK_PROVIDER ||
-    "claude",
+  AI_DEFAULT_PROVIDER:
+    process.env.AI_DEFAULT_PROVIDER ||
+    "",
 
 
   /* =======================================================
@@ -196,6 +311,9 @@ const env = {
 
   AWS_SECRET_ACCESS_KEY:
     process.env.AWS_SECRET_ACCESS_KEY || "",
+
+  AWS_SESSION_TOKEN:
+    process.env.AWS_SESSION_TOKEN || "",
 
   AWS_REGION:
     process.env.AWS_REGION ||
