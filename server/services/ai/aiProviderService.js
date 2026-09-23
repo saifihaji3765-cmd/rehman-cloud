@@ -1,53 +1,69 @@
 /* =========================================================
    ZYRIONOS AI PROVIDER SERVICE
-   DEEPSEEK PRIMARY + CLAUDE FALLBACK
+   MULTI-PROVIDER PRODUCTION AI ARCHITECTURE
 
-   PRODUCTION PROVIDER ARCHITECTURE
+   ACTIVE PROVIDER ROUTES
 
-   Primary:
-     DeepSeek
+   1. Amazon Bedrock
+   2. Sarvam AI
+   3. BharatRouter
+   4. IndieRouter
+   5. Google Vertex AI
 
-   Fallback:
-     Anthropic Claude
+   IMPORTANT
+   ---------------------------------------------------------
+   - DeepSeek has been completely removed.
+   - Claude / Anthropic has been completely removed.
+   - Gemini is NOT a direct provider in this service.
+   - OpenAI is NOT a provider.
+   - Agents must call this service, never providers directly.
+   - Provider-specific implementation stays inside this layer.
+   - Existing agents can continue using generateText()
+     and generateJSON().
 
-   IMPORTANT:
-     - Gemini is completely removed from the active provider layer.
-     - OpenAI is NOT an active provider.
-     - The "openai" npm package is used only as the
-       OpenAI-compatible SDK client for DeepSeek.
-     - Agents must call this service, never providers directly.
+   ARCHITECTURE
 
-   Provider order:
-     1. DeepSeek
-     2. Claude
+   Agent
+     ↓
+   AI Provider Service
+     ↓
+   Provider Router
+     ↓
+   Selected Provider
+     ↓
+   Normalized Response
 
-   Failure policy:
-     - Temporary failures:
-         controlled retry
-         then provider fallback
-     - Quota / balance:
-         no retry
-         fallback immediately
-     - Authentication / configuration:
-         no retry
-         fallback immediately
-     - Invalid request:
-         no retry
-         no pointless retry loop
-     - Timeout:
-         treated as temporary
+   PROVIDERS
+
+     Amazon Bedrock
+     Sarvam AI
+     BharatRouter
+     IndieRouter
+     Google Vertex AI
+
+   FAILURE POLICY
+
+   Temporary:
+     controlled retry
+     then alternate provider
+
+   Quota / balance:
+     no retry
+     alternate provider immediately
+
+   Authentication:
+     no retry
+     alternate provider
+
+   Configuration:
+     provider skipped
+
+   Invalid request:
+     no pointless provider rotation
+
+   Timeout:
+     temporary failure
 ========================================================= */
-
-
-/* =========================================================
-   PACKAGES
-========================================================= */
-
-const OpenAI =
-  require("openai");
-
-const Anthropic =
-  require("@anthropic-ai/sdk");
 
 
 /* =========================================================
@@ -67,54 +83,222 @@ const logger =
 
 
 /* =========================================================
-   PROVIDER CLIENTS
+   OPTIONAL PROVIDER CLIENTS
 ========================================================= */
 
-let deepseekClient = null;
+/*
+ * These are loaded dynamically so the entire application
+ * does not crash merely because an optional provider SDK
+ * has not been installed/configured yet.
+ */
 
-let claudeClient = null;
+let BedrockRuntimeClient = null;
+let ConverseCommand = null;
+
+let VertexAI = null;
 
 
 /* =========================================================
-   PROVIDER CONFIGURATION
+   BEDROCK SDK
 ========================================================= */
 
-const PRIMARY_PROVIDER =
-  "deepseek";
+try {
 
-const FALLBACK_PROVIDER =
-  "claude";
+  const bedrock =
+    require("@aws-sdk/client-bedrock-runtime");
+
+  BedrockRuntimeClient =
+    bedrock.BedrockRuntimeClient;
+
+  ConverseCommand =
+    bedrock.ConverseCommand;
+
+}
+
+catch (error) {
+
+  /*
+   * Bedrock remains unavailable until its SDK is installed.
+   * Do not crash the whole server.
+   */
+
+  BedrockRuntimeClient =
+    null;
+
+  ConverseCommand =
+    null;
+
+}
+
+
+/* =========================================================
+   VERTEX AI SDK
+========================================================= */
+
+try {
+
+  const vertex =
+    require("@google-cloud/vertexai");
+
+  VertexAI =
+    vertex.VertexAI;
+
+}
+
+catch (error) {
+
+  VertexAI =
+    null;
+
+}
+
+
+/* =========================================================
+   PROVIDER CLIENTS
+========================================================= */
+
+let bedrockClient =
+  null;
+
+let vertexClient =
+  null;
+
+
+/* =========================================================
+   PROVIDER NAMES
+========================================================= */
+
+const PROVIDERS = {
+
+  BEDROCK:
+    "bedrock",
+
+  SARVAM:
+    "sarvam",
+
+  BHARATROUTER:
+    "bharatrouter",
+
+  INDIEROUTER:
+    "indierouter",
+
+  VERTEX:
+    "vertex"
+
+};
+
+
+/* =========================================================
+   DEFAULT PROVIDER ORDER
+========================================================= */
+
+/*
+ * This is NOT a blind "primary/fallback" chain.
+ *
+ * It is only the default candidate order.
+ *
+ * The router can later select providers based on:
+ *
+ * - task type
+ * - capability
+ * - availability
+ * - requested provider
+ * - model
+ * - failure state
+ *
+ * No DeepSeek / Claude route exists.
+ */
+
+const DEFAULT_PROVIDER_ORDER = [
+
+  PROVIDERS.BEDROCK,
+
+  PROVIDERS.SARVAM,
+
+  PROVIDERS.BHARATROUTER,
+
+  PROVIDERS.INDIEROUTER,
+
+  PROVIDERS.VERTEX
+
+];
 
 
 /* =========================================================
    MODEL CONFIGURATION
 ========================================================= */
 
-/*
- * Current DeepSeek API model names:
- *
- * deepseek-flash
- * deepseek-v4-pro
- *
- * deepseek-flash currently maps to the current
- * DeepSeek V4.1 Flash API model.
- */
-
-const PRIMARY_DEEPSEEK_MODEL =
-  env.DEEPSEEK_MODEL ||
-  "deepseek-flash";
+const BEDROCK_MODEL =
+  env.BEDROCK_MODEL_ID ||
+  env.BEDROCK_MODEL ||
+  "";
 
 
-/*
- * Claude fallback.
- *
- * Keep this configurable through environment variables
- * so the model can be changed without modifying source code.
- */
+const SARVAM_MODEL =
+  env.SARVAM_MODEL ||
+  "sarvam-105b";
 
-const PRIMARY_CLAUDE_MODEL =
-  env.CLAUDE_MODEL ||
-  "claude-sonnet-4-6";
+
+const BHARATROUTER_MODEL =
+  env.BHARATROUTER_MODEL ||
+  "";
+
+
+const INDIEROUTER_MODEL =
+  env.INDIEROUTER_MODEL ||
+  "";
+
+
+const VERTEX_MODEL =
+  env.VERTEX_MODEL ||
+  env.VERTEX_AI_MODEL ||
+  "gemini-2.5-flash";
+
+
+/* =========================================================
+   BASE URL CONFIGURATION
+========================================================= */
+
+const SARVAM_BASE_URL =
+  env.SARVAM_BASE_URL ||
+  "https://api.sarvam.ai";
+
+
+const BHARATROUTER_BASE_URL =
+  env.BHARATROUTER_BASE_URL ||
+  "";
+
+
+const INDIEROUTER_BASE_URL =
+  env.INDIEROUTER_BASE_URL ||
+  "";
+
+
+/* =========================================================
+   AWS REGION
+========================================================= */
+
+const AWS_REGION =
+  env.AWS_REGION ||
+  env.BEDROCK_REGION ||
+  "ap-south-1";
+
+
+/* =========================================================
+   VERTEX CONFIGURATION
+========================================================= */
+
+const VERTEX_PROJECT_ID =
+  env.GOOGLE_CLOUD_PROJECT ||
+  env.GCP_PROJECT_ID ||
+  env.VERTEX_PROJECT_ID ||
+  "";
+
+
+const VERTEX_LOCATION =
+  env.VERTEX_LOCATION ||
+  env.GOOGLE_CLOUD_LOCATION ||
+  "us-central1";
 
 
 /* =========================================================
@@ -193,69 +377,87 @@ const AI_PROVIDER_TIMEOUT_MS =
 
 
 /*
- * DeepSeek
+ * Amazon Bedrock
  *
- * DeepSeek exposes an OpenAI-compatible API.
+ * AWS credentials should preferably come from:
  *
- * IMPORTANT:
- * This is NOT OpenAI provider usage.
+ * - ECS task role
+ * - IAM role
+ * - AWS credential provider chain
  *
- * The OpenAI SDK is simply being used as the compatible
- * HTTP client for DeepSeek.
+ * Do not hard-code AWS credentials here.
  */
 
 if (
-  env.DEEPSEEK_API_KEY
+  BedrockRuntimeClient
 ) {
 
-  deepseekClient =
-    new OpenAI({
+  try {
 
-      apiKey:
-        env.DEEPSEEK_API_KEY,
+    bedrockClient =
+      new BedrockRuntimeClient({
 
-      baseURL:
-        env.DEEPSEEK_BASE_URL ||
-        "https://api.deepseek.com",
+        region:
+          AWS_REGION
 
-      timeout:
-        AI_PROVIDER_TIMEOUT_MS,
+      });
 
-      maxRetries:
-        0
+  }
 
-    });
+  catch (error) {
+
+    bedrockClient =
+      null;
+
+    logger.warning(
+      `Bedrock client initialization failed: ${error.message}`
+    );
+
+  }
 
 }
 
 
 /*
- * Anthropic Claude
+ * Google Vertex AI
  */
 
 if (
-  env.ANTHROPIC_API_KEY
+  VertexAI &&
+  VERTEX_PROJECT_ID
 ) {
 
-  claudeClient =
-    new Anthropic({
+  try {
 
-      apiKey:
-        env.ANTHROPIC_API_KEY,
+    vertexClient =
+      new VertexAI({
 
-      timeout:
-        AI_PROVIDER_TIMEOUT_MS,
+        project:
+          VERTEX_PROJECT_ID,
 
-      maxRetries:
-        0
+        location:
+          VERTEX_LOCATION
 
-    });
+      });
+
+  }
+
+  catch (error) {
+
+    vertexClient =
+      null;
+
+    logger.warning(
+      `Vertex AI client initialization failed: ${error.message}`
+    );
+
+  }
 
 }
 
 
 /* =========================================================
-   NORMALIZE PROVIDER
+   PROVIDER NORMALIZATION
 ========================================================= */
 
 function normalizeProvider(
@@ -270,62 +472,57 @@ function normalizeProvider(
       .toLowerCase();
 
 
-  if (
-    [
-      "deepseek",
-      "deep-seek"
-    ].includes(
-      value
-    )
-  ) {
+  const aliases = {
 
-    return "deepseek";
+    bedrock:
+      PROVIDERS.BEDROCK,
 
-  }
+    "amazon-bedrock":
+      PROVIDERS.BEDROCK,
 
+    aws:
+      PROVIDERS.BEDROCK,
 
-  if (
-    [
-      "claude",
-      "anthropic"
-    ].includes(
-      value
-    )
-  ) {
+    sarvam:
+      PROVIDERS.SARVAM,
 
-    return "claude";
+    "sarvam-ai":
+      PROVIDERS.SARVAM,
 
-  }
+    bharatrouter:
+      PROVIDERS.BHARATROUTER,
 
+    "bharat-router":
+      PROVIDERS.BHARATROUTER,
 
-  /*
-   * Gemini is intentionally no longer supported.
-   */
+    "bharat router":
+      PROVIDERS.BHARATROUTER,
 
-  if (
-    value === "gemini"
-  ) {
+    indierouter:
+      PROVIDERS.INDIEROUTER,
 
-    return null;
+    "indie-router":
+      PROVIDERS.INDIEROUTER,
 
-  }
+    "indie router":
+      PROVIDERS.INDIEROUTER,
 
+    vertex:
+      PROVIDERS.VERTEX,
 
-  /*
-   * OpenAI is intentionally no longer supported
-   * as a production provider.
-   */
+    "vertex-ai":
+      PROVIDERS.VERTEX,
 
-  if (
-    value === "openai"
-  ) {
+    "google-vertex":
+      PROVIDERS.VERTEX
 
-    return null;
-
-  }
+  };
 
 
-  return null;
+  return (
+    aliases[value] ||
+    null
+  );
 
 }
 
@@ -344,33 +541,185 @@ function isProviderAvailable(
     );
 
 
-  if (
-    normalized === "deepseek"
+  switch (
+    normalized
   ) {
 
-    return Boolean(
-      deepseekClient &&
-      env.DEEPSEEK_API_KEY
-    );
+    case PROVIDERS.BEDROCK:
+
+      return Boolean(
+        bedrockClient &&
+        ConverseCommand &&
+        BEDROCK_MODEL
+      );
+
+
+    case PROVIDERS.SARVAM:
+
+      return Boolean(
+        env.SARVAM_API_KEY &&
+        SARVAM_BASE_URL &&
+        SARVAM_MODEL
+      );
+
+
+    case PROVIDERS.BHARATROUTER:
+
+      return Boolean(
+        env.BHARATROUTER_API_KEY &&
+        BHARATROUTER_BASE_URL &&
+        BHARATROUTER_MODEL
+      );
+
+
+    case PROVIDERS.INDIEROUTER:
+
+      return Boolean(
+        env.INDIEROUTER_API_KEY &&
+        INDIEROUTER_BASE_URL &&
+        INDIEROUTER_MODEL
+      );
+
+
+    case PROVIDERS.VERTEX:
+
+      return Boolean(
+        vertexClient &&
+        VERTEX_PROJECT_ID &&
+        VERTEX_MODEL
+      );
+
+
+    default:
+
+      return false;
 
   }
-
-
-  if (
-    normalized === "claude"
-  ) {
-
-    return Boolean(
-      claudeClient &&
-      env.ANTHROPIC_API_KEY
-    );
-
-  }
-
-
-  return false;
 
 }
+
+
+/* =========================================================
+   PROVIDER CAPABILITIES
+========================================================= */
+
+const PROVIDER_CAPABILITIES = {
+
+  [PROVIDERS.BEDROCK]: {
+
+    coding:
+      true,
+
+    reasoning:
+      true,
+
+    planning:
+      true,
+
+    longContext:
+      true,
+
+    multimodal:
+      true,
+
+    structuredOutput:
+      true
+
+  },
+
+
+  [PROVIDERS.SARVAM]: {
+
+    coding:
+      true,
+
+    reasoning:
+      true,
+
+    planning:
+      true,
+
+    longContext:
+      true,
+
+    multimodal:
+      false,
+
+    structuredOutput:
+      true
+
+  },
+
+
+  [PROVIDERS.BHARATROUTER]: {
+
+    coding:
+      true,
+
+    reasoning:
+      true,
+
+    planning:
+      true,
+
+    longContext:
+      true,
+
+    multimodal:
+      true,
+
+    structuredOutput:
+      true
+
+  },
+
+
+  [PROVIDERS.INDIEROUTER]: {
+
+    coding:
+      true,
+
+    reasoning:
+      true,
+
+    planning:
+      true,
+
+    longContext:
+      true,
+
+    multimodal:
+      true,
+
+    structuredOutput:
+      true
+
+  },
+
+
+  [PROVIDERS.VERTEX]: {
+
+    coding:
+      true,
+
+    reasoning:
+      true,
+
+    planning:
+      true,
+
+    longContext:
+      true,
+
+    multimodal:
+      true,
+
+    structuredOutput:
+      true
+
+  }
+
+};
 
 
 /* =========================================================
@@ -388,23 +737,26 @@ function getProviderOrder(
 
 
   /*
-   * Explicit valid provider request.
+   * Explicit provider request.
    *
-   * If a caller specifically asks for Claude,
-   * Claude is attempted first.
+   * Requested provider gets first chance.
    *
-   * Otherwise DeepSeek remains primary.
+   * Other available providers remain possible
+   * fallback routes.
    */
 
   if (
-    requested === "claude"
+    requested
   ) {
 
     return [
 
-      "claude",
+      requested,
 
-      "deepseek"
+      ...DEFAULT_PROVIDER_ORDER.filter(
+        (provider) =>
+          provider !== requested
+      )
 
     ];
 
@@ -412,16 +764,96 @@ function getProviderOrder(
 
 
   /*
-   * DeepSeek is always the production primary.
+   * Capability-aware ordering.
    */
 
-  return [
+  const capability =
+    String(
+      options.capability ||
+      options.taskType ||
+      options.role ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
 
-    "deepseek",
 
-    "claude"
+  let ordered =
+    [...DEFAULT_PROVIDER_ORDER];
 
-  ];
+
+  if (
+    capability === "coding" ||
+    capability === "builder" ||
+    capability === "code"
+  ) {
+
+    ordered =
+      [
+
+        PROVIDERS.BEDROCK,
+
+        PROVIDERS.INDIEROUTER,
+
+        PROVIDERS.BHARATROUTER,
+
+        PROVIDERS.SARVAM,
+
+        PROVIDERS.VERTEX
+
+      ];
+
+  }
+
+
+  if (
+    capability === "planning" ||
+    capability === "planner" ||
+    capability === "reasoning"
+  ) {
+
+    ordered =
+      [
+
+        PROVIDERS.BEDROCK,
+
+        PROVIDERS.VERTEX,
+
+        PROVIDERS.SARVAM,
+
+        PROVIDERS.BHARATROUTER,
+
+        PROVIDERS.INDIEROUTER
+
+      ];
+
+  }
+
+
+  if (
+    capability === "multimodal" ||
+    capability === "vision"
+  ) {
+
+    ordered =
+      [
+
+        PROVIDERS.VERTEX,
+
+        PROVIDERS.BEDROCK,
+
+        PROVIDERS.BHARATROUTER,
+
+        PROVIDERS.INDIEROUTER,
+
+        PROVIDERS.SARVAM
+
+      ];
+
+  }
+
+
+  return ordered;
 
 }
 
@@ -549,6 +981,8 @@ function getErrorStatus(
 
     error?.response?.status,
 
+    error?.response?.statusCode,
+
     error?.error?.status,
 
     error?.error?.code
@@ -636,6 +1070,8 @@ function getErrorMessage(
 
     error?.response?.data?.message ||
 
+    error?.response?.data?.error ||
+
     ""
 
   )
@@ -671,18 +1107,24 @@ function classifyProviderError(
 
 
   /*
-   * =======================================================
-   * TIMEOUT
-   * =======================================================
+   * TIMEOUT / NETWORK
    */
 
   if (
     error?.code ===
       "AI_PROVIDER_TIMEOUT" ||
+
     error?.code ===
       "ETIMEDOUT" ||
+
     error?.code ===
-      "ECONNRESET"
+      "ECONNRESET" ||
+
+    error?.code ===
+      "ECONNREFUSED" ||
+
+    error?.code ===
+      "EAI_AGAIN"
   ) {
 
     return {
@@ -702,13 +1144,7 @@ function classifyProviderError(
 
 
   /*
-   * =======================================================
    * QUOTA / BALANCE / RATE LIMIT
-   * =======================================================
-   *
-   * These are not blindly retried.
-   *
-   * The next provider gets a chance.
    */
 
   const quotaPhrases = [
@@ -731,13 +1167,22 @@ function classifyProviderError(
 
     "usage limit",
 
-    "exceeded your current quota"
+    "exceeded your current quota",
+
+    "payment required",
+
+    "credits exhausted",
+
+    "credits exceeded",
+
+    "capacity exceeded"
 
   ];
 
 
   if (
     status === 429 ||
+    status === 402 ||
     quotaPhrases.some(
       (phrase) =>
         message.includes(
@@ -763,9 +1208,7 @@ function classifyProviderError(
 
 
   /*
-   * =======================================================
-   * AUTHENTICATION
-   * =======================================================
+   * AUTHENTICATION / PERMISSION
    */
 
   if (
@@ -775,19 +1218,31 @@ function classifyProviderError(
     ].includes(
       status
     ) ||
+
     [
       "UNAUTHORIZED",
       "AUTHENTICATION_ERROR",
       "PERMISSION_DENIED",
-      "INVALID_API_KEY"
+      "INVALID_API_KEY",
+      "INVALID_CREDENTIALS"
     ].includes(
       code
     ) ||
+
     message.includes(
       "invalid api key"
     ) ||
+
     message.includes(
       "authentication"
+    ) ||
+
+    message.includes(
+      "unauthorized"
+    ) ||
+
+    message.includes(
+      "permission denied"
     )
   ) {
 
@@ -808,9 +1263,7 @@ function classifyProviderError(
 
 
   /*
-   * =======================================================
    * CONFIGURATION
-   * =======================================================
    */
 
   if (
@@ -835,9 +1288,7 @@ function classifyProviderError(
 
 
   /*
-   * =======================================================
    * INVALID REQUEST
-   * =======================================================
    */
 
   if (
@@ -862,9 +1313,7 @@ function classifyProviderError(
 
 
   /*
-   * =======================================================
    * TEMPORARY SERVER FAILURE
-   * =======================================================
    */
 
   if (
@@ -917,7 +1366,11 @@ function classifyProviderError(
 
     "deadline exceeded",
 
-    "server error"
+    "server error",
+
+    "network error",
+
+    "connection reset"
 
   ];
 
@@ -948,12 +1401,7 @@ function classifyProviderError(
 
 
   /*
-   * =======================================================
-   * UNKNOWN PROVIDER FAILURE
-   * =======================================================
-   *
-   * Do not endlessly retry unknown failures.
-   * Give the fallback provider a chance.
+   * UNKNOWN FAILURE
    */
 
   return {
@@ -1139,7 +1587,7 @@ function normalizeMessages(
           role,
 
           content:
-            message.content
+            message.content.trim()
 
         };
 
@@ -1160,13 +1608,6 @@ function buildMessages(
   let messages = [];
 
 
-  /*
-   * Existing OpenAI-style messages.
-   *
-   * This format is intentionally kept because it makes
-   * migration easier for existing ZyrionOS agents.
-   */
-
   if (
     Array.isArray(
       options.messages
@@ -1181,13 +1622,10 @@ function buildMessages(
   }
 
 
-  /*
-   * Plain prompt.
-   */
-
   if (
     messages.length === 0 &&
-    typeof options.prompt === "string" &&
+    typeof options.prompt ===
+      "string" &&
     options.prompt.trim()
   ) {
 
@@ -1208,13 +1646,10 @@ function buildMessages(
   }
 
 
-  /*
-   * Contents compatibility.
-   */
-
   if (
     messages.length === 0 &&
-    typeof options.contents === "string" &&
+    typeof options.contents ===
+      "string" &&
     options.contents.trim()
   ) {
 
@@ -1234,10 +1669,6 @@ function buildMessages(
 
   }
 
-
-  /*
-   * System instruction.
-   */
 
   if (
     typeof options.systemInstruction ===
@@ -1323,7 +1754,7 @@ function validateMessages(
 
 
 /* =========================================================
-   THINKING / REASONING EFFORT
+   REASONING NORMALIZATION
 ========================================================= */
 
 function normalizeReasoningEffort(
@@ -1342,6 +1773,7 @@ function normalizeReasoningEffort(
   if (
     [
       "low",
+      "medium",
       "high",
       "max"
     ].includes(
@@ -1354,45 +1786,309 @@ function normalizeReasoningEffort(
   }
 
 
-  /*
-   * Backwards compatibility:
-   * "medium" previously existed in the Gemini service.
-   *
-   * DeepSeek's current V4 reasoning levels are
-   * low / high / max.
-   */
-
-  if (
-    normalized ===
-    "medium"
-  ) {
-
-    return "high";
-
-  }
-
-
   return "high";
 
 }
 
 
 /* =========================================================
-   DEEPSEEK GENERATION
+   HTTP JSON REQUEST
 ========================================================= */
 
-async function generateWithDeepSeek(
+async function fetchJSON(
+  url,
+  options = {},
+  provider,
+  model
+) {
+
+  const controller =
+    new AbortController();
+
+
+  const timeout =
+    setTimeout(
+      () => {
+
+        controller.abort();
+
+      },
+      AI_PROVIDER_TIMEOUT_MS
+    );
+
+
+  try {
+
+    const response =
+      await fetch(
+        url,
+        {
+
+          ...options,
+
+          signal:
+            controller.signal
+
+        }
+      );
+
+
+    const rawText =
+      await response.text();
+
+
+    let data =
+      null;
+
+
+    try {
+
+      data =
+        rawText
+          ? JSON.parse(
+              rawText
+            )
+          : null;
+
+    }
+
+    catch (
+      error
+    ) {
+
+      data =
+        null;
+
+    }
+
+
+    if (
+      !response.ok
+    ) {
+
+      const error =
+        new Error(
+
+          data?.error?.message ||
+
+          data?.message ||
+
+          rawText ||
+
+          `${provider} returned HTTP ${response.status}`
+
+        );
+
+
+      error.status =
+        response.status;
+
+
+      error.provider =
+        provider;
+
+
+      error.model =
+        model;
+
+
+      error.response =
+        {
+
+          status:
+            response.status,
+
+          data,
+
+          headers:
+            response.headers
+
+        };
+
+
+      throw error;
+
+    }
+
+
+    return {
+
+      data,
+
+      status:
+        response.status,
+
+      headers:
+        response.headers
+
+    };
+
+  }
+
+  catch (
+    error
+  ) {
+
+    if (
+      error?.name ===
+      "AbortError"
+    ) {
+
+      const timeoutError =
+        new Error(
+          `${provider} AI provider timed out after ${AI_PROVIDER_TIMEOUT_MS}ms`
+        );
+
+
+      timeoutError.code =
+        "AI_PROVIDER_TIMEOUT";
+
+
+      timeoutError.provider =
+        provider;
+
+
+      timeoutError.model =
+        model;
+
+
+      throw timeoutError;
+
+    }
+
+
+    throw error;
+
+  }
+
+  finally {
+
+    clearTimeout(
+      timeout
+    );
+
+  }
+
+}
+
+
+/* =========================================================
+   EXTRACT OPENAI-COMPATIBLE TEXT
+========================================================= */
+
+function extractChatCompletionText(
+  data
+) {
+
+  const content =
+    data?.choices?.[0]?.message?.content;
+
+
+  if (
+    typeof content ===
+    "string"
+  ) {
+
+    return content.trim();
+
+  }
+
+
+  if (
+    Array.isArray(
+      content
+    )
+  ) {
+
+    return content
+
+      .map(
+        (item) =>
+          typeof item ===
+            "string"
+            ? item
+            : item?.text || ""
+      )
+
+      .join(
+        ""
+      )
+
+      .trim();
+
+  }
+
+
+  return "";
+
+}
+
+
+/* =========================================================
+   GENERIC OPENAI-COMPATIBLE PROVIDER
+========================================================= */
+
+async function generateWithOpenAICompatibleProvider(
+  provider,
   options = {}
 ) {
 
+  const config = {
+
+    [PROVIDERS.SARVAM]: {
+
+      apiKey:
+        env.SARVAM_API_KEY,
+
+      baseURL:
+        SARVAM_BASE_URL,
+
+      model:
+        SARVAM_MODEL
+
+    },
+
+
+    [PROVIDERS.BHARATROUTER]: {
+
+      apiKey:
+        env.BHARATROUTER_API_KEY,
+
+      baseURL:
+        BHARATROUTER_BASE_URL,
+
+      model:
+        BHARATROUTER_MODEL
+
+    },
+
+
+    [PROVIDERS.INDIEROUTER]: {
+
+      apiKey:
+        env.INDIEROUTER_API_KEY,
+
+      baseURL:
+        INDIEROUTER_BASE_URL,
+
+      model:
+        INDIEROUTER_MODEL
+
+    }
+
+  }[provider];
+
+
   if (
-    !deepseekClient ||
-    !env.DEEPSEEK_API_KEY
+    !config ||
+    !config.apiKey ||
+    !config.baseURL ||
+    !config.model
   ) {
 
     const error =
       new Error(
-        "DeepSeek provider is not configured"
+        `${provider} provider is not configured`
       );
 
 
@@ -1401,7 +2097,7 @@ async function generateWithDeepSeek(
 
 
     error.provider =
-      "deepseek";
+      provider;
 
 
     throw error;
@@ -1432,7 +2128,7 @@ async function generateWithDeepSeek(
 
 
     error.provider =
-      "deepseek";
+      provider;
 
 
     throw error;
@@ -1444,14 +2140,14 @@ async function generateWithDeepSeek(
     options.model &&
     String(
       options.model
-    ).startsWith(
-      "deepseek-"
-    )
-      ? options.model
-      : PRIMARY_DEEPSEEK_MODEL;
+    ).trim()
+      ? String(
+          options.model
+        ).trim()
+      : config.model;
 
 
-  const request = {
+  const body = {
 
     model,
 
@@ -1463,17 +2159,13 @@ async function generateWithDeepSeek(
   };
 
 
-  /*
-   * Maximum output tokens.
-   */
-
   if (
     Number.isFinite(
       options.maxTokens
     )
   ) {
 
-    request.max_tokens =
+    body.max_tokens =
       Math.max(
         1,
         Math.floor(
@@ -1484,15 +2176,25 @@ async function generateWithDeepSeek(
   }
 
 
-  /*
-   * JSON output.
-   */
+  if (
+    Number.isFinite(
+      options.temperature
+    )
+  ) {
+
+    body.temperature =
+      Number(
+        options.temperature
+      );
+
+  }
+
 
   if (
     options.json === true
   ) {
 
-    request.response_format = {
+    body.response_format = {
 
       type:
         "json_object"
@@ -1503,143 +2205,71 @@ async function generateWithDeepSeek(
 
 
   /*
-   * Current DeepSeek thinking configuration.
+   * Keep reasoning provider-neutral.
    *
-   * "low" / "high" / "max".
+   * Provider-specific unsupported parameters are not
+   * blindly injected into gateway requests.
    */
 
+  const response =
+    await fetchJSON(
+
+      `${config.baseURL.replace(/\/+$/, "")}/v1/chat/completions`,
+
+      {
+
+        method:
+          "POST",
+
+        headers: {
+
+          "Content-Type":
+            "application/json",
+
+          Authorization:
+            `Bearer ${config.apiKey}`
+
+        },
+
+        body:
+          JSON.stringify(
+            body
+          )
+
+      },
+
+      provider,
+
+      model
+
+    );
+
+
+  const text =
+    extractChatCompletionText(
+      response.data
+    );
+
+
   if (
-    options.thinking !== false
+    !text
   ) {
 
-    request.thinking = {
-
-      type:
-        "enabled"
-
-    };
-
-
-    request.reasoning_effort =
-      normalizeReasoningEffort(
-        options.thinkingLevel ||
-        options.reasoningEffort
-      );
-
-  }
-
-
-  /*
-   * Optional temperature.
-   *
-   * Only pass it when explicitly supplied.
-   */
-
-  if (
-    Number.isFinite(
-      options.temperature
-    )
-  ) {
-
-    request.temperature =
-      Number(
-        options.temperature
-      );
-
-  }
-
-
-  try {
-
-    const response =
-      await withTimeout(
-
-        deepseekClient.chat.completions.create(
-          request
-        ),
-
-        AI_PROVIDER_TIMEOUT_MS,
-
-        "deepseek",
-
-        model
-
+    const error =
+      new Error(
+        `${provider} returned an empty response`
       );
 
 
-    const choice =
-      response?.choices?.[0];
+    error.code =
+      "AI_EMPTY_RESPONSE";
 
-
-    const text =
-      typeof choice?.message?.content ===
-        "string"
-        ? choice.message.content
-        : "";
-
-
-    if (
-      !text.trim()
-    ) {
-
-      const error =
-        new Error(
-          "DeepSeek returned an empty response"
-        );
-
-
-      error.code =
-        "AI_EMPTY_RESPONSE";
-
-
-      error.provider =
-        "deepseek";
-
-
-      error.model =
-        model;
-
-
-      throw error;
-
-    }
-
-
-    return {
-
-      success:
-        true,
-
-      provider:
-        "deepseek",
-
-      model,
-
-      text:
-        text.trim(),
-
-      raw:
-        response,
-
-      usage:
-        response?.usage ||
-        null
-
-    };
-
-  }
-
-  catch (
-    error
-  ) {
 
     error.provider =
-      error.provider ||
-      "deepseek";
+      provider;
 
 
     error.model =
-      error.model ||
       model;
 
 
@@ -1647,25 +2277,89 @@ async function generateWithDeepSeek(
 
   }
 
+
+  return {
+
+    success:
+      true,
+
+    provider,
+
+    model,
+
+    text,
+
+    raw:
+      response.data,
+
+    usage:
+      response.data?.usage ||
+      null
+
+  };
+
 }
 
 
 /* =========================================================
-   CLAUDE GENERATION
+   BEDROCK MESSAGE CONVERSION
 ========================================================= */
 
-async function generateWithClaude(
+function buildBedrockMessages(
+  messages
+) {
+
+  return messages
+
+    .filter(
+      (message) =>
+        message.role !==
+        "system"
+    )
+
+    .map(
+      (message) => ({
+
+        role:
+          message.role ===
+          "assistant"
+            ? "assistant"
+            : "user",
+
+        content: [
+
+          {
+
+            text:
+              message.content
+
+          }
+
+        ]
+
+      })
+    );
+
+}
+
+
+/* =========================================================
+   BEDROCK GENERATION
+========================================================= */
+
+async function generateWithBedrock(
   options = {}
 ) {
 
   if (
-    !claudeClient ||
-    !env.ANTHROPIC_API_KEY
+    !bedrockClient ||
+    !ConverseCommand ||
+    !BEDROCK_MODEL
   ) {
 
     const error =
       new Error(
-        "Claude provider is not configured"
+        "Amazon Bedrock provider is not configured"
       );
 
 
@@ -1674,7 +2368,7 @@ async function generateWithClaude(
 
 
     error.provider =
-      "claude";
+      PROVIDERS.BEDROCK;
 
 
     throw error;
@@ -1705,7 +2399,7 @@ async function generateWithClaude(
 
 
     error.provider =
-      "claude";
+      PROVIDERS.BEDROCK;
 
 
     throw error;
@@ -1717,17 +2411,12 @@ async function generateWithClaude(
     options.model &&
     String(
       options.model
-    ).startsWith(
-      "claude-"
-    )
-      ? options.model
-      : PRIMARY_CLAUDE_MODEL;
+    ).trim()
+      ? String(
+          options.model
+        ).trim()
+      : BEDROCK_MODEL;
 
-
-  /*
-   * Anthropic Messages API keeps system
-   * outside the messages array.
-   */
 
   const systemMessages =
     messages.filter(
@@ -1738,37 +2427,19 @@ async function generateWithClaude(
 
 
   const conversationMessages =
-    messages
-
-      .filter(
-        (message) =>
-          message.role !==
-          "system"
-      )
-
-      .map(
-        (message) => ({
-
-          role:
-            message.role ===
-            "assistant"
-              ? "assistant"
-              : "user",
-
-          content:
-            message.content
-
-        })
-      );
+    buildBedrockMessages(
+      messages
+    );
 
 
   if (
-    conversationMessages.length === 0
+    conversationMessages.length ===
+    0
   ) {
 
     const error =
       new Error(
-        "Claude requires at least one user or assistant message"
+        "Bedrock requires at least one user or assistant message"
       );
 
 
@@ -1777,7 +2448,7 @@ async function generateWithClaude(
 
 
     error.provider =
-      "claude";
+      PROVIDERS.BEDROCK;
 
 
     throw error;
@@ -1787,19 +2458,8 @@ async function generateWithClaude(
 
   const request = {
 
-    model,
-
-    max_tokens:
-      Number.isFinite(
-        options.maxTokens
-      )
-        ? Math.max(
-            1,
-            Math.floor(
-              options.maxTokens
-            )
-          )
-        : 8192,
+    modelId:
+      model,
 
     messages:
       conversationMessages
@@ -1812,56 +2472,54 @@ async function generateWithClaude(
   ) {
 
     request.system =
-      systemMessages
-        .map(
-          (message) =>
+      systemMessages.map(
+        (message) => ({
+
+          text:
             message.content
-        )
-        .join(
-          "\n\n"
-        );
+
+        })
+      );
 
   }
 
 
-  /*
-   * JSON output is handled through prompting
-   * plus parser validation below.
-   *
-   * Do not pass unsupported provider-specific
-   * parameters blindly.
-   */
+  const maxTokens =
+    Number.isFinite(
+      options.maxTokens
+    )
+      ? Math.max(
+          1,
+          Math.floor(
+            options.maxTokens
+          )
+        )
+      : 8192;
 
-  /*
-   * Extended thinking can be enabled when requested.
-   *
-   * Keep it opt-in for Claude because thinking budgets
-   * affect output-token requirements.
-   */
+
+  const inferenceConfig = {
+
+    maxTokens
+
+  };
+
 
   if (
-    options.thinking === true &&
     Number.isFinite(
-      options.thinkingBudget
+      options.temperature
     )
   ) {
 
-    request.thinking = {
-
-      type:
-        "enabled",
-
-      budget_tokens:
-        Math.max(
-          1024,
-          Math.floor(
-            options.thinkingBudget
-          )
-        )
-
-    };
+    inferenceConfig.temperature =
+      Number(
+        options.temperature
+      );
 
   }
+
+
+  request.inferenceConfig =
+    inferenceConfig;
 
 
   try {
@@ -1869,29 +2527,35 @@ async function generateWithClaude(
     const response =
       await withTimeout(
 
-        claudeClient.messages.create(
-          request
+        bedrockClient.send(
+          new ConverseCommand(
+            request
+          )
         ),
 
         AI_PROVIDER_TIMEOUT_MS,
 
-        "claude",
+        PROVIDERS.BEDROCK,
 
         model
 
       );
 
 
+    const output =
+      response?.output?.message;
+
+
     const text =
       Array.isArray(
-        response?.content
+        output?.content
       )
-        ? response.content
+        ? output.content
 
             .filter(
               (block) =>
-                block?.type ===
-                "text"
+                typeof block?.text ===
+                "string"
             )
 
             .map(
@@ -1911,7 +2575,7 @@ async function generateWithClaude(
 
       const error =
         new Error(
-          "Claude returned an empty response"
+          "Amazon Bedrock returned an empty response"
         );
 
 
@@ -1920,7 +2584,7 @@ async function generateWithClaude(
 
 
       error.provider =
-        "claude";
+        PROVIDERS.BEDROCK;
 
 
       error.model =
@@ -1938,7 +2602,7 @@ async function generateWithClaude(
         true,
 
       provider:
-        "claude",
+        PROVIDERS.BEDROCK,
 
       model,
 
@@ -1962,7 +2626,352 @@ async function generateWithClaude(
 
     error.provider =
       error.provider ||
-      "claude";
+      PROVIDERS.BEDROCK;
+
+
+    error.model =
+      error.model ||
+      model;
+
+
+    throw error;
+
+  }
+
+}
+
+
+/* =========================================================
+   VERTEX MESSAGE CONVERSION
+========================================================= */
+
+function buildVertexContents(
+  messages
+) {
+
+  return messages
+
+    .filter(
+      (message) =>
+        message.role !==
+        "system"
+    )
+
+    .map(
+      (message) => ({
+
+        role:
+          message.role ===
+          "assistant"
+            ? "model"
+            : "user",
+
+        parts: [
+
+          {
+
+            text:
+              message.content
+
+          }
+
+        ]
+
+      })
+    );
+
+}
+
+
+/* =========================================================
+   VERTEX GENERATION
+========================================================= */
+
+async function generateWithVertex(
+  options = {}
+) {
+
+  if (
+    !vertexClient ||
+    !VERTEX_PROJECT_ID
+  ) {
+
+    const error =
+      new Error(
+        "Google Vertex AI provider is not configured"
+      );
+
+
+    error.code =
+      "AI_PROVIDER_NOT_CONFIGURED";
+
+
+    error.provider =
+      PROVIDERS.VERTEX;
+
+
+    throw error;
+
+  }
+
+
+  const messages =
+    buildMessages(
+      options
+    );
+
+
+  if (
+    !validateMessages(
+      messages
+    )
+  ) {
+
+    const error =
+      new Error(
+        "AI messages are required"
+      );
+
+
+    error.code =
+      "AI_INVALID_REQUEST";
+
+
+    error.provider =
+      PROVIDERS.VERTEX;
+
+
+    throw error;
+
+  }
+
+
+  const model =
+    options.model &&
+    String(
+      options.model
+    ).trim()
+      ? String(
+          options.model
+        ).trim()
+      : VERTEX_MODEL;
+
+
+  const systemMessages =
+    messages.filter(
+      (message) =>
+        message.role ===
+        "system"
+    );
+
+
+  const contents =
+    buildVertexContents(
+      messages
+    );
+
+
+  if (
+    contents.length ===
+    0
+  ) {
+
+    const error =
+      new Error(
+        "Vertex AI requires at least one user or assistant message"
+      );
+
+
+    error.code =
+      "AI_INVALID_REQUEST";
+
+
+    error.provider =
+      PROVIDERS.VERTEX;
+
+
+    throw error;
+
+  }
+
+
+  try {
+
+    const generativeModel =
+      vertexClient.getGenerativeModel({
+
+        model,
+
+        systemInstruction:
+          systemMessages.length > 0
+            ? {
+
+                parts:
+                  systemMessages.map(
+                    (message) => ({
+
+                      text:
+                        message.content
+
+                    })
+                  )
+
+              }
+            : undefined
+
+      });
+
+
+    const generationConfig = {
+
+      maxOutputTokens:
+        Number.isFinite(
+          options.maxTokens
+        )
+          ? Math.max(
+              1,
+              Math.floor(
+                options.maxTokens
+              )
+            )
+          : 8192
+
+    };
+
+
+    if (
+      Number.isFinite(
+        options.temperature
+      )
+    ) {
+
+      generationConfig.temperature =
+        Number(
+          options.temperature
+        );
+
+    }
+
+
+    if (
+      options.json === true
+    ) {
+
+      generationConfig.responseMimeType =
+        "application/json";
+
+    }
+
+
+    const response =
+      await withTimeout(
+
+        generativeModel.generateContent({
+
+          contents,
+
+          generationConfig
+
+        }),
+
+        AI_PROVIDER_TIMEOUT_MS,
+
+        PROVIDERS.VERTEX,
+
+        model
+
+      );
+
+
+    const candidates =
+      response?.response?.candidates ||
+      [];
+
+
+    const text =
+      candidates
+
+        .flatMap(
+          (candidate) =>
+            candidate?.content?.parts ||
+            []
+        )
+
+        .filter(
+          (part) =>
+            typeof part?.text ===
+            "string"
+        )
+
+        .map(
+          (part) =>
+            part.text
+        )
+
+        .join(
+          ""
+        );
+
+
+    if (
+      !text.trim()
+    ) {
+
+      const error =
+        new Error(
+          "Google Vertex AI returned an empty response"
+        );
+
+
+      error.code =
+        "AI_EMPTY_RESPONSE";
+
+
+      error.provider =
+        PROVIDERS.VERTEX;
+
+
+      error.model =
+        model;
+
+
+      throw error;
+
+    }
+
+
+    return {
+
+      success:
+        true,
+
+      provider:
+        PROVIDERS.VERTEX,
+
+      model,
+
+      text:
+        text.trim(),
+
+      raw:
+        response?.response ||
+        response,
+
+      usage:
+        response?.response?.usageMetadata ||
+        null
+
+    };
+
+  }
+
+  catch (
+    error
+  ) {
+
+    error.provider =
+      error.provider ||
+      PROVIDERS.VERTEX;
 
 
     error.model =
@@ -1986,45 +2995,69 @@ async function generateWithProvider(
   options
 ) {
 
-  if (
-    provider ===
-    "deepseek"
+  switch (
+    provider
   ) {
 
-    return generateWithDeepSeek(
-      options
-    );
+    case PROVIDERS.BEDROCK:
+
+      return generateWithBedrock(
+        options
+      );
+
+
+    case PROVIDERS.SARVAM:
+
+      return generateWithOpenAICompatibleProvider(
+        PROVIDERS.SARVAM,
+        options
+      );
+
+
+    case PROVIDERS.BHARATROUTER:
+
+      return generateWithOpenAICompatibleProvider(
+        PROVIDERS.BHARATROUTER,
+        options
+      );
+
+
+    case PROVIDERS.INDIEROUTER:
+
+      return generateWithOpenAICompatibleProvider(
+        PROVIDERS.INDIEROUTER,
+        options
+      );
+
+
+    case PROVIDERS.VERTEX:
+
+      return generateWithVertex(
+        options
+      );
+
+
+    default: {
+
+      const error =
+        new Error(
+          `Unsupported AI provider: ${provider}`
+        );
+
+
+      error.code =
+        "AI_UNSUPPORTED_PROVIDER";
+
+
+      error.provider =
+        provider;
+
+
+      throw error;
+
+    }
 
   }
-
-
-  if (
-    provider ===
-    "claude"
-  ) {
-
-    return generateWithClaude(
-      options
-    );
-
-  }
-
-
-  const error =
-    new Error(
-      `Unsupported AI provider: ${provider}`
-    );
-
-
-  error.code =
-    "AI_UNSUPPORTED_PROVIDER";
-
-
-  error.provider =
-    provider;
-
-
-  throw error;
 
 }
 
@@ -2050,12 +3083,13 @@ async function generateText(
 
 
   if (
-    configuredProviders.length === 0
+    configuredProviders.length ===
+    0
   ) {
 
     const error =
       new Error(
-        "No AI provider is configured. Configure DEEPSEEK_API_KEY and/or ANTHROPIC_API_KEY."
+        "No AI provider is configured. Configure at least one of Bedrock, Sarvam, BharatRouter, IndieRouter, or Vertex AI."
       );
 
 
@@ -2120,28 +3154,10 @@ async function generateText(
 
 
         const model =
-          provider ===
-          "deepseek"
-            ? (
-                options.model &&
-                String(
-                  options.model
-                ).startsWith(
-                  "deepseek-"
-                )
-                  ? options.model
-                  : PRIMARY_DEEPSEEK_MODEL
-              )
-            : (
-                options.model &&
-                String(
-                  options.model
-                ).startsWith(
-                  "claude-"
-                )
-                  ? options.model
-                  : PRIMARY_CLAUDE_MODEL
-              );
+          getProviderModel(
+            provider,
+            options
+          );
 
 
         logger.info(
@@ -2225,9 +3241,10 @@ async function generateText(
 
         /*
          * Invalid request:
-         * do not switch provider.
          *
-         * The request itself is the problem.
+         * The request itself is invalid.
+         * Switching providers cannot magically
+         * turn malformed input into valid input.
          */
 
         if (
@@ -2241,7 +3258,7 @@ async function generateText(
 
 
         /*
-         * Retry only genuine temporary failures.
+         * Retry only temporary failures.
          */
 
         if (
@@ -2260,7 +3277,7 @@ async function generateText(
         /*
          * Provider exhausted.
          *
-         * Move to next provider.
+         * Continue with next configured provider.
          */
 
         break;
@@ -2272,11 +3289,9 @@ async function generateText(
   }
 
 
-  /*
-   * =======================================================
-   * ALL PROVIDERS FAILED
-   * =======================================================
-   */
+  /* =======================================================
+     ALL PROVIDERS FAILED
+  ======================================================= */
 
   const finalError =
     new Error(
@@ -2291,13 +3306,6 @@ async function generateText(
   finalError.provider =
     null;
 
-
-  /*
-   * Do not expose raw SDK errors as the main
-   * application message.
-   *
-   * Keep structured diagnostics for logging/debugging.
-   */
 
   finalError.providers =
     providerErrors.map(
@@ -2364,6 +3372,67 @@ async function generateText(
 
 
   throw finalError;
+
+}
+
+
+/* =========================================================
+   PROVIDER MODEL
+========================================================= */
+
+function getProviderModel(
+  provider,
+  options = {}
+) {
+
+  if (
+    options.model &&
+    String(
+      options.model
+    ).trim()
+  ) {
+
+    return String(
+      options.model
+    ).trim();
+
+  }
+
+
+  switch (
+    provider
+  ) {
+
+    case PROVIDERS.BEDROCK:
+
+      return BEDROCK_MODEL;
+
+
+    case PROVIDERS.SARVAM:
+
+      return SARVAM_MODEL;
+
+
+    case PROVIDERS.BHARATROUTER:
+
+      return BHARATROUTER_MODEL;
+
+
+    case PROVIDERS.INDIEROUTER:
+
+      return INDIEROUTER_MODEL;
+
+
+    case PROVIDERS.VERTEX:
+
+      return VERTEX_MODEL;
+
+
+    default:
+
+      return "";
+
+  }
 
 }
 
@@ -2484,115 +3553,144 @@ async function generateJSON(
 
 function getProviderStatus() {
 
-  const deepseekConfigured =
-    isProviderAvailable(
-      "deepseek"
-    );
+  const status = {};
 
 
-  const claudeConfigured =
-    isProviderAvailable(
-      "claude"
-    );
+  for (
+    const provider of
+    DEFAULT_PROVIDER_ORDER
+  ) {
+
+    const configured =
+      isProviderAvailable(
+        provider
+      );
+
+
+    status[
+      provider
+    ] = {
+
+      configured,
+
+      enabled:
+        true,
+
+      available:
+        configured,
+
+      primary:
+        false,
+
+      fallback:
+        true,
+
+      model:
+        getProviderModel(
+          provider
+        ),
+
+      capabilities:
+        PROVIDER_CAPABILITIES[
+          provider
+        ] || {}
+
+    };
+
+
+    if (
+      provider ===
+      PROVIDERS.BEDROCK
+    ) {
+
+      status[
+        provider
+      ].region =
+        AWS_REGION;
+
+    }
+
+
+    if (
+      provider ===
+      PROVIDERS.SARVAM
+    ) {
+
+      status[
+        provider
+      ].baseURL =
+        SARVAM_BASE_URL;
+
+    }
+
+
+    if (
+      provider ===
+      PROVIDERS.BHARATROUTER
+    ) {
+
+      status[
+        provider
+      ].baseURL =
+        BHARATROUTER_BASE_URL;
+
+    }
+
+
+    if (
+      provider ===
+      PROVIDERS.INDIEROUTER
+    ) {
+
+      status[
+        provider
+      ].baseURL =
+        INDIEROUTER_BASE_URL;
+
+    }
+
+
+    if (
+      provider ===
+      PROVIDERS.VERTEX
+    ) {
+
+      status[
+        provider
+      ].projectConfigured =
+        Boolean(
+          VERTEX_PROJECT_ID
+        );
+
+      status[
+        provider
+      ].location =
+        VERTEX_LOCATION;
+
+    }
+
+  }
 
 
   return {
 
     mode:
-      "deepseek-primary-claude-fallback",
+      "multi-provider-role-based-routing",
 
     primary:
-      PRIMARY_PROVIDER,
+      null,
 
     fallback:
-      FALLBACK_PROVIDER,
+      null,
 
-    providers: {
+    providers:
+      status,
 
-      deepseek: {
+    order:
+      DEFAULT_PROVIDER_ORDER,
 
-        configured:
-          deepseekConfigured,
-
-        enabled:
-          true,
-
-        primary:
-          true,
-
-        model:
-          PRIMARY_DEEPSEEK_MODEL,
-
-        baseURL:
-          env.DEEPSEEK_BASE_URL ||
-          "https://api.deepseek.com"
-
-      },
-
-      claude: {
-
-        configured:
-          claudeConfigured,
-
-        enabled:
-          true,
-
-        primary:
-          false,
-
-        fallback:
-          true,
-
-        model:
-          PRIMARY_CLAUDE_MODEL
-
-      },
-
-      /*
-       * Gemini intentionally appears only as
-       * a disabled legacy status entry.
-       *
-       * No Gemini client, SDK, model or API call
-       * exists in this service.
-       */
-
-      gemini: {
-
-        configured:
-          false,
-
-        enabled:
-          false,
-
-        removed:
-          true
-
-      },
-
-      /*
-       * OpenAI is NOT a production provider.
-       *
-       * The openai package may exist solely because
-       * DeepSeek exposes an OpenAI-compatible API.
-       */
-
-      openai: {
-
-        configured:
-          false,
-
-        enabled:
-          false,
-
-        productionProvider:
-          false,
-
-        reason:
-          "OpenAI is not configured or called as a provider. The OpenAI-compatible SDK is used only as the DeepSeek client."
-
-      }
-
-    },
+    capabilities:
+      PROVIDER_CAPABILITIES,
 
     retry: {
 
@@ -2604,21 +3702,6 @@ function getProviderStatus() {
 
       maxDelayMs:
         AI_MAX_RETRY_DELAY_MS
-
-    },
-
-    fallback: {
-
-      enabled:
-        true,
-
-      order: [
-
-        "deepseek",
-
-        "claude"
-
-      ]
 
     },
 
@@ -2642,6 +3725,10 @@ module.exports = {
 
   getProviderStatus,
 
-  isProviderAvailable
+  isProviderAvailable,
+
+  normalizeProvider,
+
+  getProviderOrder
 
 };
