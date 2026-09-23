@@ -63,6 +63,12 @@
 
    Timeout:
      temporary failure
+
+   TOKEN SAFETY
+   ---------------------------------------------------------
+   Every provider receives a centralized maximum-output-token
+   limit so agents cannot accidentally request more tokens
+   than the provider/model supports.
 ========================================================= */
 
 
@@ -85,12 +91,6 @@ const logger =
 /* =========================================================
    OPTIONAL PROVIDER CLIENTS
 ========================================================= */
-
-/*
- * These are loaded dynamically so the entire application
- * does not crash merely because an optional provider SDK
- * has not been installed/configured yet.
- */
 
 let BedrockRuntimeClient = null;
 let ConverseCommand = null;
@@ -116,11 +116,6 @@ try {
 }
 
 catch (error) {
-
-  /*
-   * Bedrock remains unavailable until its SDK is installed.
-   * Do not crash the whole server.
-   */
 
   BedrockRuntimeClient =
     null;
@@ -192,23 +187,6 @@ const PROVIDERS = {
    DEFAULT PROVIDER ORDER
 ========================================================= */
 
-/*
- * This is NOT a blind "primary/fallback" chain.
- *
- * It is only the default candidate order.
- *
- * The router can later select providers based on:
- *
- * - task type
- * - capability
- * - availability
- * - requested provider
- * - model
- * - failure state
- *
- * No DeepSeek / Claude route exists.
- */
-
 const DEFAULT_PROVIDER_ORDER = [
 
   PROVIDERS.BEDROCK,
@@ -222,6 +200,46 @@ const DEFAULT_PROVIDER_ORDER = [
   PROVIDERS.VERTEX
 
 ];
+
+
+/* =========================================================
+   PROVIDER TOKEN LIMITS
+========================================================= */
+
+/*
+ * IMPORTANT
+ *
+ * These are application safety caps.
+ *
+ * The agent may request a larger value, but the provider
+ * layer will never forward more than the configured cap.
+ *
+ * Bedrock Nova Pro currently needs to stay within its
+ * supported output-token limit.
+ *
+ * We deliberately use 5000 as the ZyrionOS application
+ * safety cap instead of attempting to use the absolute
+ * model boundary.
+ */
+
+const PROVIDER_MAX_OUTPUT_TOKENS = {
+
+  [PROVIDERS.BEDROCK]:
+    5000,
+
+  [PROVIDERS.SARVAM]:
+    5000,
+
+  [PROVIDERS.BHARATROUTER]:
+    5000,
+
+  [PROVIDERS.INDIEROUTER]:
+    5000,
+
+  [PROVIDERS.VERTEX]:
+    5000
+
+};
 
 
 /* =========================================================
@@ -372,21 +390,67 @@ const AI_PROVIDER_TIMEOUT_MS =
 
 
 /* =========================================================
-   CLIENT INITIALIZATION
+   TOKEN NORMALIZATION
 ========================================================= */
 
-
 /*
- * Amazon Bedrock
+ * Central token safety layer.
  *
- * AWS credentials should preferably come from:
+ * Example:
  *
- * - ECS task role
- * - IAM role
- * - AWS credential provider chain
+ * Agent requests:
+ *     20000
  *
- * Do not hard-code AWS credentials here.
+ * Bedrock limit:
+ *     5000
+ *
+ * Actual request:
+ *     5000
  */
+
+function normalizeMaxTokens(
+  provider,
+  requestedTokens
+) {
+
+  const providerLimit =
+    PROVIDER_MAX_OUTPUT_TOKENS[
+      provider
+    ] ||
+    5000;
+
+
+  const numeric =
+    Number(
+      requestedTokens
+    );
+
+
+  if (
+    !Number.isFinite(
+      numeric
+    ) ||
+    numeric <= 0
+  ) {
+
+    return providerLimit;
+
+  }
+
+
+  return Math.min(
+    Math.floor(
+      numeric
+    ),
+    providerLimit
+  );
+
+}
+
+
+/* =========================================================
+   CLIENT INITIALIZATION
+========================================================= */
 
 if (
   BedrockRuntimeClient
@@ -418,9 +482,9 @@ if (
 }
 
 
-/*
- * Google Vertex AI
- */
+/* =========================================================
+   GOOGLE VERTEX AI CLIENT
+========================================================= */
 
 if (
   VertexAI &&
@@ -480,6 +544,9 @@ function normalizeProvider(
     "amazon-bedrock":
       PROVIDERS.BEDROCK,
 
+    amazon:
+      PROVIDERS.BEDROCK,
+
     aws:
       PROVIDERS.BEDROCK,
 
@@ -487,6 +554,9 @@ function normalizeProvider(
       PROVIDERS.SARVAM,
 
     "sarvam-ai":
+      PROVIDERS.SARVAM,
+
+    sarvamai:
       PROVIDERS.SARVAM,
 
     bharatrouter:
@@ -498,6 +568,9 @@ function normalizeProvider(
     "bharat router":
       PROVIDERS.BHARATROUTER,
 
+    bharat:
+      PROVIDERS.BHARATROUTER,
+
     indierouter:
       PROVIDERS.INDIEROUTER,
 
@@ -507,6 +580,9 @@ function normalizeProvider(
     "indie router":
       PROVIDERS.INDIEROUTER,
 
+    indie:
+      PROVIDERS.INDIEROUTER,
+
     vertex:
       PROVIDERS.VERTEX,
 
@@ -514,6 +590,9 @@ function normalizeProvider(
       PROVIDERS.VERTEX,
 
     "google-vertex":
+      PROVIDERS.VERTEX,
+
+    vertexai:
       PROVIDERS.VERTEX
 
   };
@@ -736,15 +815,6 @@ function getProviderOrder(
     );
 
 
-  /*
-   * Explicit provider request.
-   *
-   * Requested provider gets first chance.
-   *
-   * Other available providers remain possible
-   * fallback routes.
-   */
-
   if (
     requested
   ) {
@@ -762,10 +832,6 @@ function getProviderOrder(
 
   }
 
-
-  /*
-   * Capability-aware ordering.
-   */
 
   const capability =
     String(
@@ -1106,9 +1172,9 @@ function classifyProviderError(
     ).toLowerCase();
 
 
-  /*
-   * TIMEOUT / NETWORK
-   */
+  /* -------------------------------------------------------
+     TIMEOUT / NETWORK
+  ------------------------------------------------------- */
 
   if (
     error?.code ===
@@ -1143,9 +1209,9 @@ function classifyProviderError(
   }
 
 
-  /*
-   * QUOTA / BALANCE / RATE LIMIT
-   */
+  /* -------------------------------------------------------
+     QUOTA / BALANCE / RATE LIMIT
+  ------------------------------------------------------- */
 
   const quotaPhrases = [
 
@@ -1157,6 +1223,16 @@ function classifyProviderError(
 
     "too many requests",
 
+    "too many tokens per day",
+
+    "tokens per day",
+
+    "daily token",
+
+    "daily tokens",
+
+    "daily quota",
+
     "insufficient balance",
 
     "insufficient funds",
@@ -1166,6 +1242,8 @@ function classifyProviderError(
     "credit balance",
 
     "usage limit",
+
+    "usage quota",
 
     "exceeded your current quota",
 
@@ -1207,9 +1285,9 @@ function classifyProviderError(
   }
 
 
-  /*
-   * AUTHENTICATION / PERMISSION
-   */
+  /* -------------------------------------------------------
+     AUTHENTICATION / PERMISSION
+  ------------------------------------------------------- */
 
   if (
     [
@@ -1262,9 +1340,9 @@ function classifyProviderError(
   }
 
 
-  /*
-   * CONFIGURATION
-   */
+  /* -------------------------------------------------------
+     CONFIGURATION
+  ------------------------------------------------------- */
 
   if (
     error?.code ===
@@ -1287,9 +1365,9 @@ function classifyProviderError(
   }
 
 
-  /*
-   * INVALID REQUEST
-   */
+  /* -------------------------------------------------------
+     INVALID REQUEST
+  ------------------------------------------------------- */
 
   if (
     status === 400 ||
@@ -1312,9 +1390,9 @@ function classifyProviderError(
   }
 
 
-  /*
-   * TEMPORARY SERVER FAILURE
-   */
+  /* -------------------------------------------------------
+     TEMPORARY SERVER FAILURE
+  ------------------------------------------------------- */
 
   if (
     [
@@ -1362,8 +1440,6 @@ function classifyProviderError(
 
     "high demand",
 
-    "capacity",
-
     "deadline exceeded",
 
     "server error",
@@ -1400,9 +1476,9 @@ function classifyProviderError(
   }
 
 
-  /*
-   * UNKNOWN FAILURE
-   */
+  /* -------------------------------------------------------
+     UNKNOWN FAILURE
+  ------------------------------------------------------- */
 
   return {
 
@@ -1749,44 +1825,6 @@ function validateMessages(
     )
 
   );
-
-}
-
-
-/* =========================================================
-   REASONING NORMALIZATION
-========================================================= */
-
-function normalizeReasoningEffort(
-  value
-) {
-
-  const normalized =
-    String(
-      value ||
-      "high"
-    )
-      .trim()
-      .toLowerCase();
-
-
-  if (
-    [
-      "low",
-      "medium",
-      "high",
-      "max"
-    ].includes(
-      normalized
-    )
-  ) {
-
-    return normalized;
-
-  }
-
-
-  return "high";
 
 }
 
@@ -2159,21 +2197,15 @@ async function generateWithOpenAICompatibleProvider(
   };
 
 
-  if (
-    Number.isFinite(
+  /*
+   * Centralized provider token safety.
+   */
+
+  body.max_tokens =
+    normalizeMaxTokens(
+      provider,
       options.maxTokens
-    )
-  ) {
-
-    body.max_tokens =
-      Math.max(
-        1,
-        Math.floor(
-          options.maxTokens
-        )
-      );
-
-  }
+    );
 
 
   if (
@@ -2203,13 +2235,6 @@ async function generateWithOpenAICompatibleProvider(
 
   }
 
-
-  /*
-   * Keep reasoning provider-neutral.
-   *
-   * Provider-specific unsupported parameters are not
-   * blindly injected into gateway requests.
-   */
 
   const response =
     await fetchJSON(
@@ -2484,17 +2509,35 @@ async function generateWithBedrock(
   }
 
 
-  const maxTokens =
+  /*
+   * CRITICAL FIX
+   *
+   * The agent may request 10000, 15000, 20000 etc.
+   *
+   * We NEVER send that value directly to Bedrock.
+   *
+   * The centralized service clamps it to the safe
+   * provider-specific maximum.
+   */
+
+  const requestedMaxTokens =
     Number.isFinite(
       options.maxTokens
     )
-      ? Math.max(
-          1,
-          Math.floor(
-            options.maxTokens
-          )
-        )
-      : 8192;
+      ? options.maxTokens
+      : 5000;
+
+
+  const maxTokens =
+    normalizeMaxTokens(
+      PROVIDERS.BEDROCK,
+      requestedMaxTokens
+    );
+
+
+  logger.info(
+    `Bedrock token policy: requested=${requestedMaxTokens} | effective=${maxTokens} | providerLimit=${PROVIDER_MAX_OUTPUT_TOKENS[PROVIDERS.BEDROCK]}`
+  );
 
 
   const inferenceConfig = {
@@ -2678,6 +2721,7 @@ function buildVertexContents(
         ]
 
       })
+
     );
 
 }
@@ -2825,16 +2869,10 @@ async function generateWithVertex(
     const generationConfig = {
 
       maxOutputTokens:
-        Number.isFinite(
+        normalizeMaxTokens(
+          PROVIDERS.VERTEX,
           options.maxTokens
         )
-          ? Math.max(
-              1,
-              Math.floor(
-                options.maxTokens
-              )
-            )
-          : 8192
 
     };
 
@@ -3243,8 +3281,6 @@ async function generateText(
          * Invalid request:
          *
          * The request itself is invalid.
-         * Switching providers cannot magically
-         * turn malformed input into valid input.
          */
 
         if (
@@ -3275,9 +3311,10 @@ async function generateText(
 
 
         /*
-         * Provider exhausted.
+         * Quota / authentication / configuration /
+         * exhausted provider:
          *
-         * Continue with next configured provider.
+         * Continue to next configured provider.
          */
 
         break;
@@ -3593,7 +3630,12 @@ function getProviderStatus() {
       capabilities:
         PROVIDER_CAPABILITIES[
           provider
-        ] || {}
+        ] || {},
+
+      maxOutputTokens:
+        PROVIDER_MAX_OUTPUT_TOKENS[
+          provider
+        ] || null
 
     };
 
@@ -3691,6 +3733,13 @@ function getProviderStatus() {
 
     capabilities:
       PROVIDER_CAPABILITIES,
+
+    tokenPolicy: {
+
+      providerMaxOutputTokens:
+        PROVIDER_MAX_OUTPUT_TOKENS
+
+    },
 
     retry: {
 
