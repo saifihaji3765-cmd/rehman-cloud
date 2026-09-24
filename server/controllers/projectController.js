@@ -23,6 +23,16 @@ const deployAgent =
    Members
    Logs
    Versions
+
+   SOURCE OF TRUTH:
+   MongoDB Project document
+
+   IMPORTANT:
+   Generated project files are persisted inside:
+      Project.files[]
+
+   The Workspace must always be able to reload them
+   from the project detail endpoint.
    ========================================================= */
 
 
@@ -146,40 +156,80 @@ function sendError(
 
 
 /* =========================================================
-   NORMALIZE GENERATED FILE
+   FILE HELPERS
    ========================================================= */
 
+/*
+ * Normalize one project file.
+ *
+ * Every persisted file receives a Mongoose subdocument _id
+ * automatically because projectFileSchema now has _id:true.
+ */
+
 function normalizeProjectFile(file = {}) {
+  const rawPath =
+    cleanString(
+      file.path ||
+      file.filePath ||
+      file.filename ||
+      "",
+      500
+    );
+
   const path =
-    cleanString(file.path, 500);
+    rawPath
+      .replace(/\\/g, "/")
+      .replace(/^\/+/, "")
+      .trim();
+
+  const fallbackName =
+    path.split("/").filter(Boolean).pop() ||
+    "file";
 
   const name =
     cleanString(
       file.name ||
-      path.split("/").pop() ||
-      "file",
+      fallbackName,
       200
     );
 
   const content =
-    String(file.content ?? "");
+    typeof file.content === "string"
+      ? file.content
+      : String(
+          file.content ??
+          file.code ??
+          ""
+        );
+
+  const type =
+    cleanString(
+      file.type || "file",
+      100
+    );
+
+  const language =
+    cleanString(
+      file.language ||
+      file.lang ||
+      "",
+      50
+    );
+
+  const hash =
+    cleanString(
+      file.hash || "",
+      128
+    );
 
   return {
     path,
 
     name,
 
-    type:
-      cleanString(
-        file.type || "file",
-        100
-      ),
+    type,
 
-    language:
-      cleanString(
-        file.language || "",
-        50
-      ),
+    language,
 
     content,
 
@@ -189,11 +239,7 @@ function normalizeProjectFile(file = {}) {
         "utf8"
       ),
 
-    hash:
-      cleanString(
-        file.hash || "",
-        200
-      ),
+    hash,
 
     isEntryPoint:
       Boolean(
@@ -203,14 +249,24 @@ function normalizeProjectFile(file = {}) {
     isGenerated:
       file.isGenerated === undefined
         ? true
-        : Boolean(file.isGenerated)
+        : Boolean(
+            file.isGenerated
+          ),
+
+    isDeleted:
+      Boolean(
+        file.isDeleted
+      )
   };
 }
 
 
-/* =========================================================
-   NORMALIZE FILE COLLECTION
-   ========================================================= */
+/*
+ * Normalize an entire file collection.
+ *
+ * Duplicate paths are removed.
+ * The first valid occurrence wins.
+ */
 
 function normalizeProjectFiles(files) {
   if (!Array.isArray(files)) {
@@ -221,34 +277,95 @@ function normalizeProjectFiles(files) {
   const paths = new Set();
 
   for (const rawFile of files) {
+    if (
+      !rawFile ||
+      typeof rawFile !== "object"
+    ) {
+      continue;
+    }
+
     const file =
-      normalizeProjectFile(rawFile);
+      normalizeProjectFile(
+        rawFile
+      );
 
     if (!file.path) {
       continue;
     }
 
-    if (paths.has(file.path)) {
+    const normalizedPath =
+      file.path.toLowerCase();
+
+    if (
+      paths.has(
+        normalizedPath
+      )
+    ) {
       continue;
     }
 
-    paths.add(file.path);
+    paths.add(
+      normalizedPath
+    );
 
-    normalized.push(file);
+    normalized.push(
+      file
+    );
   }
 
   return normalized;
 }
 
 
-/* =========================================================
-   FILE COUNT
-   ========================================================= */
+/*
+ * Replace the complete project file tree.
+ *
+ * This deliberately replaces the existing file collection
+ * with the authoritative generated file set.
+ *
+ * Mongoose generates fresh subdocument IDs for the files.
+ */
 
-function getFileCount(project) {
-  return Array.isArray(project?.files)
-    ? project.files.length
-    : 0;
+function replaceProjectFiles(
+  project,
+  files
+) {
+  const normalizedFiles =
+    normalizeProjectFiles(
+      files
+    );
+
+  project.files =
+    normalizedFiles;
+
+  project.fileCount =
+    normalizedFiles.filter(
+      file =>
+        !file.isDeleted
+    ).length;
+
+  return normalizedFiles;
+}
+
+
+/*
+ * Get only active/non-deleted files.
+ */
+
+function getActiveProjectFiles(
+  project
+) {
+  if (
+    !project ||
+    !Array.isArray(project.files)
+  ) {
+    return [];
+  }
+
+  return project.files.filter(
+    file =>
+      !file.isDeleted
+  );
 }
 
 
@@ -339,13 +456,23 @@ async function createProjectController(
         framework
       );
 
+    if (
+      !Array.isArray(files)
+    ) {
+      return sendError(
+        res,
+        400,
+        "Files must be an array"
+      );
+    }
+
     const normalizedFiles =
       normalizeProjectFiles(
         files
       );
 
     const project =
-      await Project.create({
+      new Project({
         userId,
 
         projectName:
@@ -361,27 +488,59 @@ async function createProjectController(
           normalizedFramework,
 
         status:
-          "draft",
+          normalizedFiles.length
+            ? "building"
+            : "draft",
 
         deploymentStatus:
           "not_deployed",
 
         build: {
           status:
-            "idle"
+            normalizedFiles.length
+              ? "success"
+              : "idle",
+
+          completedAt:
+            normalizedFiles.length
+              ? new Date()
+              : null
         },
 
         files:
           normalizedFiles,
 
         fileCount:
-          normalizedFiles.length,
+          normalizedFiles.filter(
+            file =>
+              !file.isDeleted
+          ).length,
 
         aiGenerated:
           true,
 
         lastActivityAt:
           new Date()
+      });
+
+    await project.save();
+
+    /*
+     * Re-read the saved document.
+     *
+     * This guarantees the response contains the actual
+     * MongoDB representation including generated file IDs.
+     */
+
+    const savedProject =
+      await Project.findOne({
+        _id:
+          project._id,
+
+        userId,
+
+        isArchived:
+          false
       });
 
     await createActivity({
@@ -401,7 +560,8 @@ async function createProjectController(
           normalizedFramework,
 
         fileCount:
-          normalizedFiles.length
+          savedProject?.fileCount ||
+          0
       }
     });
 
@@ -413,7 +573,10 @@ async function createProjectController(
           "Project created",
 
         data:
-          publicProject(project)
+          publicProject(
+            savedProject ||
+            project
+          )
       })
     );
   } catch (error) {
@@ -483,12 +646,37 @@ async function getProjectsController(
         )
       ]);
 
+    /*
+     * Normalize fileCount for older documents.
+     *
+     * Existing projects created before this persistence
+     * hardening may have an inaccurate fileCount.
+     */
+
+    const normalizedProjects =
+      projects.map(
+        project => ({
+          ...project,
+
+          fileCount:
+            Array.isArray(
+              project.files
+            )
+              ? project.files.filter(
+                  file =>
+                    !file.isDeleted
+                ).length
+              : 0
+        })
+      );
+
     return res.json(
       formatResponse({
         success: true,
 
         data: {
-          projects,
+          projects:
+            normalizedProjects,
 
           pagination: {
             page,
@@ -568,12 +756,27 @@ async function getSingleProjectController(
       );
     }
 
+    /*
+     * fileCount is derived from the actual file collection.
+     * This protects the workspace from stale counts.
+     */
+
+    const activeFiles =
+      getActiveProjectFiles(
+        project
+      );
+
+    project.fileCount =
+      activeFiles.length;
+
     return res.json(
       formatResponse({
         success: true,
 
         data:
-          publicProject(project)
+          publicProject(
+            project
+          )
       })
     );
   } catch (error) {
@@ -634,7 +837,10 @@ async function updateProjectStatusController(
       projectName,
       description,
       framework,
-      files
+      files,
+      build,
+      lastBuildPrompt,
+      aiModel
     } = req.body || {};
 
     const allowedStatuses = [
@@ -656,6 +862,20 @@ async function updateProjectStatusController(
         res,
         400,
         "Invalid project status"
+      );
+    }
+
+    const project =
+      await getOwnedProject(
+        projectId,
+        userId
+      );
+
+    if (!project) {
+      return sendError(
+        res,
+        404,
+        "Project not found"
       );
     }
 
@@ -734,6 +954,13 @@ async function updateProjectStatusController(
         );
     }
 
+    /*
+     * AUTHORITATIVE FILE UPDATE
+     *
+     * If files are supplied, the supplied collection becomes
+     * the project's complete persisted file tree.
+     */
+
     if (
       files !== undefined
     ) {
@@ -750,11 +977,63 @@ async function updateProjectStatusController(
           files
         );
 
-      update.files =
+      /*
+       * Directly assign normalized files to the Mongoose
+       * document so Mongoose generates subdocument IDs.
+       */
+
+      project.files =
         normalizedFiles;
 
+      project.fileCount =
+        normalizedFiles.filter(
+          file =>
+            !file.isDeleted
+        ).length;
+
+      update.files =
+        project.files;
+
       update.fileCount =
-        normalizedFiles.length;
+        project.fileCount;
+    }
+
+    if (
+      build !== undefined &&
+      build !== null &&
+      typeof build === "object"
+    ) {
+      update.build = {
+        ...(
+          project.build?.toObject
+            ? project.build.toObject()
+            : project.build || {}
+        ),
+
+        ...build
+      };
+    }
+
+    if (
+      lastBuildPrompt !==
+      undefined
+    ) {
+      update.lastBuildPrompt =
+        cleanString(
+          lastBuildPrompt,
+          10000
+        );
+    }
+
+    if (
+      aiModel !==
+      undefined
+    ) {
+      update.aiModel =
+        cleanString(
+          aiModel,
+          150
+        );
     }
 
     if (
@@ -765,33 +1044,58 @@ async function updateProjectStatusController(
         "deployed";
     }
 
-    const updatedProject =
-      await Project.findOneAndUpdate(
-        {
-          _id:
-            projectId,
+    /*
+     * Save through the actual Mongoose document when files
+     * are involved. This ensures subdocument IDs and hooks
+     * are persisted correctly.
+     */
 
-          userId,
+    let updatedProject;
 
-          isArchived:
-            false
-        },
-
-        {
-          $set:
-            update,
-
-          $inc: {
-            version:
-              1
-          }
-        },
-
-        {
-          new: true,
-          runValidators: true
-        }
+    if (
+      files !== undefined
+    ) {
+      Object.assign(
+        project,
+        update
       );
+
+      project.version =
+        (project.version || 0) + 1;
+
+      await project.save();
+
+      updatedProject =
+        project;
+    } else {
+      updatedProject =
+        await Project.findOneAndUpdate(
+          {
+            _id:
+              projectId,
+
+            userId,
+
+            isArchived:
+              false
+          },
+
+          {
+            $set:
+              update,
+
+            $inc: {
+              version:
+                1
+            }
+          },
+
+          {
+            new: true,
+            runValidators: true
+          }
+        );
+    }
 
     if (!updatedProject) {
       return sendError(
@@ -799,6 +1103,36 @@ async function updateProjectStatusController(
         404,
         "Project not found"
       );
+    }
+
+    /*
+     * Always return a fresh database document.
+     */
+
+    const freshProject =
+      await Project.findOne({
+        _id:
+          projectId,
+
+        userId,
+
+        isArchived:
+          false
+      });
+
+    const persistedFileCount =
+      Array.isArray(
+        freshProject?.files
+      )
+        ? freshProject.files.filter(
+            file =>
+              !file.isDeleted
+          ).length
+        : 0;
+
+    if (freshProject) {
+      freshProject.fileCount =
+        persistedFileCount;
     }
 
     await createActivity({
@@ -810,7 +1144,9 @@ async function updateProjectStatusController(
         "project.updated",
 
       message:
-        "Project updated",
+        files !== undefined
+          ? "Project updated with persisted files"
+          : "Project updated",
 
       metadata: {
         status:
@@ -818,7 +1154,7 @@ async function updateProjectStatusController(
 
         fileCount:
           files !== undefined
-            ? updatedProject.fileCount
+            ? persistedFileCount
             : undefined
       }
     });
@@ -828,10 +1164,13 @@ async function updateProjectStatusController(
         success: true,
 
         message:
-          "Project updated",
+          files !== undefined
+            ? "Project and files updated"
+            : "Project updated",
 
         data:
           publicProject(
+            freshProject ||
             updatedProject
           )
       })
@@ -1028,9 +1367,9 @@ async function deployProjectController(
     }
 
     const files =
-      Array.isArray(project.files)
-        ? project.files
-        : [];
+      getActiveProjectFiles(
+        project
+      );
 
     if (!files.length) {
       return sendError(
@@ -1066,6 +1405,9 @@ async function deployProjectController(
       errorMessage:
         ""
     };
+
+    project.fileCount =
+      files.length;
 
     project.lastActivityAt =
       new Date();
@@ -1389,7 +1731,9 @@ async function getProjectFilesController(
     }
 
     const files =
-      project.files || [];
+      getActiveProjectFiles(
+        project
+      );
 
     return res.json(
       formatResponse({
@@ -1455,6 +1799,18 @@ async function getProjectFileController(
       );
     }
 
+    if (
+      !isValidObjectId(
+        fileId
+      )
+    ) {
+      return sendError(
+        res,
+        400,
+        "Invalid file ID"
+      );
+    }
+
     const project =
       await getOwnedProject(
         projectId,
@@ -1474,7 +1830,10 @@ async function getProjectFileController(
         fileId
       );
 
-    if (!file) {
+    if (
+      !file ||
+      file.isDeleted
+    ) {
       return sendError(
         res,
         404,
@@ -1562,8 +1921,9 @@ async function createProjectFileController(
     const duplicate =
       project.files.some(
         existingFile =>
-          existingFile.path ===
-          file.path
+          !existingFile.isDeleted &&
+          existingFile.path.toLowerCase() ===
+            file.path.toLowerCase()
       );
 
     if (duplicate) {
@@ -1579,7 +1939,9 @@ async function createProjectFileController(
     );
 
     project.fileCount =
-      project.files.length;
+      getActiveProjectFiles(
+        project
+      ).length;
 
     project.version =
       (project.version || 0) + 1;
@@ -1662,6 +2024,18 @@ async function updateProjectFileController(
       );
     }
 
+    if (
+      !isValidObjectId(
+        fileId
+      )
+    ) {
+      return sendError(
+        res,
+        400,
+        "Invalid file ID"
+      );
+    }
+
     const project =
       await getOwnedProject(
         projectId,
@@ -1681,7 +2055,10 @@ async function updateProjectFileController(
         fileId
       );
 
-    if (!file) {
+    if (
+      !file ||
+      file.isDeleted
+    ) {
       return sendError(
         res,
         404,
@@ -1706,7 +2083,9 @@ async function updateProjectFileController(
         cleanString(
           path,
           500
-        );
+        )
+          .replace(/\\/g, "/")
+          .replace(/^\/+/, "");
 
       if (!cleanPath) {
         return sendError(
@@ -1719,10 +2098,11 @@ async function updateProjectFileController(
       const duplicate =
         project.files.some(
           existingFile =>
+            !existingFile.isDeleted &&
             existingFile._id.toString() !==
               file._id.toString() &&
-            existingFile.path ===
-              cleanPath
+            existingFile.path.toLowerCase() ===
+              cleanPath.toLowerCase()
         );
 
       if (duplicate) {
@@ -1786,7 +2166,7 @@ async function updateProjectFileController(
 
       file.size =
         Buffer.byteLength(
-          String(content),
+          file.content,
           "utf8"
         );
     }
@@ -1810,7 +2190,9 @@ async function updateProjectFileController(
     }
 
     project.fileCount =
-      project.files.length;
+      getActiveProjectFiles(
+        project
+      ).length;
 
     project.version =
       (project.version || 0) + 1;
@@ -1890,6 +2272,18 @@ async function deleteProjectFileController(
       );
     }
 
+    if (
+      !isValidObjectId(
+        fileId
+      )
+    ) {
+      return sendError(
+        res,
+        400,
+        "Invalid file ID"
+      );
+    }
+
     const project =
       await getOwnedProject(
         projectId,
@@ -1909,7 +2303,10 @@ async function deleteProjectFileController(
         fileId
       );
 
-    if (!file) {
+    if (
+      !file ||
+      file.isDeleted
+    ) {
       return sendError(
         res,
         404,
@@ -1920,10 +2317,20 @@ async function deleteProjectFileController(
     const path =
       file.path;
 
-    file.deleteOne();
+    /*
+     * Soft-delete instead of physically removing the file.
+     *
+     * This protects project history and makes recovery/versioning
+     * possible.
+     */
+
+    file.isDeleted =
+      true;
 
     project.fileCount =
-      project.files.length;
+      getActiveProjectFiles(
+        project
+      ).length;
 
     project.version =
       (project.version || 0) + 1;
@@ -1959,7 +2366,9 @@ async function deleteProjectFileController(
           "Project file deleted",
 
         data: {
-          path
+          path,
+
+          fileId
         }
       })
     );
@@ -3880,7 +4289,9 @@ async function createProjectVersionController(
         : 1;
 
     const files =
-      project.files || [];
+      getActiveProjectFiles(
+        project
+      );
 
     const version = {
       projectId:
@@ -3932,7 +4343,10 @@ async function createProjectVersionController(
         `Project version ${versionNumber} created`,
 
       metadata: {
-        versionNumber
+        versionNumber,
+
+        fileCount:
+          files.length
       }
     });
 
@@ -4050,7 +4464,9 @@ async function restoreProjectVersionController(
       );
 
     project.fileCount =
-      project.files.length;
+      getActiveProjectFiles(
+        project
+      ).length;
 
     project.framework =
       normalizeFramework(
@@ -4088,7 +4504,10 @@ async function restoreProjectVersionController(
         versionId,
 
         versionNumber:
-          version.versionNumber
+          version.versionNumber,
+
+        fileCount:
+          project.fileCount
       }
     });
 
