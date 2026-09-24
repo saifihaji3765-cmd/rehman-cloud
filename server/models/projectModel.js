@@ -38,6 +38,15 @@ const FRAMEWORKS = [
 
 /* =========================================================
    PROJECT FILE
+   =========================================================
+   IMPORTANT:
+   File subdocuments intentionally keep _id enabled.
+
+   Why:
+   - project.files.id(fileId) requires subdocument IDs
+   - individual file GET/update/delete routes use fileId
+   - frontend code explorer can safely reference files
+   - future versioning and file activity can identify files
    ========================================================= */
 
 const projectFileSchema = new mongoose.Schema(
@@ -103,7 +112,7 @@ const projectFileSchema = new mongoose.Schema(
     }
   },
   {
-    _id: false
+    _id: true
   }
 );
 
@@ -177,14 +186,12 @@ const projectSettingsSchema = new mongoose.Schema(
 );
 
 /* =========================================================
-   ENVIRONMENT
+   ENVIRONMENT VARIABLE
+   =========================================================
+   IMPORTANT:
+   Actual secret values should NOT be stored here.
+   This schema stores configuration/metadata only.
    ========================================================= */
-
-/*
- * IMPORTANT:
- * Actual secret values should NOT be stored here.
- * This schema stores configuration/metadata only.
- */
 
 const environmentVariableSchema =
   new mongoose.Schema(
@@ -217,6 +224,10 @@ const environmentVariableSchema =
       _id: false
     }
   );
+
+/* =========================================================
+   ENVIRONMENT
+   ========================================================= */
 
 const environmentSchema =
   new mongoose.Schema(
@@ -517,7 +528,8 @@ const projectMemberSchema =
           "owner",
           "admin",
           "developer",
-          "viewer"
+          "viewer",
+          "member"
         ],
         default: "viewer"
       },
