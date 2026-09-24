@@ -343,57 +343,62 @@ const providerCooldowns =
   new Map();
 
 
+
 /* =========================================================
    RETRY CONFIGURATION
 ========================================================= */
 
+const configuredMaxRetries =
+  Number(
+    env.AI_PROVIDER_MAX_RETRIES
+  );
+
+
 const AI_MAX_RETRIES =
   Number.isFinite(
-    Number(
-      env.AI_PROVIDER_MAX_RETRIES
-    )
+    configuredMaxRetries
   )
     ? Math.max(
         0,
         Math.floor(
-          Number(
-            env.AI_PROVIDER_MAX_RETRIES
-          )
+          configuredMaxRetries
         )
       )
-    )
     : 1;
+
+
+const configuredRetryBaseDelay =
+  Number(
+    env.AI_PROVIDER_RETRY_BASE_DELAY_MS
+  );
 
 
 const AI_RETRY_BASE_DELAY_MS =
   Number.isFinite(
-    Number(
-      env.AI_PROVIDER_RETRY_BASE_DELAY_MS
-    )
+    configuredRetryBaseDelay
   )
     ? Math.max(
         100,
-        Number(
-          env.AI_PROVIDER_RETRY_BASE_DELAY_MS
-        )
+        configuredRetryBaseDelay
       )
     : 1200;
 
 
+const configuredMaxRetryDelay =
+  Number(
+    env.AI_PROVIDER_MAX_RETRY_DELAY_MS
+  );
+
+
 const AI_MAX_RETRY_DELAY_MS =
   Number.isFinite(
-    Number(
-      env.AI_PROVIDER_MAX_RETRY_DELAY_MS
-    )
+    configuredMaxRetryDelay
   )
     ? Math.max(
         AI_RETRY_BASE_DELAY_MS,
-        Number(
-          env.AI_PROVIDER_MAX_RETRY_DELAY_MS
-        )
+        configuredMaxRetryDelay
       )
     : 5000;
-
 
 /* =========================================================
    TIMEOUT
