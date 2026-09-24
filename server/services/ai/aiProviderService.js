@@ -2,73 +2,35 @@
    ZYRIONOS AI PROVIDER SERVICE
    MULTI-PROVIDER PRODUCTION AI ARCHITECTURE
 
-   ACTIVE PROVIDER ROUTES
+   ACTIVE PROVIDERS
 
    1. Amazon Bedrock
    2. Sarvam AI
    3. BharatRouter
    4. IndieRouter
-   5. Google Vertex AI
-
-   IMPORTANT
-   ---------------------------------------------------------
-   - DeepSeek has been completely removed.
-   - Claude / Anthropic has been completely removed.
-   - Gemini is NOT a direct provider in this service.
-   - OpenAI is NOT a provider.
-   - Agents must call this service, never providers directly.
-   - Provider-specific implementation stays inside this layer.
-   - Existing agents can continue using generateText()
-     and generateJSON().
+   5. Google Vertex AI / Gemini Enterprise Agent Platform
 
    ARCHITECTURE
 
    Agent
-     ↓
+      ↓
    AI Provider Service
-     ↓
-   Provider Router
-     ↓
+      ↓
+   Capability Router
+      ↓
    Selected Provider
-     ↓
+      ↓
    Normalized Response
 
-   PROVIDERS
+   IMPORTANT
 
-     Amazon Bedrock
-     Sarvam AI
-     BharatRouter
-     IndieRouter
-     Google Vertex AI
-
-   FAILURE POLICY
-
-   Temporary:
-     controlled retry
-     then alternate provider
-
-   Quota / balance:
-     no retry
-     alternate provider immediately
-
-   Authentication:
-     no retry
-     alternate provider
-
-   Configuration:
-     provider skipped
-
-   Invalid request:
-     no pointless provider rotation
-
-   Timeout:
-     temporary failure
-
-   TOKEN SAFETY
-   ---------------------------------------------------------
-   Every provider receives a centralized maximum-output-token
-   limit so agents cannot accidentally request more tokens
-   than the provider/model supports.
+   - DeepSeek removed
+   - Anthropic / Claude removed
+   - OpenAI is not an active provider
+   - Agents never call providers directly
+   - Provider-specific logic remains here
+   - Vertex uses AWS → Google Workload Identity Federation
+   - No Google service-account private key is required
 ========================================================= */
 
 
@@ -89,13 +51,20 @@ const logger =
 
 
 /* =========================================================
-   OPTIONAL PROVIDER CLIENTS
+   OPTIONAL SDK CLIENTS
 ========================================================= */
 
-let BedrockRuntimeClient = null;
-let ConverseCommand = null;
+let BedrockRuntimeClient =
+  null;
 
-let VertexAI = null;
+let ConverseCommand =
+  null;
+
+let GoogleGenAI =
+  null;
+
+let GoogleAuth =
+  null;
 
 
 /* =========================================================
@@ -115,7 +84,9 @@ try {
 
 }
 
-catch (error) {
+catch (
+  error
+) {
 
   BedrockRuntimeClient =
     null;
@@ -127,22 +98,48 @@ catch (error) {
 
 
 /* =========================================================
-   VERTEX AI SDK
+   GOOGLE GEN AI SDK
 ========================================================= */
 
 try {
 
-  const vertex =
-    require("@google-cloud/vertexai");
+  const googleGenAI =
+    require("@google/genai");
 
-  VertexAI =
-    vertex.VertexAI;
+  GoogleGenAI =
+    googleGenAI.GoogleGenAI;
 
 }
 
-catch (error) {
+catch (
+  error
+) {
 
-  VertexAI =
+  GoogleGenAI =
+    null;
+
+}
+
+
+/* =========================================================
+   GOOGLE AUTH LIBRARY
+========================================================= */
+
+try {
+
+  const googleAuth =
+    require("google-auth-library");
+
+  GoogleAuth =
+    googleAuth.GoogleAuth;
+
+}
+
+catch (
+  error
+) {
+
+  GoogleAuth =
     null;
 
 }
@@ -156,6 +153,12 @@ let bedrockClient =
   null;
 
 let vertexClient =
+  null;
+
+let vertexAuth =
+  null;
+
+let vertexCredentialConfig =
   null;
 
 
@@ -205,22 +208,6 @@ const DEFAULT_PROVIDER_ORDER = [
 /* =========================================================
    PROVIDER TOKEN LIMITS
 ========================================================= */
-
-/*
- * IMPORTANT
- *
- * These are application safety caps.
- *
- * The agent may request a larger value, but the provider
- * layer will never forward more than the configured cap.
- *
- * Bedrock Nova Pro currently needs to stay within its
- * supported output-token limit.
- *
- * We deliberately use 5000 as the ZyrionOS application
- * safety cap instead of attempting to use the absolute
- * model boundary.
- */
 
 const PROVIDER_MAX_OUTPUT_TOKENS = {
 
@@ -303,20 +290,57 @@ const AWS_REGION =
 
 
 /* =========================================================
-   VERTEX CONFIGURATION
+   GOOGLE VERTEX CONFIGURATION
 ========================================================= */
 
 const VERTEX_PROJECT_ID =
+  env.VERTEX_PROJECT_ID ||
   env.GOOGLE_CLOUD_PROJECT ||
   env.GCP_PROJECT_ID ||
-  env.VERTEX_PROJECT_ID ||
   "";
 
 
 const VERTEX_LOCATION =
   env.VERTEX_LOCATION ||
   env.GOOGLE_CLOUD_LOCATION ||
-  "us-central1";
+  "asia-south1";
+
+
+/* =========================================================
+   GOOGLE WIF CONFIGURATION
+========================================================= */
+
+const GOOGLE_WIF_CONFIG_JSON =
+  env.GOOGLE_WIF_CONFIG_JSON ||
+  process.env.GOOGLE_WIF_CONFIG_JSON ||
+  "";
+
+
+/* =========================================================
+   PROVIDER QUOTA COOLDOWN
+========================================================= */
+
+const AI_PROVIDER_QUOTA_COOLDOWN_MS =
+  Number.isFinite(
+    Number(
+      process.env.AI_PROVIDER_QUOTA_COOLDOWN_MS
+    )
+  )
+    ? Math.max(
+        10000,
+        Number(
+          process.env.AI_PROVIDER_QUOTA_COOLDOWN_MS
+        )
+      )
+    : 300000;
+
+
+/* =========================================================
+   PROVIDER COOLDOWN STATE
+========================================================= */
+
+const providerCooldowns =
+  new Map();
 
 
 /* =========================================================
@@ -337,6 +361,7 @@ const AI_MAX_RETRIES =
           )
         )
       )
+    )
     : 1;
 
 
@@ -390,23 +415,8 @@ const AI_PROVIDER_TIMEOUT_MS =
 
 
 /* =========================================================
-   TOKEN NORMALIZATION
+   NORMALIZE MAX TOKENS
 ========================================================= */
-
-/*
- * Central token safety layer.
- *
- * Example:
- *
- * Agent requests:
- *     20000
- *
- * Bedrock limit:
- *     5000
- *
- * Actual request:
- *     5000
- */
 
 function normalizeMaxTokens(
   provider,
@@ -449,7 +459,101 @@ function normalizeMaxTokens(
 
 
 /* =========================================================
-   CLIENT INITIALIZATION
+   LOAD GOOGLE WIF CONFIGURATION
+========================================================= */
+
+function loadGoogleWIFConfig() {
+
+  if (
+    !GOOGLE_WIF_CONFIG_JSON ||
+    !String(
+      GOOGLE_WIF_CONFIG_JSON
+    ).trim()
+  ) {
+
+    return null;
+
+  }
+
+
+  try {
+
+    const parsed =
+      JSON.parse(
+        GOOGLE_WIF_CONFIG_JSON
+      );
+
+
+    if (
+      !parsed ||
+      typeof parsed !== "object"
+    ) {
+
+      throw new Error(
+        "Google WIF configuration must be a JSON object"
+      );
+
+    }
+
+
+    if (
+      parsed.type !==
+      "external_account"
+    ) {
+
+      throw new Error(
+        "Google WIF configuration must use type=external_account"
+      );
+
+    }
+
+
+    if (
+      !parsed.audience
+    ) {
+
+      throw new Error(
+        "Google WIF configuration is missing audience"
+      );
+
+    }
+
+
+    if (
+      !parsed.credential_source ||
+      typeof parsed.credential_source !==
+      "object"
+    ) {
+
+      throw new Error(
+        "Google WIF configuration is missing credential_source"
+      );
+
+    }
+
+
+    return parsed;
+
+  }
+
+  catch (
+    error
+  ) {
+
+    logger.warning(
+      `Google WIF configuration invalid: ${error.message}`
+    );
+
+
+    return null;
+
+  }
+
+}
+
+
+/* =========================================================
+   INITIALIZE BEDROCK
 ========================================================= */
 
 if (
@@ -468,7 +572,9 @@ if (
 
   }
 
-  catch (error) {
+  catch (
+    error
+  ) {
 
     bedrockClient =
       null;
@@ -483,36 +589,159 @@ if (
 
 
 /* =========================================================
-   GOOGLE VERTEX AI CLIENT
+   INITIALIZE GOOGLE VERTEX
 ========================================================= */
 
+vertexCredentialConfig =
+  loadGoogleWIFConfig();
+
+
 if (
-  VertexAI &&
-  VERTEX_PROJECT_ID
+  GoogleGenAI &&
+  GoogleAuth &&
+  VERTEX_PROJECT_ID &&
+  vertexCredentialConfig
 ) {
 
   try {
 
+    /*
+     * WIF credentials are generated by Google Cloud
+     * and supplied through AWS Secrets Manager.
+     *
+     * The credential configuration contains no service
+     * account private key.
+     *
+     * GoogleAuth exchanges the AWS workload identity for
+     * short-lived Google credentials.
+     */
+
+    vertexAuth =
+      new GoogleAuth({
+
+        credentials:
+          vertexCredentialConfig,
+
+        projectId:
+          VERTEX_PROJECT_ID,
+
+        scopes: [
+
+          "https://www.googleapis.com/auth/cloud-platform"
+
+        ]
+
+      });
+
+
     vertexClient =
-      new VertexAI({
+      new GoogleGenAI({
+
+        vertexai:
+          true,
 
         project:
           VERTEX_PROJECT_ID,
 
         location:
-          VERTEX_LOCATION
+          VERTEX_LOCATION,
+
+        googleAuthOptions: {
+
+          credentials:
+            vertexCredentialConfig,
+
+          projectId:
+            VERTEX_PROJECT_ID,
+
+          scopes: [
+
+            "https://www.googleapis.com/auth/cloud-platform"
+
+          ],
+
+          /*
+           * Node.js native fetch compatibility.
+           */
+
+          clientOptions: {
+
+            transporterOptions: {
+
+              fetchImplementation:
+                globalThis.fetch
+
+            }
+
+          }
+
+        }
 
       });
 
+
+    logger.info(
+      `Google Vertex AI WIF client initialized | project=${VERTEX_PROJECT_ID} | location=${VERTEX_LOCATION}`
+    );
+
   }
 
-  catch (error) {
+  catch (
+    error
+  ) {
+
+    vertexAuth =
+      null;
 
     vertexClient =
       null;
 
     logger.warning(
-      `Vertex AI client initialization failed: ${error.message}`
+      `Google Vertex AI WIF initialization failed: ${error.message}`
+    );
+
+  }
+
+}
+
+else {
+
+  if (
+    !VERTEX_PROJECT_ID
+  ) {
+
+    logger.warning(
+      "Google Vertex AI unavailable: VERTEX_PROJECT_ID is missing"
+    );
+
+  }
+
+  else if (
+    !vertexCredentialConfig
+  ) {
+
+    logger.warning(
+      "Google Vertex AI unavailable: GOOGLE_WIF_CONFIG_JSON is missing or invalid"
+    );
+
+  }
+
+  else if (
+    !GoogleGenAI
+  ) {
+
+    logger.warning(
+      "Google Vertex AI unavailable: @google/genai is not installed"
+    );
+
+  }
+
+  else if (
+    !GoogleAuth
+  ) {
+
+    logger.warning(
+      "Google Vertex AI unavailable: google-auth-library is not installed"
     );
 
   }
@@ -627,45 +856,69 @@ function isProviderAvailable(
     case PROVIDERS.BEDROCK:
 
       return Boolean(
+
         bedrockClient &&
+
         ConverseCommand &&
+
         BEDROCK_MODEL
+
       );
 
 
     case PROVIDERS.SARVAM:
 
       return Boolean(
+
         env.SARVAM_API_KEY &&
+
         SARVAM_BASE_URL &&
+
         SARVAM_MODEL
+
       );
 
 
     case PROVIDERS.BHARATROUTER:
 
       return Boolean(
+
         env.BHARATROUTER_API_KEY &&
+
         BHARATROUTER_BASE_URL &&
+
         BHARATROUTER_MODEL
+
       );
 
 
     case PROVIDERS.INDIEROUTER:
 
       return Boolean(
+
         env.INDIEROUTER_API_KEY &&
+
         INDIEROUTER_BASE_URL &&
+
         INDIEROUTER_MODEL
+
       );
 
 
     case PROVIDERS.VERTEX:
 
       return Boolean(
+
         vertexClient &&
+
+        vertexCredentialConfig &&
+
         VERTEX_PROJECT_ID &&
+
+        VERTEX_LOCATION &&
+
         VERTEX_MODEL
+
       );
 
 
@@ -854,20 +1107,19 @@ function getProviderOrder(
     capability === "code"
   ) {
 
-    ordered =
-      [
+    ordered = [
 
-        PROVIDERS.BEDROCK,
+      PROVIDERS.BEDROCK,
 
-        PROVIDERS.INDIEROUTER,
+      PROVIDERS.INDIEROUTER,
 
-        PROVIDERS.BHARATROUTER,
+      PROVIDERS.BHARATROUTER,
 
-        PROVIDERS.SARVAM,
+      PROVIDERS.SARVAM,
 
-        PROVIDERS.VERTEX
+      PROVIDERS.VERTEX
 
-      ];
+    ];
 
   }
 
@@ -878,20 +1130,19 @@ function getProviderOrder(
     capability === "reasoning"
   ) {
 
-    ordered =
-      [
+    ordered = [
 
-        PROVIDERS.BEDROCK,
+      PROVIDERS.BEDROCK,
 
-        PROVIDERS.VERTEX,
+      PROVIDERS.VERTEX,
 
-        PROVIDERS.SARVAM,
+      PROVIDERS.SARVAM,
 
-        PROVIDERS.BHARATROUTER,
+      PROVIDERS.BHARATROUTER,
 
-        PROVIDERS.INDIEROUTER
+      PROVIDERS.INDIEROUTER
 
-      ];
+    ];
 
   }
 
@@ -901,25 +1152,94 @@ function getProviderOrder(
     capability === "vision"
   ) {
 
-    ordered =
-      [
+    ordered = [
 
-        PROVIDERS.VERTEX,
+      PROVIDERS.VERTEX,
 
-        PROVIDERS.BEDROCK,
+      PROVIDERS.BEDROCK,
 
-        PROVIDERS.BHARATROUTER,
+      PROVIDERS.BHARATROUTER,
 
-        PROVIDERS.INDIEROUTER,
+      PROVIDERS.INDIEROUTER,
 
-        PROVIDERS.SARVAM
+      PROVIDERS.SARVAM
 
-      ];
+    ];
 
   }
 
 
   return ordered;
+
+}
+
+
+/* =========================================================
+   PROVIDER COOLDOWN
+========================================================= */
+
+function isProviderCoolingDown(
+  provider
+) {
+
+  const until =
+    providerCooldowns.get(
+      provider
+    );
+
+
+  if (
+    !until
+  ) {
+
+    return false;
+
+  }
+
+
+  if (
+    Date.now() >=
+    until
+  ) {
+
+    providerCooldowns.delete(
+      provider
+    );
+
+    return false;
+
+  }
+
+
+  return true;
+
+}
+
+
+/* =========================================================
+   SET PROVIDER COOLDOWN
+========================================================= */
+
+function cooldownProvider(
+  provider,
+  duration =
+    AI_PROVIDER_QUOTA_COOLDOWN_MS
+) {
+
+  const until =
+    Date.now() +
+    duration;
+
+
+  providerCooldowns.set(
+    provider,
+    until
+  );
+
+
+  logger.warning(
+    `AI provider cooldown enabled: ${provider} | duration=${duration}ms`
+  );
 
 }
 
@@ -1051,7 +1371,9 @@ function getErrorStatus(
 
     error?.error?.status,
 
-    error?.error?.code
+    error?.error?.code,
+
+    error?.details?.status
 
   ];
 
@@ -1138,6 +1460,8 @@ function getErrorMessage(
 
     error?.response?.data?.error ||
 
+    error?.details?.message ||
+
     ""
 
   )
@@ -1190,7 +1514,11 @@ function classifyProviderError(
       "ECONNREFUSED" ||
 
     error?.code ===
-      "EAI_AGAIN"
+      "EAI_AGAIN" ||
+
+    message.includes(
+      "fetch failed"
+    )
   ) {
 
     return {
@@ -1219,11 +1547,13 @@ function classifyProviderError(
 
     "resource exhausted",
 
+    "resource_exhausted",
+
     "rate limit",
 
     "too many requests",
 
-    "too many tokens per day",
+    "too many tokens",
 
     "tokens per day",
 
@@ -1253,7 +1583,9 @@ function classifyProviderError(
 
     "credits exceeded",
 
-    "capacity exceeded"
+    "capacity exceeded",
+
+    "resource has been exhausted"
 
   ];
 
@@ -1261,6 +1593,8 @@ function classifyProviderError(
   if (
     status === 429 ||
     status === 402 ||
+    code ===
+      "RESOURCE_EXHAUSTED" ||
     quotaPhrases.some(
       (phrase) =>
         message.includes(
@@ -1302,7 +1636,8 @@ function classifyProviderError(
       "AUTHENTICATION_ERROR",
       "PERMISSION_DENIED",
       "INVALID_API_KEY",
-      "INVALID_CREDENTIALS"
+      "INVALID_CREDENTIALS",
+      "UNAUTHENTICATED"
     ].includes(
       code
     ) ||
@@ -1321,6 +1656,10 @@ function classifyProviderError(
 
     message.includes(
       "permission denied"
+    ) ||
+
+    message.includes(
+      "unauthenticated"
     )
   ) {
 
@@ -2192,20 +2531,15 @@ async function generateWithOpenAICompatibleProvider(
     messages,
 
     stream:
-      false
+      false,
+
+    max_tokens:
+      normalizeMaxTokens(
+        provider,
+        options.maxTokens
+      )
 
   };
-
-
-  /*
-   * Centralized provider token safety.
-   */
-
-  body.max_tokens =
-    normalizeMaxTokens(
-      provider,
-      options.maxTokens
-    );
 
 
   if (
@@ -2509,17 +2843,6 @@ async function generateWithBedrock(
   }
 
 
-  /*
-   * CRITICAL FIX
-   *
-   * The agent may request 10000, 15000, 20000 etc.
-   *
-   * We NEVER send that value directly to Bedrock.
-   *
-   * The centralized service clamps it to the safe
-   * provider-specific maximum.
-   */
-
   const requestedMaxTokens =
     Number.isFinite(
       options.maxTokens
@@ -2685,7 +3008,7 @@ async function generateWithBedrock(
 
 
 /* =========================================================
-   VERTEX MESSAGE CONVERSION
+   VERTEX CONTENT CONVERSION
 ========================================================= */
 
 function buildVertexContents(
@@ -2728,6 +3051,56 @@ function buildVertexContents(
 
 
 /* =========================================================
+   VERTEX RESPONSE TEXT
+========================================================= */
+
+function extractVertexText(
+  response
+) {
+
+  if (
+    typeof response?.text ===
+    "string"
+  ) {
+
+    return response.text.trim();
+
+  }
+
+
+  const candidates =
+    response?.candidates ||
+    [];
+
+
+  return candidates
+
+    .flatMap(
+      (candidate) =>
+        candidate?.content?.parts ||
+        []
+    )
+
+    .filter(
+      (part) =>
+        typeof part?.text ===
+        "string"
+    )
+
+    .map(
+      (part) =>
+        part.text
+    )
+
+    .join(
+      ""
+    )
+    .trim();
+
+}
+
+
+/* =========================================================
    VERTEX GENERATION
 ========================================================= */
 
@@ -2737,7 +3110,9 @@ async function generateWithVertex(
 
   if (
     !vertexClient ||
-    !VERTEX_PROJECT_ID
+    !vertexCredentialConfig ||
+    !VERTEX_PROJECT_ID ||
+    !VERTEX_MODEL
   ) {
 
     const error =
@@ -2839,76 +3214,84 @@ async function generateWithVertex(
   }
 
 
-  try {
+  const generationConfig = {
 
-    const generativeModel =
-      vertexClient.getGenerativeModel({
+    maxOutputTokens:
+      normalizeMaxTokens(
+        PROVIDERS.VERTEX,
+        options.maxTokens
+      )
 
-        model,
-
-        systemInstruction:
-          systemMessages.length > 0
-            ? {
-
-                parts:
-                  systemMessages.map(
-                    (message) => ({
-
-                      text:
-                        message.content
-
-                    })
-                  )
-
-              }
-            : undefined
-
-      });
+  };
 
 
-    const generationConfig = {
+  if (
+    Number.isFinite(
+      options.temperature
+    )
+  ) {
 
-      maxOutputTokens:
-        normalizeMaxTokens(
-          PROVIDERS.VERTEX,
-          options.maxTokens
+    generationConfig.temperature =
+      Number(
+        options.temperature
+      );
+
+  }
+
+
+  if (
+    options.json === true
+  ) {
+
+    generationConfig.responseMimeType =
+      "application/json";
+
+  }
+
+
+  const config = {
+
+    ...generationConfig
+
+  };
+
+
+  if (
+    systemMessages.length > 0
+  ) {
+
+    config.systemInstruction = {
+
+      role:
+        "system",
+
+      parts:
+        systemMessages.map(
+          (message) => ({
+
+            text:
+              message.content
+
+          })
         )
 
     };
 
-
-    if (
-      Number.isFinite(
-        options.temperature
-      )
-    ) {
-
-      generationConfig.temperature =
-        Number(
-          options.temperature
-        );
-
-    }
+  }
 
 
-    if (
-      options.json === true
-    ) {
-
-      generationConfig.responseMimeType =
-        "application/json";
-
-    }
-
+  try {
 
     const response =
       await withTimeout(
 
-        generativeModel.generateContent({
+        vertexClient.models.generateContent({
+
+          model,
 
           contents,
 
-          generationConfig
+          config
 
         }),
 
@@ -2921,38 +3304,14 @@ async function generateWithVertex(
       );
 
 
-    const candidates =
-      response?.response?.candidates ||
-      [];
-
-
     const text =
-      candidates
-
-        .flatMap(
-          (candidate) =>
-            candidate?.content?.parts ||
-            []
-        )
-
-        .filter(
-          (part) =>
-            typeof part?.text ===
-            "string"
-        )
-
-        .map(
-          (part) =>
-            part.text
-        )
-
-        .join(
-          ""
-        );
+      extractVertexText(
+        response
+      );
 
 
     if (
-      !text.trim()
+      !text
     ) {
 
       const error =
@@ -2988,15 +3347,13 @@ async function generateWithVertex(
 
       model,
 
-      text:
-        text.trim(),
+      text,
 
       raw:
-        response?.response ||
         response,
 
       usage:
-        response?.response?.usageMetadata ||
+        response?.usageMetadata ||
         null
 
     };
@@ -3151,6 +3508,27 @@ async function generateText(
     const provider of configuredProviders
   ) {
 
+    /*
+     * Do not repeatedly hit a provider that has already
+     * reported an account quota/balance exhaustion.
+     */
+
+    if (
+      isProviderCoolingDown(
+        provider
+      )
+    ) {
+
+      logger.warning(
+        `AI Provider skipped due to active cooldown: ${provider}`
+      );
+
+
+      continue;
+
+    }
+
+
     let attempt =
       0;
 
@@ -3278,9 +3656,33 @@ async function generateText(
 
 
         /*
+         * Quota/balance exhaustion:
+         *
+         * Do not retry.
+         * Put provider into cooldown.
+         * Immediately move to next provider.
+         */
+
+        if (
+          classification.category ===
+          "quota"
+        ) {
+
+          cooldownProvider(
+            provider
+          );
+
+
+          break;
+
+        }
+
+
+        /*
          * Invalid request:
          *
          * The request itself is invalid.
+         * Rotating providers would not solve it.
          */
 
         if (
@@ -3311,7 +3713,7 @@ async function generateText(
 
 
         /*
-         * Quota / authentication / configuration /
+         * Authentication / configuration /
          * exhausted provider:
          *
          * Continue to next configured provider.
@@ -3614,7 +4016,15 @@ function getProviderStatus() {
         true,
 
       available:
-        configured,
+        configured &&
+        !isProviderCoolingDown(
+          provider
+        ),
+
+      coolingDown:
+        isProviderCoolingDown(
+          provider
+        ),
 
       primary:
         false,
@@ -3706,6 +4116,13 @@ function getProviderStatus() {
 
       status[
         provider
+      ].wifConfigured =
+        Boolean(
+          vertexCredentialConfig
+        );
+
+      status[
+        provider
       ].location =
         VERTEX_LOCATION;
 
@@ -3738,6 +4155,13 @@ function getProviderStatus() {
 
       providerMaxOutputTokens:
         PROVIDER_MAX_OUTPUT_TOKENS
+
+    },
+
+    cooldown: {
+
+      quotaCooldownMs:
+        AI_PROVIDER_QUOTA_COOLDOWN_MS
 
     },
 
