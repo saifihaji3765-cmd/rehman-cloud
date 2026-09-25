@@ -1,27 +1,41 @@
 /* =========================================================
-   ZYRIONOS BUILDER AGENT
-   ---------------------------------------------------------
-   Planning → Production Code Generation
+   ZyrionOS BUILDER AGENT
+   Chunked Project Code Generation
+   =========================================================
 
-   AI ROUTING:
+   Architecture:
 
+   Planning Agent
+        ↓
    Builder Agent
         ↓
-   aiProviderService
+   Project Manifest
         ↓
-   Gemini 3.8 Flash
+   File Generation Batches
         ↓
-   Gemini 3.7 Flash
+   File Validation
         ↓
-   Gemini 3.6 Flash
+   Complete Project
+        ↓
+   Master Agent
 
-   OpenAI is NOT called by this agent.
-   Provider logic remains centralized.
-========================================================= */
+   IMPORTANT:
 
+   - Builder NEVER calls an AI provider directly.
+   - All AI calls go through aiProviderService.
+   - No Gemini dependency.
+   - Large projects are generated in controlled batches.
+   - Final return contract remains:
 
-/* =========================================================
-   SERVICES
+       {
+         success: true,
+         data: {
+           projectName,
+           framework,
+           files: [...]
+         }
+       }
+
 ========================================================= */
 
 const logger =
@@ -34,62 +48,50 @@ const {
 
 
 /* =========================================================
-   CONSTANTS
+   LIMITS
 ========================================================= */
 
-const MAX_FILES =
-  100;
+const MAX_FILES = 100;
 
-const MAX_PATH_LENGTH =
-  300;
+const MAX_PATH_LENGTH = 300;
 
-const MAX_FILE_SIZE =
-  200000;
+const MAX_FILE_SIZE = 200000;
 
-const MAX_PROMPT_LENGTH =
-  12000;
+const MAX_PROMPT_LENGTH = 12000;
 
-const MAX_PLAN_SIZE =
-  100000;
+const MAX_PLAN_SIZE = 100000;
 
 
-/* =========================================================
-   COMMON FRAMEWORKS
-========================================================= */
+/*
+ * Instead of asking the model for an entire project
+ * in one response, files are generated in controlled
+ * batches.
+ */
+const FILES_PER_BATCH = 3;
 
-const COMMON_FRAMEWORKS = [
 
-  "React",
-  "Next.js",
-  "Node.js",
-  "Express",
-  "NestJS",
-  "Vue",
-  "Nuxt",
-  "Angular",
-  "Svelte",
-  "SvelteKit",
-  "Python",
-  "FastAPI",
-  "Django",
-  "Flask",
-  "Java",
-  "Spring Boot",
-  "PHP",
-  "Laravel",
-  "Flutter",
-  "React Native"
+/*
+ * Maximum output tokens for one file-generation batch.
 
-];
+ * This is deliberately much lower than the previous
+ * 12000-token one-shot Builder request.
+ */
+const FILE_BATCH_MAX_TOKENS = 5000;
+
+
+/*
+ * Manifest is intentionally small.
+ */
+const MANIFEST_MAX_TOKENS = 3500;
 
 
 /* =========================================================
    SAFE STRING
 ========================================================= */
 
-function cleanString(
+function safeString(
   value,
-  maxLength = 4000
+  maxLength = 10000
 ) {
 
   if (
@@ -102,28 +104,36 @@ function cleanString(
 
   return value
     .trim()
-    .slice(0, maxLength);
+    .slice(
+      0,
+      maxLength
+    );
 
 }
 
 
 /* =========================================================
-   SAFE JSON
+   SAFE JSON STRINGIFY
 ========================================================= */
 
 function safeJson(
-  value
+  value,
+  maxLength = 100000
 ) {
 
   try {
 
-    return JSON.stringify(
-      value ?? null
+    const output =
+      JSON.stringify(
+        value ?? null
+      );
+
+    return output.slice(
+      0,
+      maxLength
     );
 
-  }
-
-  catch (error) {
+  } catch (error) {
 
     return "{}";
 
@@ -133,197 +143,119 @@ function safeJson(
 
 
 /* =========================================================
-   SAFE JSON PARSER
-========================================================= */
-
-function safeJsonParse(
-  value
-) {
-
-  if (
-    !value ||
-    typeof value !== "string"
-  ) {
-
-    return null;
-
-  }
-
-  try {
-
-    return JSON.parse(
-      value.trim()
-    );
-
-  }
-
-  catch (error) {
-
-    try {
-
-      const cleaned =
-        value
-          .replace(
-            /^\s*```json\s*/i,
-            ""
-          )
-          .replace(
-            /^\s*```\s*/i,
-            ""
-          )
-          .replace(
-            /\s*```\s*$/i,
-            ""
-          )
-          .trim();
-
-      return JSON.parse(
-        cleaned
-      );
-
-    }
-
-    catch (secondError) {
-
-      return null;
-
-    }
-
-  }
-
-}
-
-
-/* =========================================================
-   NORMALIZE FRAMEWORK
-========================================================= */
-
-function normalizeFramework(
-  framework,
-  plan
-) {
-
-  let value =
-    cleanString(
-      framework,
-      200
-    );
-
-  if (!value) {
-
-    value =
-      cleanString(
-        plan?.framework,
-        200
-      );
-
-  }
-
-  if (!value) {
-
-    value =
-      cleanString(
-        plan?.frontend?.framework,
-        200
-      );
-
-  }
-
-  if (!value) {
-
-    return "";
-
-  }
-
-  const knownFramework =
-    COMMON_FRAMEWORKS.find(
-      (item) =>
-        item.toLowerCase() ===
-        value.toLowerCase()
-    );
-
-  return (
-    knownFramework ||
-    value
-  );
-
-}
-
-
-/* =========================================================
-   NORMALIZE PROJECT NAME
+   PROJECT NAME
 ========================================================= */
 
 function normalizeProjectName(
   value
 ) {
 
-  const projectName =
-    cleanString(
+  const name =
+    safeString(
       value,
-      200
+      120
     );
 
-  return (
-    projectName ||
-    "ZyrionOS Project"
-  );
+  if (!name) {
+
+    return "zyrionos-project";
+
+  }
+
+  return name
+    .replace(
+      /[^a-zA-Z0-9._-]/g,
+      "-"
+    )
+    .replace(
+      /-+/g,
+      "-"
+    )
+    .replace(
+      /^[-_.]+|[-_.]+$/g,
+      ""
+    )
+    .slice(
+      0,
+      100
+    ) ||
+    "zyrionos-project";
 
 }
 
 
 /* =========================================================
-   NORMALIZE FILE PATH
+   FRAMEWORK
+========================================================= */
+
+function normalizeFramework(
+  value
+) {
+
+  const framework =
+    safeString(
+      value,
+      100
+    );
+
+  return framework ||
+    "React";
+
+}
+
+
+/* =========================================================
+   FILE PATH SECURITY
 ========================================================= */
 
 function normalizeFilePath(
   value
 ) {
 
-  if (
-    typeof value !== "string"
-  ) {
-
-    return null;
-
-  }
-
   let filePath =
-    value
-      .trim()
-      .replace(
-        /\\/g,
-        "/"
-      );
+    safeString(
+      value,
+      MAX_PATH_LENGTH
+    );
 
-  while (
-    filePath.startsWith("./")
-  ) {
-
-    filePath =
-      filePath.slice(2);
-
-  }
-
-  if (
-    !filePath
-  ) {
+  if (!filePath) {
 
     return null;
 
   }
 
+
+  /*
+   * Normalize Windows separators.
+   */
+  filePath =
+    filePath.replace(
+      /\\/g,
+      "/"
+    );
+
+
+  /*
+   * Remove leading slash.
+   */
+  filePath =
+    filePath.replace(
+      /^\/+/,
+      ""
+    );
+
+
+  /*
+   * Reject traversal.
+   */
+  const segments =
+    filePath.split("/");
+
+
   if (
-    filePath.startsWith("/")
-  ) {
-
-    return null;
-
-  }
-
-  if (
-    /^[A-Za-z]:\//.test(
-      filePath
+    segments.some(
+      segment =>
+        segment === ".."
     )
   ) {
 
@@ -331,41 +263,38 @@ function normalizeFilePath(
 
   }
 
+
+  /*
+   * Reject dangerous filesystem paths.
+   */
   if (
-    filePath.includes("\0")
+    filePath.includes("\0") ||
+    filePath.includes(":") ||
+    filePath.startsWith("~")
   ) {
 
     return null;
 
   }
 
-  const segments =
-    filePath.split("/");
 
-  if (
-    segments.includes("..")
-  ) {
+  /*
+   * Remove duplicate separators.
+   */
+  filePath =
+    filePath.replace(
+      /\/+/g,
+      "/"
+    );
 
-    return null;
 
-  }
-
-  if (
-    filePath.length >
-    MAX_PATH_LENGTH
-  ) {
-
-    return null;
-
-  }
-
-  return filePath;
+  return filePath || null;
 
 }
 
 
 /* =========================================================
-   NORMALIZE FILE CONTENT
+   FILE CONTENT
 ========================================================= */
 
 function normalizeFileContent(
@@ -373,12 +302,14 @@ function normalizeFileContent(
 ) {
 
   if (
-    typeof value !== "string"
+    typeof value !==
+    "string"
   ) {
 
     return null;
 
   }
+
 
   if (
     value.length >
@@ -389,7 +320,60 @@ function normalizeFileContent(
 
   }
 
+
   return value;
+
+}
+
+
+/* =========================================================
+   NORMALIZE FILE
+========================================================= */
+
+function normalizeFile(
+  file
+) {
+
+  if (
+    !file ||
+    typeof file !==
+      "object"
+  ) {
+
+    return null;
+
+  }
+
+
+  const path =
+    normalizeFilePath(
+      file.path
+    );
+
+
+  const content =
+    normalizeFileContent(
+      file.content
+    );
+
+
+  if (
+    !path ||
+    content === null
+  ) {
+
+    return null;
+
+  }
+
+
+  return {
+
+    path,
+
+    content,
+
+  };
 
 }
 
@@ -406,94 +390,23 @@ function normalizeFiles(
     !Array.isArray(files)
   ) {
 
-    return {
-
-      files: [],
-
-      invalidCount: 0,
-
-      duplicateCount: 0
-
-    };
+    return [];
 
   }
 
-  const normalizedFiles =
-    [];
 
-  const seenPaths =
+  const normalized = [];
+
+  const seen =
     new Set();
 
-  let invalidCount =
-    0;
-
-  let duplicateCount =
-    0;
 
   for (
     const file of files
   ) {
 
     if (
-      !file ||
-      typeof file !== "object"
-    ) {
-
-      invalidCount++;
-
-      continue;
-
-    }
-
-    const filePath =
-      normalizeFilePath(
-        file.path ||
-        file.name
-      );
-
-    const content =
-      normalizeFileContent(
-        file.content
-      );
-
-    if (
-      !filePath ||
-      content === null
-    ) {
-
-      invalidCount++;
-
-      continue;
-
-    }
-
-    if (
-      seenPaths.has(
-        filePath
-      )
-    ) {
-
-      duplicateCount++;
-
-      continue;
-
-    }
-
-    seenPaths.add(
-      filePath
-    );
-
-    normalizedFiles.push({
-
-      path:
-        filePath,
-
-      content
-
-    });
-
-    if (
-      normalizedFiles.length >=
+      normalized.length >=
       MAX_FILES
     ) {
 
@@ -501,116 +414,118 @@ function normalizeFiles(
 
     }
 
+
+    const normalizedFile =
+      normalizeFile(
+        file
+      );
+
+
+    if (!normalizedFile) {
+
+      continue;
+
+    }
+
+
+    const key =
+      normalizedFile.path
+        .toLowerCase();
+
+
+    /*
+     * Prevent duplicate paths.
+     */
+    if (
+      seen.has(key)
+    ) {
+
+      continue;
+
+    }
+
+
+    seen.add(key);
+
+    normalized.push(
+      normalizedFile
+    );
+
   }
 
-  return {
 
-    files:
-      normalizedFiles,
-
-    invalidCount,
-
-    duplicateCount
-
-  };
+  return normalized;
 
 }
 
 
 /* =========================================================
-   NORMALIZE BUILD REQUEST
+   BUILD REQUEST NORMALIZATION
 ========================================================= */
 
 function normalizeBuildRequest(
-  input
+  input = {}
 ) {
 
-  if (
-    typeof input === "string"
-  ) {
+  const request =
+    input &&
+    typeof input === "object"
+      ? input
+      : {};
 
-    return {
 
-      prompt:
-        cleanString(
-          input,
-          MAX_PROMPT_LENGTH
-        ),
+  const prompt =
+    safeString(
+      request.prompt,
+      MAX_PROMPT_LENGTH
+    );
 
-      plan:
-        null,
 
-      framework:
-        "",
+  const plan =
+    request.plan ??
+    null;
 
-      user:
-        {},
 
-      memoryContext:
-        null,
+  const planString =
+    safeJson(
+      plan,
+      MAX_PLAN_SIZE
+    );
 
-      intent:
-        null
 
-    };
+  const framework =
+    normalizeFramework(
+      request.framework
+    );
 
-  }
 
-  if (
-    !input ||
-    typeof input !== "object"
-  ) {
+  const projectId =
+    safeString(
+      request.projectId,
+      200
+    );
 
-    return {
 
-      prompt: "",
+  const userId =
+    safeString(
+      request.userId,
+      200
+    );
 
-      plan: null,
-
-      framework: "",
-
-      user: {},
-
-      memoryContext: null,
-
-      intent: null
-
-    };
-
-  }
 
   return {
 
-    prompt:
-      cleanString(
-        input.prompt,
-        MAX_PROMPT_LENGTH
-      ),
+    prompt,
 
-    plan:
-      input.plan ||
-      input.projectPlan ||
-      null,
+    plan,
 
-    framework:
-      cleanString(
-        input.framework,
-        200
-      ),
+    planString,
 
-    user:
-      input.user &&
-      typeof input.user === "object"
-        ? input.user
-        : {},
+    framework,
 
-    memoryContext:
-      input.memoryContext ||
-      null,
+    projectId,
 
-    intent:
-      input.intent ||
-      null
+    userId,
 
   };
 
@@ -618,31 +533,50 @@ function normalizeBuildRequest(
 
 
 /* =========================================================
-   BUILD SYSTEM PROMPT
+   BUILD PLAN SUMMARY
 ========================================================= */
 
-function createBuilderSystemPrompt() {
+function createBuildContext(
+  request
+) {
 
-  return `You are the Builder Agent of ZyrionOS.
+  return {
 
-Your job is to transform a validated Planning Agent output into a REAL, coherent, production-ready source-code project.
+    userPrompt:
+      request.prompt,
 
-The Planning Agent already decided the architecture.
+    framework:
+      request.framework,
 
-You MUST follow the plan.
+    projectId:
+      request.projectId ||
+      "not specified",
 
-Your response is consumed directly by backend code.
+    plan:
+      request.plan,
 
-RETURN ONLY VALID JSON.
+  };
 
-NO markdown.
-NO triple backticks.
-NO explanations outside JSON.
-NO fake implementation.
-NO demo implementation.
-NO placeholder-only files.
+}
 
-REQUIRED JSON:
+
+/* =========================================================
+   MANIFEST SYSTEM PROMPT
+========================================================= */
+
+function createManifestSystemPrompt() {
+
+  return `
+You are the ZyrionOS Project Architect.
+
+Your job is to convert a user's software request and
+planning result into a precise project file manifest.
+
+You are NOT generating source code yet.
+
+Return ONLY valid JSON.
+
+Required format:
 
 {
   "projectName": "string",
@@ -650,163 +584,621 @@ REQUIRED JSON:
   "files": [
     {
       "path": "string",
-      "content": "string"
+      "purpose": "string"
     }
   ]
 }
 
-STRICT REQUIREMENTS:
+STRICT RULES:
 
-1. Generate complete source files.
+1. Return valid JSON only.
 
-2. Every generated file must contain real implementation.
+2. Do not use Markdown.
 
-3. Every file must have a unique relative path.
+3. Do not use code fences.
 
-4. Use forward slashes in paths.
+4. Do not include explanations outside JSON.
 
-5. Never use absolute paths.
+5. Every file must have a unique path.
 
-6. Never use ../ path traversal.
+6. Paths must be relative project paths.
 
-7. Never include secrets.
+7. Never use:
+   ../
+   absolute filesystem paths
+   Windows drive paths
 
-8. Never include API keys.
+8. Keep the project practical and complete.
 
-9. Never include passwords.
+9. Include all files required for the requested
+   application to actually run.
 
-10. Never include private credentials.
+10. Include package.json when dependencies are required.
 
-11. Never include real payment secrets.
+11. Include configuration files when required.
 
-12. Use environment variables for external secrets.
+12. Include application entry points.
 
-13. Follow the Planning Agent architecture.
+13. Include required components, pages, services,
+    API routes and utilities.
 
-14. Keep frontend and backend architecture consistent.
+14. Do not generate unnecessary duplicate files.
 
-15. Keep imports internally consistent.
+15. Do not generate binary files.
 
-16. Generated files must reference only:
-   - generated files,
-   - declared project dependencies,
-   - legitimate external packages,
-   - legitimate standard-library modules.
+16. Do not generate secrets, API keys or credentials.
 
-17. Generate package.json whenever required.
+17. Do not invent external services unless required
+    by the user's request or planning.
 
-18. Generate the correct application entry point.
+18. The manifest should contain file paths and concise
+    purposes only.
 
-19. Generate required configuration files.
+19. Keep the number of files within the requested scope.
 
-20. Generate required API routes when the plan requires them.
+20. Maximum project files: ${MAX_FILES}.
+`;
 
-21. Generate database models when required by the plan.
+}
 
-22. Generate authentication only when required by the plan.
 
-23. Generate real error handling.
+/* =========================================================
+   FILE BATCH SYSTEM PROMPT
+========================================================= */
 
-24. Generate real validation.
+function createFileBatchSystemPrompt() {
 
-25. Do not claim that deployment happened.
+  return `
+You are the ZyrionOS Code Builder.
 
-26. Do not claim that AWS is configured.
+You generate production-quality source files for a
+software project.
 
-27. Do not claim that a database is configured.
+The project architecture has already been planned.
 
-28. Do not claim that a domain is configured.
+You will receive a small batch of requested files.
 
-29. Do not claim that SSL is configured.
+Return ONLY valid JSON.
 
-30. Do not claim that payments are configured.
+Required format:
 
-31. Infrastructure integrations must be represented as real application configuration/code only.
+{
+  "files": [
+    {
+      "path": "string",
+      "content": "complete file content"
+    }
+  ]
+}
 
-32. Never invent credentials.
+STRICT RULES:
 
-33. Never invent unavailable infrastructure.
+1. Return valid JSON only.
 
-34. Never invent external APIs.
+2. Do not use Markdown.
 
-35. Never invent external URLs.
+3. Do not use code fences.
 
-36. Do not generate unnecessary files.
+4. Do not explain your answer outside JSON.
 
-37. Do not duplicate files.
+5. Generate EVERY requested file.
 
-38. Do not create files merely to increase file count.
+6. Never omit a requested file.
 
-39. Preserve the exact architectural intent of the Planning Agent.
+7. Each path must exactly match the requested path.
 
-40. Follow the requested framework.
+8. Each file must contain COMPLETE usable code.
 
-41. If the plan specifies a technology, use that technology.
+9. Never use placeholder comments such as:
+   TODO
+   implement later
+   add code here
+   rest of code
+   omitted
+   same as above
 
-42. If the plan specifies a file, generate that file.
+10. Do not truncate code.
 
-43. If the plan does not require a technology, do not randomly introduce it.
+11. Do not generate fake imports.
 
-44. Ensure generated imports match generated paths.
+12. Imports must match the project architecture.
 
-45. Ensure package dependencies match imported packages.
+13. Respect the specified framework.
 
-46. Ensure configuration names match code usage.
+14. Respect package/dependency requirements.
 
-47. Ensure environment variable names are consistent.
+15. Keep the generated files internally consistent.
 
-48. Ensure API route paths are consistent.
+16. Do not generate API keys, passwords, tokens,
+    private credentials or secrets.
 
-49. Ensure exported functions match their imports.
+17. Use environment variables for secrets.
 
-50. Do not output pseudo-code.
+18. Do not change the requested file paths.
 
-51. Do not output TODO-only implementations.
+19. Do not generate binary data.
 
-52. Do not output "coming soon" implementations.
+20. If a requested file depends on another file,
+    use the exact path from the project manifest.
 
-53. Do not output fake success responses.
+21. The final application must be structurally runnable.
 
-54. Do not omit file content.
+22. Do not invent backend endpoints that were not
+    specified by the planning information.
 
-55. The "files" property MUST be an array.
+23. Existing generated files are provided only as
+    architectural context. Do not rewrite them unless
+    explicitly requested.
 
-56. "path" MUST be a string.
+24. Never return an empty files array.
 
-57. "content" MUST be a string.
+25. Maximum files in this response:
+    ${FILES_PER_BATCH}.
+`;
 
-58. Return JSON only.
+}
 
-QUALITY REQUIREMENTS:
 
-- Think through the complete dependency graph before generating files.
-- Make the generated project internally coherent.
-- Prefer fewer complete files over many incomplete files.
-- Do not sacrifice correctness to increase file count.
-- Preserve existing architecture when the plan references an existing project.
-- Do not silently replace the framework.
-- Do not silently change database technology.
-- Do not silently change authentication architecture.
-- Do not silently change API architecture.
+/* =========================================================
+   MANIFEST VALIDATION
+========================================================= */
 
-SECURITY:
+function validateManifest(
+  manifest
+) {
 
-Never generate:
-- secrets
-- access tokens
-- private keys
-- passwords
-- payment credentials
-- authentication cookies
-- production API keys
+  if (
+    !manifest ||
+    typeof manifest !==
+      "object"
+  ) {
 
-Use environment variables instead.
+    return {
 
-FINAL RULE:
+      valid:
+        false,
 
-The output is parsed automatically.
+      error:
+        "Manifest is not an object.",
 
-Therefore the entire response MUST be valid JSON and nothing else.`;
+    };
+
+  }
+
+
+  const projectName =
+    normalizeProjectName(
+      manifest.projectName
+    );
+
+
+  const framework =
+    normalizeFramework(
+      manifest.framework
+    );
+
+
+  if (
+    !Array.isArray(
+      manifest.files
+    )
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "Manifest files must be an array.",
+
+    };
+
+  }
+
+
+  if (
+    manifest.files.length ===
+    0
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "Manifest returned no files.",
+
+    };
+
+  }
+
+
+  if (
+    manifest.files.length >
+    MAX_FILES
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        `Manifest exceeds maximum file count of ${MAX_FILES}.`,
+
+    };
+
+  }
+
+
+  const files = [];
+
+  const seen =
+    new Set();
+
+
+  for (
+    const item of
+      manifest.files
+  ) {
+
+    if (
+      !item ||
+      typeof item !==
+        "object"
+    ) {
+
+      return {
+
+        valid:
+          false,
+
+        error:
+          "Manifest contains an invalid file entry.",
+
+      };
+
+    }
+
+
+    const path =
+      normalizeFilePath(
+        item.path
+      );
+
+
+    if (!path) {
+
+      return {
+
+        valid:
+          false,
+
+        error:
+          "Manifest contains an invalid file path.",
+
+      };
+
+    }
+
+
+    const key =
+      path.toLowerCase();
+
+
+    if (
+      seen.has(key)
+    ) {
+
+      return {
+
+        valid:
+          false,
+
+        error:
+          `Duplicate manifest path: ${path}`,
+
+      };
+
+    }
+
+
+    seen.add(key);
+
+
+    const purpose =
+      safeString(
+        item.purpose,
+        500
+      );
+
+
+    files.push({
+
+      path,
+
+      purpose:
+        purpose ||
+        "Required project file",
+
+    });
+
+  }
+
+
+  return {
+
+    valid:
+      true,
+
+    data: {
+
+      projectName,
+
+      framework,
+
+      files,
+
+    },
+
+  };
+
+}
+
+
+/* =========================================================
+   BATCH VALIDATION
+========================================================= */
+
+function validateGeneratedBatch(
+  generated,
+  expectedFiles
+) {
+
+  if (
+    !generated ||
+    typeof generated !==
+      "object"
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "Generated batch is not an object.",
+
+    };
+
+  }
+
+
+  if (
+    !Array.isArray(
+      generated.files
+    )
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "Generated batch does not contain files.",
+
+    };
+
+  }
+
+
+  if (
+    generated.files.length ===
+    0
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "Generated batch returned no files.",
+
+    };
+
+  }
+
+
+  const expected =
+    new Set(
+      expectedFiles.map(
+        item =>
+          item.path
+            .toLowerCase()
+      )
+    );
+
+
+  const received =
+    new Map();
+
+
+  for (
+    const rawFile of
+      generated.files
+  ) {
+
+    const file =
+      normalizeFile(
+        rawFile
+      );
+
+
+    if (!file) {
+
+      return {
+
+        valid:
+          false,
+
+        error:
+          "Generated batch contains an invalid file.",
+
+      };
+
+    }
+
+
+    const key =
+      file.path
+        .toLowerCase();
+
+
+    if (
+      !expected.has(key)
+    ) {
+
+      return {
+
+        valid:
+          false,
+
+        error:
+          `Unexpected file generated: ${file.path}`,
+
+      };
+
+    }
+
+
+    if (
+      received.has(key)
+    ) {
+
+      return {
+
+        valid:
+          false,
+
+        error:
+          `Duplicate file generated: ${file.path}`,
+
+      };
+
+    }
+
+
+    received.set(
+      key,
+      file
+    );
+
+  }
+
+
+  /*
+   * Every requested file must be present.
+   */
+  for (
+    const expectedFile of
+      expectedFiles
+  ) {
+
+    const key =
+      expectedFile.path
+        .toLowerCase();
+
+
+    if (
+      !received.has(key)
+    ) {
+
+      return {
+
+        valid:
+          false,
+
+        error:
+          `Missing generated file: ${expectedFile.path}`,
+
+      };
+
+    }
+
+  }
+
+
+  return {
+
+    valid:
+      true,
+
+    files:
+      Array.from(
+        received.values()
+      ),
+
+  };
+
+}
+
+
+/* =========================================================
+   FILE BATCHING
+========================================================= */
+
+function createBatches(
+  files
+) {
+
+  const batches = [];
+
+
+  for (
+    let index = 0;
+    index < files.length;
+    index += FILES_PER_BATCH
+  ) {
+
+    batches.push(
+      files.slice(
+        index,
+        index +
+          FILES_PER_BATCH
+      )
+    );
+
+  }
+
+
+  return batches;
+
+}
+
+
+/* =========================================================
+   GENERATED FILE INDEX
+========================================================= */
+
+function createGeneratedFileIndex(
+  files
+) {
+
+  return files.map(
+    file => ({
+
+      path:
+        file.path,
+
+      size:
+        file.content.length,
+
+    })
+  );
 
 }
 
@@ -819,18 +1211,23 @@ async function builderAgent(
   input = {}
 ) {
 
+  const startedAt =
+    Date.now();
+
+
   let currentStage =
-    "request-normalization";
+    "normalization";
+
 
   try {
 
     logger.info(
-      "🏗️ ZyrionOS Builder Agent Started"
+      "Builder Agent Started"
     );
 
 
     /* =====================================================
-       REQUEST NORMALIZATION
+       NORMALIZATION
     ===================================================== */
 
     const request =
@@ -838,104 +1235,60 @@ async function builderAgent(
         input
       );
 
-    const prompt =
-      request.prompt;
 
-    const plan =
-      request.plan;
-
-    const framework =
-      normalizeFramework(
-        request.framework,
-        plan
-      );
-
-
-    /* =====================================================
-       VALIDATION
-    ===================================================== */
-
-    if (
-      !prompt
-    ) {
+    if (!request.prompt) {
 
       return {
 
-        success: false,
-
-        message:
-          "Build prompt required",
+        success:
+          false,
 
         error:
-          "Builder Agent received an empty build prompt.",
+          "Builder Agent requires a user prompt.",
 
         stage:
-          currentStage
-
-      };
-
-    }
-
-    if (
-      !plan ||
-      typeof plan !== "object" ||
-      Array.isArray(plan)
-    ) {
-
-      return {
-
-        success: false,
-
-        message:
-          "Project plan required",
-
-        error:
-          "Builder Agent did not receive a valid Planning Agent output.",
-
-        stage:
-          currentStage
+          currentStage,
 
       };
 
     }
 
 
-    /* =====================================================
-       PLAN SIZE SAFETY
-    ===================================================== */
+    if (!request.plan) {
 
-    let planForAI =
-      plan;
+      return {
 
-    try {
+        success:
+          false,
 
-      const serializedPlan =
-        JSON.stringify(
-          plan
-        );
+        error:
+          "Builder Agent requires a planning result.",
 
-      if (
-        serializedPlan.length >
-        MAX_PLAN_SIZE
-      ) {
+        stage:
+          currentStage,
 
-        planForAI = {
-
-          ...plan,
-
-          _builderNotice:
-            "Planning output exceeded builder context limit. Preserve the essential architecture and implementation requirements from the supplied plan."
-
-        };
-
-      }
+      };
 
     }
 
-    catch (error) {
 
-      planForAI =
-        plan;
+    if (
+      request.planString.length >
+      MAX_PLAN_SIZE
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          "Planning data is too large.",
+
+        stage:
+          currentStage,
+
+      };
 
     }
 
@@ -944,42 +1297,26 @@ async function builderAgent(
        BUILD CONTEXT
     ===================================================== */
 
-    const buildContext = {
-
-      userRequest:
-        prompt,
-
-      framework:
-        framework ||
-        "Use the framework specified by the Planning Agent.",
-
-      plan:
-        planForAI,
-
-      intent:
-        request.intent ||
-        null,
-
-      memoryContext:
-        request.memoryContext ||
-        null
-
-    };
+    const buildContext =
+      createBuildContext(
+        request
+      );
 
 
     /* =====================================================
-       AI BUILD
+       MANIFEST GENERATION
     ===================================================== */
 
     currentStage =
-      "ai-build";
+      "project-manifest";
+
 
     logger.info(
-      "Builder Agent requesting structured code generation from centralized AI provider."
+      "Builder generating project manifest"
     );
 
 
-    const result =
+    const manifestResult =
       await generateJSON({
 
         messages: [
@@ -990,7 +1327,7 @@ async function builderAgent(
               "system",
 
             content:
-              createBuilderSystemPrompt()
+              createManifestSystemPrompt(),
 
           },
 
@@ -999,258 +1336,542 @@ async function builderAgent(
             role:
               "user",
 
-            content:
-              safeJson(
-                buildContext
-              )
+            content: `
+USER REQUEST:
 
-          }
+${request.prompt}
+
+FRAMEWORK:
+
+${request.framework}
+
+PLANNING RESULT:
+
+${request.planString}
+
+PROJECT ID:
+
+${request.projectId || "not specified"}
+
+Create the complete project file manifest.
+Do not generate source code yet.
+`,
+          },
 
         ],
 
-        /*
-         * IMPORTANT:
-         *
-         * Do NOT specify:
-         *
-         * provider: "openai"
-         * provider: "gemini"
-         * model: ...
-         *
-         * here.
-         *
-         * Provider service owns the Gemini
-         * model failover chain.
-         */
-
-        json:
-          true,
+        temperature:
+          0.1,
 
         maxTokens:
-          12000,
-
-        thinkingLevel:
-          "high"
+          MANIFEST_MAX_TOKENS,
 
       });
 
 
-    /* =====================================================
-       PROVIDER VALIDATION
-    ===================================================== */
-
     if (
-      !result ||
-      result.success !== true
-    ) {
-
-      const providerError =
-        result?.error ||
-        "Centralized AI provider returned an unsuccessful result.";
-
-      logger.error(
-        `Builder Agent AI Provider Failed: ${providerError}`
-      );
-
-      return {
-
-        success: false,
-
-        message:
-          "Builder Agent AI provider failed",
-
-        error:
-          providerError,
-
-        stage:
-          currentStage,
-
-        provider:
-          result?.provider ||
-          null,
-
-        model:
-          result?.model ||
-          null
-
-      };
-
-    }
-
-
-    /* =====================================================
-       STRUCTURED RESPONSE VALIDATION
-    ===================================================== */
-
-    let parsed =
-      result.data;
-
-
-    /*
-     * Normally generateJSON already parses
-     * the provider response.
-     *
-     * This additional safety layer handles
-     * accidental stringified JSON.
-     */
-
-    if (
-      typeof parsed === "string"
-    ) {
-
-      parsed =
-        safeJsonParse(
-          parsed
-        );
-
-    }
-
-
-    if (
-      !parsed ||
-      typeof parsed !== "object" ||
-      Array.isArray(parsed)
+      !manifestResult ||
+      manifestResult.success !==
+        true
     ) {
 
       return {
 
-        success: false,
-
-        message:
-          "Builder Agent received an invalid AI response",
+        success:
+          false,
 
         error:
-          "AI provider returned an invalid project object.",
-
-        stage:
-          currentStage,
-
-        provider:
-          result.provider ||
-          null,
-
-        model:
-          result.model ||
-          null
-
-      };
-
-    }
-
-
-    /* =====================================================
-       FILE ARRAY VALIDATION
-    ===================================================== */
-
-    if (
-      !Array.isArray(
-        parsed.files
-      )
-    ) {
-
-      return {
-
-        success: false,
-
-        message:
-          "Invalid files structure",
-
-        error:
-          "Builder Agent response does not contain a valid files array.",
-
-        stage:
-          currentStage,
-
-        provider:
-          result.provider ||
-          null,
-
-        model:
-          result.model ||
-          null
-
-      };
-
-    }
-
-
-    if (
-      parsed.files.length === 0
-    ) {
-
-      return {
-
-        success: false,
-
-        message:
-          "Builder Agent returned no project files",
-
-        error:
-          "The AI Builder completed but generated zero files.",
-
-        stage:
-          currentStage,
-
-        provider:
-          result.provider ||
-          null,
-
-        model:
-          result.model ||
-          null
-
-      };
-
-    }
-
-
-    /* =====================================================
-       FILE NORMALIZATION
-    ===================================================== */
-
-    currentStage =
-      "file-validation";
-
-    const fileResult =
-      normalizeFiles(
-        parsed.files
-      );
-
-
-    if (
-      fileResult.files.length === 0
-    ) {
-
-      return {
-
-        success: false,
-
-        message:
-          "Builder Agent returned no valid project files",
-
-        error:
-          "All generated files failed path/content validation.",
+          manifestResult?.error ||
+          "Project manifest generation failed.",
 
         stage:
           currentStage,
 
         metadata: {
 
-          invalidFiles:
-            fileResult.invalidCount,
-
-          duplicateFiles:
-            fileResult.duplicateCount
+          durationMs:
+            Date.now() -
+            startedAt,
 
         },
 
-        provider:
-          result.provider ||
-          null,
+      };
 
-        model:
-          result.model ||
-          null
+    }
+
+
+    const manifestValidation =
+      validateManifest(
+        manifestResult.data
+      );
+
+
+    if (
+      !manifestValidation.valid
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          manifestValidation.error,
+
+        stage:
+          currentStage,
+
+        metadata: {
+
+          durationMs:
+            Date.now() -
+            startedAt,
+
+        },
+
+      };
+
+    }
+
+
+    const projectName =
+      manifestValidation
+        .data
+        .projectName;
+
+
+    const manifestFramework =
+      manifestValidation
+        .data
+        .framework ||
+      request.framework;
+
+
+    const manifestFiles =
+      manifestValidation
+        .data
+        .files;
+
+
+    logger.success(
+      `Builder manifest created: ${manifestFiles.length} files`
+    );
+
+
+    /* =====================================================
+       FILE BATCH GENERATION
+    ===================================================== */
+
+    currentStage =
+      "file-generation";
+
+
+    const batches =
+      createBatches(
+        manifestFiles
+      );
+
+
+    const generatedFiles =
+      [];
+
+
+    const generatedPaths =
+      new Set();
+
+
+    logger.info(
+      `Builder will generate ${batches.length} file batches`
+    );
+
+
+    for (
+      let batchIndex = 0;
+      batchIndex < batches.length;
+      batchIndex++
+    ) {
+
+      const batch =
+        batches[batchIndex];
+
+
+      currentStage =
+        `file-generation-batch-${batchIndex + 1}`;
+
+
+      const batchNumber =
+        batchIndex + 1;
+
+
+      logger.info(
+        `Builder generating batch ${batchNumber}/${batches.length} (${batch.length} files)`
+      );
+
+
+      /*
+       * Only send the manifest and requested batch.
+       *
+       * We intentionally do NOT send all previously
+       * generated source code back to the model.
+       *
+       * This prevents context explosion and keeps
+       * individual AI requests manageable.
+       */
+      const batchDescription =
+        batch
+          .map(
+            file => ({
+              path:
+                file.path,
+
+              purpose:
+                file.purpose,
+
+            })
+          );
+
+
+      const generatedIndex =
+        createGeneratedFileIndex(
+          generatedFiles
+        );
+
+
+      const batchResult =
+        await generateJSON({
+
+          messages: [
+
+            {
+
+              role:
+                "system",
+
+              content:
+                createFileBatchSystemPrompt(),
+
+            },
+
+            {
+
+              role:
+                "user",
+
+              content: `
+USER REQUEST:
+
+${request.prompt}
+
+PROJECT:
+
+${projectName}
+
+FRAMEWORK:
+
+${manifestFramework}
+
+PLANNING RESULT:
+
+${request.planString}
+
+COMPLETE PROJECT MANIFEST:
+
+${safeJson(
+  manifestFiles,
+  50000
+)}
+
+CURRENT FILE BATCH:
+
+${safeJson(
+  batchDescription,
+  10000
+)}
+
+ALREADY GENERATED FILE INDEX:
+
+${safeJson(
+  generatedIndex,
+  20000
+)}
+
+Generate ONLY the files in CURRENT FILE BATCH.
+
+Every requested path must be returned.
+
+Return complete source code.
+Do not return explanations.
+Do not return Markdown.
+`,
+            },
+
+          ],
+
+          temperature:
+            0.2,
+
+          maxTokens:
+            FILE_BATCH_MAX_TOKENS,
+
+        });
+
+
+      if (
+        !batchResult ||
+        batchResult.success !==
+          true
+      ) {
+
+        logger.error(
+          `Builder batch ${batchNumber}/${batches.length} failed`
+        );
+
+
+        return {
+
+          success:
+            false,
+
+          error:
+            batchResult?.error ||
+            `File generation batch ${batchNumber} failed.`,
+
+          stage:
+            currentStage,
+
+          metadata: {
+
+            projectName,
+
+            framework:
+              manifestFramework,
+
+            totalManifestFiles:
+              manifestFiles.length,
+
+            generatedFiles:
+              generatedFiles.length,
+
+            failedBatch:
+              batchNumber,
+
+            totalBatches:
+              batches.length,
+
+            durationMs:
+              Date.now() -
+              startedAt,
+
+          },
+
+        };
+
+      }
+
+
+      const batchValidation =
+        validateGeneratedBatch(
+
+          batchResult.data,
+
+          batch
+
+        );
+
+
+      if (
+        !batchValidation.valid
+      ) {
+
+        logger.error(
+          `Builder batch validation failed: ${batchValidation.error}`
+        );
+
+
+        return {
+
+          success:
+            false,
+
+          error:
+            batchValidation.error,
+
+          stage:
+            currentStage,
+
+          metadata: {
+
+            projectName,
+
+            framework:
+              manifestFramework,
+
+            totalManifestFiles:
+              manifestFiles.length,
+
+            generatedFiles:
+              generatedFiles.length,
+
+            failedBatch:
+              batchNumber,
+
+            totalBatches:
+              batches.length,
+
+            durationMs:
+              Date.now() -
+              startedAt,
+
+          },
+
+        };
+
+      }
+
+
+      /*
+       * Add validated files.
+       */
+      for (
+        const file of
+          batchValidation.files
+      ) {
+
+        const key =
+          file.path
+            .toLowerCase();
+
+
+        if (
+          generatedPaths.has(key)
+        ) {
+
+          return {
+
+            success:
+              false,
+
+            error:
+              `Duplicate project file detected: ${file.path}`,
+
+            stage:
+              currentStage,
+
+          };
+
+        }
+
+
+        generatedPaths.add(
+          key
+        );
+
+
+        generatedFiles.push(
+          file
+        );
+
+      }
+
+
+      logger.success(
+        `Builder batch ${batchNumber}/${batches.length} completed: ${batchValidation.files.length} files`
+      );
+
+    }
+
+
+    /* =====================================================
+       FINAL PROJECT VALIDATION
+    ===================================================== */
+
+    currentStage =
+      "final-project-validation";
+
+
+    if (
+      generatedFiles.length !==
+      manifestFiles.length
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          `Builder generated ${generatedFiles.length} files but manifest required ${manifestFiles.length}.`,
+
+        stage:
+          currentStage,
+
+        metadata: {
+
+          projectName,
+
+          framework:
+            manifestFramework,
+
+          manifestFiles:
+            manifestFiles.length,
+
+          generatedFiles:
+            generatedFiles.length,
+
+          durationMs:
+            Date.now() -
+            startedAt,
+
+        },
+
+      };
+
+    }
+
+
+    /*
+     * Final normalization pass.
+     */
+    const finalFiles =
+      normalizeFiles(
+        generatedFiles
+      );
+
+
+    if (
+      finalFiles.length !==
+      manifestFiles.length
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          "Final project validation rejected one or more generated files.",
+
+        stage:
+          currentStage,
+
+        metadata: {
+
+          projectName,
+
+          framework:
+            manifestFramework,
+
+          manifestFiles:
+            manifestFiles.length,
+
+          generatedFiles:
+            finalFiles.length,
+
+          durationMs:
+            Date.now() -
+            startedAt,
+
+        },
 
       };
 
@@ -1258,141 +1879,134 @@ async function builderAgent(
 
 
     /* =====================================================
-       PROJECT NAME
+       FINAL PATH VERIFICATION
     ===================================================== */
 
-    const projectName =
-      normalizeProjectName(
-        parsed.projectName ||
-        plan.projectName
+    const finalPathSet =
+      new Set(
+        finalFiles.map(
+          file =>
+            file.path
+              .toLowerCase()
+        )
       );
 
 
-    /* =====================================================
-       FINAL FRAMEWORK
-    ===================================================== */
+    for (
+      const manifestFile of
+        manifestFiles
+    ) {
 
-    const finalFramework =
-      normalizeFramework(
-        parsed.framework ||
-        framework,
-        plan
-      );
+      const key =
+        manifestFile.path
+          .toLowerCase();
 
 
-    /* =====================================================
-       FINAL BUILD RESULT
-    ===================================================== */
+      if (
+        !finalPathSet.has(key)
+      ) {
 
-    const normalizedBuild = {
+        return {
 
-      projectName,
+          success:
+            false,
 
-      framework:
-        finalFramework,
+          error:
+            `Final project is missing: ${manifestFile.path}`,
 
-      files:
-        fileResult.files
+          stage:
+            currentStage,
 
-    };
-
-
-    /* =====================================================
-       SUCCESS LOG
-    ===================================================== */
-
-    logger.success(
-      `Builder Agent Completed: ${fileResult.files.length} files generated`
-    );
-
-    logger.info(
-      `Builder Agent Provider: ${result.provider || "unknown"}`
-    );
-
-    logger.info(
-      `Builder Agent Model: ${result.model || "unknown"}`
-    );
-
-
-    /* =====================================================
-       RESPONSE
-    ===================================================== */
-
-    return {
-
-      success: true,
-
-      data:
-        normalizedBuild,
-
-      metadata: {
-
-        agent:
-          "builderAgent",
-
-        provider:
-          result.provider ||
-          null,
-
-        model:
-          result.model ||
-          null,
-
-        totalFiles:
-          fileResult.files.length,
-
-        invalidFiles:
-          fileResult.invalidCount,
-
-        duplicateFiles:
-          fileResult.duplicateCount,
-
-        framework:
-          finalFramework,
-
-        projectName,
-
-        generatedAt:
-          new Date()
+        };
 
       }
 
-    };
-
-  }
-
-  catch (error) {
-
-    const errorMessage =
-      error?.message ||
-      "Unknown Builder Agent error";
+    }
 
 
-    logger.error(
-      `Builder Agent Failed at ${currentStage}: ${errorMessage}`
+    /* =====================================================
+       FINAL SUCCESS
+    ===================================================== */
+
+    const durationMs =
+      Date.now() -
+      startedAt;
+
+
+    logger.success(
+      `Builder Agent Completed: ${finalFiles.length} files generated in ${durationMs}ms`
     );
 
 
     return {
 
-      success: false,
+      success:
+        true,
 
-      message:
-        "Builder Agent Failed",
+      data: {
+
+        projectName,
+
+        framework:
+          manifestFramework,
+
+        files:
+          finalFiles,
+
+      },
+
+      metadata: {
+
+        architecture:
+          "chunked-builder",
+
+        manifestFiles:
+          manifestFiles.length,
+
+        generatedFiles:
+          finalFiles.length,
+
+        batches:
+          batches.length,
+
+        filesPerBatch:
+          FILES_PER_BATCH,
+
+        durationMs,
+
+      },
+
+    };
+
+  } catch (error) {
+
+    logger.error(
+      `Builder Agent Failed at ${currentStage}: ${
+        error?.message ||
+        "Unknown error"
+      }`
+    );
+
+
+    return {
+
+      success:
+        false,
 
       error:
-        errorMessage,
+        error?.message ||
+        "Builder Agent failed.",
 
       stage:
         currentStage,
 
-      provider:
-        error?.provider ||
-        null,
+      metadata: {
 
-      model:
-        error?.model ||
-        null
+        durationMs:
+          Date.now() -
+          startedAt,
+
+      },
 
     };
 
