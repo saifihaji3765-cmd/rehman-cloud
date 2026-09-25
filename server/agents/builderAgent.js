@@ -1,6 +1,7 @@
 /* =========================================================
    ZyrionOS BUILDER AGENT
    Chunked Project Code Generation
+   Production-Safe Batch Validation + Repair
    =========================================================
 
    Architecture:
@@ -13,7 +14,11 @@
         ↓
    File Generation Batches
         ↓
-   File Validation
+   Batch Validation
+        ↓
+   Batch Repair if required
+        ↓
+   Final Project Validation
         ↓
    Complete Project
         ↓
@@ -25,6 +30,8 @@
    - All AI calls go through aiProviderService.
    - No Gemini dependency.
    - Large projects are generated in controlled batches.
+   - Unexpected extra files do NOT automatically fail a batch.
+   - Missing requested files trigger controlled repair attempts.
    - Final return contract remains:
 
        {
@@ -61,28 +68,34 @@ const MAX_PROMPT_LENGTH = 12000;
 
 const MAX_PLAN_SIZE = 100000;
 
-
-/*
- * Instead of asking the model for an entire project
- * in one response, files are generated in controlled
- * batches.
- */
 const FILES_PER_BATCH = 3;
 
-
-/*
- * Maximum output tokens for one file-generation batch.
-
- * This is deliberately much lower than the previous
- * 12000-token one-shot Builder request.
- */
 const FILE_BATCH_MAX_TOKENS = 5000;
 
+const MANIFEST_MAX_TOKENS = 3500;
 
 /*
- * Manifest is intentionally small.
+ * Maximum number of attempts for one file batch.
+
+ * Attempt 1:
+ * normal generation.
+
+ * Attempt 2+:
+ * repair / correction request.
  */
-const MANIFEST_MAX_TOKENS = 3500;
+const MAX_BATCH_ATTEMPTS = 2;
+
+
+/*
+ * Maximum number of files that can be returned
+ * by one AI response.
+
+ * We allow a small amount of over-generation because
+ * some models occasionally return files belonging to
+ * another nearby batch.
+ */
+const MAX_BATCH_RESPONSE_FILES =
+  FILES_PER_BATCH + 3;
 
 
 /* =========================================================
@@ -732,8 +745,88 @@ STRICT RULES:
 
 24. Never return an empty files array.
 
-25. Maximum files in this response:
+25. Maximum requested files in this response:
     ${FILES_PER_BATCH}.
+
+26. If you accidentally generate a file that belongs
+    to another project batch, still prioritize returning
+    every requested file correctly.
+
+27. Never replace a requested file with another file.
+
+28. Make sure every requested path appears exactly once.
+`;
+
+}
+
+
+/* =========================================================
+   BATCH REPAIR SYSTEM PROMPT
+========================================================= */
+
+function createBatchRepairSystemPrompt() {
+
+  return `
+You are the ZyrionOS Builder Repair Agent.
+
+A previous file-generation attempt for a small project
+batch failed validation.
+
+Your job is to repair ONLY the current batch.
+
+Return ONLY valid JSON.
+
+Required format:
+
+{
+  "files": [
+    {
+      "path": "string",
+      "content": "complete file content"
+    }
+  ]
+}
+
+STRICT RULES:
+
+1. Return valid JSON only.
+
+2. Do not use Markdown.
+
+3. Do not use code fences.
+
+4. Generate every missing requested file.
+
+5. Every requested path must exactly match.
+
+6. Do not return files outside the requested batch.
+
+7. Do not omit any requested file.
+
+8. Do not return duplicate paths.
+
+9. Return complete source code.
+
+10. Do not use placeholders.
+
+11. Do not truncate code.
+
+12. Preserve the project architecture.
+
+13. Preserve framework requirements.
+
+14. Preserve dependency requirements.
+
+15. Fix missing or invalid files instead of explaining
+    the previous error.
+
+16. Never generate secrets.
+
+17. If an existing valid file from the previous attempt
+    is supplied, preserve its content unless it must be
+    corrected for consistency.
+
+18. The final response must contain ONLY the repaired files.
 `;
 
 }
@@ -952,6 +1045,37 @@ function validateManifest(
    BATCH VALIDATION
 ========================================================= */
 
+/*
+ * Important behavior:
+ *
+ * The old validator treated ANY extra file as a fatal
+ * error.
+ *
+ * Example:
+ *
+ * Expected:
+ *   App.js
+ *   index.js
+ *   App.css
+ *
+ * AI returns:
+ *   App.js
+ *   index.js
+ *   App.css
+ *   TodoList.js
+ *
+ * The old Builder failed the entire build.
+ *
+ * The new Builder:
+ *
+ *   - ignores extra files
+ *   - keeps only requested files
+ *   - fails only when a requested file is missing
+ *
+ * This prevents one accidental cross-batch file from
+ * destroying an otherwise valid generation.
+ */
+
 function validateGeneratedBatch(
   generated,
   expectedFiles
@@ -1013,18 +1137,60 @@ function validateGeneratedBatch(
   }
 
 
+  if (
+    generated.files.length >
+    MAX_BATCH_RESPONSE_FILES
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        `Generated batch returned too many files: ${generated.files.length}.`,
+
+    };
+
+  }
+
+
   const expected =
-    new Set(
-      expectedFiles.map(
-        item =>
-          item.path
-            .toLowerCase()
-      )
+    new Map();
+
+
+  for (
+    const item of
+      expectedFiles
+  ) {
+
+    const normalizedPath =
+      normalizeFilePath(
+        item.path
+      );
+
+
+    if (!normalizedPath) {
+
+      continue;
+
+    }
+
+
+    expected.set(
+      normalizedPath.toLowerCase(),
+      normalizedPath
     );
+
+  }
 
 
   const received =
     new Map();
+
+
+  const unexpectedFiles =
+    [];
 
 
   for (
@@ -1040,15 +1206,13 @@ function validateGeneratedBatch(
 
     if (!file) {
 
-      return {
-
-        valid:
-          false,
-
-        error:
-          "Generated batch contains an invalid file.",
-
-      };
+      /*
+       * Invalid files are ignored here.
+       *
+       * If that causes a requested file to remain
+       * missing, the repair pass will regenerate it.
+       */
+      continue;
 
     }
 
@@ -1058,23 +1222,30 @@ function validateGeneratedBatch(
         .toLowerCase();
 
 
+    /*
+     * Extra file:
+     *
+     * Do NOT kill the whole batch.
+     *
+     * It may be a file the model accidentally generated
+     * from the next batch.
+     */
     if (
       !expected.has(key)
     ) {
 
-      return {
+      unexpectedFiles.push(
+        file.path
+      );
 
-        valid:
-          false,
-
-        error:
-          `Unexpected file generated: ${file.path}`,
-
-      };
+      continue;
 
     }
 
 
+    /*
+     * Duplicate requested file.
+     */
     if (
       received.has(key)
     ) {
@@ -1086,6 +1257,9 @@ function validateGeneratedBatch(
 
         error:
           `Duplicate file generated: ${file.path}`,
+
+        repairable:
+          false,
 
       };
 
@@ -1101,8 +1275,11 @@ function validateGeneratedBatch(
 
 
   /*
-   * Every requested file must be present.
+   * Find missing requested files.
    */
+  const missingFiles = [];
+
+
   for (
     const expectedFile of
       expectedFiles
@@ -1117,30 +1294,70 @@ function validateGeneratedBatch(
       !received.has(key)
     ) {
 
-      return {
-
-        valid:
-          false,
-
-        error:
-          `Missing generated file: ${expectedFile.path}`,
-
-      };
+      missingFiles.push(
+        expectedFile
+      );
 
     }
 
   }
 
 
+  /*
+   * All requested files are present.
+   *
+   * Extra files are discarded safely.
+   */
+  if (
+    missingFiles.length ===
+    0
+  ) {
+
+    return {
+
+      valid:
+        true,
+
+      files:
+        Array.from(
+          received.values()
+        ),
+
+      unexpectedFiles,
+
+      missingFiles: [],
+
+    };
+
+  }
+
+
+  /*
+   * Requested files are missing.
+   *
+   * Caller can perform a repair attempt.
+   */
   return {
 
     valid:
+      false,
+
+    repairable:
       true,
+
+    error:
+      `Missing generated file(s): ${missingFiles
+        .map(file => file.path)
+        .join(", ")}`,
 
     files:
       Array.from(
         received.values()
       ),
+
+    unexpectedFiles,
+
+    missingFiles,
 
   };
 
@@ -1199,6 +1416,214 @@ function createGeneratedFileIndex(
 
     })
   );
+
+}
+
+
+/* =========================================================
+   BUILD BATCH REQUEST
+========================================================= */
+
+function createBatchUserMessage({
+  request,
+  projectName,
+  manifestFramework,
+  manifestFiles,
+  batch,
+  generatedFiles,
+  repairContext = null
+}) {
+
+  const generatedIndex =
+    createGeneratedFileIndex(
+      generatedFiles
+    );
+
+
+  const batchDescription =
+    batch.map(
+      file => ({
+
+        path:
+          file.path,
+
+        purpose:
+          file.purpose,
+
+      })
+    );
+
+
+  let repairSection =
+    "";
+
+
+  if (repairContext) {
+
+    repairSection = `
+
+REPAIR MODE:
+
+The previous generation attempt did not satisfy
+the batch contract.
+
+VALID FILES ALREADY RECEIVED:
+
+${safeJson(
+  repairContext.validFiles || [],
+  30000
+)}
+
+MISSING REQUESTED FILES:
+
+${safeJson(
+  repairContext.missingFiles || [],
+  10000
+)}
+
+UNEXPECTED FILES FROM PREVIOUS ATTEMPT:
+
+${safeJson(
+  repairContext.unexpectedFiles || [],
+  10000
+)}
+
+PREVIOUS VALIDATION ERROR:
+
+${safeString(
+  repairContext.error || "",
+  2000
+)}
+
+Generate the missing/corrected requested files now.
+
+Do not repeat the previous validation mistake.
+`;
+
+  }
+
+
+  return `
+USER REQUEST:
+
+${request.prompt}
+
+PROJECT:
+
+${projectName}
+
+FRAMEWORK:
+
+${manifestFramework}
+
+PLANNING RESULT:
+
+${request.planString}
+
+COMPLETE PROJECT MANIFEST:
+
+${safeJson(
+  manifestFiles,
+  50000
+)}
+
+CURRENT FILE BATCH:
+
+${safeJson(
+  batchDescription,
+  10000
+)}
+
+ALREADY GENERATED FILE INDEX:
+
+${safeJson(
+  generatedIndex,
+  20000
+)}
+
+Generate ONLY the files in CURRENT FILE BATCH.
+
+Every requested path must be returned.
+
+Return complete source code.
+
+Do not return explanations.
+Do not return Markdown.
+Do not return files from another batch.
+
+${repairSection}
+`;
+
+}
+
+
+/* =========================================================
+   REQUEST ONE BATCH
+========================================================= */
+
+async function requestBatchGeneration({
+  request,
+  projectName,
+  manifestFramework,
+  manifestFiles,
+  batch,
+  generatedFiles,
+  repairContext = null
+}) {
+
+  return generateJSON({
+
+    messages: [
+
+      {
+
+        role:
+          "system",
+
+        content:
+          repairContext
+            ? createBatchRepairSystemPrompt()
+            : createFileBatchSystemPrompt(),
+
+      },
+
+      {
+
+        role:
+          "user",
+
+        content:
+          createBatchUserMessage({
+
+            request,
+
+            projectName,
+
+            manifestFramework,
+
+            manifestFiles,
+
+            batch,
+
+            generatedFiles,
+
+            repairContext,
+
+          }),
+
+      },
+
+    ],
+
+    temperature:
+      repairContext
+        ? 0.1
+        : 0.2,
+
+    maxTokens:
+      FILE_BATCH_MAX_TOKENS,
+
+  });
 
 }
 
@@ -1301,6 +1726,14 @@ async function builderAgent(
       createBuildContext(
         request
       );
+
+
+    /*
+     * Keep this reference intentionally available for
+     * future builder telemetry without changing the
+     * Master Agent contract.
+     */
+    void buildContext;
 
 
     /* =====================================================
@@ -1508,181 +1941,293 @@ Do not generate source code yet.
       );
 
 
-      /*
-       * Only send the manifest and requested batch.
-       *
-       * We intentionally do NOT send all previously
-       * generated source code back to the model.
-       *
-       * This prevents context explosion and keeps
-       * individual AI requests manageable.
-       */
-      const batchDescription =
-        batch
-          .map(
-            file => ({
-              path:
-                file.path,
-
-              purpose:
-                file.purpose,
-
-            })
-          );
+      let batchCompleted =
+        false;
 
 
-      const generatedIndex =
-        createGeneratedFileIndex(
-          generatedFiles
-        );
+      let lastValidation =
+        null;
 
 
-      const batchResult =
-        await generateJSON({
-
-          messages: [
-
-            {
-
-              role:
-                "system",
-
-              content:
-                createFileBatchSystemPrompt(),
-
-            },
-
-            {
-
-              role:
-                "user",
-
-              content: `
-USER REQUEST:
-
-${request.prompt}
-
-PROJECT:
-
-${projectName}
-
-FRAMEWORK:
-
-${manifestFramework}
-
-PLANNING RESULT:
-
-${request.planString}
-
-COMPLETE PROJECT MANIFEST:
-
-${safeJson(
-  manifestFiles,
-  50000
-)}
-
-CURRENT FILE BATCH:
-
-${safeJson(
-  batchDescription,
-  10000
-)}
-
-ALREADY GENERATED FILE INDEX:
-
-${safeJson(
-  generatedIndex,
-  20000
-)}
-
-Generate ONLY the files in CURRENT FILE BATCH.
-
-Every requested path must be returned.
-
-Return complete source code.
-Do not return explanations.
-Do not return Markdown.
-`,
-            },
-
-          ],
-
-          temperature:
-            0.2,
-
-          maxTokens:
-            FILE_BATCH_MAX_TOKENS,
-
-        });
-
-
-      if (
-        !batchResult ||
-        batchResult.success !==
-          true
+      for (
+        let attempt = 1;
+        attempt <= MAX_BATCH_ATTEMPTS;
+        attempt++
       ) {
 
-        logger.error(
-          `Builder batch ${batchNumber}/${batches.length} failed`
-        );
+        const isRepairAttempt =
+          attempt > 1;
 
 
-        return {
+        if (isRepairAttempt) {
 
-          success:
-            false,
+          logger.warning(
+            `Builder repairing batch ${batchNumber}/${batches.length} | attempt=${attempt}`
+          );
 
-          error:
-            batchResult?.error ||
-            `File generation batch ${batchNumber} failed.`,
+        }
 
-          stage:
-            currentStage,
 
-          metadata: {
+        const repairContext =
+          isRepairAttempt
+            ? lastValidation
+            : null;
+
+
+        const batchResult =
+          await requestBatchGeneration({
+
+            request,
 
             projectName,
 
-            framework:
-              manifestFramework,
+            manifestFramework,
 
-            totalManifestFiles:
-              manifestFiles.length,
+            manifestFiles,
 
-            generatedFiles:
-              generatedFiles.length,
+            batch,
 
-            failedBatch:
-              batchNumber,
+            generatedFiles,
 
-            totalBatches:
-              batches.length,
+            repairContext,
 
-            durationMs:
-              Date.now() -
-              startedAt,
-
-          },
-
-        };
-
-      }
+          });
 
 
-      const batchValidation =
-        validateGeneratedBatch(
+        if (
+          !batchResult ||
+          batchResult.success !==
+            true
+        ) {
 
-          batchResult.data,
-
-          batch
-
-        );
+          logger.warning(
+            `Builder batch ${batchNumber}/${batches.length} AI request failed | attempt=${attempt}`
+          );
 
 
-      if (
-        !batchValidation.valid
-      ) {
+          lastValidation = {
 
+            valid:
+              false,
+
+            repairable:
+              true,
+
+            error:
+              batchResult?.error ||
+              "AI batch generation failed.",
+
+            files: [],
+
+            missingFiles:
+              batch,
+
+            unexpectedFiles: [],
+
+          };
+
+
+          if (
+            attempt <
+            MAX_BATCH_ATTEMPTS
+          ) {
+
+            continue;
+
+          }
+
+
+          logger.error(
+            `Builder batch ${batchNumber}/${batches.length} failed after ${attempt} attempts`
+          );
+
+
+          return {
+
+            success:
+              false,
+
+            error:
+              batchResult?.error ||
+              `File generation batch ${batchNumber} failed.`,
+
+            stage:
+              currentStage,
+
+            metadata: {
+
+              projectName,
+
+              framework:
+                manifestFramework,
+
+              totalManifestFiles:
+                manifestFiles.length,
+
+              generatedFiles:
+                generatedFiles.length,
+
+              failedBatch:
+                batchNumber,
+
+              totalBatches:
+                batches.length,
+
+              attempts:
+                attempt,
+
+              durationMs:
+                Date.now() -
+                startedAt,
+
+            },
+
+          };
+
+        }
+
+
+        const batchValidation =
+          validateGeneratedBatch(
+
+            batchResult.data,
+
+            batch
+
+          );
+
+
+        lastValidation =
+          batchValidation;
+
+
+        /*
+         * SUCCESS:
+         *
+         * All requested files exist.
+         *
+         * Any accidental extra files are ignored.
+         */
+        if (
+          batchValidation.valid
+        ) {
+
+          if (
+            Array.isArray(
+              batchValidation.unexpectedFiles
+            ) &&
+            batchValidation
+              .unexpectedFiles
+              .length > 0
+          ) {
+
+            logger.warning(
+              `Builder batch ${batchNumber}: ignored unexpected files: ${batchValidation.unexpectedFiles.join(", ")}`
+            );
+
+          }
+
+
+          /*
+           * Add only files belonging to the current
+           * manifest batch.
+           */
+          for (
+            const file of
+              batchValidation.files
+          ) {
+
+            const key =
+              file.path
+                .toLowerCase();
+
+
+            if (
+              generatedPaths.has(key)
+            ) {
+
+              return {
+
+                success:
+                  false,
+
+                error:
+                  `Duplicate project file detected: ${file.path}`,
+
+                stage:
+                  currentStage,
+
+                metadata: {
+
+                  projectName,
+
+                  framework:
+                    manifestFramework,
+
+                  failedBatch:
+                    batchNumber,
+
+                  durationMs:
+                    Date.now() -
+                    startedAt,
+
+                },
+
+              };
+
+            }
+
+
+            generatedPaths.add(
+              key
+            );
+
+
+            generatedFiles.push(
+              file
+            );
+
+          }
+
+
+          logger.success(
+            `Builder batch ${batchNumber}/${batches.length} completed: ${batchValidation.files.length} files`
+          );
+
+
+          batchCompleted =
+            true;
+
+
+          break;
+
+        }
+
+
+        /*
+         * REPAIRABLE FAILURE:
+         *
+         * Some requested files are missing.
+         */
+        if (
+          batchValidation.repairable &&
+          attempt <
+            MAX_BATCH_ATTEMPTS
+        ) {
+
+          logger.warning(
+            `Builder batch ${batchNumber}: missing requested files, starting repair`
+          );
+
+
+          continue;
+
+        }
+
+
+        /*
+         * Final failed validation.
+         */
         logger.error(
           `Builder batch validation failed: ${batchValidation.error}`
         );
@@ -1718,6 +2263,9 @@ Do not return Markdown.
             totalBatches:
               batches.length,
 
+            attempts:
+              attempt,
+
             durationMs:
               Date.now() -
               startedAt,
@@ -1729,54 +2277,41 @@ Do not return Markdown.
       }
 
 
-      /*
-       * Add validated files.
-       */
-      for (
-        const file of
-          batchValidation.files
-      ) {
+      if (!batchCompleted) {
 
-        const key =
-          file.path
-            .toLowerCase();
+        return {
 
+          success:
+            false,
 
-        if (
-          generatedPaths.has(key)
-        ) {
+          error:
+            `Builder could not complete batch ${batchNumber}.`,
 
-          return {
+          stage:
+            currentStage,
 
-            success:
-              false,
+          metadata: {
 
-            error:
-              `Duplicate project file detected: ${file.path}`,
+            projectName,
 
-            stage:
-              currentStage,
+            framework:
+              manifestFramework,
 
-          };
+            failedBatch:
+              batchNumber,
 
-        }
+            totalBatches:
+              batches.length,
 
+            durationMs:
+              Date.now() -
+              startedAt,
 
-        generatedPaths.add(
-          key
-        );
+          },
 
-
-        generatedFiles.push(
-          file
-        );
+        };
 
       }
-
-
-      logger.success(
-        `Builder batch ${batchNumber}/${batches.length} completed: ${batchValidation.files.length} files`
-      );
 
     }
 
@@ -1916,6 +2451,19 @@ Do not return Markdown.
 
           stage:
             currentStage,
+
+          metadata: {
+
+            projectName,
+
+            framework:
+              manifestFramework,
+
+            durationMs:
+              Date.now() -
+              startedAt,
+
+          },
 
         };
 
