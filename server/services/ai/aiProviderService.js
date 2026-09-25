@@ -8,7 +8,7 @@
    2. Sarvam AI
    3. BharatRouter
    4. IndieRouter
-   5. Google Vertex AI / Gemini Enterprise Agent Platform
+   5. Google Vertex AI
 
    ARCHITECTURE
 
@@ -20,19 +20,20 @@
       ↓
    Selected Provider
       ↓
+   Response Validation
+      ↓
    Normalized Response
 
    IMPORTANT
 
    - DeepSeek removed
-   - Anthropic / Claude removed
+   - Claude / Anthropic removed
    - OpenAI is not an active provider
    - Agents never call providers directly
-   - Provider-specific logic remains here
-   - Vertex uses AWS → Google Workload Identity Federation
-   - No Google service-account private key is required
-   - Sarvam reasoning is explicitly disabled for short-budget
-     production requests to prevent empty visible responses
+   - Provider-specific logic remains centralized
+   - Structured JSON failures can retry and fail over
+   - Bedrock uses ECS IAM role
+   - Vertex uses AWS → Google WIF
 ========================================================= */
 
 
@@ -84,11 +85,7 @@ try {
   ConverseCommand =
     bedrock.ConverseCommand;
 
-}
-
-catch (
-  error
-) {
+} catch (error) {
 
   BedrockRuntimeClient =
     null;
@@ -111,11 +108,7 @@ try {
   GoogleGenAI =
     googleGenAI.GoogleGenAI;
 
-}
-
-catch (
-  error
-) {
+} catch (error) {
 
   GoogleGenAI =
     null;
@@ -135,11 +128,7 @@ try {
   GoogleAuth =
     googleAuth.GoogleAuth;
 
-}
-
-catch (
-  error
-) {
+} catch (error) {
 
   GoogleAuth =
     null;
@@ -208,27 +197,44 @@ const DEFAULT_PROVIDER_ORDER = [
 
 
 /* =========================================================
-   PROVIDER TOKEN LIMITS
+   PROVIDER OUTPUT LIMITS
+=========================================================
+
+   These are application safety limits.
+
+   The actual provider/model may impose a lower limit.
+
+   Builder can request 12000 tokens, but the provider
+   service will never silently pretend that 5000 was
+   requested. The effective budget is logged and returned.
 ========================================================= */
 
 const PROVIDER_MAX_OUTPUT_TOKENS = {
 
   [PROVIDERS.BEDROCK]:
-    5000,
+    12000,
 
   [PROVIDERS.SARVAM]:
-    5000,
+    12000,
 
   [PROVIDERS.BHARATROUTER]:
-    5000,
+    12000,
 
   [PROVIDERS.INDIEROUTER]:
-    5000,
+    12000,
 
   [PROVIDERS.VERTEX]:
-    5000
+    12000
 
 };
+
+
+/* =========================================================
+   DEFAULT OUTPUT TOKEN LIMIT
+========================================================= */
+
+const DEFAULT_OUTPUT_TOKENS =
+  5000;
 
 
 /* =========================================================
@@ -434,7 +440,7 @@ function normalizeMaxTokens(
     PROVIDER_MAX_OUTPUT_TOKENS[
       provider
     ] ||
-    5000;
+    DEFAULT_OUTPUT_TOKENS;
 
 
   const numeric =
@@ -541,11 +547,7 @@ function loadGoogleWIFConfig() {
 
     return parsed;
 
-  }
-
-  catch (
-    error
-  ) {
+  } catch (error) {
 
     logger.warning(
       `Google WIF configuration invalid: ${error.message}`
@@ -577,11 +579,8 @@ if (
 
       });
 
-  }
 
-  catch (
-    error
-  ) {
+  } catch (error) {
 
     bedrockClient =
       null;
@@ -676,11 +675,7 @@ if (
       `Google Vertex AI WIF client initialized | project=${VERTEX_PROJECT_ID} | location=${VERTEX_LOCATION}`
     );
 
-  }
-
-  catch (
-    error
-  ) {
+  } catch (error) {
 
     vertexAuth =
       null;
@@ -694,9 +689,7 @@ if (
 
   }
 
-}
-
-else {
+} else {
 
   if (
     !VERTEX_PROJECT_ID
@@ -706,9 +699,7 @@ else {
       "Google Vertex AI unavailable: VERTEX_PROJECT_ID is missing"
     );
 
-  }
-
-  else if (
+  } else if (
     !vertexCredentialConfig
   ) {
 
@@ -716,9 +707,7 @@ else {
       "Google Vertex AI unavailable: GOOGLE_WIF_CONFIG_JSON is missing or invalid"
     );
 
-  }
-
-  else if (
+  } else if (
     !GoogleGenAI
   ) {
 
@@ -726,9 +715,7 @@ else {
       "Google Vertex AI unavailable: @google/genai is not installed"
     );
 
-  }
-
-  else if (
+  } else if (
     !GoogleAuth
   ) {
 
@@ -1488,6 +1475,38 @@ function classifyProviderError(
     ).toLowerCase();
 
 
+  /* =======================================================
+     STRUCTURED OUTPUT FAILURE
+  ======================================================= */
+
+  if (
+    error?.code ===
+      "AI_INVALID_JSON" ||
+
+    error?.code ===
+      "AI_STRUCTURED_OUTPUT_INVALID"
+  ) {
+
+    return {
+
+      category:
+        "structured_output",
+
+      retryable:
+        true,
+
+      fallback:
+        true
+
+    };
+
+  }
+
+
+  /* =======================================================
+     TEMPORARY NETWORK FAILURE
+  ======================================================= */
+
   if (
     error?.code ===
       "AI_PROVIDER_TIMEOUT" ||
@@ -1524,6 +1543,10 @@ function classifyProviderError(
 
   }
 
+
+  /* =======================================================
+     QUOTA / BILLING
+  ======================================================= */
 
   const quotaPhrases = [
 
@@ -1603,6 +1626,10 @@ function classifyProviderError(
   }
 
 
+  /* =======================================================
+     AUTHENTICATION
+  ======================================================= */
+
   if (
     [
       401,
@@ -1659,6 +1686,10 @@ function classifyProviderError(
   }
 
 
+  /* =======================================================
+     CONFIGURATION
+  ======================================================= */
+
   if (
     error?.code ===
       "AI_PROVIDER_NOT_CONFIGURED"
@@ -1680,9 +1711,15 @@ function classifyProviderError(
   }
 
 
+  /* =======================================================
+     INVALID REQUEST
+  ======================================================= */
+
   if (
     status === 400 ||
-    status === 422
+    status === 422 ||
+    error?.code ===
+      "AI_INVALID_REQUEST"
   ) {
 
     return {
@@ -1700,6 +1737,10 @@ function classifyProviderError(
 
   }
 
+
+  /* =======================================================
+     SERVER TEMPORARY
+  ======================================================= */
 
   if (
     [
@@ -2079,9 +2120,7 @@ function buildMessages(
 
       };
 
-    }
-
-    else {
+    } else {
 
       messages.unshift({
 
@@ -2191,11 +2230,7 @@ async function fetchJSON(
             )
           : null;
 
-    }
-
-    catch (
-      error
-    ) {
+    } catch (error) {
 
       data =
         null;
@@ -2264,11 +2299,7 @@ async function fetchJSON(
 
     };
 
-  }
-
-  catch (
-    error
-  ) {
+  } catch (error) {
 
     if (
       error?.name ===
@@ -2300,9 +2331,7 @@ async function fetchJSON(
 
     throw error;
 
-  }
-
-  finally {
+  } finally {
 
     clearTimeout(
       timeout
@@ -2383,11 +2412,6 @@ function extractChatCompletionText(
 
   }
 
-
-  /*
-   * Some compatible providers can return
-   * an array of content blocks.
-   */
 
   if (
     Array.isArray(
@@ -2505,6 +2529,236 @@ function getSafeResponseDiagnostics(
         : null
 
   };
+
+}
+
+
+/* =========================================================
+   JSON TEXT CLEANER
+========================================================= */
+
+function cleanJSONText(
+  value
+) {
+
+  if (
+    typeof value !==
+    "string"
+  ) {
+
+    return "";
+
+  }
+
+
+  let text =
+    value.trim();
+
+
+  if (
+    !text
+  ) {
+
+    return "";
+
+  }
+
+
+  /* Remove markdown JSON fence */
+
+  text =
+    text.replace(
+      /^\s*```json\s*/i,
+      ""
+    );
+
+
+  text =
+    text.replace(
+      /^\s*```\s*/i,
+      ""
+    );
+
+
+  text =
+    text.replace(
+      /\s*```\s*$/i,
+      ""
+    );
+
+
+  text =
+    text.trim();
+
+
+  return text;
+
+}
+
+
+/* =========================================================
+   EXTRACT JSON OBJECT
+========================================================= */
+
+function extractJSONCandidate(
+  value
+) {
+
+  const cleaned =
+    cleanJSONText(
+      value
+    );
+
+
+  if (
+    !cleaned
+  ) {
+
+    return "";
+
+  }
+
+
+  /* First try the entire response */
+
+  try {
+
+    JSON.parse(
+      cleaned
+    );
+
+    return cleaned;
+
+  } catch (error) {
+
+    /* Continue with object extraction */
+
+  }
+
+
+  const firstObject =
+    cleaned.indexOf(
+      "{"
+    );
+
+
+  const lastObject =
+    cleaned.lastIndexOf(
+      "}"
+    );
+
+
+  if (
+    firstObject >= 0 &&
+    lastObject > firstObject
+  ) {
+
+    return cleaned.slice(
+      firstObject,
+      lastObject + 1
+    );
+
+  }
+
+
+  const firstArray =
+    cleaned.indexOf(
+      "["
+    );
+
+
+  const lastArray =
+    cleaned.lastIndexOf(
+      "]"
+    );
+
+
+  if (
+    firstArray >= 0 &&
+    lastArray > firstArray
+  ) {
+
+    return cleaned.slice(
+      firstArray,
+      lastArray + 1
+    );
+
+  }
+
+
+  return cleaned;
+
+}
+
+
+/* =========================================================
+   PARSE JSON RESPONSE
+========================================================= */
+
+function parseJSONResponse(
+  text
+) {
+
+  if (
+    typeof text !==
+    "string" ||
+    !text.trim()
+  ) {
+
+    throw new Error(
+      "AI provider returned empty JSON content"
+    );
+
+  }
+
+
+  const candidate =
+    extractJSONCandidate(
+      text
+    );
+
+
+  try {
+
+    return JSON.parse(
+      candidate
+    );
+
+  } catch (error) {
+
+    const parseError =
+      new Error(
+        `Invalid JSON: ${error.message}`
+      );
+
+
+    parseError.code =
+      "AI_INVALID_JSON";
+
+
+    parseError.parseMessage =
+      error.message;
+
+
+    parseError.rawLength =
+      text.length;
+
+
+    parseError.startsWithObject =
+      text.trim().startsWith(
+        "{"
+      );
+
+
+    parseError.endsWithObject =
+      text.trim().endsWith(
+        "}"
+      );
+
+
+    throw parseError;
+
+  }
 
 }
 
@@ -2668,31 +2922,30 @@ async function generateWithOpenAICompatibleProvider(
   }
 
 
-  /*
-   * Sarvam-105B uses reasoning by default.
-   *
-   * Reasoning tokens count against max_tokens.
-   * When the caller gives a small budget such as 1000,
-   * reasoning can consume the entire budget and leave
-   * message.content empty.
-   *
-   * Explicitly disabling reasoning makes the provider
-   * reliable for short production generation calls.
-   *
-   * Sarvam documents reasoning_effort=null as the
-   * supported way to disable reasoning.
-   */
+  /* =======================================================
+     SARVAM
+  ======================================================= */
 
   if (
     provider ===
     PROVIDERS.SARVAM
   ) {
 
+    /*
+     * Disable visible reasoning for structured
+     * production output. Reasoning tokens can consume
+     * the generation budget.
+     */
+
     body.reasoning_effort =
       null;
 
   }
 
+
+  /* =======================================================
+     STRUCTURED JSON
+  ======================================================= */
 
   if (
     options.json === true
@@ -2716,12 +2969,6 @@ async function generateWithOpenAICompatibleProvider(
   };
 
 
-  /*
-   * Sarvam officially supports api-subscription-key.
-   * Bearer is also accepted, but use the native header
-   * for Sarvam to match its documented API contract.
-   */
-
   if (
     provider ===
     PROVIDERS.SARVAM
@@ -2732,14 +2979,17 @@ async function generateWithOpenAICompatibleProvider(
     ] =
       config.apiKey;
 
-  }
-
-  else {
+  } else {
 
     headers.Authorization =
       `Bearer ${config.apiKey}`;
 
   }
+
+
+  logger.info(
+    `${provider} token policy: requested=${options.maxTokens || "default"} | effective=${maxTokens}`
+  );
 
 
   const response =
@@ -2768,6 +3018,12 @@ async function generateWithOpenAICompatibleProvider(
     );
 
 
+  const diagnostics =
+    getSafeResponseDiagnostics(
+      response.data
+    );
+
+
   const text =
     extractChatCompletionText(
       response.data
@@ -2777,12 +3033,6 @@ async function generateWithOpenAICompatibleProvider(
   if (
     !text
   ) {
-
-    const diagnostics =
-      getSafeResponseDiagnostics(
-        response.data
-      );
-
 
     logger.warning(
       `${provider} returned empty visible content | ` +
@@ -2838,6 +3088,11 @@ async function generateWithOpenAICompatibleProvider(
 
     usage:
       response.data?.usage ||
+      null,
+
+    finishReason:
+      diagnostics.finishReason ||
+
       null
 
   };
@@ -3033,7 +3288,7 @@ async function generateWithBedrock(
       options.maxTokens
     )
       ? options.maxTokens
-      : 5000;
+      : DEFAULT_OUTPUT_TOKENS;
 
 
   const maxTokens =
@@ -3044,7 +3299,7 @@ async function generateWithBedrock(
 
 
   logger.info(
-    `Bedrock token policy: requested=${requestedMaxTokens} | effective=${maxTokens} | providerLimit=${PROVIDER_MAX_OUTPUT_TOKENS[PROVIDERS.BEDROCK]}`
+    `Bedrock token policy: requested=${requestedMaxTokens} | effective=${maxTokens}`
   );
 
 
@@ -3165,15 +3420,15 @@ async function generateWithBedrock(
 
       usage:
         response?.usage ||
+        null,
+
+      finishReason:
+        response?.stopReason ||
         null
 
     };
 
-  }
-
-  catch (
-    error
-  ) {
+  } catch (error) {
 
     error.provider =
       error.provider ||
@@ -3539,15 +3794,15 @@ async function generateWithVertex(
 
       usage:
         response?.usageMetadata ||
+        null,
+
+      finishReason:
+        response?.candidates?.[0]?.finishReason ||
         null
 
     };
 
-  }
-
-  catch (
-    error
-  ) {
+  } catch (error) {
 
     error.provider =
       error.provider ||
@@ -3638,6 +3893,115 @@ async function generateWithProvider(
     }
 
   }
+
+}
+
+
+/* =========================================================
+   VALIDATE STRUCTURED RESPONSE
+========================================================= */
+
+function validateStructuredJSON(
+  result
+) {
+
+  if (
+    !result ||
+    typeof result.text !==
+      "string" ||
+    !result.text.trim()
+  ) {
+
+    const error =
+      new Error(
+        "AI provider returned empty structured output"
+      );
+
+
+    error.code =
+      "AI_STRUCTURED_OUTPUT_INVALID";
+
+
+    error.provider =
+      result?.provider ||
+      null;
+
+
+    error.model =
+      result?.model ||
+      null;
+
+
+    throw error;
+
+  }
+
+
+  let parsed;
+
+
+  try {
+
+    parsed =
+      parseJSONResponse(
+        result.text
+      );
+
+  } catch (error) {
+
+    error.provider =
+      result.provider ||
+      null;
+
+
+    error.model =
+      result.model ||
+      null;
+
+
+    error.finishReason =
+      result.finishReason ||
+      null;
+
+
+    error.responseDiagnostics =
+      getSafeResponseDiagnostics(
+        result.raw
+      );
+
+
+    /*
+     * If the provider stopped because the output
+     * reached its token limit, expose that explicitly.
+     */
+
+    if (
+      String(
+        result.finishReason ||
+        ""
+      ).toLowerCase() ===
+        "length"
+    ) {
+
+      error.message =
+        `${result.provider} returned truncated JSON because the output reached the token limit`;
+
+    }
+
+
+    throw error;
+
+  }
+
+
+  return {
+
+    ...result,
+
+    data:
+      parsed
+
+  };
 
 }
 
@@ -3738,7 +4102,7 @@ async function generateText(
 
 
           logger.warning(
-            `${provider} transient retry | attempt=${attempt + 1} | delay=${delay}ms`
+            `${provider} retry | attempt=${attempt + 1} | delay=${delay}ms`
           );
 
 
@@ -3768,6 +4132,36 @@ async function generateText(
           );
 
 
+        /*
+         * Structured JSON validation happens BEFORE
+         * generateText returns success.
+         *
+         * This is the critical fix.
+         *
+         * If JSON is malformed, generateText catches
+         * AI_INVALID_JSON and can retry/fail over.
+         */
+
+        if (
+          options.json === true
+        ) {
+
+          const structured =
+            validateStructuredJSON(
+              result
+            );
+
+
+          logger.success(
+            `AI Success: ${provider}/${structured.model} | structured JSON valid`
+          );
+
+
+          return structured;
+
+        }
+
+
         logger.success(
           `AI Success: ${provider}/${result.model}`
         );
@@ -3775,11 +4169,7 @@ async function generateText(
 
         return result;
 
-      }
-
-      catch (
-        error
-      ) {
+      } catch (error) {
 
         const classification =
           classifyProviderError(
@@ -3835,6 +4225,46 @@ async function generateText(
         );
 
 
+        /*
+         * STRUCTURED JSON FAILURE
+         *
+         * Do not put provider into quota cooldown.
+         * The provider may be perfectly healthy.
+         */
+
+        if (
+          classification.category ===
+          "structured_output"
+        ) {
+
+          /*
+           * Retry the same provider once if configured.
+           * After retries are exhausted, continue to
+           * the next configured provider.
+           */
+
+          if (
+            classification.retryable &&
+            attempt <
+              AI_MAX_RETRIES
+          ) {
+
+            attempt += 1;
+
+            continue;
+
+          }
+
+
+          break;
+
+        }
+
+
+        /* =================================================
+           QUOTA
+        ================================================= */
+
         if (
           classification.category ===
           "quota"
@@ -3850,6 +4280,10 @@ async function generateText(
         }
 
 
+        /* =================================================
+           INVALID REQUEST
+        ================================================= */
+
         if (
           classification.category ===
           "invalid_request"
@@ -3859,6 +4293,10 @@ async function generateText(
 
         }
 
+
+        /* =================================================
+           NORMAL RETRY
+        ================================================= */
 
         if (
           classification.retryable &&
@@ -4045,93 +4483,43 @@ async function generateJSON(
     });
 
 
-  let parsed;
+  /*
+   * generateText already validated and parsed
+   * the structured response.
+   */
 
-
-  try {
-
-    parsed =
-      JSON.parse(
-        result.text
-      );
-
-  }
-
-  catch (
-    firstParseError
+  if (
+    !result ||
+    result.success !== true ||
+    !result.data
   ) {
 
-    try {
-
-      const cleaned =
-        result.text
-
-          .replace(
-            /^\s*```json\s*/i,
-            ""
-          )
-
-          .replace(
-            /^\s*```\s*/i,
-            ""
-          )
-
-          .replace(
-            /\s*```\s*$/i,
-            ""
-          )
-
-          .trim();
+    const error =
+      new Error(
+        "AI provider returned an invalid structured response"
+      );
 
 
-      parsed =
-        JSON.parse(
-          cleaned
-        );
-
-    }
-
-    catch (
-      secondParseError
-    ) {
-
-      const parseError =
-        new Error(
-          `${result.provider} returned invalid JSON: ${secondParseError.message}`
-        );
+    error.code =
+      "AI_STRUCTURED_OUTPUT_INVALID";
 
 
-      parseError.code =
-        "AI_INVALID_JSON";
+    error.provider =
+      result?.provider ||
+      null;
 
 
-      parseError.provider =
-        result.provider;
+    error.model =
+      result?.model ||
+      null;
 
 
-      parseError.model =
-        result.model;
-
-
-      parseError.rawText =
-        result.text;
-
-
-      throw parseError;
-
-    }
+    throw error;
 
   }
 
 
-  return {
-
-    ...result,
-
-    data:
-      parsed
-
-  };
+  return result;
 
 }
 
