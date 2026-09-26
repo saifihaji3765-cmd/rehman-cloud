@@ -1,12 +1,37 @@
 /* =========================================================
    ZyrionOS FILE AGENT
-   Secure Project File Management
+   Production Secure Project File Management
+
+   RESPONSIBILITY:
+
+   Project Workspace
+        ↓
+   Safe File Access
+        ↓
+   Read / Scan / Write / Replace / Delete
+        ↓
+   Builder / Fix Agent / Master Agent
+        ↓
+   Project Files
+
+   IMPORTANT:
+
+   - Workspace containment is mandatory.
+   - Path traversal is rejected.
+   - Absolute paths are rejected.
+   - Symlinks are rejected.
+   - Secret files are protected.
+   - Binary files are not decoded as source.
+   - Writes use temporary files + rename.
+   - Fix Agent can safely apply complete
+     replacement files.
+   - No arbitrary filesystem access.
 ========================================================= */
 
 
-/* =========================
+/* =========================================================
    PACKAGES
-========================= */
+========================================================= */
 
 const fs =
   require("fs");
@@ -14,10 +39,13 @@ const fs =
 const path =
   require("path");
 
+const crypto =
+  require("crypto");
 
-/* =========================
+
+/* =========================================================
    SERVICES
-========================= */
+========================================================= */
 
 const logger =
   require("../services/loggerService");
@@ -39,16 +67,27 @@ const WORKSPACE =
 ========================================================= */
 
 const MAX_FILE_SIZE =
-  200000;
+  250000;
+
 
 const MAX_FILES =
-  500;
+  1000;
+
 
 const MAX_PATH_LENGTH =
   300;
 
+
 const MAX_SCAN_DEPTH =
-  20;
+  30;
+
+
+const MAX_BATCH_FILES =
+  100;
+
+
+const MAX_TOTAL_BATCH_SIZE =
+  10000000;
 
 
 /* =========================================================
@@ -70,7 +109,19 @@ const PROTECTED_DIRECTORIES =
 
     "coverage",
 
-    ".cache"
+    ".cache",
+
+    ".turbo",
+
+    ".vercel",
+
+    ".amplify",
+
+    ".aws",
+
+    ".ssh",
+
+    ".npm"
 
   ]);
 
@@ -92,11 +143,25 @@ const PROTECTED_FILES =
 
     ".env.test",
 
+    ".env.staging",
+
+    ".npmrc",
+
+    ".pypirc",
+
     "id_rsa",
 
     "id_rsa.pub",
 
-    "authorized_keys"
+    "authorized_keys",
+
+    "credentials",
+
+    "credentials.json",
+
+    "service-account.json",
+
+    "firebase-adminsdk.json"
 
   ]);
 
@@ -132,6 +197,8 @@ const BINARY_EXTENSIONS =
 
     ".tar",
 
+    ".tgz",
+
     ".7z",
 
     ".rar",
@@ -147,6 +214,10 @@ const BINARY_EXTENSIONS =
     ".mkv",
 
     ".wav",
+
+    ".flac",
+
+    ".webm",
 
     ".woff",
 
@@ -164,7 +235,29 @@ const BINARY_EXTENSIONS =
 
     ".so",
 
-    ".dylib"
+    ".dylib",
+
+    ".bin"
+
+  ]);
+
+
+/* =========================================================
+   SECRET FILE EXTENSIONS
+========================================================= */
+
+const SECRET_EXTENSIONS =
+  new Set([
+
+    ".pem",
+
+    ".key",
+
+    ".p12",
+
+    ".pfx",
+
+    ".crt"
 
   ]);
 
@@ -174,9 +267,9 @@ const BINARY_EXTENSIONS =
 ========================================================= */
 
 
-/* =========================
+/* =========================================================
    SAFE STRING
-========================= */
+========================================================= */
 
 function cleanString(
   value,
@@ -184,7 +277,8 @@ function cleanString(
 ) {
 
   if (
-    typeof value !== "string"
+    typeof value !==
+    "string"
   ) {
 
     return "";
@@ -202,9 +296,9 @@ function cleanString(
 }
 
 
-/* =========================
+/* =========================================================
    SAFE JSON
-========================= */
+========================================================= */
 
 function safeJson(
   value
@@ -218,7 +312,9 @@ function safeJson(
 
   }
 
-  catch (error) {
+  catch (
+    error
+  ) {
 
     return "{}";
 
@@ -227,9 +323,9 @@ function safeJson(
 }
 
 
-/* =========================
+/* =========================================================
    GET PROJECT ROOT
-========================= */
+========================================================= */
 
 function getProjectRoot(
   projectId
@@ -243,8 +339,9 @@ function getProjectRoot(
 
 
   /*
-   * Default workspace is retained for
-   * backwards compatibility.
+   * Backwards compatibility:
+   *
+   * No projectId means root workspace.
    */
 
   if (
@@ -257,8 +354,8 @@ function getProjectRoot(
 
 
   /*
-   * Project IDs should not contain
-   * filesystem traversal characters.
+   * Project IDs are identifiers,
+   * not arbitrary filesystem paths.
    */
 
   if (
@@ -299,9 +396,9 @@ function getProjectRoot(
 }
 
 
-/* =========================
+/* =========================================================
    WORKSPACE CONTAINMENT
-========================= */
+========================================================= */
 
 function isInsideWorkspace(
   targetPath
@@ -312,6 +409,7 @@ function isInsideWorkspace(
       WORKSPACE
     );
 
+
   const resolvedTarget =
     path.resolve(
       targetPath
@@ -319,6 +417,7 @@ function isInsideWorkspace(
 
 
   return (
+
     resolvedTarget ===
       workspaceRoot ||
 
@@ -326,14 +425,51 @@ function isInsideWorkspace(
       workspaceRoot +
       path.sep
     )
+
   );
 
 }
 
 
-/* =========================
+/* =========================================================
+   ROOT CONTAINMENT
+========================================================= */
+
+function isInsideRoot(
+  root,
+  targetPath
+) {
+
+  const resolvedRoot =
+    path.resolve(
+      root
+    );
+
+
+  const resolvedTarget =
+    path.resolve(
+      targetPath
+    );
+
+
+  return (
+
+    resolvedTarget ===
+      resolvedRoot ||
+
+    resolvedTarget.startsWith(
+      resolvedRoot +
+      path.sep
+    )
+
+  );
+
+}
+
+
+/* =========================================================
    VALIDATE RELATIVE PATH
-========================= */
+========================================================= */
 
 function validateRelativePath(
   fileName
@@ -346,7 +482,8 @@ function validateRelativePath(
 
     return {
 
-      valid: false,
+      valid:
+        false,
 
       error:
         "File path must be a string"
@@ -366,7 +503,9 @@ function validateRelativePath(
 
 
   while (
-    cleanPath.startsWith("./")
+    cleanPath.startsWith(
+      "./"
+    )
   ) {
 
     cleanPath =
@@ -381,7 +520,8 @@ function validateRelativePath(
 
     return {
 
-      valid: false,
+      valid:
+        false,
 
       error:
         "File path is required"
@@ -398,7 +538,8 @@ function validateRelativePath(
 
     return {
 
-      valid: false,
+      valid:
+        false,
 
       error:
         "File path is too long"
@@ -409,7 +550,7 @@ function validateRelativePath(
 
 
   /*
-   * Reject absolute Unix paths.
+   * Unix absolute path.
    */
 
   if (
@@ -418,7 +559,8 @@ function validateRelativePath(
 
     return {
 
-      valid: false,
+      valid:
+        false,
 
       error:
         "Absolute paths are not allowed"
@@ -429,7 +571,7 @@ function validateRelativePath(
 
 
   /*
-   * Reject Windows absolute paths.
+   * Windows absolute path.
    */
 
   if (
@@ -440,7 +582,8 @@ function validateRelativePath(
 
     return {
 
-      valid: false,
+      valid:
+        false,
 
       error:
         "Absolute paths are not allowed"
@@ -451,40 +594,19 @@ function validateRelativePath(
 
 
   /*
-   * Reject traversal.
+   * Null byte.
    */
 
-  const segments =
-    cleanPath.split("/");
-
-
   if (
-    segments.includes("..")
+    cleanPath.includes(
+      "\0"
+    )
   ) {
 
     return {
 
-      valid: false,
-
-      error:
-        "Path traversal is not allowed"
-
-    };
-
-  }
-
-
-  /*
-   * Reject null bytes.
-   */
-
-  if (
-    cleanPath.includes("\0")
-  ) {
-
-    return {
-
-      valid: false,
+      valid:
+        false,
 
       error:
         "Invalid file path"
@@ -495,11 +617,76 @@ function validateRelativePath(
 
 
   /*
-   * Reject protected directories.
+   * Normalize repeated separators.
+   */
+
+  cleanPath =
+    cleanPath.replace(
+      /\/+/g,
+      "/"
+    );
+
+
+  const segments =
+    cleanPath.split("/");
+
+
+  /*
+   * Path traversal.
+   */
+
+  if (
+    segments.includes(
+      ".."
+    )
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "Path traversal is not allowed"
+
+    };
+
+  }
+
+
+  /*
+   * Empty path segments are harmless
+   * after normalization except root.
+   */
+
+  if (
+    segments.some(
+      (segment) =>
+        segment.length ===
+        0
+    )
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "Invalid file path"
+
+    };
+
+  }
+
+
+  /*
+   * Protected directories.
    */
 
   for (
-    const segment of segments
+    const segment of
+      segments
   ) {
 
     if (
@@ -510,7 +697,8 @@ function validateRelativePath(
 
       return {
 
-        valid: false,
+        valid:
+          false,
 
         error:
           `Access to protected directory '${segment}' is not allowed`
@@ -529,7 +717,7 @@ function validateRelativePath(
 
 
   /*
-   * Never expose secret files.
+   * Protected secret files.
    */
 
   if (
@@ -540,7 +728,8 @@ function validateRelativePath(
 
     return {
 
-      valid: false,
+      valid:
+        false,
 
       error:
         "Access to protected file is not allowed"
@@ -551,27 +740,26 @@ function validateRelativePath(
 
 
   /*
-   * Reject common private-key files.
+   * Secret extension.
    */
 
+  const extension =
+    path.posix.extname(
+      baseName
+    )
+      .toLowerCase();
+
+
   if (
-    baseName.endsWith(
-      ".pem"
-    ) ||
-    baseName.endsWith(
-      ".key"
-    ) ||
-    baseName.endsWith(
-      ".p12"
-    ) ||
-    baseName.endsWith(
-      ".pfx"
+    SECRET_EXTENSIONS.has(
+      extension
     )
   ) {
 
     return {
 
-      valid: false,
+      valid:
+        false,
 
       error:
         "Access to private credential files is not allowed"
@@ -581,9 +769,33 @@ function validateRelativePath(
   }
 
 
+  /*
+   * Extra private-key naming protection.
+   */
+
+  if (
+    /^id_(rsa|dsa|ecdsa|ed25519)$/i.test(
+      baseName
+    )
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "Private key files are protected"
+
+    };
+
+  }
+
+
   return {
 
-    valid: true,
+    valid:
+      true,
 
     path:
       cleanPath
@@ -593,9 +805,9 @@ function validateRelativePath(
 }
 
 
-/* =========================
+/* =========================================================
    RESOLVE SAFE PATH
-========================= */
+========================================================= */
 
 function resolveSafePath(
   root,
@@ -619,12 +831,22 @@ function resolveSafePath(
   }
 
 
+  const resolvedRoot =
+    path.resolve(
+      root
+    );
+
+
   const targetPath =
     path.resolve(
-      root,
+      resolvedRoot,
       validation.path
     );
 
+
+  /*
+   * Workspace containment.
+   */
 
   if (
     !isInsideWorkspace(
@@ -640,23 +862,13 @@ function resolveSafePath(
 
 
   /*
-   * Also ensure the path remains
-   * inside the selected project root.
+   * Project containment.
    */
 
-  const resolvedRoot =
-    path.resolve(
-      root
-    );
-
-
   if (
-    targetPath !==
-      resolvedRoot &&
-
-    !targetPath.startsWith(
-      resolvedRoot +
-      path.sep
+    !isInsideRoot(
+      resolvedRoot,
+      targetPath
     )
   ) {
 
@@ -680,35 +892,28 @@ function resolveSafePath(
 }
 
 
-/* =========================
+/* =========================================================
    ENSURE DIRECTORY
-========================= */
+========================================================= */
 
 function ensureDirectory(
   directory
 ) {
 
-  if (
-    !fs.existsSync(
-      directory
-    )
-  ) {
-
-    fs.mkdirSync(
-      directory,
-      {
-        recursive: true
-      }
-    );
-
-  }
+  fs.mkdirSync(
+    directory,
+    {
+      recursive:
+        true
+    }
+  );
 
 }
 
 
-/* =========================
-   IS BINARY FILE
-========================= */
+/* =========================================================
+   IS BINARY
+========================================================= */
 
 function isBinaryFile(
   filePath
@@ -728,9 +933,9 @@ function isBinaryFile(
 }
 
 
-/* =========================
+/* =========================================================
    IS PROTECTED ENTRY
-========================= */
+========================================================= */
 
 function isProtectedEntry(
   name
@@ -758,11 +963,28 @@ function isProtectedEntry(
   }
 
 
+  const extension =
+    path.extname(
+      name
+    )
+      .toLowerCase();
+
+
   if (
-    name.endsWith(".pem") ||
-    name.endsWith(".key") ||
-    name.endsWith(".p12") ||
-    name.endsWith(".pfx")
+    SECRET_EXTENSIONS.has(
+      extension
+    )
+  ) {
+
+    return true;
+
+  }
+
+
+  if (
+    /^id_(rsa|dsa|ecdsa|ed25519)$/i.test(
+      name
+    )
   ) {
 
     return true;
@@ -776,6 +998,493 @@ function isProtectedEntry(
 
 
 /* =========================================================
+   CHECK EXISTING ENTRY
+========================================================= */
+
+function getExistingEntry(
+  filePath
+) {
+
+  try {
+
+    const stat =
+      fs.lstatSync(
+        filePath
+      );
+
+
+    return {
+
+      exists:
+        true,
+
+      isFile:
+        stat.isFile(),
+
+      isDirectory:
+        stat.isDirectory(),
+
+      isSymbolicLink:
+        stat.isSymbolicLink(),
+
+      size:
+        stat.size,
+
+      mode:
+        stat.mode,
+
+      modifiedAt:
+        stat.mtime
+
+    };
+
+  }
+
+  catch (
+    error
+  ) {
+
+    if (
+      error.code ===
+      "ENOENT"
+    ) {
+
+      return {
+
+        exists:
+          false
+
+      };
+
+    }
+
+
+    throw error;
+
+  }
+
+}
+
+
+/* =========================================================
+   PREVENT SYMLINK PARENT
+========================================================= */
+
+function ensureNoSymlinkParent(
+  root,
+  targetPath
+) {
+
+  const resolvedRoot =
+    path.resolve(
+      root
+    );
+
+
+  let current =
+    path.dirname(
+      targetPath
+    );
+
+
+  while (
+    current !==
+      resolvedRoot
+  ) {
+
+    if (
+      !isInsideRoot(
+        resolvedRoot,
+        current
+      )
+    ) {
+
+      throw new Error(
+        "Parent directory escapes project workspace"
+      );
+
+    }
+
+
+    const entry =
+      getExistingEntry(
+        current
+      );
+
+
+    if (
+      entry.exists &&
+      entry.isSymbolicLink
+    ) {
+
+      throw new Error(
+        "Refusing to access a path through a symbolic-link directory"
+      );
+
+    }
+
+
+    current =
+      path.dirname(
+        current
+      );
+
+  }
+
+}
+
+
+/* =========================================================
+   READ TEXT FILE
+========================================================= */
+
+function readTextFile(
+  filePath
+) {
+
+  const entry =
+    getExistingEntry(
+      filePath
+    );
+
+
+  if (
+    !entry.exists
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      error:
+        "File not found"
+
+    };
+
+  }
+
+
+  if (
+    entry.isSymbolicLink
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      error:
+        "Symbolic links are not allowed"
+
+    };
+
+  }
+
+
+  if (
+    !entry.isFile
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      error:
+        "Target is not a file"
+
+    };
+
+  }
+
+
+  if (
+    entry.size >
+    MAX_FILE_SIZE
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      error:
+        "File exceeds maximum readable size",
+
+      size:
+        entry.size
+
+    };
+
+  }
+
+
+  if (
+    isBinaryFile(
+      filePath
+    )
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      error:
+        "Binary files cannot be read as text"
+
+    };
+
+  }
+
+
+  try {
+
+    const content =
+      fs.readFileSync(
+        filePath,
+        "utf8"
+      );
+
+
+    return {
+
+      success:
+        true,
+
+      content,
+
+      size:
+        Buffer.byteLength(
+          content,
+          "utf8"
+        )
+
+    };
+
+  }
+
+  catch (
+    error
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      error:
+        error?.message ||
+        "Unable to read file"
+
+    };
+
+  }
+
+}
+
+
+/* =========================================================
+   ATOMIC WRITE
+========================================================= */
+
+function atomicWrite(
+  filePath,
+  content
+) {
+
+  const directory =
+    path.dirname(
+      filePath
+    );
+
+
+  ensureDirectory(
+    directory
+  );
+
+
+  const temporaryName =
+    `.${path.basename(
+      filePath
+    )}.${process.pid}.${Date.now()}.${crypto.randomBytes(
+      6
+    ).toString("hex")}.tmp`;
+
+
+  const temporaryPath =
+    path.join(
+      directory,
+      temporaryName
+    );
+
+
+  try {
+
+    fs.writeFileSync(
+      temporaryPath,
+      content,
+      {
+        encoding:
+          "utf8",
+
+        flag:
+          "wx"
+
+      }
+    );
+
+
+    /*
+     * Rename is atomic on the same filesystem.
+     */
+
+    fs.renameSync(
+      temporaryPath,
+      filePath
+    );
+
+
+    return {
+
+      success:
+        true
+
+    };
+
+  }
+
+  catch (
+    error
+  ) {
+
+    try {
+
+      if (
+        fs.existsSync(
+          temporaryPath
+        )
+      ) {
+
+        fs.unlinkSync(
+          temporaryPath
+        );
+
+      }
+
+    }
+
+    catch (
+      cleanupError
+    ) {
+
+      logger.warning(
+        `Temporary file cleanup failed: ${cleanupError.message}`
+      );
+
+    }
+
+
+    return {
+
+      success:
+        false,
+
+      error:
+        error?.message ||
+        "Atomic file write failed"
+
+    };
+
+  }
+
+}
+
+
+/* =========================================================
+   VALIDATE CONTENT
+========================================================= */
+
+function validateContent(
+  content
+) {
+
+  if (
+    typeof content !==
+    "string"
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "File content must be a string"
+
+    };
+
+  }
+
+
+  const size =
+    Buffer.byteLength(
+      content,
+      "utf8"
+    );
+
+
+  if (
+    size >
+    MAX_FILE_SIZE
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        `File exceeds maximum size of ${MAX_FILE_SIZE} bytes`
+
+    };
+
+  }
+
+
+  if (
+    content.includes(
+      "\0"
+    )
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "File contains an invalid null byte"
+
+    };
+
+  }
+
+
+  return {
+
+    valid:
+      true,
+
+    size
+
+  };
+
+}
+
+
+/* =========================================================
    READ DIRECTORY
 ========================================================= */
 
@@ -784,7 +1493,11 @@ function readDirectory(
   currentDirectory,
   depth = 0,
   state = {
-    files: 0
+    files:
+      0,
+
+    folders:
+      0
   }
 ) {
 
@@ -798,7 +1511,18 @@ function readDirectory(
   }
 
 
-  let items = [];
+  if (
+    state.files >=
+    MAX_FILES
+  ) {
+
+    return [];
+
+  }
+
+
+  let items =
+    [];
 
 
   try {
@@ -807,21 +1531,37 @@ function readDirectory(
       fs.readdirSync(
         currentDirectory,
         {
-          withFileTypes: true
+          withFileTypes:
+            true
         }
       );
 
   }
 
-  catch (error) {
+  catch (
+    error
+  ) {
 
     logger.warning(
       `Unable to read directory: ${currentDirectory}`
     );
 
+
     return [];
 
   }
+
+
+  /*
+   * Stable output.
+   */
+
+  items.sort(
+    (a, b) =>
+      a.name.localeCompare(
+        b.name
+      )
+  );
 
 
   const results =
@@ -829,7 +1569,8 @@ function readDirectory(
 
 
   for (
-    const item of items
+    const item of
+      items
   ) {
 
     if (
@@ -865,8 +1606,20 @@ function readDirectory(
 
 
     /*
-     * Prevent symlink traversal.
+     * Verify containment.
      */
+
+    if (
+      !isInsideRoot(
+        root,
+        itemPath
+      )
+    ) {
+
+      continue;
+
+    }
+
 
     let stat;
 
@@ -880,16 +1633,43 @@ function readDirectory(
 
     }
 
-    catch (error) {
+    catch (
+      error
+    ) {
 
       continue;
 
     }
 
 
+    /*
+     * Never follow symlinks.
+     */
+
     if (
       stat.isSymbolicLink()
     ) {
+
+      results.push({
+
+        name:
+          path.relative(
+            root,
+            itemPath
+          )
+            .replace(
+              /\\/g,
+              "/"
+            ),
+
+        type:
+          "symlink",
+
+        ignored:
+          true
+
+      });
+
 
       continue;
 
@@ -908,13 +1688,16 @@ function readDirectory(
         );
 
 
-    /* =========================
+    /* =====================================================
        DIRECTORY
-    ========================= */
+    ===================================================== */
 
     if (
       stat.isDirectory()
     ) {
+
+      state.folders++;
+
 
       results.push({
 
@@ -929,10 +1712,15 @@ function readDirectory(
 
       const children =
         readDirectory(
+
           root,
+
           itemPath,
+
           depth + 1,
+
           state
+
         );
 
 
@@ -946,9 +1734,9 @@ function readDirectory(
     }
 
 
-    /* =========================
+    /* =====================================================
        FILE
-    ========================= */
+    ===================================================== */
 
     if (
       !stat.isFile()
@@ -962,10 +1750,9 @@ function readDirectory(
     state.files++;
 
 
-    /*
-     * Do not attempt to decode binary
-     * files as UTF-8 source code.
-     */
+    /* =====================================================
+       BINARY
+    ===================================================== */
 
     if (
       isBinaryFile(
@@ -985,19 +1772,22 @@ function readDirectory(
           true,
 
         size:
-          stat.size
+          stat.size,
+
+        modifiedAt:
+          stat.mtime
 
       });
+
 
       continue;
 
     }
 
 
-    /*
-     * Avoid reading extremely large
-     * files into memory.
-     */
+    /* =====================================================
+       LARGE FILE
+    ===================================================== */
 
     if (
       stat.size >
@@ -1016,16 +1806,25 @@ function readDirectory(
           true,
 
         size:
-          stat.size
+          stat.size,
+
+        modifiedAt:
+          stat.mtime
 
       });
+
 
       continue;
 
     }
 
 
-    let content = "";
+    /* =====================================================
+       TEXT FILE
+    ===================================================== */
+
+    let content =
+      "";
 
 
     try {
@@ -1038,7 +1837,9 @@ function readDirectory(
 
     }
 
-    catch (error) {
+    catch (
+      error
+    ) {
 
       results.push({
 
@@ -1052,9 +1853,13 @@ function readDirectory(
           true,
 
         size:
-          stat.size
+          stat.size,
+
+        modifiedAt:
+          stat.mtime
 
       });
+
 
       continue;
 
@@ -1069,7 +1874,13 @@ function readDirectory(
       type:
         "file",
 
-      content
+      content,
+
+      size:
+        stat.size,
+
+      modifiedAt:
+        stat.mtime
 
     });
 
@@ -1082,7 +1893,1222 @@ function readDirectory(
 
 
 /* =========================================================
-   FILE AGENT
+   NORMALIZE REQUESTED FILES
+========================================================= */
+
+function normalizeRequestedFiles(
+  projectRoot,
+  requestedFiles
+) {
+
+  if (
+    !Array.isArray(
+      requestedFiles
+    )
+  ) {
+
+    return {
+
+      files:
+        [],
+
+      rejected:
+        []
+
+    };
+
+  }
+
+
+  const files =
+    [];
+
+
+  const rejected =
+    [];
+
+
+  const seen =
+    new Set();
+
+
+  for (
+    const item of
+      requestedFiles
+  ) {
+
+    if (
+      !item ||
+      typeof item !==
+        "object"
+    ) {
+
+      rejected.push({
+
+        error:
+          "Invalid file request"
+
+      });
+
+
+      continue;
+
+    }
+
+
+    const requestedPath =
+      item.path ||
+      item.name;
+
+
+    try {
+
+      const safe =
+        resolveSafePath(
+
+          projectRoot,
+
+          requestedPath
+
+        );
+
+
+      if (
+        seen.has(
+          safe.relativePath
+        )
+      ) {
+
+        rejected.push({
+
+          path:
+            safe.relativePath,
+
+          error:
+            "Duplicate file path"
+
+        });
+
+
+        continue;
+
+      }
+
+
+      seen.add(
+        safe.relativePath
+      );
+
+
+      if (
+        item.content !==
+          undefined
+      ) {
+
+        const validation =
+          validateContent(
+            item.content
+          );
+
+
+        if (
+          !validation.valid
+        ) {
+
+          rejected.push({
+
+            path:
+              safe.relativePath,
+
+            error:
+              validation.error
+
+          });
+
+
+          continue;
+
+        }
+
+      }
+
+
+      files.push({
+
+        path:
+          safe.relativePath,
+
+        content:
+          typeof item.content ===
+            "string"
+            ? item.content
+            : null
+
+      });
+
+    }
+
+    catch (
+      error
+    ) {
+
+      rejected.push({
+
+        path:
+          requestedPath ||
+          null,
+
+        error:
+          error?.message ||
+          "Invalid file path"
+
+      });
+
+    }
+
+  }
+
+
+  return {
+
+    files,
+
+    rejected
+
+  };
+
+}
+
+
+/* =========================================================
+   SAVE FILE
+========================================================= */
+
+function saveFile(
+  fileName,
+  content,
+  projectId = ""
+) {
+
+  try {
+
+    if (
+      typeof content !==
+      "string"
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          "File content must be a string"
+
+      };
+
+    }
+
+
+    const contentValidation =
+      validateContent(
+        content
+      );
+
+
+    if (
+      !contentValidation.valid
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          contentValidation.error
+
+      };
+
+    }
+
+
+    const projectRoot =
+      getProjectRoot(
+        projectId
+      );
+
+
+    ensureDirectory(
+      projectRoot
+    );
+
+
+    const safePath =
+      resolveSafePath(
+
+        projectRoot,
+
+        fileName
+
+      );
+
+
+    ensureNoSymlinkParent(
+
+      projectRoot,
+
+      safePath.path
+
+    );
+
+
+    const existing =
+      getExistingEntry(
+        safePath.path
+      );
+
+
+    /*
+     * Never overwrite symlinks.
+     */
+
+    if (
+      existing.exists &&
+      existing.isSymbolicLink
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          "Refusing to overwrite a symbolic link"
+
+      };
+
+    }
+
+
+    /*
+     * Never replace directories.
+     */
+
+    if (
+      existing.exists &&
+      existing.isDirectory
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          "Target path is a directory"
+
+      };
+
+    }
+
+
+    const result =
+      atomicWrite(
+
+        safePath.path,
+
+        content
+
+      );
+
+
+    if (
+      !result.success
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          result.error
+
+      };
+
+    }
+
+
+    logger.success(
+      `File Saved: ${safePath.relativePath}`
+    );
+
+
+    return {
+
+      success:
+        true,
+
+      operation:
+        existing.exists
+          ? "updated"
+          : "created",
+
+      path:
+        safePath.relativePath,
+
+      projectId:
+        projectId ||
+        null,
+
+      size:
+        contentValidation.size
+
+    };
+
+  }
+
+  catch (
+    error
+  ) {
+
+    const errorMessage =
+      error?.message ||
+      "Unknown file save error";
+
+
+    logger.error(
+      `File Save Failed: ${errorMessage}`
+    );
+
+
+    return {
+
+      success:
+        false,
+
+      error:
+        errorMessage
+
+    };
+
+  }
+
+}
+
+
+/* =========================================================
+   READ FILE
+========================================================= */
+
+function readFile(
+  fileName,
+  projectId = ""
+) {
+
+  try {
+
+    const projectRoot =
+      getProjectRoot(
+        projectId
+      );
+
+
+    const safePath =
+      resolveSafePath(
+
+        projectRoot,
+
+        fileName
+
+      );
+
+
+    ensureNoSymlinkParent(
+
+      projectRoot,
+
+      safePath.path
+
+    );
+
+
+    const result =
+      readTextFile(
+        safePath.path
+      );
+
+
+    if (
+      !result.success
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          result.error,
+
+        path:
+          safePath.relativePath
+
+      };
+
+    }
+
+
+    return {
+
+      success:
+        true,
+
+      path:
+        safePath.relativePath,
+
+      content:
+        result.content,
+
+      size:
+        result.size,
+
+      projectId:
+        projectId ||
+        null
+
+    };
+
+  }
+
+  catch (
+    error
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      error:
+        error?.message ||
+        "Unable to read file"
+
+    };
+
+  }
+
+}
+
+
+/* =========================================================
+   DELETE FILE
+========================================================= */
+
+function deleteFile(
+  fileName,
+  projectId = ""
+) {
+
+  try {
+
+    const projectRoot =
+      getProjectRoot(
+        projectId
+      );
+
+
+    const safePath =
+      resolveSafePath(
+
+        projectRoot,
+
+        fileName
+
+      );
+
+
+    ensureNoSymlinkParent(
+
+      projectRoot,
+
+      safePath.path
+
+    );
+
+
+    const existing =
+      getExistingEntry(
+        safePath.path
+      );
+
+
+    if (
+      !existing.exists
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          "File not found",
+
+        path:
+          safePath.relativePath
+
+      };
+
+    }
+
+
+    if (
+      existing.isSymbolicLink
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          "Refusing to delete symbolic link"
+
+      };
+
+    }
+
+
+    if (
+      !existing.isFile
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          "Target is not a file"
+
+      };
+
+    }
+
+
+    fs.unlinkSync(
+      safePath.path
+    );
+
+
+    logger.success(
+      `File Deleted: ${safePath.relativePath}`
+    );
+
+
+    return {
+
+      success:
+        true,
+
+      operation:
+        "deleted",
+
+      path:
+        safePath.relativePath,
+
+      projectId:
+        projectId ||
+        null
+
+    };
+
+  }
+
+  catch (
+    error
+  ) {
+
+    const errorMessage =
+      error?.message ||
+      "Unknown file delete error";
+
+
+    logger.error(
+      `File Delete Failed: ${errorMessage}`
+    );
+
+
+    return {
+
+      success:
+        false,
+
+      error:
+        errorMessage
+
+    };
+
+  }
+
+}
+
+
+/* =========================================================
+   APPLY FILE REPLACEMENTS
+========================================================= */
+
+/*
+ * Used by Fix Agent / Builder / Master.
+ *
+ * IMPORTANT:
+ *
+ * Every file is treated as a COMPLETE
+ * replacement.
+ *
+ * No partial patches.
+ * No append operations.
+ * No arbitrary paths.
+ */
+
+function applyFileReplacements(
+  files,
+  projectId = "",
+  options = {}
+) {
+
+  const dryRun =
+    options.dryRun ===
+    true;
+
+
+  const projectRoot =
+    getProjectRoot(
+      projectId
+    );
+
+
+  if (
+    !Array.isArray(
+      files
+    )
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      error:
+        "Files must be an array",
+
+      results:
+        []
+
+    };
+
+  }
+
+
+  if (
+    files.length >
+    MAX_BATCH_FILES
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      error:
+        `Maximum ${MAX_BATCH_FILES} files allowed per batch`,
+
+      results:
+        []
+
+    };
+
+  }
+
+
+  const normalized =
+    normalizeRequestedFiles(
+
+      projectRoot,
+
+      files
+
+    );
+
+
+  if (
+    normalized.rejected.length >
+    0
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      error:
+        "One or more files failed validation",
+
+      rejected:
+        normalized.rejected,
+
+      results:
+        []
+
+    };
+
+  }
+
+
+  const writable =
+    normalized.files.filter(
+      (file) =>
+        typeof file.content ===
+        "string"
+    );
+
+
+  let totalBytes =
+    0;
+
+
+  for (
+    const file of
+      writable
+  ) {
+
+    totalBytes +=
+      Buffer.byteLength(
+        file.content,
+        "utf8"
+      );
+
+  }
+
+
+  if (
+    totalBytes >
+    MAX_TOTAL_BATCH_SIZE
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      error:
+        `Batch exceeds maximum size of ${MAX_TOTAL_BATCH_SIZE} bytes`,
+
+      results:
+        []
+
+    };
+
+  }
+
+
+  const results =
+    [];
+
+
+  /*
+   * Preflight every file before writing
+   * anything.
+   *
+   * This prevents half-valid batches.
+   */
+
+  for (
+    const file of
+      writable
+  ) {
+
+    try {
+
+      const safePath =
+        resolveSafePath(
+
+          projectRoot,
+
+          file.path
+
+        );
+
+
+      ensureNoSymlinkParent(
+
+        projectRoot,
+
+        safePath.path
+
+      );
+
+
+      const existing =
+        getExistingEntry(
+          safePath.path
+        );
+
+
+      if (
+        existing.exists &&
+        existing.isSymbolicLink
+      ) {
+
+        throw new Error(
+          "Refusing to overwrite symbolic link"
+        );
+
+      }
+
+
+      if (
+        existing.exists &&
+        existing.isDirectory
+      ) {
+
+        throw new Error(
+          "Target path is a directory"
+        );
+
+      }
+
+
+      results.push({
+
+        path:
+          file.path,
+
+        absolutePath:
+          safePath.path,
+
+        operation:
+          existing.exists
+            ? "updated"
+            : "created",
+
+        size:
+          Buffer.byteLength(
+            file.content,
+            "utf8"
+          )
+
+      });
+
+    }
+
+    catch (
+      error
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          `Preflight failed for '${file.path}': ${error.message}`,
+
+        results:
+          []
+
+      };
+
+    }
+
+  }
+
+
+  /*
+   * Dry run ends after preflight.
+   */
+
+  if (
+    dryRun
+  ) {
+
+    return {
+
+      success:
+        true,
+
+      dryRun:
+        true,
+
+      files:
+        results.map(
+          (item) => ({
+
+            path:
+              item.path,
+
+            operation:
+              item.operation,
+
+            size:
+              item.size
+
+          })
+        ),
+
+      count:
+        results.length
+
+    };
+
+  }
+
+
+  /*
+   * Actual write.
+   *
+   * Atomic write protects individual
+   * files from partial content.
+   */
+
+  const completed =
+    [];
+
+
+  for (
+    const file of
+      writable
+  ) {
+
+    const safePath =
+      resolveSafePath(
+
+        projectRoot,
+
+        file.path
+
+      );
+
+
+    const writeResult =
+      atomicWrite(
+
+        safePath.path,
+
+        file.content
+
+      );
+
+
+    if (
+      !writeResult.success
+    ) {
+
+      logger.error(
+
+        `Batch file write failed: ${file.path}`
+
+      );
+
+
+      return {
+
+        success:
+          false,
+
+        error:
+          `Failed to write '${file.path}': ${writeResult.error}`,
+
+        partial:
+          true,
+
+        completed,
+
+        failed:
+          file.path
+
+      };
+
+    }
+
+
+    completed.push({
+
+      path:
+        file.path,
+
+      operation:
+        results.find(
+          (item) =>
+            item.path ===
+            file.path
+        )?.operation ||
+        "updated",
+
+      size:
+        Buffer.byteLength(
+          file.content,
+          "utf8"
+        )
+
+    });
+
+  }
+
+
+  logger.success(
+
+    `File replacements applied: ${completed.length} files`
+
+  );
+
+
+  return {
+
+    success:
+      true,
+
+    dryRun:
+      false,
+
+    files:
+      completed,
+
+    count:
+      completed.length,
+
+    projectId:
+      projectId ||
+      null
+
+  };
+
+}
+
+
+/* =========================================================
+   PROJECT SNAPSHOT
+========================================================= */
+
+function createProjectSnapshot(
+  projectId = ""
+) {
+
+  try {
+
+    const projectRoot =
+      getProjectRoot(
+        projectId
+      );
+
+
+    ensureDirectory(
+      projectRoot
+    );
+
+
+    const files =
+      readDirectory(
+        projectRoot,
+        projectRoot
+      );
+
+
+    const sourceFiles =
+      files
+        .filter(
+          (item) =>
+            item.type ===
+            "file" &&
+            !item.binary &&
+            !item.truncated &&
+            !item.unreadable
+        )
+        .map(
+          (item) => ({
+
+            path:
+              item.name,
+
+            content:
+              item.content
+
+          })
+        );
+
+
+    return {
+
+      success:
+        true,
+
+      projectId:
+        projectId ||
+        null,
+
+      files:
+        sourceFiles,
+
+      inventory:
+        files.map(
+          (item) => ({
+
+            path:
+              item.name,
+
+            type:
+              item.type,
+
+            size:
+              item.size ||
+              null,
+
+            binary:
+              item.binary ||
+              false,
+
+            truncated:
+              item.truncated ||
+              false,
+
+            unreadable:
+              item.unreadable ||
+              false
+
+          })
+        ),
+
+      fileCount:
+        sourceFiles.length
+
+    };
+
+  }
+
+  catch (
+    error
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      error:
+        error?.message ||
+        "Unable to create project snapshot"
+
+    };
+
+  }
+
+}
+
+
+/* =========================================================
+   MAIN FILE AGENT
 ========================================================= */
 
 async function fileAgent(
@@ -1101,54 +3127,44 @@ async function fileAgent(
 
 
     /* =====================================================
-       INPUT CONTRACT
-
-       Supported:
-
-       fileAgent()
-
-       fileAgent({
-         prompt,
-         projectId,
-         user,
-         intent,
-         planning,
-         files
-       })
-
-       The Master Agent uses the second
-       form.
+       INPUT
     ===================================================== */
 
-    let prompt = "";
+    let prompt =
+      "";
 
-    let projectId = "";
+    let projectId =
+      "";
 
-    let requestedFiles = [];
+    let requestedFiles =
+      [];
 
 
     if (
-      typeof input === "string"
+      typeof input ===
+      "string"
     ) {
 
       prompt =
         cleanString(
           input,
-          4000
+          12000
         );
 
     }
 
     else if (
       input &&
-      typeof input === "object"
+      typeof input ===
+        "object"
     ) {
 
       prompt =
         cleanString(
           input.prompt,
-          4000
+          12000
         );
+
 
       projectId =
         cleanString(
@@ -1187,7 +3203,25 @@ async function fileAgent(
 
 
     /* =====================================================
-       SCAN WORKSPACE
+       REQUESTED FILES
+    ===================================================== */
+
+    currentStage =
+      "requested-file-validation";
+
+
+    const requested =
+      normalizeRequestedFiles(
+
+        projectRoot,
+
+        requestedFiles
+
+      );
+
+
+    /* =====================================================
+       WORKSPACE SCAN
     ===================================================== */
 
     currentStage =
@@ -1196,87 +3230,28 @@ async function fileAgent(
 
     const files =
       readDirectory(
+
         projectRoot,
+
         projectRoot
+
       );
 
 
-    /* =====================================================
-       REQUESTED FILE INFORMATION
-    ===================================================== */
-
-    const requested =
-      [];
-
-
-    for (
-      const file of requestedFiles
-    ) {
-
-      if (
-        !file ||
-        typeof file !==
-          "object"
-      ) {
-
-        continue;
-
-      }
+    const fileEntries =
+      files.filter(
+        (item) =>
+          item.type ===
+          "file"
+      );
 
 
-      const filePath =
-        file.path ||
-        file.name;
-
-
-      if (
-        typeof filePath !==
-        "string"
-      ) {
-
-        continue;
-
-      }
-
-
-      try {
-
-        const safePath =
-          resolveSafePath(
-            projectRoot,
-            filePath
-          );
-
-
-        requested.push({
-
-          path:
-            safePath.relativePath,
-
-          content:
-            typeof file.content ===
-              "string"
-              ? file.content
-              : ""
-
-        });
-
-      }
-
-      catch (error) {
-
-        /*
-         * Invalid requested paths are
-         * ignored rather than accessed.
-         */
-
-        logger.warning(
-          `Rejected file path: ${filePath}`
-        );
-
-      }
-
-    }
+    const folderEntries =
+      files.filter(
+        (item) =>
+          item.type ===
+          "folder"
+      );
 
 
     /* =====================================================
@@ -1285,12 +3260,16 @@ async function fileAgent(
 
     const result = {
 
-      success: true,
+      success:
+        true,
 
       files,
 
       requestedFiles:
-        requested,
+        requested.files,
+
+      rejectedFiles:
+        requested.rejected,
 
       projectId:
         projectId ||
@@ -1301,16 +3280,27 @@ async function fileAgent(
           ? `workspace/${projectId}`
           : "workspace",
 
+      workspaceRoot:
+        projectRoot,
+
       fileCount:
-        files.filter(
-          (item) =>
-            item.type === "file"
-        ).length,
+        fileEntries.length,
 
       folderCount:
-        files.filter(
+        folderEntries.length,
+
+      binaryFiles:
+        fileEntries.filter(
           (item) =>
-            item.type === "folder"
+            item.binary ===
+            true
+        ).length,
+
+      truncatedFiles:
+        fileEntries.filter(
+          (item) =>
+            item.truncated ===
+            true
         ).length
 
     };
@@ -1321,7 +3311,9 @@ async function fileAgent(
     ===================================================== */
 
     logger.success(
+
       `File Agent Completed: ${result.fileCount} files, ${result.folderCount} folders`
+
     );
 
 
@@ -1329,7 +3321,9 @@ async function fileAgent(
 
   }
 
-  catch (error) {
+  catch (
+    error
+  ) {
 
     const errorMessage =
       error?.message ||
@@ -1337,13 +3331,16 @@ async function fileAgent(
 
 
     logger.error(
+
       `File Agent Failed at ${currentStage}: ${errorMessage}`
+
     );
 
 
     return {
 
-      success: false,
+      success:
+        false,
 
       message:
         "File Agent Failed",
@@ -1362,339 +3359,70 @@ async function fileAgent(
 
 
 /* =========================================================
-   SAVE FILE
-========================================================= */
-
-function saveFile(
-  fileName,
-  content,
-  projectId = ""
-) {
-
-  try {
-
-    if (
-      typeof content !==
-      "string"
-    ) {
-
-      return {
-
-        success: false,
-
-        error:
-          "File content must be a string"
-
-      };
-
-    }
-
-
-    if (
-      content.length >
-      MAX_FILE_SIZE
-    ) {
-
-      return {
-
-        success: false,
-
-        error:
-          "File content exceeds maximum allowed size"
-
-      };
-
-    }
-
-
-    const projectRoot =
-      getProjectRoot(
-        projectId
-      );
-
-
-    ensureDirectory(
-      projectRoot
-    );
-
-
-    const safePath =
-      resolveSafePath(
-        projectRoot,
-        fileName
-      );
-
-
-    const directory =
-      path.dirname(
-        safePath.path
-      );
-
-
-    ensureDirectory(
-      directory
-    );
-
-
-    /*
-     * Never follow an existing symlink.
-     */
-
-    if (
-      fs.existsSync(
-        safePath.path
-      )
-    ) {
-
-      const stat =
-        fs.lstatSync(
-          safePath.path
-        );
-
-
-      if (
-        stat.isSymbolicLink()
-      ) {
-
-        return {
-
-          success: false,
-
-          error:
-            "Refusing to overwrite a symbolic link"
-
-        };
-
-      }
-
-    }
-
-
-    fs.writeFileSync(
-      safePath.path,
-      content,
-      {
-        encoding: "utf8",
-        flag: "w"
-      }
-    );
-
-
-    logger.success(
-      `File Saved: ${safePath.relativePath}`
-    );
-
-
-    return {
-
-      success: true,
-
-      path:
-        safePath.relativePath,
-
-      projectId:
-        projectId ||
-        null,
-
-      size:
-        Buffer.byteLength(
-          content,
-          "utf8"
-        )
-
-    };
-
-  }
-
-  catch (error) {
-
-    const errorMessage =
-      error?.message ||
-      "Unknown file save error";
-
-
-    logger.error(
-      `File Save Failed: ${errorMessage}`
-    );
-
-
-    return {
-
-      success: false,
-
-      error:
-        errorMessage
-
-    };
-
-  }
-
-}
-
-
-/* =========================================================
-   DELETE FILE
-========================================================= */
-
-function deleteFile(
-  fileName,
-  projectId = ""
-) {
-
-  try {
-
-    const projectRoot =
-      getProjectRoot(
-        projectId
-      );
-
-
-    const safePath =
-      resolveSafePath(
-        projectRoot,
-        fileName
-      );
-
-
-    if (
-      !fs.existsSync(
-        safePath.path
-      )
-    ) {
-
-      return {
-
-        success: false,
-
-        error:
-          "File not found",
-
-        path:
-          safePath.relativePath
-
-      };
-
-    }
-
-
-    const stat =
-      fs.lstatSync(
-        safePath.path
-      );
-
-
-    if (
-      stat.isSymbolicLink()
-    ) {
-
-      return {
-
-        success: false,
-
-        error:
-          "Refusing to delete symbolic link"
-
-      };
-
-    }
-
-
-    if (
-      !stat.isFile()
-    ) {
-
-      return {
-
-        success: false,
-
-        error:
-          "Target is not a file"
-
-      };
-
-    }
-
-
-    fs.unlinkSync(
-      safePath.path
-    );
-
-
-    logger.success(
-      `File Deleted: ${safePath.relativePath}`
-    );
-
-
-    return {
-
-      success: true,
-
-      path:
-        safePath.relativePath,
-
-      projectId:
-        projectId ||
-        null
-
-    };
-
-  }
-
-  catch (error) {
-
-    const errorMessage =
-      error?.message ||
-      "Unknown file delete error";
-
-
-    logger.error(
-      `File Delete Failed: ${errorMessage}`
-    );
-
-
-    return {
-
-      success: false,
-
-      error:
-        errorMessage
-
-    };
-
-  }
-
-}
-
-
-/* =========================================================
    ATTACH METHODS
 ========================================================= */
 
+
 /*
- * IMPORTANT:
+ * Main compatibility:
  *
- * Master Agent currently does:
- *
- * const fileAgent = require("./fileAgent");
+ * const fileAgent =
+ *   require("./fileAgent");
  *
  * await fileAgent({...});
- *
- * Therefore the main export MUST itself
- * be callable.
- *
- * We attach saveFile/deleteFile as
- * properties so both styles work:
- *
- * fileAgent(...)
- * fileAgent.saveFile(...)
- * fileAgent.deleteFile(...)
  */
+
+
+/* =========================================================
+   SAVE
+========================================================= */
 
 fileAgent.saveFile =
   saveFile;
 
+
+/* =========================================================
+   READ
+========================================================= */
+
+fileAgent.readFile =
+  readFile;
+
+
+/* =========================================================
+   DELETE
+========================================================= */
+
 fileAgent.deleteFile =
   deleteFile;
+
+
+/* =========================================================
+   BATCH REPLACEMENT
+========================================================= */
+
+fileAgent.applyFileReplacements =
+  applyFileReplacements;
+
+
+/* =========================================================
+   SNAPSHOT
+========================================================= */
+
+fileAgent.createProjectSnapshot =
+  createProjectSnapshot;
+
+
+/* =========================================================
+   PATH HELPERS
+========================================================= */
+
+fileAgent.validateRelativePath =
+  validateRelativePath;
+
+
+fileAgent.resolveSafePath =
+  resolveSafePath;
 
 
 /* =========================================================
