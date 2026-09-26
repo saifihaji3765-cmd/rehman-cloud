@@ -1,68 +1,70 @@
 /* =========================================================
-   ZyrionOS MASTER AGENT
-   Central AI Orchestrator
-   =========================================================
+   ZYRIONOS MASTER AGENT
+   ---------------------------------------------------------
+   Central Autonomous Orchestrator / CEO Control Plane
 
-   Architecture:
+   CORE RESPONSIBILITY:
 
-   Master
-      |
-      +-- Memory
-      +-- Intent
-      +-- Planning
-      +-- Builder
-      +-- Fix
-      +-- File
-      +-- Deploy
-             |
-             +-- Billing
-             +-- Subscription
-             +-- Docker
-             +-- AWS
-             +-- Domain
-             +-- SSL
-             +-- Monitoring
-             +-- Scaling
-
-   AI Provider Architecture:
-
+   User Request
+        ↓
    Master Agent
-        |
-        +-- AI Provider Service
-                 |
-                 +-- Primary Provider
-                 |
-                 +-- Fallback Provider
+        ↓
+   Intent
+        ↓
+   Workflow Decision
+        ↓
+   Specialized Agents
+        ↓
+   Validation Gates
+        ↓
+   Final Result
+        ↓
+   Master Response
 
-   IMPORTANT:
-   Master Agent does NOT directly call OpenAI,
-   Gemini, or any other AI provider.
+   MASTER IS RESPONSIBLE FOR:
 
-   All provider calls must go through:
-   server/services/ai/aiProviderService.js
+   - Request normalization
+   - Memory context
+   - Intent classification
+   - Workflow selection
+   - Agent sequencing
+   - Dependency enforcement
+   - Failure propagation
+   - Execution gates
+   - Build → Deploy protection
+   - Billing → Subscription coordination
+   - Infrastructure ownership
+   - Large-project orchestration
+   - Final result aggregation
 
-   Total:
-   1 Master Agent
-   15 Core Specialized Agents
-   + Financial Control Plane Agents
+   MASTER DOES NOT:
 
-   Master does NOT require itself.
-   ================================================= */
+   - Generate source code itself
+   - Deploy infrastructure itself
+   - Process payments itself
+   - Modify files itself
+   - Directly call an AI provider
+   - Invent successful results
+
+   AI PROVIDERS:
+
+   Master never calls Gemini/OpenAI/etc directly.
+
+   All AI calls go through:
+
+       services/ai/aiProviderService.js
+
+========================================================= */
 
 
-/* =========================
+/* =========================================================
    SPECIALIZED AGENTS
-========================= */
-
-
-/* =========================
-   LEVEL 1
-========================= */
+========================================================= */
 
 const intentAgent =
   require("./intentAgent");
 
-const plannerAgent =
+const planningAgent =
   require("./planningAgent");
 
 const builderAgent =
@@ -78,9 +80,9 @@ const memoryAgent =
   require("./memoryAgent");
 
 
-/* =========================
-   LEVEL 2
-========================= */
+/* =========================================================
+   INFRASTRUCTURE AGENTS
+========================================================= */
 
 const dockerAgent =
   require("./dockerAgent");
@@ -101,9 +103,9 @@ const scalingAgent =
   require("./scalingAgent");
 
 
-/* =========================
-   LEVEL 3
-========================= */
+/* =========================================================
+   BUSINESS / DEPLOYMENT AGENTS
+========================================================= */
 
 const billingAgent =
   require("./billingAgent");
@@ -151,20 +153,6 @@ const whatsappControlAgent =
 const logger =
   require("../services/loggerService");
 
-
-/* =========================================================
-   AI PROVIDER SERVICE
-=========================================================
-
-   IMPORTANT:
-
-   Master Agent never creates an OpenAI/Gemini client.
-
-   All AI provider selection, failover, timeout,
-   provider availability and response generation
-   are handled centrally by aiProviderService.
-========================================================= */
-
 const {
   generateText
 } =
@@ -172,28 +160,45 @@ const {
 
 
 /* =========================================================
+   CONSTANTS
+========================================================= */
+
+const MAX_PROMPT_LENGTH =
+  12000;
+
+const MAX_MEMORY_LENGTH =
+  5000;
+
+const MAX_CONTEXT_LENGTH =
+  18000;
+
+const MAX_WORKFLOW_STEPS =
+  20;
+
+const MAX_AGENT_RESULTS =
+  30;
+
+
+/* =========================================================
    AGENT REGISTRY
-=========================================================
+   ---------------------------------------------------------
+   Registry describes ownership.
 
-   All 15 core specialized agents are registered here.
+   IMPORTANT:
 
-   They are NOT independently executed by Master when
-   another orchestrator already owns that responsibility.
+   Master owns workflow orchestration.
 
-   Example:
+   Deploy Agent owns deployment internals.
 
-   Deploy Agent owns:
+   Therefore Master does NOT independently execute:
 
-      Docker
-      AWS
-      Domain
-      SSL
-      Monitoring
-      Scaling
-      Billing
-      Subscription
+       dockerAgent
+       awsAgent
+       domainAgent
+       sslAgent
 
-   This prevents duplicate deployment operations.
+   during a deploy workflow unless a future
+   explicit architecture requires it.
 ========================================================= */
 
 const agentRegistry = {
@@ -202,7 +207,7 @@ const agentRegistry = {
     intentAgent,
 
   planning:
-    plannerAgent,
+    planningAgent,
 
   builder:
     builderAgent,
@@ -215,6 +220,15 @@ const agentRegistry = {
 
   memory:
     memoryAgent,
+
+  deploy:
+    deployAgent,
+
+  billing:
+    billingAgent,
+
+  subscription:
+    subscriptionAgent,
 
   docker:
     dockerAgent,
@@ -233,29 +247,6 @@ const agentRegistry = {
 
   scaling:
     scalingAgent,
-
-  billing:
-    billingAgent,
-
-  subscription:
-    subscriptionAgent,
-
-  deploy:
-    deployAgent,
-
-
-  /* =======================================================
-     FINANCIAL CONTROL AGENTS
-     =======================================================
-
-     Registered only.
-
-     They are NOT executed by Master yet.
-
-     Financial orchestration will be integrated after
-     the financial provider/service/route/middleware/
-     worker validation phase.
-  ======================================================= */
 
   financialControl:
     financialControlAgent,
@@ -279,20 +270,18 @@ const agentRegistry = {
     emergencyAgent,
 
   whatsappControl:
-    whatsappControlAgent,
+    whatsappControlAgent
+
 };
 
 
 /* =========================================================
-   HELPERS
+   SAFE JSON
 ========================================================= */
 
-
-/* =========================
-   SAFE JSON
-========================= */
-
-function safeJson(value) {
+function safeJson(
+  value
+) {
 
   try {
 
@@ -300,16 +289,14 @@ function safeJson(value) {
       value ?? null
     );
 
-  } catch (error) {
+  } catch (
+    error
+  ) {
 
     return JSON.stringify({
 
       error:
-        "Unable to serialize result",
-
-      message:
-        error?.message ||
-        "Serialization failed",
+        "Unable to serialize value"
 
     });
 
@@ -318,13 +305,92 @@ function safeJson(value) {
 }
 
 
-/* =========================
+/* =========================================================
+   SAFE STRING
+========================================================= */
+
+function cleanString(
+  value,
+  maxLength = 4000
+) {
+
+  if (
+    typeof value !==
+    "string"
+  ) {
+
+    return "";
+
+  }
+
+
+  return value
+    .replace(
+      /\u0000/g,
+      ""
+    )
+    .trim()
+    .slice(
+      0,
+      maxLength
+    );
+
+}
+
+
+/* =========================================================
+   USER ID
+========================================================= */
+
+function getUserId(
+  user = {}
+) {
+
+  return (
+
+    user?.id ||
+
+    user?._id ||
+
+    user?.userId ||
+
+    null
+
+  );
+
+}
+
+
+/* =========================================================
+   SUCCESS CHECK
+========================================================= */
+
+function isSuccessful(
+  result
+) {
+
+  return Boolean(
+
+    result &&
+
+    result.success === true
+
+  );
+
+}
+
+
+/* =========================================================
    ERROR NORMALIZER
-========================= */
+========================================================= */
 
-function normalizeError(error) {
+function normalizeError(
+  error
+) {
 
-  if (!error) {
+  if (
+    !error
+  ) {
 
     return {
 
@@ -338,7 +404,7 @@ function normalizeError(error) {
         null,
 
       code:
-        null,
+        null
 
     };
 
@@ -362,20 +428,24 @@ function normalizeError(error) {
 
     code:
       error.code ||
-      null,
+      null
 
   };
 
 }
 
 
-/* =========================
+/* =========================================================
    AGENT ERROR
-========================= */
+========================================================= */
 
-function getAgentError(result) {
+function getAgentError(
+  result
+) {
 
-  if (!result) {
+  if (
+    !result
+  ) {
 
     return "Agent returned no result.";
 
@@ -395,47 +465,9 @@ function getAgentError(result) {
 }
 
 
-/* =========================
-   SUCCESS CHECK
-========================= */
-
-function isSuccessful(result) {
-
-  return Boolean(
-
-    result &&
-
-    result.success === true
-
-  );
-
-}
-
-
-/* =========================
-   USER ID
-========================= */
-
-function getUserId(user = {}) {
-
-  return (
-
-    user?.id ||
-
-    user?._id ||
-
-    user?.userId ||
-
-    null
-
-  );
-
-}
-
-
-/* =========================
-   PLANNING DATA
-========================= */
+/* =========================================================
+   GET PLANNING DATA
+========================================================= */
 
 function getPlanningData(
   planning
@@ -454,22 +486,23 @@ function getPlanningData(
 }
 
 
-/* =========================
-   DEPLOYMENT ID
-========================= */
+/* =========================================================
+   GET DEPLOYMENT ID
+========================================================= */
 
 function getDeploymentId(
-  planningData,
   deploymentResult,
   projectId
 ) {
 
   return (
 
-    planningData?.deploymentId ||
-
     deploymentResult
       ?.deployment
+      ?.deploymentId ||
+
+    deploymentResult
+      ?.data
       ?.deploymentId ||
 
     deploymentResult
@@ -477,7 +510,7 @@ function getDeploymentId(
 
     deploymentResult
       ?.data
-      ?.deploymentId ||
+      ?.id ||
 
     projectId ||
 
@@ -489,7 +522,1230 @@ function getDeploymentId(
 
 
 /* =========================================================
-   MASTER AGENT
+   PROJECT NAME
+========================================================= */
+
+function getProjectName(
+  request,
+  planningData
+) {
+
+  return (
+
+    planningData?.projectName ||
+
+    request?.projectName ||
+
+    request?.name ||
+
+    null
+
+  );
+
+}
+
+
+/* =========================================================
+   REQUEST NORMALIZATION
+========================================================= */
+
+function normalizeRequest(
+  request,
+  fallbackUser = {}
+) {
+
+  let normalized = {};
+
+
+  if (
+    typeof request ===
+    "string"
+  ) {
+
+    normalized = {
+
+      prompt:
+        request
+
+    };
+
+  }
+
+  else if (
+    request &&
+    typeof request ===
+      "object"
+  ) {
+
+    normalized = {
+
+      ...request
+
+    };
+
+  }
+
+
+  normalized.prompt =
+    cleanString(
+      normalized.prompt,
+      MAX_PROMPT_LENGTH
+    );
+
+
+  normalized.type =
+    cleanString(
+      normalized.type,
+      100
+    )
+      .toLowerCase();
+
+
+  normalized.framework =
+    cleanString(
+      normalized.framework,
+      200
+    );
+
+
+  normalized.projectId =
+    cleanString(
+      normalized.projectId,
+      300
+    );
+
+
+  normalized.projectName =
+    cleanString(
+      normalized.projectName,
+      200
+    );
+
+
+  normalized.user =
+    normalized.user ||
+    fallbackUser ||
+    {};
+
+
+  return normalized;
+
+}
+
+
+/* =========================================================
+   WORKFLOW STATE
+========================================================= */
+
+function createWorkflowState(
+  request,
+  userId
+) {
+
+  return {
+
+    workflowId:
+
+      request.workflowId ||
+
+      `zyrionos-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 10)}`,
+
+    startedAt:
+      new Date(),
+
+    userId:
+      userId || null,
+
+    projectId:
+      request.projectId || null,
+
+    projectName:
+      request.projectName || null,
+
+    primaryIntent:
+      null,
+
+    projectScale:
+      null,
+
+    complexity:
+      null,
+
+    currentStage:
+      "initialized",
+
+    completedStages:
+      [],
+
+    failedStages:
+      [],
+
+    skippedStages:
+      [],
+
+    status:
+      "running",
+
+    agentResults:
+      {}
+
+  };
+
+}
+
+
+/* =========================================================
+   RECORD STAGE
+========================================================= */
+
+function recordStage(
+  workflow,
+  stage,
+  result,
+  status = "completed"
+) {
+
+  if (
+    !workflow
+  ) {
+
+    return;
+
+  }
+
+
+  const entry = {
+
+    stage,
+
+    status,
+
+    timestamp:
+      new Date(),
+
+    success:
+      result?.success === true
+
+  };
+
+
+  if (
+    status ===
+    "completed"
+  ) {
+
+    workflow.completedStages.push(
+      stage
+    );
+
+  }
+
+  else if (
+    status ===
+    "failed"
+  ) {
+
+    workflow.failedStages.push(
+      stage
+    );
+
+  }
+
+  else if (
+    status ===
+    "skipped"
+  ) {
+
+    workflow.skippedStages.push(
+      stage
+    );
+
+  }
+
+
+  workflow.agentResults[
+    stage
+  ] =
+    result || null;
+
+
+  /*
+   * Keep orchestration state bounded.
+   */
+
+  if (
+    workflow.completedStages.length >
+    MAX_WORKFLOW_STEPS
+  ) {
+
+    workflow.completedStages =
+      workflow.completedStages.slice(
+        -MAX_WORKFLOW_STEPS
+      );
+
+  }
+
+
+  return entry;
+
+}
+
+
+/* =========================================================
+   ROUTE NORMALIZATION
+========================================================= */
+
+function getIntentData(
+  intent
+) {
+
+  if (
+    intent?.data &&
+    typeof intent.data ===
+      "object"
+  ) {
+
+    return intent.data;
+
+  }
+
+
+  if (
+    intent &&
+    typeof intent ===
+      "object"
+  ) {
+
+    return intent;
+
+  }
+
+
+  return {
+
+    type:
+      "chat"
+
+  };
+
+}
+
+
+/* =========================================================
+   SECONDARY INTENTS
+========================================================= */
+
+function getSecondaryIntents(
+  intent
+) {
+
+  const data =
+    getIntentData(
+      intent
+    );
+
+
+  if (
+    !Array.isArray(
+      data.secondaryIntents
+    )
+  ) {
+
+    return [];
+
+  }
+
+
+  return [
+
+    ...new Set(
+
+      data.secondaryIntents
+
+        .filter(
+          (
+            item
+          ) =>
+            typeof item ===
+            "string"
+        )
+
+        .map(
+          (
+            item
+          ) =>
+            item
+              .trim()
+              .toLowerCase()
+        )
+
+        .filter(Boolean)
+
+    )
+
+  ];
+
+}
+
+
+/* =========================================================
+   WORKFLOW CLASSIFICATION
+   ---------------------------------------------------------
+   Master converts Intent output into an explicit
+   execution workflow.
+
+   This prevents every agent from making its own
+   interpretation of the request.
+========================================================= */
+
+function determineWorkflow(
+  intent,
+  request
+) {
+
+  const data =
+    getIntentData(
+      intent
+    );
+
+
+  const type =
+    cleanString(
+      data.type,
+      100
+    )
+      .toLowerCase();
+
+
+  const secondary =
+    getSecondaryIntents(
+      intent
+    );
+
+
+  const workflow = {
+
+    type:
+      type || "chat",
+
+    secondary,
+
+    requiresPlanning:
+      false,
+
+    requiresBuild:
+      false,
+
+    requiresDeploy:
+      false,
+
+    requiresBilling:
+      false,
+
+    requiresSubscription:
+      false,
+
+    requiresMonitoring:
+      false,
+
+    requiresScaling:
+      false,
+
+    requiresFix:
+      false,
+
+    requiresFile:
+      false,
+
+    autonomousSequence:
+      false
+
+  };
+
+
+  /*
+   * PRIMARY ROUTES
+   */
+
+  switch (
+    workflow.type
+  ) {
+
+    case "build":
+
+      workflow.requiresPlanning =
+        true;
+
+      workflow.requiresBuild =
+        true;
+
+      break;
+
+
+    case "fix":
+
+      workflow.requiresPlanning =
+        true;
+
+      workflow.requiresFix =
+        true;
+
+      break;
+
+
+    case "deploy":
+
+      workflow.requiresDeploy =
+        true;
+
+      break;
+
+
+    case "billing":
+
+      workflow.requiresBilling =
+        true;
+
+      break;
+
+
+    case "subscription":
+
+      workflow.requiresSubscription =
+        true;
+
+      break;
+
+
+    case "monitor":
+
+      workflow.requiresMonitoring =
+        true;
+
+      break;
+
+
+    case "scale":
+
+      workflow.requiresScaling =
+        true;
+
+      break;
+
+
+    case "file":
+
+      workflow.requiresFile =
+        true;
+
+      break;
+
+
+    case "automation":
+
+      workflow.requiresPlanning =
+        true;
+
+      break;
+
+
+    case "infrastructure":
+
+      workflow.requiresPlanning =
+        true;
+
+      break;
+
+
+    case "chat":
+
+    case "thumbnail":
+
+    default:
+
+      break;
+
+  }
+
+
+  /*
+   * EXPLICIT SECONDARY OPERATIONS
+   *
+   * Only explicit secondary intents can
+   * expand the workflow.
+   */
+
+  if (
+    secondary.includes(
+      "deploy"
+    )
+  ) {
+
+    workflow.requiresDeploy =
+      true;
+
+  }
+
+
+  if (
+    secondary.includes(
+      "billing"
+    )
+  ) {
+
+    workflow.requiresBilling =
+      true;
+
+  }
+
+
+  if (
+    secondary.includes(
+      "subscription"
+    )
+  ) {
+
+    workflow.requiresSubscription =
+      true;
+
+  }
+
+
+  if (
+    secondary.includes(
+      "monitor"
+    )
+  ) {
+
+    workflow.requiresMonitoring =
+      true;
+
+  }
+
+
+  if (
+    secondary.includes(
+      "scale"
+    )
+  ) {
+
+    workflow.requiresScaling =
+      true;
+
+  }
+
+
+  /*
+   * Explicit request flags.
+   */
+
+  if (
+    request?.autoDeploy ===
+    true
+  ) {
+
+    workflow.requiresDeploy =
+      true;
+
+  }
+
+
+  if (
+    request?.afterBuild ===
+    "deploy"
+  ) {
+
+    workflow.requiresDeploy =
+      true;
+
+  }
+
+
+  /*
+   * A build + deploy workflow is autonomous,
+   * but deployment is only allowed after
+   * successful build validation.
+   */
+
+  if (
+    workflow.requiresBuild &&
+    workflow.requiresDeploy
+  ) {
+
+    workflow.autonomousSequence =
+      true;
+
+  }
+
+
+  return workflow;
+
+}
+
+
+/* =========================================================
+   CONTEXT BUILDER
+========================================================= */
+
+function createAgentContext(
+  base
+) {
+
+  const context = {
+
+    workflowId:
+      base.workflow.workflowId,
+
+    userId:
+      base.userId,
+
+    projectId:
+      base.request.projectId,
+
+    projectName:
+      base.projectName,
+
+    prompt:
+      base.request.prompt,
+
+    user:
+      base.request.user,
+
+    framework:
+      base.request.framework,
+
+    intent:
+      base.intent,
+
+    planning:
+      base.planningData,
+
+    memoryContext:
+      base.memoryContext,
+
+    workflow:
+      base.workflow,
+
+    previousResults:
+      base.workflow.agentResults,
+
+    operationState: {
+
+      currentStage:
+        base.workflow.currentStage,
+
+      completedStages:
+        base.workflow.completedStages,
+
+      failedStages:
+        base.workflow.failedStages,
+
+      status:
+        base.workflow.status
+
+    }
+
+  };
+
+
+  /*
+   * Keep large context bounded.
+   *
+   * Individual agent results remain available
+   * in workflow state, but the serialized context
+   * sent to an agent should not become infinite.
+   */
+
+  return context;
+
+}
+
+
+/* =========================================================
+   RUN AGENT SAFELY
+========================================================= */
+
+async function runAgent(
+  workflow,
+  stage,
+  agent,
+  payload
+) {
+
+  workflow.currentStage =
+    stage;
+
+
+  if (
+    typeof agent !==
+    "function"
+  ) {
+
+    const failure = {
+
+      success:
+        false,
+
+      message:
+        `${stage} agent is unavailable`,
+
+      error:
+        `No callable agent registered for ${stage}`
+
+    };
+
+
+    recordStage(
+      workflow,
+      stage,
+      failure,
+      "failed"
+    );
+
+
+    return failure;
+
+  }
+
+
+  try {
+
+    logger.info(
+      `Master → ${stage} Agent`
+    );
+
+
+    const result =
+      await agent(
+        payload
+      );
+
+
+    if (
+      isSuccessful(
+        result
+      )
+    ) {
+
+      recordStage(
+        workflow,
+        stage,
+        result,
+        "completed"
+      );
+
+
+      logger.success(
+        `Master ← ${stage} Agent Completed`
+      );
+
+    }
+
+    else {
+
+      recordStage(
+        workflow,
+        stage,
+        result,
+        "failed"
+      );
+
+
+      logger.error(
+        `Master ← ${stage} Agent Failed: ${getAgentError(result)}`
+      );
+
+    }
+
+
+    return result;
+
+  }
+
+  catch (
+    error
+  ) {
+
+    const normalized =
+      normalizeError(
+        error
+      );
+
+
+    const result = {
+
+      success:
+        false,
+
+      message:
+        `${stage} Agent Failed`,
+
+      error:
+        normalized.message,
+
+      details:
+        normalized
+
+    };
+
+
+    recordStage(
+      workflow,
+      stage,
+      result,
+      "failed"
+    );
+
+
+    logger.error(
+      `Master ← ${stage} Agent Exception: ${normalized.message}`
+    );
+
+
+    return result;
+
+  }
+
+}
+
+
+/* =========================================================
+   BUILD OUTPUT VALIDATION
+========================================================= */
+
+function validateBuildResult(
+  result
+) {
+
+  if (
+    !isSuccessful(
+      result
+    )
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        getAgentError(
+          result
+        )
+
+    };
+
+  }
+
+
+  const files =
+    result
+      ?.data
+      ?.files;
+
+
+  if (
+    !Array.isArray(
+      files
+    )
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "Builder returned no files array."
+
+    };
+
+  }
+
+
+  if (
+    files.length ===
+    0
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "Builder returned an empty project."
+
+    };
+
+  }
+
+
+  return {
+
+    valid:
+      true,
+
+    files
+
+  };
+
+}
+
+
+/* =========================================================
+   DEPLOYMENT GATE
+   ---------------------------------------------------------
+   Deployment MUST NEVER happen after a failed build.
+========================================================= */
+
+function canDeploy(
+  workflow,
+  buildResult
+) {
+
+  /*
+   * Direct deployment of an already-existing
+   * project is allowed when no build was requested.
+   */
+
+  if (
+    !workflow.requiresBuild
+  ) {
+
+    return {
+
+      allowed:
+        true,
+
+      reason:
+        "Existing project deployment workflow."
+
+    };
+
+  }
+
+
+  /*
+   * Build was required.
+   */
+
+  if (
+    !isSuccessful(
+      buildResult
+    )
+  ) {
+
+    return {
+
+      allowed:
+        false,
+
+      reason:
+        "Deployment blocked because build did not succeed."
+
+    };
+
+  }
+
+
+  const validation =
+    validateBuildResult(
+      buildResult
+    );
+
+
+  if (
+    !validation.valid
+  ) {
+
+    return {
+
+      allowed:
+        false,
+
+      reason:
+        validation.error
+
+    };
+
+  }
+
+
+  return {
+
+    allowed:
+      true,
+
+    reason:
+      "Build completed and returned project files."
+
+  };
+
+}
+
+
+/* =========================================================
+   FINANCIAL GATE
+   ---------------------------------------------------------
+   Master never invents payment success.
+
+   Subscription Agent remains responsible for
+   entitlement state.
+
+   Billing Agent remains responsible for billing
+   operations/status.
+========================================================= */
+
+function getPaymentContext(
+  request
+) {
+
+  return {
+
+    paymentId:
+      request?.paymentId ||
+      null,
+
+    paymentConfirmed:
+      request?.paymentConfirmed ===
+      true,
+
+    paymentProvider:
+      request?.paymentProvider ||
+      null,
+
+    providerCustomerId:
+      request?.providerCustomerId ||
+      null,
+
+    providerSubscriptionId:
+      request?.providerSubscriptionId ||
+      null,
+
+    billingCycle:
+      request?.billingCycle ||
+      null,
+
+    plan:
+      request?.plan ||
+      request?.subscriptionPlan ||
+      null
+
+  };
+
+}
+
+
+/* =========================================================
+   SUBSCRIPTION GATE
+========================================================= */
+
+function canProcessSubscription(
+  request
+) {
+
+  const payment =
+    getPaymentContext(
+      request
+    );
+
+
+  /*
+   * Subscription status checks do not necessarily
+   * require a payment.
+   */
+
+  if (
+    request?.operation ===
+    "status"
+  ) {
+
+    return {
+
+      allowed:
+        true,
+
+      reason:
+        "Subscription status operation."
+
+    };
+
+  }
+
+
+  /*
+   * If the request explicitly says payment has
+   * been confirmed, pass the authoritative payment
+   * identifiers downstream.
+
+   * The Subscription Agent must still verify
+   * authoritative payment state before entitlement.
+   */
+
+  if (
+    payment.paymentConfirmed
+  ) {
+
+    return {
+
+      allowed:
+        true,
+
+      reason:
+        "Payment confirmation supplied; downstream subscription agent must verify authoritative state."
+
+    };
+
+  }
+
+
+  /*
+   * Never manufacture an entitlement from a
+   * missing payment confirmation.
+   */
+
+  return {
+
+    allowed:
+      true,
+
+    reason:
+      "Subscription agent may inspect current entitlement/payment state."
+
+  };
+
+}
+
+
+/* =========================================================
+   PROJECT FILES
+========================================================= */
+
+function getProjectFiles(
+  request,
+  buildResult
+) {
+
+  return (
+
+    buildResult
+      ?.data
+      ?.files ||
+
+    request?.files ||
+
+    []
+
+  );
+
+}
+
+
+/* =========================================================
+   MAIN MASTER AGENT
 ========================================================= */
 
 async function masterAgent(
@@ -497,8 +1753,55 @@ async function masterAgent(
   user = {}
 ) {
 
+  const startedAt =
+    Date.now();
+
+
   let currentStage =
     "request-normalization";
+
+
+  let normalizedRequest =
+    null;
+
+  let workflow =
+    null;
+
+  let memoryContext =
+    null;
+
+  let intent =
+    null;
+
+  let planning =
+    null;
+
+  let planningData =
+    null;
+
+  let buildResult =
+    null;
+
+  let deploymentResult =
+    null;
+
+  let monitoringResult =
+    null;
+
+  let scalingResult =
+    null;
+
+  let billingResult =
+    null;
+
+  let subscriptionResult =
+    null;
+
+  let fixResult =
+    null;
+
+  let fileResult =
+    null;
 
 
   try {
@@ -512,79 +1815,15 @@ async function masterAgent(
        REQUEST NORMALIZATION
     ===================================================== */
 
-    let userPrompt =
-      "";
+    normalizedRequest =
+      normalizeRequest(
+        request,
+        user
+      );
 
-    let requestType =
-      "";
-
-    let framework =
-      "";
-
-    let projectId =
-      "";
-
-    let normalizedUser =
-      user || {};
-
-
-    /* =========================
-       STRING REQUEST
-    ========================= */
 
     if (
-      typeof request ===
-      "string"
-    ) {
-
-      userPrompt =
-        request;
-
-    }
-
-
-    /* =========================
-       OBJECT REQUEST
-    ========================= */
-
-    else if (
-      request &&
-      typeof request ===
-        "object"
-    ) {
-
-      userPrompt =
-        request.prompt ||
-        "";
-
-      requestType =
-        request.type ||
-        "";
-
-      framework =
-        request.framework ||
-        "";
-
-      projectId =
-        request.projectId ||
-        "";
-
-      normalizedUser =
-        request.user ||
-        user ||
-        {};
-
-    }
-
-
-    /* =====================================================
-       VALIDATION
-    ===================================================== */
-
-    if (
-      typeof userPrompt !==
-        "string" ||
-      !userPrompt.trim()
+      !normalizedRequest.prompt
     ) {
 
       return {
@@ -599,20 +1838,17 @@ async function masterAgent(
           "Master Agent received an empty prompt.",
 
         stage:
-          currentStage,
+          currentStage
 
       };
 
     }
 
 
-    userPrompt =
-      userPrompt.trim();
+    const normalizedUser =
+      normalizedRequest.user ||
+      {};
 
-
-    /* =====================================================
-       AUTHENTICATED USER
-    ===================================================== */
 
     const userId =
       getUserId(
@@ -620,54 +1856,39 @@ async function masterAgent(
       );
 
 
-    /* =====================================================
-       AI PROVIDER CONFIGURATION
-    =====================================================
-
-       IMPORTANT:
-
-       Master Agent no longer checks only
-       OPENAI_API_KEY.
-
-       Provider availability and fallback are
-       handled by aiProviderService.
-
-       This allows:
-
-       Gemini primary
-          ↓
-       OpenAI fallback
-
-       or any future configured provider order.
-    ===================================================== */
-
-    currentStage =
-      "ai-provider-validation";
+    const projectId =
+      normalizedRequest.projectId ||
+      null;
 
 
-    logger.info(
-      "Master Agent using centralized AI Provider Service"
-    );
+    const workflowState =
+      createWorkflowState(
+        normalizedRequest,
+        userId
+      );
 
 
     /* =====================================================
-       MEMORY AGENT
+       MEMORY
     ===================================================== */
 
     currentStage =
       "memory-agent";
 
-    let memoryContext =
-      null;
 
+    memoryContext =
+      await runAgent(
 
-    try {
+        workflowState,
 
-      memoryContext =
-        await memoryAgent({
+        "memory",
+
+        memoryAgent,
+
+        {
 
           prompt:
-            userPrompt,
+            normalizedRequest.prompt,
 
           user:
             normalizedUser,
@@ -676,71 +1897,54 @@ async function masterAgent(
 
           projectId,
 
-        });
+          workflowId:
+            workflowState.workflowId
 
+        }
 
-      if (
-        isSuccessful(
-          memoryContext
-        )
-      ) {
-
-        logger.success(
-          "Memory Agent Completed"
-        );
-
-      } else {
-
-        logger.warning(
-          `Memory Agent returned failure: ${getAgentError(memoryContext)}`
-        );
-
-      }
-
-    } catch (error) {
-
-      const normalized =
-        normalizeError(
-          error
-        );
-
-
-      logger.warning(
-        `Memory Agent Failed: ${normalized.message}`
       );
 
 
-      memoryContext = {
+    /*
+     * Memory failure is non-fatal.
+     *
+     * Memory must never block a normal request.
+     */
 
-        success:
-          false,
+    if (
+      !isSuccessful(
+        memoryContext
+      )
+    ) {
 
-        error:
-          normalized.message,
-
-      };
+      logger.warning(
+        "Memory unavailable. Continuing without memory."
+      );
 
     }
 
 
     /* =====================================================
-       INTENT AGENT
+       INTENT
     ===================================================== */
 
     currentStage =
       "intent-agent";
 
-    let intent =
-      null;
 
+    intent =
+      await runAgent(
 
-    try {
+        workflowState,
 
-      intent =
-        await intentAgent({
+        "intent",
+
+        intentAgent,
+
+        {
 
           prompt:
-            userPrompt,
+            normalizedRequest.prompt,
 
           user:
             normalizedUser,
@@ -751,48 +1955,50 @@ async function masterAgent(
 
           projectId,
 
-        });
+          workflowId:
+            workflowState.workflowId
 
+        }
 
-      if (
-        isSuccessful(intent)
-      ) {
-
-        logger.success(
-          `Intent Agent Completed: ${intent.type || "unknown"}`
-        );
-
-      } else {
-
-        logger.warning(
-          `Intent Agent returned failure: ${getAgentError(intent)}`
-        );
-
-      }
-
-    } catch (error) {
-
-      const normalized =
-        normalizeError(
-          error
-        );
-
-
-      logger.error(
-        `Intent Agent Failed: ${normalized.message}`
       );
 
 
-      intent = {
+    /*
+     * Intent failure is NOT silently converted into
+     * a successful arbitrary workflow.
+     *
+     * The Intent Agent itself has a deterministic
+     * fallback in the replacement provided earlier.
+     */
+
+    if (
+      !isSuccessful(
+        intent
+      )
+    ) {
+
+      workflowState.status =
+        "failed";
+
+
+      return {
 
         success:
           false,
 
-        error:
-          normalized.message,
+        message:
+          "Intent classification failed",
 
-        type:
-          "chat",
+        error:
+          getAgentError(
+            intent
+          ),
+
+        stage:
+          currentStage,
+
+        workflow:
+          workflowState
 
       };
 
@@ -800,17 +2006,20 @@ async function masterAgent(
 
 
     /* =====================================================
-       REQUEST TYPE OVERRIDES
+       REQUEST TYPE OVERRIDE
+       -----------------------------------------------------
+       Explicit API-level request type has priority
+       over AI classification.
     ===================================================== */
 
     if (
-      requestType ===
+      normalizedRequest.type ===
       "code"
     ) {
 
       intent = {
 
-        ...(intent || {}),
+        ...intent,
 
         success:
           true,
@@ -818,19 +2027,30 @@ async function masterAgent(
         type:
           "build",
 
+        data: {
+
+          ...getIntentData(
+            intent
+          ),
+
+          type:
+            "build"
+
+        }
+
       };
 
     }
 
 
     if (
-      requestType ===
+      normalizedRequest.type ===
       "deploy"
     ) {
 
       intent = {
 
-        ...(intent || {}),
+        ...intent,
 
         success:
           true,
@@ -838,35 +2058,16 @@ async function masterAgent(
         type:
           "deploy",
 
-      };
+        data: {
 
-    }
+          ...getIntentData(
+            intent
+          ),
 
+          type:
+            "deploy"
 
-    /*
-     * No fake thumbnail generation.
-     *
-     * There is no dedicated thumbnailAgent.js
-     * in the current architecture.
-     */
-
-    if (
-      requestType ===
-      "thumbnail"
-    ) {
-
-      intent = {
-
-        ...(intent || {}),
-
-        success:
-          true,
-
-        type:
-          "chat",
-
-        unsupportedCapability:
-          "thumbnail-agent-not-installed",
+        }
 
       };
 
@@ -874,145 +2075,211 @@ async function masterAgent(
 
 
     /* =====================================================
-       PLANNING AGENT
+       WORKFLOW DECISION
     ===================================================== */
 
     currentStage =
-      "planning-agent";
-
-    let planning =
-      null;
+      "workflow-decision";
 
 
-    try {
-
-      planning =
-        await plannerAgent({
-
-          prompt:
-            userPrompt,
-
-          intent,
-
-          user:
-            normalizedUser,
-
-          userId,
-
-          memoryContext,
-
-          projectId,
-
-        });
-
-
-      if (
-        isSuccessful(planning)
-      ) {
-
-        logger.success(
-          "Planning Agent Completed"
-        );
-
-      } else {
-
-        logger.warning(
-          `Planning Agent returned failure: ${getAgentError(planning)}`
-        );
-
-      }
-
-    } catch (error) {
-
-      const normalized =
-        normalizeError(
-          error
-        );
-
-
-      logger.error(
-        `Planning Agent Failed: ${normalized.message}`
+    workflow =
+      determineWorkflow(
+        intent,
+        normalizedRequest
       );
 
 
-      planning = {
+    workflowState.primaryIntent =
+      workflow.type;
 
-        success:
-          false,
 
-        error:
-          normalized.message,
+    workflowState.projectScale =
+      getIntentData(
+        intent
+      ).projectScale ||
+      null;
 
-      };
+
+    workflowState.complexity =
+      getIntentData(
+        intent
+      ).complexity ||
+      null;
+
+
+    logger.info(
+
+      `Master Workflow: ${workflow.type}` +
+      ` | Planning=${workflow.requiresPlanning}` +
+      ` | Build=${workflow.requiresBuild}` +
+      ` | Deploy=${workflow.requiresDeploy}` +
+      ` | Billing=${workflow.requiresBilling}` +
+      ` | Subscription=${workflow.requiresSubscription}`
+
+    );
+
+
+    /* =====================================================
+       PLANNING
+       -----------------------------------------------------
+       Planning is only executed when the workflow
+       actually needs planning.
+    ===================================================== */
+
+    if (
+      workflow.requiresPlanning
+    ) {
+
+      currentStage =
+        "planning-agent";
+
+
+      planning =
+        await runAgent(
+
+          workflowState,
+
+          "planning",
+
+          planningAgent,
+
+          {
+
+            prompt:
+              normalizedRequest.prompt,
+
+            intent,
+
+            user:
+              normalizedUser,
+
+            userId,
+
+            memoryContext,
+
+            projectId,
+
+            workflowId:
+              workflowState.workflowId
+
+          }
+
+        );
+
+
+      if (
+        !isSuccessful(
+          planning
+        )
+      ) {
+
+        workflowState.status =
+          "failed";
+
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "Planning Agent failed",
+
+          error:
+            getAgentError(
+              planning
+            ),
+
+          stage:
+            currentStage,
+
+          workflow:
+            workflowState,
+
+          intent,
+
+          planning
+
+        };
+
+      }
+
+
+      planningData =
+        getPlanningData(
+          planning
+        );
 
     }
 
 
     /* =====================================================
-       NORMALIZED PLANNING DATA
-    ===================================================== */
-
-    const planningData =
-      getPlanningData(
-        planning
-      );
-
-
-    /* =====================================================
-       RESULT CONTAINERS
-    ===================================================== */
-
-    let buildResult =
-      null;
-
-    let deploymentResult =
-      null;
-
-    let monitoringResult =
-      null;
-
-    let scalingResult =
-      null;
-
-    let billingResult =
-      null;
-
-    let subscriptionResult =
-      null;
-
-    let fixResult =
-      null;
-
-    let fileResult =
-      null;
-
-
-    /* =====================================================
-       BUILD FLOW
+       BUILD
+       -----------------------------------------------------
+       Builder can only run after successful planning.
     ===================================================== */
 
     if (
-      intent?.type ===
-      "build"
+      workflow.requiresBuild
     ) {
+
+      if (
+        !isSuccessful(
+          planning
+        )
+      ) {
+
+        workflowState.status =
+          "failed";
+
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "Build blocked",
+
+          error:
+            "Builder requires a successful Planning Agent result.",
+
+          stage:
+            "build-gate",
+
+          workflow:
+            workflowState,
+
+          planning
+
+        };
+
+      }
+
 
       currentStage =
         "builder-agent";
 
 
-      try {
+      buildResult =
+        await runAgent(
 
-        buildResult =
-          await builderAgent({
+          workflowState,
+
+          "builder",
+
+          builderAgent,
+
+          {
 
             prompt:
-              userPrompt,
+              normalizedRequest.prompt,
 
             plan:
               planningData,
 
             framework:
-              framework ||
+              normalizedRequest.framework ||
               planningData?.framework ||
               planningData
                 ?.frontend
@@ -1030,117 +2297,467 @@ async function masterAgent(
 
             projectId,
 
-          });
+            workflowId:
+              workflowState.workflowId
 
+          }
 
-        if (
-          !isSuccessful(
-            buildResult
-          )
-        ) {
-
-          logger.error(
-            `Builder Agent Failed: ${getAgentError(buildResult)}`
-          );
-
-
-          return {
-
-            success:
-              false,
-
-            message:
-              "Builder Agent Failed",
-
-            error:
-              getAgentError(
-                buildResult
-              ),
-
-            stage:
-              currentStage,
-
-            orchestration: {
-
-              intent,
-
-              planning,
-
-              memoryContext,
-
-              buildResult,
-
-            },
-
-          };
-
-        }
-
-
-        /* =========================
-           FILE VALIDATION
-        ========================= */
-
-        const generatedFiles =
-          buildResult
-            ?.data
-            ?.files;
-
-
-        if (
-          !Array.isArray(
-            generatedFiles
-          ) ||
-          generatedFiles.length ===
-            0
-        ) {
-
-          return {
-
-            success:
-              false,
-
-            message:
-              "Builder Agent returned no project files",
-
-            error:
-              "Builder completed but returned an empty files array.",
-
-            stage:
-              currentStage,
-
-            orchestration: {
-
-              intent,
-
-              planning,
-
-              memoryContext,
-
-              buildResult,
-
-            },
-
-          };
-
-        }
-
-
-        logger.success(
-          `Builder generated ${generatedFiles.length} project files`
         );
 
 
-      } catch (error) {
+      const buildValidation =
+        validateBuildResult(
+          buildResult
+        );
 
-        const normalized =
-          normalizeError(
-            error
-          );
+
+      if (
+        !buildValidation.valid
+      ) {
+
+        workflowState.status =
+          "failed";
+
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "Build failed",
+
+          error:
+            buildValidation.error,
+
+          stage:
+            currentStage,
+
+          workflow:
+            workflowState,
+
+          intent,
+
+          planning,
+
+          buildResult
+
+        };
+
+      }
+
+
+      logger.success(
+
+        `Master Build Gate Passed: ` +
+        `${buildValidation.files.length} files`
+
+      );
+
+    }
+
+
+    /* =====================================================
+       FIX
+       -----------------------------------------------------
+       Fix is independent unless the request also
+       explicitly requires another workflow.
+    ===================================================== */
+
+    if (
+      workflow.requiresFix
+    ) {
+
+      currentStage =
+        "fix-agent";
+
+
+      fixResult =
+        await runAgent(
+
+          workflowState,
+
+          "fix",
+
+          fixAgent,
+
+          {
+
+            prompt:
+              normalizedRequest.prompt,
+
+            user:
+              normalizedUser,
+
+            userId,
+
+            intent,
+
+            planning:
+              planningData,
+
+            memoryContext,
+
+            projectId,
+
+            workflowId:
+              workflowState.workflowId,
+
+            files:
+              getProjectFiles(
+                normalizedRequest,
+                buildResult
+              )
+
+          }
+
+        );
+
+
+      if (
+        !isSuccessful(
+          fixResult
+        )
+      ) {
+
+        workflowState.status =
+          "failed";
+
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "Fix Agent failed",
+
+          error:
+            getAgentError(
+              fixResult
+            ),
+
+          stage:
+            currentStage,
+
+          workflow:
+            workflowState,
+
+          fixResult
+
+        };
+
+      }
+
+    }
+
+
+    /* =====================================================
+       FILE
+    ===================================================== */
+
+    if (
+      workflow.requiresFile
+    ) {
+
+      currentStage =
+        "file-agent";
+
+
+      fileResult =
+        await runAgent(
+
+          workflowState,
+
+          "file",
+
+          fileAgent,
+
+          {
+
+            prompt:
+              normalizedRequest.prompt,
+
+            user:
+              normalizedUser,
+
+            userId,
+
+            intent,
+
+            planning:
+              planningData,
+
+            memoryContext,
+
+            projectId,
+
+            workflowId:
+              workflowState.workflowId,
+
+            files:
+              getProjectFiles(
+                normalizedRequest,
+                buildResult
+              )
+
+          }
+
+        );
+
+
+      if (
+        !isSuccessful(
+          fileResult
+        )
+      ) {
+
+        workflowState.status =
+          "failed";
+
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "File Agent failed",
+
+          error:
+            getAgentError(
+              fileResult
+            ),
+
+          stage:
+            currentStage,
+
+          workflow:
+            workflowState,
+
+          fileResult
+
+        };
+
+      }
+
+    }
+
+
+    /* =====================================================
+       BILLING
+       -----------------------------------------------------
+       Billing does not automatically mean entitlement.
+    ===================================================== */
+
+    if (
+      workflow.requiresBilling
+    ) {
+
+      currentStage =
+        "billing-agent";
+
+
+      billingResult =
+        await runAgent(
+
+          workflowState,
+
+          "billing",
+
+          billingAgent,
+
+          {
+
+            prompt:
+              normalizedRequest.prompt,
+
+            user:
+              normalizedUser,
+
+            userId,
+
+            projectId,
+
+            plan:
+              normalizedRequest.plan ||
+              normalizedRequest.subscriptionPlan ||
+              planningData?.plan ||
+              planningData?.subscriptionPlan ||
+              null,
+
+            billingCycle:
+              normalizedRequest.billingCycle,
+
+            paymentProvider:
+              normalizedRequest.paymentProvider,
+
+            paymentId:
+              normalizedRequest.paymentId,
+
+            providerCustomerId:
+              normalizedRequest.providerCustomerId,
+
+            providerSubscriptionId:
+              normalizedRequest.providerSubscriptionId,
+
+            workflowId:
+              workflowState.workflowId,
+
+            user:
+              normalizedUser,
+
+            planning:
+              planningData
+
+          }
+
+        );
+
+    }
+
+
+    /* =====================================================
+       SUBSCRIPTION
+       -----------------------------------------------------
+       Subscription agent owns entitlement state.
+    ===================================================== */
+
+    if (
+      workflow.requiresSubscription
+    ) {
+
+      const subscriptionGate =
+        canProcessSubscription(
+          normalizedRequest
+        );
+
+
+      if (
+        !subscriptionGate.allowed
+      ) {
+
+        workflowState.status =
+          "failed";
+
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "Subscription operation blocked",
+
+          error:
+            subscriptionGate.reason,
+
+          stage:
+            "subscription-gate",
+
+          workflow:
+            workflowState
+
+        };
+
+      }
+
+
+      currentStage =
+        "subscription-agent";
+
+
+      subscriptionResult =
+        await runAgent(
+
+          workflowState,
+
+          "subscription",
+
+          subscriptionAgent,
+
+          {
+
+            prompt:
+              normalizedRequest.prompt,
+
+            user:
+              normalizedUser,
+
+            userId,
+
+            projectId,
+
+            plan:
+              normalizedRequest.plan ||
+              normalizedRequest.subscriptionPlan ||
+              null,
+
+            billingCycle:
+              normalizedRequest.billingCycle,
+
+            paymentProvider:
+              normalizedRequest.paymentProvider,
+
+            paymentConfirmed:
+              normalizedRequest.paymentConfirmed ===
+              true,
+
+            paymentId:
+              normalizedRequest.paymentId,
+
+            providerCustomerId:
+              normalizedRequest.providerCustomerId,
+
+            providerSubscriptionId:
+              normalizedRequest.providerSubscriptionId,
+
+            workflowId:
+              workflowState.workflowId,
+
+            planning:
+              planningData
+
+          }
+
+        );
+
+    }
+
+
+    /* =====================================================
+       DEPLOYMENT
+       -----------------------------------------------------
+       CRITICAL GATE:
+       If build was requested, build MUST succeed
+       before deployment.
+    ===================================================== */
+
+    if (
+      workflow.requiresDeploy
+    ) {
+
+      currentStage =
+        "deployment-gate";
+
+
+      const deploymentGate =
+        canDeploy(
+          workflow,
+          buildResult
+        );
+
+
+      if (
+        !deploymentGate.allowed
+      ) {
+
+        workflowState.status =
+          "failed";
 
 
         logger.error(
-          `Builder Agent Failed: ${normalized.message}`
+          `Deployment blocked: ${deploymentGate.reason}`
         );
 
 
@@ -1150,357 +2767,267 @@ async function masterAgent(
             false,
 
           message:
-            "Builder Agent Failed",
+            "Deployment blocked",
 
           error:
-            normalized.message,
+            deploymentGate.reason,
 
           stage:
             currentStage,
 
-          details:
-            normalized,
+          workflow:
+            workflowState,
 
-          orchestration: {
+          intent,
 
-            intent,
+          planning,
 
-            planning,
+          buildResult,
 
-            memoryContext,
-
-            buildResult:
-              null,
-
-          },
+          deploymentResult:
+            null
 
         };
 
       }
 
-    }
-
-
-    /* =====================================================
-       DEPLOY FLOW
-    ===================================================== */
-
-    if (
-      intent?.type ===
-      "deploy"
-    ) {
 
       currentStage =
         "deploy-agent";
 
 
-      try {
+      deploymentResult =
+        await runAgent(
 
-        deploymentResult =
-          await deployAgent({
+          workflowState,
+
+          "deploy",
+
+          deployAgent,
+
+          {
+
+            prompt:
+              normalizedRequest.prompt,
+
+            user:
+              normalizedUser,
 
             userId,
 
             projectId,
 
             projectName:
-              planningData
-                ?.projectName ||
-              projectDataProjectName(
-                request
+              getProjectName(
+                normalizedRequest,
+                planningData
               ),
 
             framework:
-              framework ||
-              planningData
-                ?.framework ||
+              normalizedRequest.framework ||
+              planningData?.framework ||
               planningData
                 ?.frontend
                 ?.framework,
 
-            prompt:
-              userPrompt,
-
             plan:
-              planningData
-                ?.plan ||
               planningData,
-
-            user:
-              normalizedUser,
 
             planning:
               planningData,
 
-            billingCycle:
-              request &&
-              typeof request ===
-                "object"
-                ? request.billingCycle
-                : undefined,
+            files:
+              getProjectFiles(
+                normalizedRequest,
+                buildResult
+              ),
 
-            paymentProvider:
-              request &&
-              typeof request ===
-                "object"
-                ? request.paymentProvider
-                : undefined,
+            intent,
 
-            paymentConfirmed:
-              request &&
-              typeof request ===
-                "object"
-                ? request.paymentConfirmed ===
-                  true
-                : false,
-
-            providerCustomerId:
-              request &&
-              typeof request ===
-                "object"
-                ? request.providerCustomerId
-                : undefined,
-
-            providerSubscriptionId:
-              request &&
-              typeof request ===
-                "object"
-                ? request.providerSubscriptionId
-                : undefined,
+            workflowId:
+              workflowState.workflowId,
 
             paymentId:
-              request &&
-              typeof request ===
-                "object"
-                ? request.paymentId
-                : undefined,
+              normalizedRequest.paymentId,
 
-            files:
-              buildResult
-                ?.data
-                ?.files ||
-              request?.files ||
-              [],
+            paymentConfirmed:
+              normalizedRequest.paymentConfirmed ===
+              true,
 
-          });
+            paymentProvider:
+              normalizedRequest.paymentProvider,
 
+            providerCustomerId:
+              normalizedRequest.providerCustomerId,
 
-        if (
-          isSuccessful(
-            deploymentResult
-          )
-        ) {
+            providerSubscriptionId:
+              normalizedRequest.providerSubscriptionId,
 
-          logger.success(
-            "Deploy Agent Completed"
-          );
+            billingCycle:
+              normalizedRequest.billingCycle,
 
-        } else {
+            /*
+             * Deploy Agent owns:
+             *
+             * Docker
+             * AWS
+             * Domain
+             * SSL
+             * deployment URL
+             *
+             * Master must not execute those agents
+             * a second time.
+             */
 
-          logger.error(
-            `Deploy Agent returned failure: ${getAgentError(deploymentResult)}`
-          );
+            infrastructureOwnership:
+              "deployAgent"
 
-        }
+          }
 
-      } catch (error) {
-
-        const normalized =
-          normalizeError(
-            error
-          );
-
-
-        logger.error(
-          `Deploy Agent Failed: ${normalized.message}`
         );
 
 
-        deploymentResult = {
+      if (
+        !isSuccessful(
+          deploymentResult
+        )
+      ) {
+
+        workflowState.status =
+          "failed";
+
+
+        return {
 
           success:
             false,
 
+          message:
+            "Deployment failed",
+
           error:
-            normalized.message,
+            getAgentError(
+              deploymentResult
+            ),
+
+          stage:
+            currentStage,
+
+          workflow:
+            workflowState,
+
+          intent,
+
+          planning,
+
+          buildResult,
+
+          deploymentResult
 
         };
 
       }
 
+
+      /*
+       * A deployment result must contain some
+       * authoritative deployment identity.
+       */
+
+      const deploymentId =
+        getDeploymentId(
+          deploymentResult,
+          projectId
+        );
+
+
+      logger.success(
+
+        `Deployment Gate Passed` +
+        ` | deploymentId=${deploymentId || "unknown"}`
+
+      );
+
     }
 
 
     /* =====================================================
-       MONITORING FLOW
+       MONITORING
+       -----------------------------------------------------
+       Monitoring is allowed after deployment or for
+       an existing project.
     ===================================================== */
 
     if (
-      intent?.type ===
-      "monitor"
+      workflow.requiresMonitoring
     ) {
 
       currentStage =
         "monitoring-agent";
 
 
-      try {
-
-        const deploymentId =
-          getDeploymentId(
-
-            planningData,
-
-            deploymentResult,
-
-            projectId
-
-          );
-
-
-        if (!deploymentId) {
-
-          monitoringResult = {
-
-            success:
-              false,
-
-            message:
-              "Deployment ID required for monitoring",
-
-          };
-
-        } else {
-
-          monitoringResult =
-            await monitoringAgent({
-
-              deploymentId,
-
-              appName:
-                planningData
-                  ?.projectName,
-
-              projectName:
-                planningData
-                  ?.projectName,
-
-              projectId,
-
-              user:
-                normalizedUser,
-
-              userId,
-
-              planning:
-                planningData,
-
-            });
-
-        }
-
-
-        if (
-          isSuccessful(
-            monitoringResult
-          )
-        ) {
-
-          logger.success(
-            "Monitoring Agent Completed"
-          );
-
-        } else {
-
-          logger.warning(
-            `Monitoring Agent returned failure: ${getAgentError(monitoringResult)}`
-          );
-
-        }
-
-      } catch (error) {
-
-        const normalized =
-          normalizeError(
-            error
-          );
-
-
-        logger.error(
-          `Monitoring Agent Failed: ${normalized.message}`
+      const deploymentId =
+        getDeploymentId(
+          deploymentResult,
+          projectId
         );
 
+
+      if (
+        !deploymentId
+      ) {
 
         monitoringResult = {
 
           success:
             false,
 
+          message:
+            "Deployment or project ID required for monitoring",
+
           error:
-            normalized.message,
+            "No deployment identifier was available."
 
         };
 
+
+        recordStage(
+          workflowState,
+          "monitoring",
+          monitoringResult,
+          "failed"
+        );
+
       }
 
-    }
+      else {
 
+        monitoringResult =
+          await runAgent(
 
-    /* =====================================================
-       SCALING FLOW
-    ===================================================== */
+            workflowState,
 
-    if (
-      intent?.type ===
-      "scale"
-    ) {
+            "monitoring",
 
-      currentStage =
-        "scaling-agent";
+            monitoringAgent,
 
-
-      try {
-
-        const deploymentId =
-          getDeploymentId(
-
-            planningData,
-
-            deploymentResult,
-
-            projectId
-
-          );
-
-
-        if (!deploymentId) {
-
-          scalingResult = {
-
-            success:
-              false,
-
-            message:
-              "Deployment ID required for scaling",
-
-          };
-
-        } else {
-
-          scalingResult =
-            await scalingAgent({
+            {
 
               deploymentId,
 
               projectId,
 
               projectName:
-                planningData
-                  ?.projectName,
+                getProjectName(
+                  normalizedRequest,
+                  planningData
+                ),
 
               appName:
-                planningData
-                  ?.projectName,
+                getProjectName(
+                  normalizedRequest,
+                  planningData
+                ),
 
               user:
                 normalizedUser,
@@ -1510,147 +3037,110 @@ async function masterAgent(
               planning:
                 planningData,
 
-            });
+              workflowId:
+                workflowState.workflowId
 
-        }
+            }
 
-
-        if (
-          isSuccessful(
-            scalingResult
-          )
-        ) {
-
-          logger.success(
-            "Scaling Agent Completed"
           );
 
-        } else {
+      }
 
-          logger.warning(
-            `Scaling Agent returned failure: ${getAgentError(scalingResult)}`
-          );
-
-        }
-
-      } catch (error) {
-
-        const normalized =
-          normalizeError(
-            error
-          );
+    }
 
 
-        logger.error(
-          `Scaling Agent Failed: ${normalized.message}`
+    /* =====================================================
+       SCALING
+       -----------------------------------------------------
+       Scaling only receives a known deployment/project
+       identity.
+    ===================================================== */
+
+    if (
+      workflow.requiresScaling
+    ) {
+
+      currentStage =
+        "scaling-agent";
+
+
+      const deploymentId =
+        getDeploymentId(
+          deploymentResult,
+          projectId
         );
 
+
+      if (
+        !deploymentId
+      ) {
 
         scalingResult = {
 
           success:
             false,
 
+          message:
+            "Deployment or project ID required for scaling",
+
           error:
-            normalized.message,
+            "No deployment identifier was available."
 
         };
 
-      }
 
-    }
-
-
-    /* =====================================================
-       BILLING FLOW
-    ===================================================== */
-
-    if (
-      intent?.type ===
-      "billing"
-    ) {
-
-      currentStage =
-        "billing-agent";
-
-
-      try {
-
-        billingResult =
-          await billingAgent({
-
-            userId,
-
-            plan:
-              planningData
-                ?.plan ||
-              planningData
-                ?.subscriptionPlan ||
-              "Starter",
-
-            billingCycle:
-              request &&
-              typeof request ===
-                "object"
-                ? request.billingCycle
-                : undefined,
-
-            paymentProvider:
-              request &&
-              typeof request ===
-                "object"
-                ? request.paymentProvider
-                : undefined,
-
-            user:
-              normalizedUser,
-
-            planning:
-              planningData,
-
-          });
-
-
-        if (
-          isSuccessful(
-            billingResult
-          )
-        ) {
-
-          logger.success(
-            "Billing Agent Completed"
-          );
-
-        } else {
-
-          logger.warning(
-            `Billing Agent returned failure: ${getAgentError(billingResult)}`
-          );
-
-        }
-
-      } catch (error) {
-
-        const normalized =
-          normalizeError(
-            error
-          );
-
-
-        logger.error(
-          `Billing Agent Failed: ${normalized.message}`
+        recordStage(
+          workflowState,
+          "scaling",
+          scalingResult,
+          "failed"
         );
 
+      }
 
-        billingResult = {
+      else {
 
-          success:
-            false,
+        scalingResult =
+          await runAgent(
 
-          error:
-            normalized.message,
+            workflowState,
 
-        };
+            "scaling",
+
+            scalingAgent,
+
+            {
+
+              deploymentId,
+
+              projectId,
+
+              projectName:
+                getProjectName(
+                  normalizedRequest,
+                  planningData
+                ),
+
+              appName:
+                getProjectName(
+                  normalizedRequest,
+                  planningData
+                ),
+
+              user:
+                normalizedUser,
+
+              userId,
+
+              planning:
+                planningData,
+
+              workflowId:
+                workflowState.workflowId
+
+            }
+
+          );
 
       }
 
@@ -1658,317 +3148,28 @@ async function masterAgent(
 
 
     /* =====================================================
-       SUBSCRIPTION FLOW
+       WORKFLOW COMPLETION
     ===================================================== */
 
-    if (
-      intent?.type ===
-      "subscription"
-    ) {
-
-      currentStage =
-        "subscription-agent";
+    workflowState.status =
+      "completed";
 
 
-      try {
-
-        subscriptionResult =
-          await subscriptionAgent({
-
-            userId,
-
-            plan:
-              planningData
-                ?.plan ||
-              planningData
-                ?.subscriptionPlan ||
-              "Starter",
-
-            billingCycle:
-              request &&
-              typeof request ===
-                "object"
-                ? request.billingCycle
-                : undefined,
-
-            paymentProvider:
-              request &&
-              typeof request ===
-                "object"
-                ? request.paymentProvider
-                : undefined,
-
-            paymentConfirmed:
-              request &&
-              typeof request ===
-                "object"
-                ? request.paymentConfirmed ===
-                  true
-                : false,
-
-            providerCustomerId:
-              request &&
-              typeof request ===
-                "object"
-                ? request.providerCustomerId
-                : undefined,
-
-            providerSubscriptionId:
-              request &&
-              typeof request ===
-                "object"
-                ? request.providerSubscriptionId
-                : undefined,
-
-            paymentId:
-              request &&
-              typeof request ===
-                "object"
-                ? request.paymentId
-                : undefined,
-
-            user:
-              normalizedUser,
-
-            planning:
-              planningData,
-
-          });
-
-
-        if (
-          isSuccessful(
-            subscriptionResult
-          )
-        ) {
-
-          logger.success(
-            "Subscription Agent Completed"
-          );
-
-        } else {
-
-          logger.warning(
-            `Subscription Agent returned failure: ${getAgentError(subscriptionResult)}`
-          );
-
-        }
-
-      } catch (error) {
-
-        const normalized =
-          normalizeError(
-            error
-          );
-
-
-        logger.error(
-          `Subscription Agent Failed: ${normalized.message}`
-        );
-
-
-        subscriptionResult = {
-
-          success:
-            false,
-
-          error:
-            normalized.message,
-
-        };
-
-      }
-
-    }
+    workflowState.currentStage =
+      "completed";
 
 
     /* =====================================================
-       FIX FLOW
-    ===================================================== */
-
-    if (
-      intent?.type ===
-      "fix"
-    ) {
-
-      currentStage =
-        "fix-agent";
-
-
-      try {
-
-        fixResult =
-          await fixAgent({
-
-            prompt:
-              userPrompt,
-
-            user:
-              normalizedUser,
-
-            userId,
-
-            intent,
-
-            planning:
-              planningData,
-
-            memoryContext,
-
-            projectId,
-
-            files:
-              buildResult
-                ?.data
-                ?.files ||
-              request?.files ||
-              [],
-
-          });
-
-
-        if (
-          isSuccessful(
-            fixResult
-          )
-        ) {
-
-          logger.success(
-            "Fix Agent Completed"
-          );
-
-        } else {
-
-          logger.warning(
-            `Fix Agent returned failure: ${getAgentError(fixResult)}`
-          );
-
-        }
-
-      } catch (error) {
-
-        const normalized =
-          normalizeError(
-            error
-          );
-
-
-        logger.error(
-          `Fix Agent Failed: ${normalized.message}`
-        );
-
-
-        fixResult = {
-
-          success:
-            false,
-
-          error:
-            normalized.message,
-
-        };
-
-      }
-
-    }
-
-
-    /* =====================================================
-       FILE FLOW
-    ===================================================== */
-
-    if (
-      intent?.type ===
-      "file"
-    ) {
-
-      currentStage =
-        "file-agent";
-
-
-      try {
-
-        fileResult =
-          await fileAgent({
-
-            prompt:
-              userPrompt,
-
-            user:
-              normalizedUser,
-
-            userId,
-
-            intent,
-
-            planning:
-              planningData,
-
-            memoryContext,
-
-            projectId,
-
-            files:
-              buildResult
-                ?.data
-                ?.files ||
-              request?.files ||
-              [],
-
-          });
-
-
-        if (
-          isSuccessful(
-            fileResult
-          )
-        ) {
-
-          logger.success(
-            "File Agent Completed"
-          );
-
-        } else {
-
-          logger.warning(
-            `File Agent returned failure: ${getAgentError(fileResult)}`
-          );
-
-        }
-
-      } catch (error) {
-
-        const normalized =
-          normalizeError(
-            error
-          );
-
-
-        logger.error(
-          `File Agent Failed: ${normalized.message}`
-        );
-
-
-        fileResult = {
-
-          success:
-            false,
-
-          error:
-            normalized.message,
-
-        };
-
-      }
-
-    }
-
-
-    /* =====================================================
-       ORCHESTRATION RESULT
+       ORCHESTRATION SNAPSHOT
     ===================================================== */
 
     const orchestration = {
+
+      workflowId:
+        workflowState.workflowId,
+
+      status:
+        workflowState.status,
 
       intent,
 
@@ -1992,69 +3193,77 @@ async function masterAgent(
 
       fileResult,
 
+      workflow,
 
-      /*
-       * These agents are owned by Deploy Agent
-       * during a deployment workflow.
-       *
-       * We expose their availability without
-       * executing them a second time.
-       */
+      completedStages:
+        workflowState.completedStages,
 
-      infrastructureAgents: {
+      failedStages:
+        workflowState.failedStages,
 
-        docker:
-          Boolean(
-            agentRegistry.docker
-          ),
+      skippedStages:
+        workflowState.skippedStages,
 
-        aws:
-          Boolean(
-            agentRegistry.aws
-          ),
+      infrastructureOwnership: {
 
-        domain:
-          Boolean(
-            agentRegistry.domain
-          ),
+        deployAgentOwns:
 
-        ssl:
-          Boolean(
-            agentRegistry.ssl
-          ),
+          [
+
+            "docker",
+
+            "aws",
+
+            "domain",
+
+            "ssl"
+
+          ]
 
       },
+
+      financialOwnership: {
+
+        billingAgentOwns:
+
+          [
+
+            "billing_operations",
+
+            "payment_information"
+
+          ],
+
+        subscriptionAgentOwns:
+
+          [
+
+            "subscription_state",
+
+            "entitlements",
+
+            "plan_access"
+
+          ]
+
+      }
 
     };
 
 
     /* =====================================================
-       FINAL MASTER AI RESPONSE
+       FINAL AI COMMUNICATION
+       -----------------------------------------------------
+       This AI call is ONLY for communication.
+
+       It does NOT decide what already happened.
+
+       Backend results are authoritative.
     ===================================================== */
 
     currentStage =
-      "master-ai-response";
+      "master-final-response";
 
-
-    /*
-     * IMPORTANT:
-     *
-     * There is NO direct OpenAI client here.
-     *
-     * generateText() delegates provider selection to
-     * aiProviderService.
-     *
-     * Current configured architecture:
-     *
-     *     Gemini
-     *        ↓
-     *     failure/unavailable
-     *        ↓
-     *     OpenAI fallback
-     *
-     * Provider credentials, model names, timeout,
-     * failover and availability are handled centrally.
-     */
 
     const completion =
       await generateText({
@@ -2062,228 +3271,266 @@ async function masterAgent(
         messages: [
 
           {
+
             role:
               "system",
 
             content: `
-You are the ZyrionOS Autonomous Master AI.
 
-You are the final communication layer of
-a multi-agent AI operating system.
+You are the final communication layer of ZyrionOS.
 
-Your job is to explain only what the connected
-backend agents actually did.
+The Master Agent has already completed orchestration.
+
+Your job is ONLY to explain the actual backend results.
+
+The backend is the source of truth.
 
 STRICT RULES:
 
-1. Never invent project files.
+1. Never invent a result.
 
-2. Never invent deployment URLs.
+2. Never invent a deployment URL.
 
-3. Never invent AWS infrastructure.
+3. Never invent a payment success.
 
-4. Never invent Docker results.
+4. Never invent a subscription entitlement.
 
-5. Never invent billing results.
+5. Never invent AWS infrastructure.
 
-6. Never invent subscription status.
+6. Never invent Docker results.
 
 7. Never invent monitoring metrics.
 
-8. Never invent scaling actions.
+8. Never invent scaling results.
 
-9. Never claim an operation succeeded unless
-   its backend result has success: true.
+9. Never claim a build succeeded unless
+   buildResult.success === true.
 
-10. Never claim a deployment is live unless
-    the deployment result actually provides
-    a real ready URL.
+10. Never claim deployment succeeded unless
+    deploymentResult.success === true.
 
-11. Never claim health is healthy unless the
-    monitoring/deployment result explicitly
-    supports it.
+11. Never claim payment succeeded unless
+    billingResult explicitly reports success.
 
-12. Never claim payment succeeded unless an
-    authoritative payment result says so.
+12. Never claim features are unlocked unless
+    subscriptionResult explicitly reports
+    the entitlement/access state.
 
-13. Never expose API keys, access tokens,
-    JWTs, passwords, cookies or secrets.
+13. Never expose secrets, tokens, passwords,
+    API keys, cookies or credentials.
 
-14. If an operation is pending, say pending.
+14. If something failed, state that it failed.
 
-15. If an operation failed, say failed.
+15. If something is unavailable, state that it
+    is unavailable.
 
-16. If information is unavailable, say that
-    it is unavailable.
+16. If deployment URL is present in the backend
+    result, report that exact URL.
 
-17. Do not convert null, missing or unavailable
-    metrics into zero.
+17. Do not fabricate a branded URL from a
+    provider URL.
 
-18. Do not claim that an infrastructure agent
-    independently ran when it was orchestrated
-    by another agent.
+18. Do not say an agent ran if the orchestration
+    record shows it was skipped.
 
-19. Keep the final response clear and useful.
+19. Keep the response concise but informative.
 
-20. The backend is the source of truth.
-`,
+20. Never override backend truth with assumptions.
+
+`
+
           },
 
           {
+
             role:
               "user",
 
             content: `
-USER PROMPT:
-${userPrompt}
 
-REQUEST TYPE:
-${requestType || "general"}
+USER REQUEST:
 
-FRAMEWORK:
-${framework || "not specified"}
+${normalizedRequest.prompt}
 
-PROJECT ID:
-${projectId || "not specified"}
+WORKFLOW:
 
-USER ID:
-${userId || "not available"}
+${safeJson(
+  workflow
+)}
 
 INTENT:
-${safeJson(intent)}
+
+${safeJson(
+  intent
+)}
 
 PLANNING:
-${safeJson(planning)}
 
-MEMORY:
-${safeJson(memoryContext)}
+${safeJson(
+  planning
+)}
 
 BUILD RESULT:
-${safeJson(buildResult)}
+
+${safeJson(
+  buildResult
+)}
 
 DEPLOYMENT RESULT:
-${safeJson(deploymentResult)}
 
-MONITORING RESULT:
-${safeJson(monitoringResult)}
-
-SCALING RESULT:
-${safeJson(scalingResult)}
+${safeJson(
+  deploymentResult
+)}
 
 BILLING RESULT:
-${safeJson(billingResult)}
+
+${safeJson(
+  billingResult
+)}
 
 SUBSCRIPTION RESULT:
-${safeJson(subscriptionResult)}
+
+${safeJson(
+  subscriptionResult
+)}
+
+MONITORING RESULT:
+
+${safeJson(
+  monitoringResult
+)}
+
+SCALING RESULT:
+
+${safeJson(
+  scalingResult
+)}
 
 FIX RESULT:
-${safeJson(fixResult)}
+
+${safeJson(
+  fixResult
+)}
 
 FILE RESULT:
-${safeJson(fileResult)}
 
-INFRASTRUCTURE AGENTS:
 ${safeJson(
-  orchestration.infrastructureAgents
+  fileResult
 )}
-`,
-          },
+
+WORKFLOW STATE:
+
+${safeJson(
+  workflowState
+)}
+
+`
+
+          }
 
         ],
 
-        temperature:
-          0.4,
-
         maxTokens:
-          1500,
+          1800
 
       });
 
 
     /* =====================================================
-       PROVIDER RESPONSE VALIDATION
+       FINAL AI FAILURE
+       -----------------------------------------------------
+       The actual orchestration already happened.
+       Therefore a communication-provider failure
+       must NOT erase successful backend results.
     ===================================================== */
 
-    if (
-      !completion ||
-      completion.success !== true
-    ) {
-
-      return {
-
-        success:
-          false,
-
-        message:
-          "Master AI provider failed",
-
-        error:
-          completion?.error ||
-          "AI provider service returned an unsuccessful result.",
-
-        stage:
-          currentStage,
-
-        orchestration,
-
-      };
-
-    }
-
-
-    /* =====================================================
-       FINAL RESPONSE
-    ===================================================== */
-
-    const reply =
-      completion
-        ?.text
-        ?.trim() ||
+    let reply =
       "";
 
 
-    if (!reply) {
+    if (
+      completion &&
+      completion.success ===
+      true
+    ) {
 
-      return {
+      reply =
+        cleanString(
+          completion.text,
+          12000
+        );
 
-        success:
-          false,
+    }
 
-        message:
-          "Master AI returned an empty response",
 
-        error:
-          "AI provider completed the request but returned no message.",
+    if (
+      !reply
+    ) {
 
-        stage:
-          currentStage,
+      /*
+       * Deterministic fallback response.
+       */
 
-        orchestration,
+      const successfulStages =
+        workflowState
+          .completedStages
+          .join(
+            ", "
+          );
 
-      };
+
+      const failedStages =
+        workflowState
+          .failedStages
+          .join(
+            ", "
+          );
+
+
+      reply =
+        [
+
+          `Workflow ${workflowState.status}.`,
+
+          successfulStages
+            ? `Completed: ${successfulStages}.`
+            : "",
+
+          failedStages
+            ? `Failed: ${failedStages}.`
+            : "",
+
+          deploymentResult?.deployment?.url
+            ? `Deployment URL: ${deploymentResult.deployment.url}`
+            : "",
+
+          deploymentResult?.data?.url
+            ? `Deployment URL: ${deploymentResult.data.url}`
+            : ""
+
+        ]
+          .filter(Boolean)
+          .join(" ");
 
     }
 
 
     /* =====================================================
-       PROVIDER LOGGING
+       SUCCESS LOG
     ===================================================== */
 
     logger.success(
 
-      `Master AI Response Generated via ${
-        completion.provider ||
-        "configured AI provider"
-      } / ${
-        completion.model ||
-        "configured model"
-      }`
+      `Master Agent Completed` +
+      ` | Workflow=${workflow.type}` +
+      ` | Status=${workflowState.status}` +
+      ` | Duration=${Date.now() - startedAt}ms`
 
     );
 
 
     /* =====================================================
-       FINAL SUCCESS
+       FINAL RESPONSE
     ===================================================== */
 
     return {
@@ -2293,11 +3540,18 @@ ${safeJson(
 
       reply,
 
-      orchestration,
+      workflow:
+        workflowState,
+
+      orchestration
 
     };
 
-  } catch (error) {
+  }
+
+  catch (
+    error
+  ) {
 
     const normalized =
       normalizeError(
@@ -2305,8 +3559,24 @@ ${safeJson(
       );
 
 
+    if (
+      workflow
+    ) {
+
+      workflow.status =
+        "failed";
+
+      workflow.currentStage =
+        currentStage;
+
+    }
+
+
     logger.error(
-      `Master Agent Failed at ${currentStage}: ${normalized.message}`
+
+      `Master Agent Failed at ${currentStage}: ` +
+      `${normalized.message}`
+
     );
 
 
@@ -2324,8 +3594,31 @@ ${safeJson(
       stage:
         currentStage,
 
-      details:
-        normalized,
+      workflow,
+
+      orchestration: {
+
+        intent,
+
+        planning,
+
+        buildResult,
+
+        deploymentResult,
+
+        monitoringResult,
+
+        scalingResult,
+
+        billingResult,
+
+        subscriptionResult,
+
+        fixResult,
+
+        fileResult
+
+      }
 
     };
 
@@ -2335,39 +3628,7 @@ ${safeJson(
 
 
 /* =========================================================
-   PROJECT NAME HELPER
-========================================================= */
-
-function projectDataProjectName(
-  request
-) {
-
-  if (
-    request &&
-    typeof request ===
-      "object"
-  ) {
-
-    return (
-
-      request.projectName ||
-
-      request.name ||
-
-      null
-
-    );
-
-  }
-
-
-  return null;
-
-}
-
-
-/* =========================================================
-   MASTER METADATA
+   MASTER AGENT METADATA
 ========================================================= */
 
 masterAgent.agents =
@@ -2378,6 +3639,115 @@ masterAgent.agentCount =
   Object.keys(
     agentRegistry
   ).length;
+
+
+/* =========================================================
+   WORKFLOW OWNERSHIP
+========================================================= */
+
+masterAgent.ownership = {
+
+  master: [
+
+    "routing",
+
+    "workflow_orchestration",
+
+    "execution_gates",
+
+    "failure_propagation",
+
+    "agent_sequencing"
+
+  ],
+
+  planning: [
+
+    "implementation_blueprint",
+
+    "module_decomposition",
+
+    "dependency_planning",
+
+    "implementation_phases"
+
+  ],
+
+  builder: [
+
+    "project_file_generation"
+
+  ],
+
+  fix: [
+
+    "bug_repair"
+
+  ],
+
+  file: [
+
+    "file_operations"
+
+  ],
+
+  deploy: [
+
+    "deployment_orchestration",
+
+    "docker",
+
+    "aws",
+
+    "domain",
+
+    "ssl",
+
+    "deployment_url"
+
+  ],
+
+  billing: [
+
+    "billing_operations",
+
+    "payment_information"
+
+  ],
+
+  subscription: [
+
+    "subscription_state",
+
+    "entitlements",
+
+    "plan_access"
+
+  ],
+
+  monitoring: [
+
+    "runtime_monitoring",
+
+    "health"
+
+  ],
+
+  scaling: [
+
+    "capacity_changes",
+
+    "scaling_operations"
+
+  ],
+
+  memory: [
+
+    "context_memory"
+
+  ]
+
+};
 
 
 /* =========================================================
