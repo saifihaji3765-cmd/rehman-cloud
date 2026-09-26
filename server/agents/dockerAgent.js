@@ -1,18 +1,19 @@
 /* =========================================================
    ZyrionOS DOCKER AGENT
+   ---------------------------------------------------------
    Production Container Build + ECR Push
 
-   Flow:
+   RESPONSIBILITY
 
-   Builder Agent
+   Project Files
         ↓
-   Docker Agent
+   Runtime Detection
         ↓
-   Validate project files
+   Project Validation
         ↓
-   Create isolated workspace
+   Isolated Workspace
         ↓
-   Generate Dockerfile
+   Dockerfile Generation
         ↓
    Docker Build
         ↓
@@ -22,15 +23,53 @@
         ↓
    Docker Push
         ↓
-   imageUri
+   Immutable Image
         ↓
    AWS Agent
+
+
+   IMPORTANT
+
+   Docker Agent does NOT:
+
+   - generate application source code
+   - call AI providers
+   - deploy directly to ECS
+   - create domains
+   - configure SSL
+   - invent image URIs
+   - expose project secrets
+   - trust unsafe file paths
+   - silently build an empty project
+
+
+   RUNTIME SUPPORT
+
+   Node / Express
+   Next.js
+   React / Vite
+   Python / FastAPI / Flask
+
+
+   IMAGE CONTRACT
+
+   Returns:
+
+   docker.imageUri
+   docker.repositoryUri
+   docker.repositoryName
+   docker.containerPort
+   docker.hostPort
+   docker.runtime
+   docker.sourceFileCount
+   docker.sourceSize
+   docker.status
 ========================================================= */
 
 
-/* =========================
+/* =========================================================
    PACKAGES
-========================= */
+========================================================= */
 
 const fs =
   require("fs");
@@ -42,7 +81,7 @@ const crypto =
   require("crypto");
 
 const {
-  spawn
+  spawn,
 } =
   require("child_process");
 
@@ -50,19 +89,19 @@ const {
   ECRClient,
   DescribeRepositoriesCommand,
   CreateRepositoryCommand,
-  GetAuthorizationTokenCommand
+  GetAuthorizationTokenCommand,
 } =
   require("@aws-sdk/client-ecr");
 
 const {
-  v4: uuidv4
+  v4: uuidv4,
 } =
   require("uuid");
 
 
-/* =========================
+/* =========================================================
    SERVICES
-========================= */
+========================================================= */
 
 const logger =
   require("../services/loggerService");
@@ -80,13 +119,11 @@ const AWS_REGION =
 
 const WORKSPACE_ROOT =
   path.resolve(
-
     process.env.ZYRION_DOCKER_WORKSPACE ||
-    path.join(
-      process.cwd(),
-      "workspace"
-    )
-
+      path.join(
+        process.cwd(),
+        "workspace"
+      )
   );
 
 
@@ -111,16 +148,48 @@ const MAX_PATH_LENGTH =
   300;
 
 
+const COMMAND_TIMEOUT_MS =
+  Number(
+    process.env.ZYRION_DOCKER_COMMAND_TIMEOUT_MS ||
+      15 * 60 * 1000
+  );
+
+
+const DOCKER_BUILD_TIMEOUT_MS =
+  Number(
+    process.env.ZYRION_DOCKER_BUILD_TIMEOUT_MS ||
+      20 * 60 * 1000
+  );
+
+
+const DOCKER_NODE_IMAGE =
+  process.env.ZYRION_NODE_IMAGE ||
+  "node:20-alpine";
+
+
+const DOCKER_NEXT_IMAGE =
+  process.env.ZYRION_NEXT_IMAGE ||
+  "node:20-alpine";
+
+
+const DOCKER_NGINX_IMAGE =
+  process.env.ZYRION_NGINX_IMAGE ||
+  "nginx:1.27-alpine";
+
+
+const DOCKER_PYTHON_IMAGE =
+  process.env.ZYRION_PYTHON_IMAGE ||
+  "python:3.11-slim";
+
+
 /* =========================================================
    ECR CLIENT
 ========================================================= */
 
 const ecrClient =
   new ECRClient({
-
     region:
-      AWS_REGION
-
+      AWS_REGION,
   });
 
 
@@ -129,107 +198,115 @@ const ecrClient =
 ========================================================= */
 
 const FRAMEWORKS = {
-
   node: {
-
     normalized:
       "node",
 
     port:
-      3000
+      3000,
 
+    runtime:
+      "node",
   },
 
   express: {
-
     normalized:
       "node",
 
     port:
-      3000
+      3000,
 
+    runtime:
+      "node",
   },
 
   javascript: {
-
     normalized:
       "node",
 
     port:
-      3000
+      3000,
 
+    runtime:
+      "node",
   },
 
   next: {
-
     normalized:
       "next",
 
     port:
-      3000
+      3000,
 
+    runtime:
+      "next",
   },
 
   nextjs: {
-
     normalized:
       "next",
 
     port:
-      3000
+      3000,
 
+    runtime:
+      "next",
   },
 
   react: {
-
     normalized:
       "react",
 
     port:
-      3000
+      80,
 
+    runtime:
+      "react",
   },
 
   vite: {
-
     normalized:
       "react",
 
     port:
-      3000
+      80,
 
+    runtime:
+      "react",
   },
 
   python: {
-
     normalized:
       "python",
 
     port:
-      8000
+      8000,
 
+    runtime:
+      "python",
   },
 
   fastapi: {
-
     normalized:
       "python",
 
     port:
-      8000
+      8000,
 
+    runtime:
+      "python",
   },
 
   flask: {
-
     normalized:
       "python",
 
     port:
-      8000
+      8000,
 
-  }
-
+    runtime:
+      "python",
+  },
 };
 
 
@@ -239,51 +316,31 @@ const FRAMEWORKS = {
 
 const PROTECTED_SEGMENTS =
   new Set([
-
     ".git",
-
     ".github",
-
     "node_modules",
-
     ".next",
-
     "dist",
-
     "build",
-
     "coverage",
-
     ".cache",
-
     ".turbo",
-
     ".aws",
-
-    ".ssh"
-
+    ".ssh",
   ]);
 
 
 const PROTECTED_FILES =
   new Set([
-
     ".env",
-
     ".env.local",
-
     ".env.production",
-
     ".env.development",
-
     ".env.test",
-
+    ".env.example",
     "id_rsa",
-
     "id_rsa.pub",
-
-    "authorized_keys"
-
+    "authorized_keys",
   ]);
 
 
@@ -295,35 +352,88 @@ function cleanString(
   value,
   maxLength = 4000
 ) {
-
   if (
     typeof value !==
     "string"
   ) {
-
     return "";
-
   }
 
-
   return value
+    .replace(
+      /\u0000/g,
+      ""
+    )
     .trim()
     .slice(
       0,
       maxLength
     );
-
 }
 
 
 /* =========================================================
-   SAFE PROJECT NAME
+   OBJECT HELPERS
+========================================================= */
+
+function safeObject(
+  value
+) {
+  if (
+    !value ||
+    typeof value !==
+      "object" ||
+    Array.isArray(value)
+  ) {
+    return {};
+  }
+
+  return value;
+}
+
+
+/* =========================================================
+   SUCCESS
+========================================================= */
+
+function isSuccessful(
+  result
+) {
+  return Boolean(
+    result &&
+      result.success === true
+  );
+}
+
+
+/* =========================================================
+   FRAMEWORK NORMALIZATION
+========================================================= */
+
+function normalizeFramework(
+  framework
+) {
+  const value =
+    cleanString(
+      framework ||
+        "node",
+      50
+    ).toLowerCase();
+
+  return (
+    FRAMEWORKS[value] ||
+    FRAMEWORKS.node
+  );
+}
+
+
+/* =========================================================
+   PROJECT NAME
 ========================================================= */
 
 function normalizeProjectName(
   value
 ) {
-
   const cleaned =
     cleanString(
       value,
@@ -339,42 +449,31 @@ function normalizeProjectName(
         ""
       );
 
-
   if (
     !cleaned
   ) {
-
     throw new Error(
       "Invalid project name"
     );
-
   }
-
 
   return cleaned.slice(
     0,
     60
   );
-
 }
 
 
 /* =========================================================
-   SAFE DEPLOYMENT ID
+   DEPLOYMENT ID
 ========================================================= */
 
 function normalizeDeploymentId(
   value
 ) {
-
-  if (
-    !value
-  ) {
-
+  if (!value) {
     return uuidv4();
-
   }
-
 
   const cleaned =
     cleanString(
@@ -382,44 +481,35 @@ function normalizeDeploymentId(
       100
     );
 
-
   if (
     !/^[a-zA-Z0-9_-]+$/.test(
       cleaned
     )
   ) {
-
     throw new Error(
       "Invalid deployment ID"
     );
-
   }
 
-
   return cleaned;
-
 }
 
 
 /* =========================================================
-   SAFE RELATIVE FILE PATH
+   SAFE FILE PATH
 ========================================================= */
 
 function validateFilePath(
   fileName
 ) {
-
   if (
     typeof fileName !==
     "string"
   ) {
-
     throw new Error(
       "File path must be a string"
     );
-
   }
-
 
   let normalized =
     fileName
@@ -429,158 +519,125 @@ function validateFilePath(
         "/"
       );
 
-
   while (
     normalized.startsWith(
       "./"
     )
   ) {
-
     normalized =
       normalized.slice(2);
-
   }
-
 
   if (
     !normalized
   ) {
-
     throw new Error(
       "File path is required"
     );
-
   }
-
 
   if (
     normalized.length >
     MAX_PATH_LENGTH
   ) {
-
     throw new Error(
       "File path is too long"
     );
-
   }
-
 
   if (
     normalized.startsWith("/")
   ) {
-
     throw new Error(
       "Absolute paths are not allowed"
     );
-
   }
-
 
   if (
     /^[A-Za-z]:\//.test(
       normalized
     )
   ) {
-
     throw new Error(
       "Windows absolute paths are not allowed"
     );
-
   }
 
-
   if (
-    normalized.includes("\0")
+    normalized.includes(
+      "\0"
+    )
   ) {
-
     throw new Error(
       "Invalid null byte in file path"
     );
-
   }
-
 
   const segments =
     normalized.split("/");
 
-
   if (
-    segments.includes("..")
+    segments.includes(
+      ".."
+    )
   ) {
-
     throw new Error(
       "Path traversal is not allowed"
     );
-
   }
 
-
   for (
-    const segment
-    of segments
+    const segment of segments
   ) {
-
     if (
       PROTECTED_SEGMENTS.has(
         segment
       )
     ) {
-
       throw new Error(
         `Protected directory '${segment}' is not allowed`
       );
-
     }
-
   }
-
 
   const baseName =
     path.posix.basename(
       normalized
     );
 
-
   if (
     PROTECTED_FILES.has(
       baseName
     )
   ) {
-
     throw new Error(
       "Protected file is not allowed"
     );
-
   }
 
+  const lowerName =
+    baseName.toLowerCase();
 
   if (
-    baseName.endsWith(
+    lowerName.endsWith(
       ".pem"
     ) ||
-
-    baseName.endsWith(
+    lowerName.endsWith(
       ".key"
     ) ||
-
-    baseName.endsWith(
+    lowerName.endsWith(
       ".p12"
     ) ||
-
-    baseName.endsWith(
+    lowerName.endsWith(
       ".pfx"
     )
   ) {
-
     throw new Error(
       "Private credential files are not allowed"
     );
-
   }
 
-
   return normalized;
-
 }
 
 
@@ -592,275 +649,62 @@ function isInside(
   root,
   target
 ) {
-
   const resolvedRoot =
     path.resolve(
       root
     );
-
 
   const resolvedTarget =
     path.resolve(
       target
     );
 
-
   return (
-
     resolvedTarget ===
       resolvedRoot ||
-
     resolvedTarget.startsWith(
       resolvedRoot +
-      path.sep
+        path.sep
     )
-
   );
-
 }
 
 
 /* =========================================================
-   NORMALIZE FRAMEWORK
+   FILE INDEX
 ========================================================= */
 
-function normalizeFramework(
-  framework
+function createFileIndex(
+  files
 ) {
+  const index =
+    new Map();
 
-  const value =
-    cleanString(
-      framework ||
-      "node",
-      50
-    )
-      .toLowerCase();
-
-
-  return (
-    FRAMEWORKS[value] ||
-    FRAMEWORKS.node
-  );
-
-}
-
-
-/* =========================================================
-   EXECUTE PROCESS
-========================================================= */
-
-/*
- * No shell command strings.
- *
- * This avoids shell injection through
- * project names, deployment IDs or paths.
- */
-
-function runCommand(
-  command,
-  args,
-  options = {}
-) {
-
-  return new Promise(
-    (
-      resolve,
-      reject
-    ) => {
-
-      const child =
-        spawn(
-          command,
-          args,
-          {
-
-            cwd:
-              options.cwd,
-
-            env:
-              process.env,
-
-            shell:
-              false,
-
-            stdio:
-              [
-                "pipe",
-                "pipe",
-                "pipe"
-              ]
-
-          }
-        );
-
-
-      let stdout = "";
-
-      let stderr = "";
-
-
-      child.stdout.on(
-        "data",
-        (data) => {
-
-          stdout +=
-            data.toString();
-
-        }
-      );
-
-
-      child.stderr.on(
-        "data",
-        (data) => {
-
-          stderr +=
-            data.toString();
-
-        }
-      );
-
-
-      child.on(
-        "error",
-        (error) => {
-
-          reject(
-            new Error(
-              `${command} execution failed: ${error.message}`
-            )
-          );
-
-        }
-      );
-
-
-      child.on(
-        "close",
-        (code) => {
-
-          if (
-            code === 0
-          ) {
-
-            resolve({
-
-              stdout,
-              stderr,
-              code
-
-            });
-
-            return;
-
-          }
-
-
-          const output =
-            stderr.trim() ||
-            stdout.trim() ||
-            `${command} exited with code ${code}`;
-
-
-          reject(
-            new Error(
-              output
-            )
-          );
-
-        }
-      );
-
-    }
-  );
-
-}
-
-
-/* =========================================================
-   ENSURE DOCKER AVAILABLE
-========================================================= */
-
-async function ensureDockerAvailable() {
-
-  await runCommand(
-    "docker",
-    [
-      "--version"
-    ]
-  );
-
-}
-
-
-/* =========================================================
-   CREATE ISOLATED WORKSPACE
-========================================================= */
-
-function createWorkspace(
-  deploymentId
-) {
-
-  if (
-    !isInside(
-      WORKSPACE_ROOT,
-      WORKSPACE_ROOT
-    )
+  for (
+    const file of files
   ) {
+    const normalized =
+      normalizeProjectFile(
+        file
+      );
 
-    throw new Error(
-      "Invalid Docker workspace root"
+    if (
+      index.has(
+        normalized.path
+      )
+    ) {
+      throw new Error(
+        `Duplicate project file: ${normalized.path}`
+      );
+    }
+
+    index.set(
+      normalized.path,
+      normalized
     );
-
   }
 
-
-  fs.mkdirSync(
-    WORKSPACE_ROOT,
-    {
-      recursive:
-        true
-    }
-  );
-
-
-  const workspacePath =
-    path.resolve(
-      WORKSPACE_ROOT,
-      deploymentId
-    );
-
-
-  if (
-    !isInside(
-      WORKSPACE_ROOT,
-      workspacePath
-    )
-  ) {
-
-    throw new Error(
-      "Workspace path escapes Docker workspace"
-    );
-
-  }
-
-
-  /*
-   * Deployment IDs are unique, therefore
-   * every build receives an isolated folder.
-   */
-
-  fs.mkdirSync(
-    workspacePath,
-    {
-      recursive:
-        true
-    }
-  );
-
-
-  return workspacePath;
-
+  return index;
 }
 
 
@@ -871,38 +715,24 @@ function createWorkspace(
 function normalizeProjectFile(
   file
 ) {
-
   if (
     !file ||
     typeof file !==
       "object"
   ) {
-
     throw new Error(
       "Invalid project file"
     );
-
   }
-
-
-  /*
-   * Builder Agent uses `path`.
-   *
-   * Older code may use `name`.
-   *
-   * Support both.
-   */
 
   const rawPath =
     file.path ||
     file.name;
 
-
   const filePath =
     validateFilePath(
       rawPath
     );
-
 
   const content =
     typeof file.content ===
@@ -910,35 +740,27 @@ function normalizeProjectFile(
       ? file.content
       : "";
 
-
   const byteSize =
     Buffer.byteLength(
       content,
       "utf8"
     );
 
-
   if (
     byteSize >
     MAX_FILE_SIZE
   ) {
-
     throw new Error(
       `File exceeds maximum size: ${filePath}`
     );
-
   }
 
-
   return {
-
     path:
       filePath,
 
-    content
-
+    content,
   };
-
 }
 
 
@@ -950,80 +772,64 @@ function writeProjectFiles(
   workspacePath,
   files
 ) {
-
   if (
     !Array.isArray(
       files
     )
   ) {
-
     throw new Error(
       "Project files must be an array"
     );
-
   }
-
 
   if (
     files.length === 0
   ) {
-
     throw new Error(
       "No project files provided"
     );
-
   }
-
 
   if (
     files.length >
     MAX_FILES
   ) {
-
     throw new Error(
       `Project contains too many files. Maximum: ${MAX_FILES}`
     );
-
   }
 
+  const fileIndex =
+    createFileIndex(
+      files
+    );
 
   let totalSize =
     0;
 
-
   const written =
     [];
 
-
   for (
-    const file
-    of files
+    const normalized of fileIndex.values()
   ) {
-
-    const normalized =
-      normalizeProjectFile(
-        file
-      );
-
-
-    totalSize +=
+    const fileSize =
       Buffer.byteLength(
         normalized.content,
         "utf8"
       );
 
+    totalSize +=
+      fileSize;
 
     if (
       totalSize >
       MAX_TOTAL_SOURCE_SIZE
     ) {
-
       throw new Error(
         "Total project source size exceeds maximum allowed size"
       );
-
     }
-
 
     const targetPath =
       path.resolve(
@@ -1031,35 +837,29 @@ function writeProjectFiles(
         normalized.path
       );
 
-
     if (
       !isInside(
         workspacePath,
         targetPath
       )
     ) {
-
       throw new Error(
         "Project file escapes isolated workspace"
       );
-
     }
-
 
     const directory =
       path.dirname(
         targetPath
       );
 
-
     fs.mkdirSync(
       directory,
       {
         recursive:
-          true
+          true,
       }
     );
-
 
     fs.writeFileSync(
       targetPath,
@@ -1067,48 +867,390 @@ function writeProjectFiles(
       {
         encoding:
           "utf8",
+
         flag:
-          "wx"
+          "wx",
       }
     );
 
-
     written.push({
-
       path:
         normalized.path,
 
       size:
-        Buffer.byteLength(
-          normalized.content,
-          "utf8"
-        )
-
+        fileSize,
     });
-
   }
 
-
   return {
-
     files:
       written,
 
-    totalSize
-
+    totalSize,
   };
-
 }
 
 
 /* =========================================================
-   GENERATE NODE DOCKERFILE
+   READ PROJECT FILE
 ========================================================= */
 
-function createNodeDockerfile() {
+function getProjectFile(
+  files,
+  target
+) {
+  const normalizedTarget =
+    target.replace(
+      /\\/g,
+      "/"
+    );
+
+  return files.find(
+    (file) =>
+      (
+        file.path ||
+        file.name ||
+        ""
+      ).replace(
+        /\\/g,
+        "/"
+      ) ===
+      normalizedTarget
+  ) || null;
+}
+
+
+/* =========================================================
+   PARSE PACKAGE.JSON
+========================================================= */
+
+function parsePackageJson(
+  files
+) {
+  const packageFile =
+    getProjectFile(
+      files,
+      "package.json"
+    );
+
+  if (
+    !packageFile
+  ) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(
+      packageFile.content
+    );
+  } catch {
+    throw new Error(
+      "package.json contains invalid JSON"
+    );
+  }
+}
+
+
+/* =========================================================
+   NODE START SCRIPT
+========================================================= */
+
+function resolveNodeStartCommand(
+  packageJson,
+  framework
+) {
+  const scripts =
+    safeObject(
+      packageJson?.scripts
+    );
+
+  if (
+    typeof scripts.start ===
+    "string" &&
+    scripts.start.trim()
+  ) {
+    return [
+      "npm",
+      "start",
+    ];
+  }
+
+  if (
+    framework.normalized ===
+    "next"
+  ) {
+    return [
+      "npm",
+      "start",
+    ];
+  }
+
+  if (
+    typeof scripts.serve ===
+    "string" &&
+    scripts.serve.trim()
+  ) {
+    return [
+      "npm",
+      "run",
+      "serve",
+    ];
+  }
+
+  if (
+    typeof scripts.preview ===
+    "string" &&
+    scripts.preview.trim()
+  ) {
+    return [
+      "npm",
+      "run",
+      "preview",
+      "--",
+      "--host",
+      "0.0.0.0",
+    ];
+  }
+
+  const entryCandidates = [
+    "server.js",
+    "app.js",
+    "index.js",
+    "main.js",
+  ];
+
+  for (
+    const candidate of entryCandidates
+  ) {
+    if (
+      getProjectFile(
+        global.__ZYRION_DOCKER_FILES__ || [],
+        candidate
+      )
+    ) {
+      return [
+        "node",
+        candidate,
+      ];
+    }
+  }
+
+  return null;
+}
+
+
+/* =========================================================
+   PYTHON ENTRYPOINT
+========================================================= */
+
+function resolvePythonStartCommand(
+  files,
+  framework
+) {
+  if (
+    framework.normalized ===
+    "python"
+  ) {
+    const fastApiFiles = [
+      "main.py",
+      "app.py",
+      "server.py",
+    ];
+
+    for (
+      const candidate of fastApiFiles
+    ) {
+      if (
+        getProjectFile(
+          files,
+          candidate
+        )
+      ) {
+        const content =
+          getProjectFile(
+            files,
+            candidate
+          ).content;
+
+        if (
+          /fastapi/i.test(
+            content
+          ) &&
+          /FastAPI\s*\(/i.test(
+            content
+          )
+        ) {
+          return [
+            "uvicorn",
+            `${candidate.replace(
+              /\.py$/,
+              ""
+            )}:app`,
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8000",
+          ];
+        }
+      }
+    }
+
+    for (
+      const candidate of [
+        "app.py",
+        "main.py",
+        "server.py",
+      ]
+    ) {
+      if (
+        getProjectFile(
+          files,
+          candidate
+        )
+      ) {
+        return [
+          "python",
+          candidate,
+        ];
+      }
+    }
+  }
+
+  return null;
+}
+
+
+/* =========================================================
+   PACKAGE REQUIREMENT VALIDATION
+========================================================= */
+
+function validateNodeProject(
+  files,
+  framework
+) {
+  const packageJson =
+    parsePackageJson(
+      files
+    );
+
+  if (
+    !packageJson
+  ) {
+    throw new Error(
+      "Node-based project requires package.json"
+    );
+  }
+
+  if (
+    !packageJson.name
+  ) {
+    logger.warning(
+      "package.json has no package name"
+    );
+  }
+
+  const dependencies = {
+    ...safeObject(
+      packageJson.dependencies
+    ),
+    ...safeObject(
+      packageJson.devDependencies
+    ),
+  };
+
+  if (
+    framework.normalized ===
+    "next" &&
+    !(
+      dependencies.next
+    )
+  ) {
+    throw new Error(
+      "Next.js project does not declare the 'next' dependency"
+    );
+  }
+
+  if (
+    framework.normalized ===
+    "react" &&
+    !(
+      dependencies.react
+    )
+  ) {
+    throw new Error(
+      "React project does not declare the 'react' dependency"
+    );
+  }
+
+  return {
+    packageJson,
+  };
+}
+
+
+/* =========================================================
+   PYTHON PROJECT VALIDATION
+========================================================= */
+
+function validatePythonProject(
+  files
+) {
+  const requirements =
+    getProjectFile(
+      files,
+      "requirements.txt"
+    );
+
+  if (
+    !requirements
+  ) {
+    throw new Error(
+      "Python project requires requirements.txt"
+    );
+  }
+
+  if (
+    !requirements.content.trim()
+  ) {
+    throw new Error(
+      "requirements.txt is empty"
+    );
+  }
+
+  const startCommand =
+    resolvePythonStartCommand(
+      files,
+      FRAMEWORKS.python
+    );
+
+  if (
+    !startCommand
+  ) {
+    throw new Error(
+      "Unable to determine Python application entrypoint"
+    );
+  }
+
+  return {
+    startCommand,
+  };
+}
+
+
+/* =========================================================
+   NODE DOCKERFILE
+========================================================= */
+
+function createNodeDockerfile(
+  startCommand
+) {
+  const command =
+    JSON.stringify(
+      startCommand
+    );
 
   return [
-    "FROM node:20-alpine",
+    `FROM ${DOCKER_NODE_IMAGE}`,
     "",
     "WORKDIR /app",
     "",
@@ -1119,25 +1261,24 @@ function createNodeDockerfile() {
     "COPY . .",
     "",
     "ENV NODE_ENV=production",
+    "ENV HOST=0.0.0.0",
     "ENV PORT=3000",
     "",
     "EXPOSE 3000",
     "",
-    "CMD [\"npm\", \"start\"]",
-    ""
+    `CMD ${command}`,
+    "",
   ].join("\n");
-
 }
 
 
 /* =========================================================
-   GENERATE NEXT.JS DOCKERFILE
+   NEXT DOCKERFILE
 ========================================================= */
 
 function createNextDockerfile() {
-
   return [
-    "FROM node:20-alpine",
+    `FROM ${DOCKER_NEXT_IMAGE}`,
     "",
     "WORKDIR /app",
     "",
@@ -1150,25 +1291,24 @@ function createNextDockerfile() {
     "RUN npm run build",
     "",
     "ENV NODE_ENV=production",
+    "ENV HOSTNAME=0.0.0.0",
     "ENV PORT=3000",
     "",
     "EXPOSE 3000",
     "",
     "CMD [\"npm\", \"start\"]",
-    ""
+    "",
   ].join("\n");
-
 }
 
 
 /* =========================================================
-   GENERATE REACT/VITE DOCKERFILE
+   REACT / VITE DOCKERFILE
 ========================================================= */
 
 function createReactDockerfile() {
-
   return [
-    "FROM node:20-alpine AS builder",
+    `FROM ${DOCKER_NODE_IMAGE} AS builder`,
     "",
     "WORKDIR /app",
     "",
@@ -1180,27 +1320,27 @@ function createReactDockerfile() {
     "",
     "RUN npm run build",
     "",
-    "FROM nginx:1.27-alpine",
+    `FROM ${DOCKER_NGINX_IMAGE}`,
     "",
     "COPY --from=builder /app/dist /usr/share/nginx/html",
     "",
     "EXPOSE 80",
     "",
     "CMD [\"nginx\", \"-g\", \"daemon off;\"]",
-    ""
+    "",
   ].join("\n");
-
 }
 
 
 /* =========================================================
-   GENERATE PYTHON DOCKERFILE
+   PYTHON DOCKERFILE
 ========================================================= */
 
-function createPythonDockerfile() {
-
+function createPythonDockerfile(
+  startCommand
+) {
   return [
-    "FROM python:3.11-slim",
+    `FROM ${DOCKER_PYTHON_IMAGE}`,
     "",
     "WORKDIR /app",
     "",
@@ -1213,12 +1353,16 @@ function createPythonDockerfile() {
     "",
     "COPY . .",
     "",
+    "ENV HOST=0.0.0.0",
+    "ENV PORT=8000",
+    "",
     "EXPOSE 8000",
     "",
-    "CMD [\"python\", \"app.py\"]",
-    ""
+    `CMD ${JSON.stringify(
+      startCommand
+    )}`,
+    "",
   ].join("\n");
-
 }
 
 
@@ -1227,45 +1371,78 @@ function createPythonDockerfile() {
 ========================================================= */
 
 function createDockerfile(
-  framework
+  framework,
+  context
 ) {
-
   switch (
     framework.normalized
   ) {
-
     case "next":
+      return {
+        content:
+          createNextDockerfile(),
 
-      return createNextDockerfile();
+        containerPort:
+          3000,
 
+        startCommand: [
+          "npm",
+          "start",
+        ],
+      };
 
     case "react":
+      return {
+        content:
+          createReactDockerfile(),
 
-      return createReactDockerfile();
+        containerPort:
+          80,
 
+        startCommand: [
+          "nginx",
+          "-g",
+          "daemon off;",
+        ],
+      };
 
     case "python":
+      return {
+        content:
+          createPythonDockerfile(
+            context.startCommand
+          ),
 
-      return createPythonDockerfile();
+        containerPort:
+          8000,
 
+        startCommand:
+          context.startCommand,
+      };
 
     case "node":
-
     default:
+      return {
+        content:
+          createNodeDockerfile(
+            context.startCommand
+          ),
 
-      return createNodeDockerfile();
+        containerPort:
+          3000,
 
+        startCommand:
+          context.startCommand,
+      };
   }
-
 }
 
 
 /* =========================================================
-   CREATE DOCKERIGNORE
+   DOCKERIGNORE
 ========================================================= */
 
 function createDockerignore() {
-
   return [
     "node_modules",
     ".next",
@@ -1287,20 +1464,281 @@ function createDockerignore() {
     "yarn-error.log",
     "Dockerfile",
     ".dockerignore",
-    ""
+    "",
   ].join("\n");
-
 }
 
 
 /* =========================================================
-   CREATE ECR REPOSITORY NAME
+   WORKSPACE
+========================================================= */
+
+function createWorkspace(
+  deploymentId
+) {
+  fs.mkdirSync(
+    WORKSPACE_ROOT,
+    {
+      recursive:
+        true,
+    }
+  );
+
+  const workspacePath =
+    path.resolve(
+      WORKSPACE_ROOT,
+      deploymentId
+    );
+
+  if (
+    !isInside(
+      WORKSPACE_ROOT,
+      workspacePath
+    )
+  ) {
+    throw new Error(
+      "Workspace path escapes Docker workspace"
+    );
+  }
+
+  fs.mkdirSync(
+    workspacePath,
+    {
+      recursive:
+        true,
+    }
+  );
+
+  return workspacePath;
+}
+
+
+/* =========================================================
+   PROCESS EXECUTION
+========================================================= */
+
+function runCommand(
+  command,
+  args,
+  options = {}
+) {
+  return new Promise(
+    (
+      resolve,
+      reject
+    ) => {
+      const timeoutMs =
+        Number(
+          options.timeoutMs ||
+            COMMAND_TIMEOUT_MS
+        );
+
+      const child =
+        spawn(
+          command,
+          args,
+          {
+            cwd:
+              options.cwd,
+
+            env:
+              {
+                ...process.env,
+                ...(options.env || {}),
+              },
+
+            shell:
+              false,
+
+            stdio:
+              [
+                "pipe",
+                "pipe",
+                "pipe",
+              ],
+          }
+        );
+
+      let stdout =
+        "";
+
+      let stderr =
+        "";
+
+      let settled =
+        false;
+
+      const timer =
+        setTimeout(
+          () => {
+            if (
+              settled
+            ) {
+              return;
+            }
+
+            settled =
+              true;
+
+            try {
+              child.kill(
+                "SIGTERM"
+              );
+            } catch {}
+
+            setTimeout(
+              () => {
+                try {
+                  child.kill(
+                    "SIGKILL"
+                  );
+                } catch {}
+              },
+              3000
+            );
+
+            reject(
+              new Error(
+                `${command} timed out after ${timeoutMs}ms`
+              )
+            );
+          },
+          timeoutMs
+        );
+
+      child.stdout.on(
+        "data",
+        (data) => {
+          stdout +=
+            data.toString();
+
+          /*
+           * Prevent unbounded process logs.
+           */
+          if (
+            stdout.length >
+            200000
+          ) {
+            stdout =
+              stdout.slice(
+                -200000
+              );
+          }
+        }
+      );
+
+      child.stderr.on(
+        "data",
+        (data) => {
+          stderr +=
+            data.toString();
+
+          if (
+            stderr.length >
+            200000
+          ) {
+            stderr =
+              stderr.slice(
+                -200000
+              );
+          }
+        }
+      );
+
+      child.on(
+        "error",
+        (error) => {
+          if (
+            settled
+          ) {
+            return;
+          }
+
+          settled =
+            true;
+
+          clearTimeout(
+            timer
+          );
+
+          reject(
+            new Error(
+              `${command} execution failed: ${error.message}`
+            )
+          );
+        }
+      );
+
+      child.on(
+        "close",
+        (code) => {
+          if (
+            settled
+          ) {
+            return;
+          }
+
+          settled =
+            true;
+
+          clearTimeout(
+            timer
+          );
+
+          if (
+            code === 0
+          ) {
+            resolve({
+              stdout,
+              stderr,
+              code,
+            });
+
+            return;
+          }
+
+          const output =
+            stderr.trim() ||
+            stdout.trim() ||
+            `${command} exited with code ${code}`;
+
+          reject(
+            new Error(
+              output
+            )
+          );
+        }
+      );
+    }
+  );
+}
+
+
+/* =========================================================
+   DOCKER AVAILABILITY
+========================================================= */
+
+async function ensureDockerAvailable() {
+  await runCommand(
+    "docker",
+    [
+      "--version",
+    ],
+    {
+      timeoutMs:
+        30000,
+    }
+  );
+}
+
+
+/* =========================================================
+   ECR REPOSITORY NAME
 ========================================================= */
 
 function createRepositoryName(
   projectName
 ) {
-
   const hash =
     crypto
       .createHash(
@@ -1317,69 +1755,52 @@ function createRepositoryName(
         8
       );
 
-
   return `${ECR_REPOSITORY_PREFIX}/${projectName}-${hash}`;
-
 }
 
 
 /* =========================================================
-   ENSURE ECR REPOSITORY
+   ECR REPOSITORY
 ========================================================= */
 
 async function ensureEcrRepository(
   repositoryName
 ) {
-
   try {
-
     const existing =
       await ecrClient.send(
-
-        new DescribeRepositoriesCommand({
-
-          repositoryNames: [
-            repositoryName
-          ]
-
-        })
-
+        new DescribeRepositoriesCommand(
+          {
+            repositoryNames: [
+              repositoryName,
+            ],
+          }
+        )
       );
-
 
     const repository =
       existing
         ?.repositories?.[0];
 
-
     if (
       !repository?.repositoryUri
     ) {
-
       throw new Error(
         "ECR repository URI was not returned"
       );
-
     }
 
-
     return {
-
       created:
         false,
 
       repositoryUri:
-        repository.repositoryUri
-
+        repository.repositoryUri,
     };
-
-  }
-
-  catch (error) {
-
+  } catch (error) {
     const statusCode =
-      error?.$metadata?.httpStatusCode;
-
+      error?.$metadata
+        ?.httpStatusCode;
 
     const notFound =
       statusCode === 400 ||
@@ -1387,118 +1808,92 @@ async function ensureEcrRepository(
       error?.name ===
         "RepositoryNotFoundException";
 
-
     if (
       !notFound
     ) {
-
       throw error;
-
     }
-
   }
-
 
   const created =
     await ecrClient.send(
+      new CreateRepositoryCommand(
+        {
+          repositoryName,
 
-      new CreateRepositoryCommand({
+          imageScanningConfiguration:
+            {
+              scanOnPush:
+                true,
+            },
 
-        repositoryName,
-
-        imageScanningConfiguration: {
-
-          scanOnPush:
-            true
-
-        },
-
-        imageTagMutability:
-          "IMMUTABLE"
-
-      })
-
+          imageTagMutability:
+            "IMMUTABLE",
+        }
+      )
     );
 
-
   const repository =
-    created
-      ?.repository;
-
+    created?.repository;
 
   if (
     !repository?.repositoryUri
   ) {
-
     throw new Error(
       "ECR repository creation did not return repository URI"
     );
-
   }
 
-
   return {
-
     created:
       true,
 
     repositoryUri:
-      repository.repositoryUri
-
+      repository.repositoryUri,
   };
-
 }
 
 
 /* =========================================================
-   GET ECR AUTHENTICATION
+   ECR AUTH
 ========================================================= */
 
 async function getEcrAuthentication() {
-
   const response =
     await ecrClient.send(
-
-      new GetAuthorizationTokenCommand({})
-
+      new GetAuthorizationTokenCommand(
+        {}
+      )
     );
-
 
   const authorizationData =
     response
       ?.authorizationData?.[0];
 
-
   if (
     !authorizationData
   ) {
-
     throw new Error(
       "AWS ECR authorization data unavailable"
     );
-
   }
 
-
   const token =
-    authorizationData.authorizationToken;
-
+    authorizationData
+      .authorizationToken;
 
   const proxyEndpoint =
-    authorizationData.proxyEndpoint;
-
+    authorizationData
+      .proxyEndpoint;
 
   if (
     !token ||
     !proxyEndpoint
   ) {
-
     throw new Error(
       "Incomplete AWS ECR authorization response"
     );
-
   }
-
 
   const decoded =
     Buffer
@@ -1510,26 +1905,20 @@ async function getEcrAuthentication() {
         "utf8"
       );
 
-
   const separator =
     decoded.indexOf(
       ":"
     );
 
-
   if (
     separator <= 0
   ) {
-
     throw new Error(
       "Invalid AWS ECR authorization token"
     );
-
   }
 
-
   return {
-
     username:
       decoded.slice(
         0,
@@ -1545,15 +1934,13 @@ async function getEcrAuthentication() {
       proxyEndpoint.replace(
         /^https?:\/\//,
         ""
-      )
-
+      ),
   };
-
 }
 
 
 /* =========================================================
-   DOCKER LOGIN TO ECR
+   DOCKER LOGIN
 ========================================================= */
 
 async function dockerLogin(
@@ -1561,28 +1948,22 @@ async function dockerLogin(
   password,
   registry
 ) {
-
   return new Promise(
     (
       resolve,
       reject
     ) => {
-
       const child =
         spawn(
-
           "docker",
-
           [
             "login",
             "--username",
             username,
             "--password-stdin",
-            registry
+            registry,
           ],
-
           {
-
             shell:
               false,
 
@@ -1590,13 +1971,10 @@ async function dockerLogin(
               [
                 "pipe",
                 "pipe",
-                "pipe"
-              ]
-
+                "pipe",
+              ],
           }
-
         );
-
 
       let stdout =
         "";
@@ -1604,85 +1982,120 @@ async function dockerLogin(
       let stderr =
         "";
 
+      let settled =
+        false;
+
+      const timer =
+        setTimeout(
+          () => {
+            if (
+              settled
+            ) {
+              return;
+            }
+
+            settled =
+              true;
+
+            try {
+              child.kill(
+                "SIGTERM"
+              );
+            } catch {}
+
+            reject(
+              new Error(
+                "Docker ECR login timed out"
+              )
+            );
+          },
+          60000
+        );
 
       child.stdout.on(
         "data",
         (data) => {
-
           stdout +=
             data.toString();
-
         }
       );
-
 
       child.stderr.on(
         "data",
         (data) => {
-
           stderr +=
             data.toString();
-
         }
       );
-
 
       child.on(
         "error",
         (error) => {
+          if (
+            settled
+          ) {
+            return;
+          }
+
+          settled =
+            true;
+
+          clearTimeout(
+            timer
+          );
 
           reject(
             new Error(
               `Docker ECR login failed: ${error.message}`
             )
           );
-
         }
       );
-
 
       child.on(
         "close",
         (code) => {
+          if (
+            settled
+          ) {
+            return;
+          }
+
+          settled =
+            true;
+
+          clearTimeout(
+            timer
+          );
 
           if (
             code !== 0
           ) {
-
             reject(
               new Error(
                 stderr.trim() ||
-                stdout.trim() ||
-                `Docker login failed with code ${code}`
+                  stdout.trim() ||
+                  `Docker login failed with code ${code}`
               )
             );
 
             return;
-
           }
 
-
           resolve({
-
             success:
-              true
-
+              true,
           });
-
         }
       );
-
 
       child.stdin.write(
         password
       );
 
-
       child.stdin.end();
-
     }
   );
-
 }
 
 
@@ -1694,36 +2107,31 @@ async function buildImage(
   workspacePath,
   imageTag
 ) {
-
   logger.info(
-    `Building Docker image: ${imageTag}`
+    `Docker build started: ${imageTag}`
   );
 
-
   await runCommand(
-
     "docker",
-
     [
       "build",
       "--pull",
       "--tag",
       imageTag,
-      "."
+      ".",
     ],
-
     {
       cwd:
-        workspacePath
+        workspacePath,
+
+      timeoutMs:
+        DOCKER_BUILD_TIMEOUT_MS,
     }
-
   );
-
 
   logger.success(
     "Docker image build completed"
   );
-
 }
 
 
@@ -1734,28 +2142,25 @@ async function buildImage(
 async function pushImage(
   imageTag
 ) {
-
   logger.info(
-    `Pushing Docker image: ${imageTag}`
+    `Docker image push started: ${imageTag}`
   );
-
 
   await runCommand(
-
     "docker",
-
     [
       "push",
-      imageTag
-    ]
-
+      imageTag,
+    ],
+    {
+      timeoutMs:
+        DOCKER_BUILD_TIMEOUT_MS,
+    }
   );
-
 
   logger.success(
     "Docker image pushed to ECR"
   );
-
 }
 
 
@@ -1766,104 +2171,279 @@ async function pushImage(
 async function removeLocalImage(
   imageTag
 ) {
-
   try {
-
     await runCommand(
-
       "docker",
-
       [
         "image",
         "rm",
-        imageTag
-      ]
-
+        imageTag,
+      ],
+      {
+        timeoutMs:
+          60000,
+      }
     );
-
-  }
-
-  catch (error) {
-
-    /*
-     * Cleanup failure should not
-     * invalidate a successfully pushed
-     * production image.
-     */
-
+  } catch (error) {
     logger.warning(
       `Local Docker image cleanup failed: ${error.message}`
     );
-
   }
-
 }
 
 
 /* =========================================================
-   CLEAN WORKSPACE
+   REMOVE WORKSPACE
 ========================================================= */
 
 function removeWorkspace(
   workspacePath
 ) {
-
   try {
-
     if (
       !isInside(
         WORKSPACE_ROOT,
         workspacePath
       )
     ) {
-
       return;
-
     }
-
 
     if (
       fs.existsSync(
         workspacePath
       )
     ) {
-
       fs.rmSync(
         workspacePath,
         {
           recursive:
             true,
+
           force:
-            true
+            true,
         }
       );
-
     }
-
-  }
-
-  catch (error) {
-
+  } catch (error) {
     logger.warning(
       `Docker workspace cleanup failed: ${error.message}`
     );
-
   }
-
 }
 
 
 /* =========================================================
-   DOCKER AGENT
+   RUNTIME CONTRACT
+========================================================= */
+
+function analyzeRuntimeContract(
+  files,
+  framework
+) {
+  const context = {
+    startCommand:
+      null,
+
+    packageJson:
+      null,
+
+    runtime:
+      framework.normalized,
+
+    containerPort:
+      framework.port,
+  };
+
+  if (
+    framework.normalized ===
+    "node" ||
+    framework.normalized ===
+    "next" ||
+    framework.normalized ===
+    "react"
+  ) {
+    const packageJson =
+      parsePackageJson(
+        files
+      );
+
+    context.packageJson =
+      packageJson;
+
+    if (
+      framework.normalized ===
+      "react"
+    ) {
+      validateNodeProject(
+        files,
+        framework
+      );
+
+      const scripts =
+        safeObject(
+          packageJson?.scripts
+        );
+
+      if (
+        typeof scripts.build !==
+        "string"
+      ) {
+        throw new Error(
+          "React/Vite project requires a build script"
+        );
+      }
+
+      context.startCommand = [
+        "nginx",
+        "-g",
+        "daemon off;",
+      ];
+
+      return context;
+    }
+
+    if (
+      framework.normalized ===
+      "next"
+    ) {
+      validateNodeProject(
+        files,
+        framework
+      );
+
+      const scripts =
+        safeObject(
+          packageJson?.scripts
+        );
+
+      if (
+        typeof scripts.build !==
+        "string"
+      ) {
+        throw new Error(
+          "Next.js project requires a build script"
+        );
+      }
+
+      if (
+        typeof scripts.start !==
+        "string"
+      ) {
+        throw new Error(
+          "Next.js project requires a start script"
+        );
+      }
+
+      context.startCommand = [
+        "npm",
+        "start",
+      ];
+
+      return context;
+    }
+
+    validateNodeProject(
+      files,
+      framework
+    );
+
+    const startCommand =
+      resolveNodeStartCommand(
+        packageJson,
+        framework
+      );
+
+    if (
+      !startCommand
+    ) {
+      throw new Error(
+        "Unable to determine Node.js application start command"
+      );
+    }
+
+    context.startCommand =
+      startCommand;
+
+    return context;
+  }
+
+  if (
+    framework.normalized ===
+    "python"
+  ) {
+    const python =
+      validatePythonProject(
+        files
+      );
+
+    context.startCommand =
+      python.startCommand;
+
+    return context;
+  }
+
+  throw new Error(
+    `Unsupported runtime: ${framework.normalized}`
+  );
+}
+
+
+/* =========================================================
+   DOCKERFILE WRITE
+========================================================= */
+
+function writeGeneratedDockerFiles(
+  workspacePath,
+  dockerfileData
+) {
+  const dockerfilePath =
+    path.join(
+      workspacePath,
+      "Dockerfile"
+    );
+
+  const dockerignorePath =
+    path.join(
+      workspacePath,
+      ".dockerignore"
+    );
+
+  fs.writeFileSync(
+    dockerfilePath,
+    dockerfileData.content,
+    {
+      encoding:
+        "utf8",
+
+      flag:
+        "wx",
+    }
+  );
+
+  fs.writeFileSync(
+    dockerignorePath,
+    createDockerignore(),
+    {
+      encoding:
+        "utf8",
+
+      flag:
+        "wx",
+    }
+  );
+}
+
+
+/* =========================================================
+   MAIN DOCKER AGENT
 ========================================================= */
 
 async function dockerAgent(
   projectData = {}
 ) {
-
   let currentStage =
     "request-validation";
-
 
   let workspacePath =
     null;
@@ -1871,26 +2451,23 @@ async function dockerAgent(
   let imageTag =
     null;
 
-
   try {
-
     logger.info(
-      "🐳 ZyrionOS Docker Agent Started"
+      "ZyrionOS Docker Agent Started"
     );
 
 
     /* =====================================================
-       VALIDATION
+       INPUT
     ===================================================== */
 
     if (
       !projectData ||
       typeof projectData !==
-        "object"
+        "object" ||
+      Array.isArray(projectData)
     ) {
-
       return {
-
         success:
           false,
 
@@ -1898,19 +2475,15 @@ async function dockerAgent(
           "Project data required",
 
         stage:
-          currentStage
-
+          currentStage,
       };
-
     }
 
 
     if (
       !projectData.projectName
     ) {
-
       return {
-
         success:
           false,
 
@@ -1918,10 +2491,8 @@ async function dockerAgent(
           "Project name required",
 
         stage:
-          currentStage
-
+          currentStage,
       };
-
     }
 
 
@@ -1943,16 +2514,19 @@ async function dockerAgent(
       );
 
 
-    if (
-      !Array.isArray(
+    const files =
+      Array.isArray(
         projectData.files
-      ) ||
-      projectData.files.length ===
-        0
+      )
+        ? projectData.files
+        : [];
+
+
+    if (
+      files.length ===
+      0
     ) {
-
       return {
-
         success:
           false,
 
@@ -1963,15 +2537,53 @@ async function dockerAgent(
           "Docker Agent cannot build an empty project.",
 
         stage:
-          currentStage
-
+          currentStage,
       };
+    }
 
+
+    if (
+      files.length >
+      MAX_FILES
+    ) {
+      return {
+        success:
+          false,
+
+        message:
+          "Project contains too many files",
+
+        error:
+          `Maximum allowed files: ${MAX_FILES}`,
+
+        stage:
+          currentStage,
+      };
     }
 
 
     /* =====================================================
-       DOCKER CHECK
+       RUNTIME CONTRACT
+    ===================================================== */
+
+    currentStage =
+      "runtime-contract";
+
+
+    const runtime =
+      analyzeRuntimeContract(
+        files,
+        framework
+      );
+
+
+    logger.info(
+      `Runtime detected: ${runtime.runtime} | port=${runtime.containerPort}`
+    );
+
+
+    /* =====================================================
+       DOCKER AVAILABILITY
     ===================================================== */
 
     currentStage =
@@ -1996,7 +2608,7 @@ async function dockerAgent(
 
 
     /* =====================================================
-       PROJECT FILES
+       SOURCE FILES
     ===================================================== */
 
     currentStage =
@@ -2005,11 +2617,8 @@ async function dockerAgent(
 
     const written =
       writeProjectFiles(
-
         workspacePath,
-
-        projectData.files
-
+        files
       );
 
 
@@ -2023,53 +2632,14 @@ async function dockerAgent(
 
     const dockerfile =
       createDockerfile(
-        framework
+        framework,
+        runtime
       );
 
 
-    fs.writeFileSync(
-
-      path.join(
-        workspacePath,
-        "Dockerfile"
-      ),
-
-      dockerfile,
-
-      {
-        encoding:
-          "utf8",
-        flag:
-          "wx"
-      }
-
-    );
-
-
-    /* =====================================================
-       DOCKERIGNORE
-    ===================================================== */
-
-    const dockerignore =
-      createDockerignore();
-
-
-    fs.writeFileSync(
-
-      path.join(
-        workspacePath,
-        ".dockerignore"
-      ),
-
-      dockerignore,
-
-      {
-        encoding:
-          "utf8",
-        flag:
-          "wx"
-      }
-
+    writeGeneratedDockerFiles(
+      workspacePath,
+      dockerfile
     );
 
 
@@ -2105,29 +2675,17 @@ async function dockerAgent(
       "image-tagging";
 
 
+    /*
+     * Deployment ID is unique, therefore each
+     * deployment gets an immutable image tag.
+     */
+
     imageTag =
       `${repositoryUri}:${deploymentId}`;
 
 
     /* =====================================================
-       BUILD
-    ===================================================== */
-
-    currentStage =
-      "docker-build";
-
-
-    await buildImage(
-
-      workspacePath,
-
-      imageTag
-
-    );
-
-
-    /* =====================================================
-       ECR LOGIN
+       ECR AUTH
     ===================================================== */
 
     currentStage =
@@ -2139,13 +2697,23 @@ async function dockerAgent(
 
 
     await dockerLogin(
-
       authentication.username,
-
       authentication.password,
-
       authentication.registry
+    );
 
+
+    /* =====================================================
+       BUILD
+    ===================================================== */
+
+    currentStage =
+      "docker-build";
+
+
+    await buildImage(
+      workspacePath,
+      imageTag
     );
 
 
@@ -2180,13 +2748,19 @@ async function dockerAgent(
     );
 
 
-    const result = {
+    workspacePath =
+      null;
 
+
+    /* =====================================================
+       RESULT
+    ===================================================== */
+
+    const result = {
       success:
         true,
 
       docker: {
-
         deploymentId,
 
         projectName,
@@ -2195,7 +2769,7 @@ async function dockerAgent(
           framework.normalized,
 
         runtime:
-          framework.normalized,
+          runtime.runtime,
 
         imageName:
           imageTag,
@@ -2211,7 +2785,13 @@ async function dockerAgent(
           ecrRepository.created,
 
         containerPort:
-          framework.port,
+          dockerfile.containerPort,
+
+        hostPort:
+          dockerfile.containerPort,
+
+        startCommand:
+          dockerfile.startCommand,
 
         workspacePath:
           null,
@@ -2237,25 +2817,37 @@ async function dockerAgent(
         status:
           "image-pushed",
 
+        immutable:
+          true,
+
         createdAt:
-          new Date().toISOString()
+          new Date().toISOString(),
+      },
 
-      }
+      metadata: {
+        agent:
+          "dockerAgent",
 
+        version:
+          "3.0.0",
+
+        region:
+          AWS_REGION,
+
+        stage:
+          "completed",
+      },
     };
 
 
     logger.success(
-      `🐳 Docker Agent Completed: ${imageTag}`
+      `Docker Agent Completed | image=${imageTag}`
     );
 
 
     return result;
 
-  }
-
-  catch (error) {
-
+  } catch (error) {
     const errorMessage =
       error?.message ||
       "Unknown Docker Agent error";
@@ -2266,24 +2858,25 @@ async function dockerAgent(
     );
 
 
-    /*
-     * Always attempt workspace cleanup
-     * after failure.
-     */
+    if (
+      imageTag
+    ) {
+      await removeLocalImage(
+        imageTag
+      );
+    }
+
 
     if (
       workspacePath
     ) {
-
       removeWorkspace(
         workspacePath
       );
-
     }
 
 
     return {
-
       success:
         false,
 
@@ -2298,13 +2891,65 @@ async function dockerAgent(
 
       deploymentId:
         projectData?.deploymentId ||
-        null
+        null,
 
+      metadata: {
+        agent:
+          "dockerAgent",
+
+        version:
+          "3.0.0",
+      },
     };
-
   }
-
 }
+
+
+/* =========================================================
+   AGENT METADATA
+========================================================= */
+
+dockerAgent.version =
+  "3.0.0";
+
+
+dockerAgent.owns = [
+  "runtime-containerization",
+  "docker-build",
+  "docker-image",
+  "ecr-repository",
+  "ecr-authentication",
+  "ecr-push",
+  "image-artifact",
+];
+
+
+dockerAgent.dependencies = [
+  "docker-runtime",
+  "aws-ecr",
+];
+
+
+dockerAgent.contract = {
+  input: {
+    required: [
+      "projectName",
+      "deploymentId",
+      "framework",
+      "files",
+    ],
+  },
+
+  output: {
+    required: [
+      "docker.imageUri",
+      "docker.repositoryUri",
+      "docker.containerPort",
+      "docker.runtime",
+      "docker.status",
+    ],
+  },
+};
 
 
 /* =========================================================
