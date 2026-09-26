@@ -1,6 +1,6 @@
 /* =========================================================
    ZyrionOS DOMAIN AGENT
-   Real AWS Route53 Domain Management
+   Production AWS Route53 Domain Management
 
    FLOW:
 
@@ -10,21 +10,37 @@
         ↓
    Domain Agent
         ↓
-   Route53 Hosted Zone
+   Route53 Hosted Zone Verification
         ↓
-   DNS Record UPSERT
+   DNS Alias UPSERT
         ↓
-   DNS Verification / Propagation
+   Route53 Change Verification
+        ↓
+   Domain Routing State
         ↓
    SSL Agent
+        ↓
+   ACM Certificate
+        ↓
+   HTTPS
 
    IMPORTANT:
 
-   This agent NEVER claims DNS is configured
-   unless Route53 actually accepted the change.
+   Domain Agent DOES:
+   - validate domain
+   - verify public Route53 hosted zone
+   - validate ALB target
+   - create/update Route53 alias
+   - verify Route53 change state
+   - return authoritative DNS state
 
-   This agent NEVER claims SSL is active.
-   SSL/ACM is handled separately.
+   Domain Agent DOES NOT:
+   - create SSL certificates
+   - claim HTTPS is active
+   - invent public URLs
+   - claim external DNS propagation
+   - create an ALB itself
+   - modify nameservers
 ========================================================= */
 
 
@@ -55,7 +71,8 @@ const {
 const {
   ListHostedZonesByNameCommand,
   ChangeResourceRecordSetsCommand,
-  GetChangeCommand
+  GetChangeCommand,
+  ListResourceRecordSetsCommand
 } =
   require("@aws-sdk/client-route-53");
 
@@ -76,40 +93,26 @@ const RESERVED_SUBDOMAINS =
   new Set([
 
     "admin",
-
     "api",
-
     "dashboard",
-
     "root",
-
     "zyrionos",
-
     "vertexcloud",
-
     "support",
-
     "billing",
-
     "mail",
-
     "ftp",
-
     "app",
-
     "www",
-
     "auth",
-
     "login",
-
     "cdn",
-
     "static",
-
     "assets",
-
-    "status"
+    "status",
+    "dev",
+    "staging",
+    "production"
 
   ]);
 
@@ -121,11 +124,17 @@ const RESERVED_SUBDOMAINS =
 const MAX_PROJECT_NAME_LENGTH =
   50;
 
+
 const MAX_DOMAIN_LENGTH =
   253;
 
+
 const MAX_LABEL_LENGTH =
   63;
+
+
+const MAX_DEPLOYMENT_ID_LENGTH =
+  100;
 
 
 /* =========================================================
@@ -173,19 +182,28 @@ function normalizeDomain(
       .toLowerCase();
 
 
+  if (
+    !domain
+  ) {
+
+    return "";
+
+  }
+
+
   /*
    * Remove protocol.
    */
 
   domain =
     domain.replace(
-      /^https?:\/\//,
+      /^https?:\/\//i,
       ""
     );
 
 
   /*
-   * Remove path/query.
+   * Remove path/query/hash.
    */
 
   domain =
@@ -210,6 +228,90 @@ function normalizeDomain(
 
 
   return domain;
+
+}
+
+
+/* =========================================================
+   DOMAIN LABEL VALIDATION
+========================================================= */
+
+function validateDomainLabels(
+  domain
+) {
+
+  const labels =
+    domain.split(".");
+
+
+  if (
+    labels.length <
+    2
+  ) {
+
+    throw new Error(
+      "Invalid domain: at least two labels are required"
+    );
+
+  }
+
+
+  for (
+    const label
+    of labels
+  ) {
+
+    if (
+      !label
+    ) {
+
+      throw new Error(
+        "Invalid domain label"
+      );
+
+    }
+
+
+    if (
+      label.length >
+      MAX_LABEL_LENGTH
+    ) {
+
+      throw new Error(
+        `Domain label exceeds ${MAX_LABEL_LENGTH} characters`
+      );
+
+    }
+
+
+    if (
+      !/^[a-z0-9-]+$/i.test(
+        label
+      )
+    ) {
+
+      throw new Error(
+        `Invalid domain label: ${label}`
+      );
+
+    }
+
+
+    if (
+      label.startsWith("-") ||
+      label.endsWith("-")
+    ) {
+
+      throw new Error(
+        `Invalid domain label: ${label}`
+      );
+
+    }
+
+  }
+
+
+  return true;
 
 }
 
@@ -251,64 +353,56 @@ function validateRootDomain(
   }
 
 
-  const labels =
-    normalized.split(".");
+  validateDomainLabels(
+    normalized
+  );
+
+
+  return normalized;
+
+}
+
+
+/* =========================================================
+   VALIDATE HOSTNAME
+========================================================= */
+
+function validateHostname(
+  hostname
+) {
+
+  const normalized =
+    normalizeDomain(
+      hostname
+    );
 
 
   if (
-    labels.length <
-    2
+    !normalized
   ) {
 
     throw new Error(
-      "Invalid root domain"
+      "Hostname is required"
     );
 
   }
 
 
-  for (
-    const label of labels
+  if (
+    normalized.length >
+    MAX_DOMAIN_LENGTH
   ) {
 
-    if (
-      !label ||
-      label.length >
-        MAX_LABEL_LENGTH
-    ) {
-
-      throw new Error(
-        "Invalid domain label"
-      );
-
-    }
-
-
-    if (
-      !/^[a-z0-9-]+$/.test(
-        label
-      )
-    ) {
-
-      throw new Error(
-        `Invalid domain label: ${label}`
-      );
-
-    }
-
-
-    if (
-      label.startsWith("-") ||
-      label.endsWith("-")
-    ) {
-
-      throw new Error(
-        `Invalid domain label: ${label}`
-      );
-
-    }
+    throw new Error(
+      "Hostname is too long"
+    );
 
   }
+
+
+  validateDomainLabels(
+    normalized
+  );
 
 
   return normalized;
@@ -365,6 +459,7 @@ function cleanProjectName(
         MAX_LABEL_LENGTH
       );
 
+
     cleaned =
       cleaned.replace(
         /-+$/,
@@ -390,7 +485,7 @@ function normalizeDeploymentId(
   const deploymentId =
     cleanString(
       value,
-      100
+      MAX_DEPLOYMENT_ID_LENGTH
     );
 
 
@@ -429,16 +524,37 @@ function shortDeploymentId(
   deploymentId
 ) {
 
-  return deploymentId
-    .replace(
-      /[^a-zA-Z0-9-]/g,
-      "-"
-    )
-    .toLowerCase()
-    .slice(
-      0,
-      16
-    );
+  const shortId =
+    deploymentId
+      .replace(
+        /[^a-zA-Z0-9-]/g,
+        "-"
+      )
+      .replace(
+        /-+/g,
+        "-"
+      )
+      .replace(
+        /^-+|-+$/g,
+        ""
+      )
+      .toLowerCase()
+      .slice(
+        0,
+        16
+      );
+
+
+  if (
+    !shortId
+  ) {
+
+    return "deployment";
+
+  }
+
+
+  return shortId;
 
 }
 
@@ -452,7 +568,7 @@ function createSubdomain(
   deploymentId
 ) {
 
-  const cleanName =
+  let baseName =
     cleanProjectName(
       projectName
     );
@@ -462,10 +578,6 @@ function createSubdomain(
     shortDeploymentId(
       deploymentId
     );
-
-
-  let baseName =
-    cleanName;
 
 
   /*
@@ -495,7 +607,8 @@ function createSubdomain(
 
 
   if (
-    maxBaseLength < 1
+    maxBaseLength <
+    1
   ) {
 
     throw new Error(
@@ -506,14 +619,25 @@ function createSubdomain(
 
 
   baseName =
-    baseName.slice(
-      0,
-      maxBaseLength
-    )
+    baseName
+      .slice(
+        0,
+        maxBaseLength
+      )
       .replace(
         /-+$/,
         ""
       );
+
+
+  if (
+    !baseName
+  ) {
+
+    baseName =
+      "app";
+
+  }
 
 
   const subdomain =
@@ -532,7 +656,134 @@ function createSubdomain(
   }
 
 
+  validateDomainLabels(
+    `${subdomain}.example.com`
+  );
+
+
   return subdomain;
+
+}
+
+
+/* =========================================================
+   BUILD HOSTNAME
+========================================================= */
+
+function buildHostname(
+  subdomain,
+  rootDomain
+) {
+
+  const hostname =
+    `${subdomain}.${rootDomain}`;
+
+
+  return validateHostname(
+    hostname
+  );
+
+}
+
+
+/* =========================================================
+   BUILD HTTP URL
+========================================================= */
+
+function buildHttpUrl(
+  hostname
+) {
+
+  return `http://${hostname}`;
+
+}
+
+
+/* =========================================================
+   BUILD HTTPS URL
+========================================================= */
+
+function buildHttpsUrl(
+  hostname
+) {
+
+  return `https://${hostname}`;
+
+}
+
+
+/* =========================================================
+   NORMALIZE HOSTED ZONE ID
+========================================================= */
+
+function normalizeHostedZoneId(
+  value
+) {
+
+  const raw =
+    cleanString(
+      value,
+      300
+    );
+
+
+  if (
+    !raw
+  ) {
+
+    return "";
+
+  }
+
+
+  return raw.replace(
+    /^\/hostedzone\//i,
+    ""
+  );
+
+}
+
+
+/* =========================================================
+   VALIDATE HOSTED ZONE ID
+========================================================= */
+
+function validateHostedZoneId(
+  value,
+  fieldName = "hosted zone ID"
+) {
+
+  const normalized =
+    normalizeHostedZoneId(
+      value
+    );
+
+
+  if (
+    !normalized
+  ) {
+
+    throw new Error(
+      `${fieldName} is required`
+    );
+
+  }
+
+
+  if (
+    !/^Z[A-Z0-9]+$/i.test(
+      normalized
+    )
+  ) {
+
+    throw new Error(
+      `Invalid ${fieldName}: ${normalized}`
+    );
+
+  }
+
+
+  return normalized;
 
 }
 
@@ -560,7 +811,7 @@ async function findHostedZone(
           `${normalizedRoot}.`,
 
         MaxItems:
-          "20"
+          "100"
 
       })
 
@@ -604,8 +855,6 @@ async function findHostedZone(
 
   /*
    * This agent manages public DNS.
-   * Private hosted zones are not suitable
-   * for public application domains.
    */
 
   if (
@@ -620,22 +869,10 @@ async function findHostedZone(
 
 
   const hostedZoneId =
-    exactZone.Id
-      ?.replace(
-        /^\/hostedzone\//,
-        ""
-      );
-
-
-  if (
-    !hostedZoneId
-  ) {
-
-    throw new Error(
-      "Route53 hosted zone ID not available"
+    validateHostedZoneId(
+      exactZone.Id,
+      "Route53 hosted zone ID"
     );
-
-  }
 
 
   return {
@@ -647,7 +884,11 @@ async function findHostedZone(
       exactZone.Name,
 
     privateZone:
-      false
+      false,
+
+    resourceRecordSetCount:
+      exactZone.ResourceRecordSetCount ||
+      null
 
   };
 
@@ -655,31 +896,18 @@ async function findHostedZone(
 
 
 /* =========================================================
-   NORMALIZE TARGET
+   LOAD BALANCER INPUT
 ========================================================= */
 
 function getLoadBalancerTarget(
   projectData
 ) {
 
-  /*
-   * Supported input styles:
-   *
-   * loadBalancerDnsName
-   * loadBalancerHostedZoneId
-   *
-   * OR:
-   *
-   * loadBalancer: {
-   *   dnsName,
-   *   hostedZoneId
-   * }
-   */
-
   const loadBalancer =
     projectData.loadBalancer ||
     projectData.alb ||
     projectData.aws?.loadBalancer ||
+    projectData.aws?.alb ||
     {};
 
 
@@ -687,7 +915,9 @@ function getLoadBalancerTarget(
     projectData.loadBalancerDnsName ||
     loadBalancer.dnsName ||
     loadBalancer.DNSName ||
+    loadBalancer.dns ||
     projectData.aws?.loadBalancerDnsName ||
+    projectData.aws?.albDnsName ||
     "";
 
 
@@ -696,7 +926,9 @@ function getLoadBalancerTarget(
     loadBalancer.hostedZoneId ||
     loadBalancer.canonicalHostedZoneId ||
     loadBalancer.CanonicalHostedZoneId ||
+    loadBalancer.zoneId ||
     projectData.aws?.loadBalancerHostedZoneId ||
+    projectData.aws?.albHostedZoneId ||
     "";
 
 
@@ -708,9 +940,8 @@ function getLoadBalancerTarget(
       ),
 
     hostedZoneId:
-      cleanString(
-        hostedZoneId,
-        300
+      normalizeHostedZoneId(
+        hostedZoneId
       )
 
   };
@@ -725,6 +956,25 @@ function getLoadBalancerTarget(
 function validateLoadBalancerTarget(
   target
 ) {
+
+  if (
+    !target ||
+    typeof target !==
+      "object"
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "Load balancer target not provided"
+
+    };
+
+  }
+
 
   if (
     !target.dnsName
@@ -778,12 +1028,134 @@ function validateLoadBalancerTarget(
   }
 
 
+  try {
+
+    validateHostname(
+      target.dnsName
+    );
+
+  }
+
+  catch (error) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        `Invalid load balancer DNS name: ${error.message}`
+
+    };
+
+  }
+
+
+  try {
+
+    validateHostedZoneId(
+      target.hostedZoneId,
+      "load balancer hosted zone ID"
+    );
+
+  }
+
+  catch (error) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        error.message
+
+    };
+
+  }
+
+
   return {
 
     valid:
       true
 
   };
+
+}
+
+
+/* =========================================================
+   CHECK EXISTING RECORD
+========================================================= */
+
+async function findExistingRecord(
+  hostedZoneId,
+  recordName
+) {
+
+  const normalizedZoneId =
+    validateHostedZoneId(
+      hostedZoneId
+    );
+
+
+  const normalizedRecordName =
+    validateHostname(
+      recordName
+    );
+
+
+  const response =
+    await route53.send(
+
+      new ListResourceRecordSetsCommand({
+
+        HostedZoneId:
+          normalizedZoneId,
+
+        StartRecordName:
+          `${normalizedRecordName}.`,
+
+        StartRecordType:
+          "A",
+
+        MaxItems:
+          "10"
+
+      })
+
+    );
+
+
+  const records =
+    response?.ResourceRecordSets ||
+    [];
+
+
+  const exact =
+    records.find(
+      (record) => {
+
+        const name =
+          normalizeDomain(
+            record.Name
+          );
+
+
+        return (
+          name ===
+          normalizedRecordName &&
+          record.Type ===
+          "A"
+        );
+
+      }
+    );
+
+
+  return exact ||
+    null;
 
 }
 
@@ -797,7 +1169,29 @@ async function upsertAliasRecord(
 ) {
 
   const recordName =
-    `${data.subdomain}.${data.rootDomain}.`;
+    validateHostname(
+      `${data.subdomain}.${data.rootDomain}`
+    );
+
+
+  const hostedZoneId =
+    validateHostedZoneId(
+      data.hostedZoneId,
+      "Route53 hosted zone ID"
+    );
+
+
+  const targetHostedZoneId =
+    validateHostedZoneId(
+      data.targetHostedZoneId,
+      "load balancer hosted zone ID"
+    );
+
+
+  const targetDnsName =
+    validateHostname(
+      data.targetDnsName
+    );
 
 
   const response =
@@ -806,7 +1200,7 @@ async function upsertAliasRecord(
       new ChangeResourceRecordSetsCommand({
 
         HostedZoneId:
-          data.hostedZoneId,
+          hostedZoneId,
 
         ChangeBatch: {
 
@@ -823,7 +1217,7 @@ async function upsertAliasRecord(
               ResourceRecordSet: {
 
                 Name:
-                  recordName,
+                  `${recordName}.`,
 
                 Type:
                   "A",
@@ -831,10 +1225,10 @@ async function upsertAliasRecord(
                 AliasTarget: {
 
                   HostedZoneId:
-                    data.targetHostedZoneId,
+                    targetHostedZoneId,
 
                   DNSName:
-                    `${data.targetDnsName}.`,
+                    `${targetDnsName}.`,
 
                   EvaluateTargetHealth:
                     true
@@ -876,7 +1270,16 @@ async function upsertAliasRecord(
 
     status:
       changeInfo.Status ||
-      "PENDING"
+      "PENDING",
+
+    recordName,
+
+    recordType:
+      "A",
+
+    targetDnsName,
+
+    targetHostedZoneId
 
   };
 
@@ -884,7 +1287,7 @@ async function upsertAliasRecord(
 
 
 /* =========================================================
-   WAIT FOR ROUTE53 CHANGE
+   GET ROUTE53 CHANGE STATUS
 ========================================================= */
 
 async function getDnsChangeStatus(
@@ -932,16 +1335,232 @@ async function getDnsChangeStatus(
 
 
 /* =========================================================
-   BUILD HTTPS DOMAIN
+   WAIT FOR ROUTE53 CHANGE
 ========================================================= */
 
-function buildHttpsUrl(
-  subdomain,
-  rootDomain
+async function waitForRoute53Change(
+  changeId,
+  options = {}
 ) {
 
-  return (
-    `https://${subdomain}.${rootDomain}`
+  const timeoutMs =
+    Number(
+      options.timeoutMs ||
+      60000
+    );
+
+
+  const pollIntervalMs =
+    Number(
+      options.pollIntervalMs ||
+      3000
+    );
+
+
+  const startedAt =
+    Date.now();
+
+
+  let lastStatus =
+    "UNKNOWN";
+
+
+  while (
+    Date.now() -
+      startedAt <
+    timeoutMs
+  ) {
+
+    const result =
+      await getDnsChangeStatus(
+        changeId
+      );
+
+
+    lastStatus =
+      result.status;
+
+
+    if (
+      lastStatus ===
+      "INSYNC"
+    ) {
+
+      return {
+
+        success:
+          true,
+
+        status:
+          "INSYNC",
+
+        timedOut:
+          false,
+
+        durationMs:
+          Date.now() -
+          startedAt
+
+      };
+
+    }
+
+
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          pollIntervalMs
+        )
+    );
+
+  }
+
+
+  return {
+
+    success:
+      false,
+
+    status:
+      lastStatus,
+
+    timedOut:
+      true,
+
+    durationMs:
+      Date.now() -
+      startedAt
+
+  };
+
+}
+
+
+/* =========================================================
+   VERIFY RECORD AFTER UPSERT
+========================================================= */
+
+async function verifyAliasRecord(
+  hostedZoneId,
+  recordName,
+  target
+) {
+
+  const record =
+    await findExistingRecord(
+      hostedZoneId,
+      recordName
+    );
+
+
+  if (
+    !record
+  ) {
+
+    return {
+
+      exists:
+        false,
+
+      matches:
+        false,
+
+      record:
+        null
+
+    };
+
+  }
+
+
+  if (
+    !record.AliasTarget
+  ) {
+
+    return {
+
+      exists:
+        true,
+
+      matches:
+        false,
+
+      record
+
+    };
+
+  }
+
+
+  const actualTarget =
+    normalizeDomain(
+      record
+        .AliasTarget
+        .DNSName
+    );
+
+
+  const expectedTarget =
+    normalizeDomain(
+      target.dnsName
+    );
+
+
+  const actualHostedZoneId =
+    normalizeHostedZoneId(
+      record
+        .AliasTarget
+        .HostedZoneId
+    );
+
+
+  const expectedHostedZoneId =
+    normalizeHostedZoneId(
+      target.hostedZoneId
+    );
+
+
+  const matches =
+    actualTarget ===
+      expectedTarget &&
+    actualHostedZoneId ===
+      expectedHostedZoneId;
+
+
+  return {
+
+    exists:
+      true,
+
+    matches,
+
+    record
+
+  };
+
+}
+
+
+/* =========================================================
+   CUSTOM DOMAIN
+========================================================= */
+
+function normalizeCustomDomain(
+  value
+) {
+
+  if (
+    !value
+  ) {
+
+    return null;
+
+  }
+
+
+  return validateHostname(
+    value
   );
 
 }
@@ -959,6 +1578,10 @@ async function domainAgent(
     "request-validation";
 
 
+  const startedAt =
+    Date.now();
+
+
   try {
 
     logger.info(
@@ -973,7 +1596,10 @@ async function domainAgent(
     if (
       !projectData ||
       typeof projectData !==
-        "object"
+        "object" ||
+      Array.isArray(
+        projectData
+      )
     ) {
 
       return {
@@ -1025,6 +1651,47 @@ async function domainAgent(
 
 
     /* =====================================================
+       CUSTOM DOMAIN
+    ===================================================== */
+
+    currentStage =
+      "custom-domain-validation";
+
+
+    const customDomain =
+      normalizeCustomDomain(
+        projectData.customDomain
+      );
+
+
+    /*
+     * The automatic Route53 record created by this
+     * agent belongs to APP_DOMAIN/rootDomain.
+     *
+     * A custom domain may be returned as metadata,
+     * but this agent does not silently modify an
+     * unrelated hosted zone.
+     */
+
+    if (
+      customDomain &&
+      !(
+        customDomain ===
+        rootDomain ||
+        customDomain.endsWith(
+          `.${rootDomain}`
+        )
+      )
+    ) {
+
+      logger.warning(
+        `Custom domain ${customDomain} is outside managed root domain ${rootDomain}; it will not be modified by this agent.`
+      );
+
+    }
+
+
+    /* =====================================================
        CREATE SUBDOMAIN
     ===================================================== */
 
@@ -1039,39 +1706,27 @@ async function domainAgent(
       );
 
 
-    const fullHostname =
-      `${subdomain}.${rootDomain}`;
-
-
-    const fullDomain =
-      buildHttpsUrl(
+    const hostname =
+      buildHostname(
         subdomain,
         rootDomain
       );
 
 
-    /* =====================================================
-       CUSTOM DOMAIN
-    ===================================================== */
-
-    let customDomain =
-      null;
+    const httpUrl =
+      buildHttpUrl(
+        hostname
+      );
 
 
-    if (
-      projectData.customDomain
-    ) {
-
-      customDomain =
-        validateRootDomain(
-          projectData.customDomain
-        );
-
-    }
+    const httpsUrl =
+      buildHttpsUrl(
+        hostname
+      );
 
 
     /* =====================================================
-       LOAD BALANCER
+       LOAD BALANCER TARGET
     ===================================================== */
 
     currentStage =
@@ -1110,7 +1765,7 @@ async function domainAgent(
 
 
     /* =====================================================
-       NO TARGET = DNS CANNOT BE CONFIGURED
+       NO LOAD BALANCER
     ===================================================== */
 
     if (
@@ -1118,7 +1773,7 @@ async function domainAgent(
     ) {
 
       logger.warning(
-        "Load balancer target unavailable. DNS record was not created."
+        `DNS waiting for load balancer: ${loadBalancerValidation.error}`
       );
 
 
@@ -1128,7 +1783,7 @@ async function domainAgent(
           true,
 
         message:
-          "Domain prepared but DNS is waiting for a load balancer target.",
+          "Domain prepared but DNS is waiting for a valid load balancer target.",
 
         domain: {
 
@@ -1138,12 +1793,13 @@ async function domainAgent(
 
           subdomain,
 
-          hostname:
-            fullHostname,
+          hostname,
 
           rootDomain,
 
-          fullDomain,
+          httpUrl,
+
+          httpsUrl,
 
           customDomain,
 
@@ -1158,8 +1814,11 @@ async function domainAgent(
             configured:
               false,
 
+            route53ChangeStatus:
+              "NOT_STARTED",
+
             propagationStatus:
-              "pending",
+              "waiting_for_load_balancer",
 
             changeId:
               null,
@@ -1168,22 +1827,9 @@ async function domainAgent(
               hostedZone.id,
 
             recordName:
-              fullHostname
+              hostname,
 
-          },
-
-          ssl: {
-
-            enabled:
-              false,
-
-            provider:
-              "AWS ACM",
-
-            status:
-              "not_configured",
-
-            httpsEnabled:
+            recordVerified:
               false
 
           },
@@ -1201,15 +1847,76 @@ async function domainAgent(
 
           },
 
+          ssl: {
+
+            enabled:
+              false,
+
+            provider:
+              "AWS ACM",
+
+            status:
+              "not_configured",
+
+            httpsEnabled:
+              false,
+
+            managedBy:
+              "sslAgent"
+
+          },
+
           domainReady:
             false,
 
+          dnsReady:
+            false,
+
+          sslReady:
+            false,
+
+          fullyReady:
+            false,
+
           reason:
-            "A real Route53 record requires an ALB/load-balancer target."
+            loadBalancerValidation.error,
+
+          createdAt:
+            new Date().toISOString(),
+
+          durationMs:
+            Date.now() -
+            startedAt
 
         }
 
       };
+
+    }
+
+
+    /* =====================================================
+       EXISTING RECORD CHECK
+    ===================================================== */
+
+    currentStage =
+      "route53-existing-record-check";
+
+
+    const existingRecord =
+      await findExistingRecord(
+        hostedZone.id,
+        hostname
+      );
+
+
+    if (
+      existingRecord
+    ) {
+
+      logger.info(
+        `Existing Route53 A record found for ${hostname}; UPSERT will reconcile it.`
+      );
 
     }
 
@@ -1244,43 +1951,123 @@ async function domainAgent(
 
 
     logger.success(
-      `Route53 DNS UPSERT accepted: ${fullHostname}`
+      `Route53 DNS UPSERT accepted: ${hostname}`
     );
 
 
     /* =====================================================
-       CHECK CHANGE STATUS
+       ROUTE53 CHANGE VERIFICATION
     ===================================================== */
 
     currentStage =
       "route53-change-verification";
 
 
-    const changeStatus =
-      await getDnsChangeStatus(
-        dnsChange.changeId
+    const changeVerification =
+      await waitForRoute53Change(
+
+        dnsChange.changeId,
+
+        {
+
+          timeoutMs:
+            Number(
+              projectData.dnsVerificationTimeoutMs ||
+              process.env.AWS_ROUTE53_CHANGE_TIMEOUT_MS ||
+              60000
+            ),
+
+          pollIntervalMs:
+            Number(
+              projectData.dnsVerificationPollIntervalMs ||
+              process.env.AWS_ROUTE53_CHANGE_POLL_INTERVAL_MS ||
+              3000
+            )
+
+        }
+
       );
 
 
-    const dnsConfigured =
-      (
-        changeStatus.status ===
-        "INSYNC"
-      );
+    /*
+     * Route53 INSYNC means Route53 accepted and
+     * synchronized the requested change.
+     *
+     * It does NOT prove that every recursive DNS
+     * resolver on the Internet has refreshed.
+     */
+
+    const route53InSync =
+      changeVerification.success &&
+      changeVerification.status ===
+        "INSYNC";
 
 
     /* =====================================================
-       SSL IS SEPARATE
+       RECORD VERIFICATION
+    ===================================================== */
+
+    currentStage =
+      "route53-record-verification";
+
+
+    const recordVerification =
+      await verifyAliasRecord(
+
+        hostedZone.id,
+
+        hostname,
+
+        {
+
+          dnsName:
+            loadBalancer.dnsName,
+
+          hostedZoneId:
+            loadBalancer.hostedZoneId
+
+        }
+
+      );
+
+
+    const recordVerified =
+      recordVerification.exists &&
+      recordVerification.matches;
+
+
+    /* =====================================================
+       DNS STATE
+    ===================================================== */
+
+    const dnsReady =
+      route53InSync &&
+      recordVerified;
+
+
+    /* =====================================================
+       SSL STATE
     ===================================================== */
 
     /*
-     * Route53 DNS configuration does NOT
-     * mean SSL is configured.
+     * SSL belongs to sslAgent.
      *
-     * ACM certificate provisioning belongs
-     * to sslAgent.
+     * Domain Agent never reports HTTPS as active
+     * merely because the HTTPS URL can be constructed.
      */
 
+    const sslReady =
+      false;
+
+
+    const fullyReady =
+      dnsReady &&
+      sslReady;
+
+
+    /* =====================================================
+       DOMAIN DATA
+    ===================================================== */
 
     const domainData = {
 
@@ -1290,12 +2077,13 @@ async function domainAgent(
 
       subdomain,
 
-      hostname:
-        fullHostname,
+      hostname,
 
       rootDomain,
 
-      fullDomain,
+      httpUrl,
+
+      httpsUrl,
 
       customDomain,
 
@@ -1310,23 +2098,38 @@ async function domainAgent(
         configured:
           true,
 
+        dnsReady,
+
+        route53ChangeStatus:
+          changeVerification.status,
+
         propagationStatus:
-          changeStatus.status ===
-          "INSYNC"
-            ? "insync"
+          route53InSync
+            ? "route53_insync"
             : "pending",
 
         changeId:
           dnsChange.changeId,
 
         changeStatus:
-          changeStatus.status,
+          dnsChange.status,
 
         hostedZoneId:
           hostedZone.id,
 
+        hostedZoneName:
+          hostedZone.name,
+
         recordName:
-          fullHostname,
+          hostname,
+
+        recordVerified,
+
+        recordExists:
+          recordVerification.exists,
+
+        recordMatches:
+          recordVerification.matches,
 
         target:
           loadBalancer.dnsName,
@@ -1369,21 +2172,45 @@ async function domainAgent(
       },
 
       domainReady:
-        dnsConfigured,
+        dnsReady,
+
+      dnsReady,
+
+      sslReady,
+
+      fullyReady,
 
       createdAt:
-        new Date().toISOString()
+        new Date().toISOString(),
+
+      durationMs:
+        Date.now() -
+        startedAt
 
     };
 
 
     /* =====================================================
-       SUCCESS LOG
+       FINAL LOG
     ===================================================== */
 
-    logger.success(
-      `🌐 Domain Agent Completed: ${fullHostname}`
-    );
+    if (
+      dnsReady
+    ) {
+
+      logger.success(
+        `🌐 Domain DNS Ready: ${hostname}`
+      );
+
+    }
+
+    else {
+
+      logger.warning(
+        `🌐 Domain DNS Pending: ${hostname}`
+      );
+
+    }
 
 
     /* =====================================================
@@ -1394,6 +2221,11 @@ async function domainAgent(
 
       success:
         true,
+
+      message:
+        dnsReady
+          ? "Domain DNS configured and verified by Route53."
+          : "Domain request accepted but DNS is not fully verified yet.",
 
       domain:
         domainData
@@ -1426,7 +2258,15 @@ async function domainAgent(
         errorMessage,
 
       stage:
-        currentStage
+        currentStage,
+
+      deploymentId:
+        projectData?.deploymentId ||
+        null,
+
+      durationMs:
+        Date.now() -
+        startedAt
 
     };
 
