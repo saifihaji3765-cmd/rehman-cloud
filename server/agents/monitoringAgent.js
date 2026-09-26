@@ -1,12 +1,14 @@
 /* =========================================================
    ZyrionOS MONITORING AGENT
-   Real AWS ECS + CloudWatch Monitoring
+   Production AWS ECS + CloudWatch Monitoring
 
    FLOW:
 
    ECS Service
        ↓
    Describe ECS Service
+       ↓
+   ECS Deployment Health
        ↓
    CloudWatch CPU
        ↓
@@ -17,13 +19,24 @@
    Alerts
        ↓
    Scaling Recommendation
+       ↓
+   Monitoring Result
 
    IMPORTANT:
 
-   This agent NEVER converts missing metrics
+   AWS ECS / CloudWatch are the source of truth.
+
+   Missing CloudWatch metrics are NEVER converted
    into fake 0% usage.
 
-   AWS ECS / CloudWatch are the source of truth.
+   This agent does NOT mutate infrastructure.
+
+   It observes infrastructure and produces:
+     - health state
+     - metrics
+     - alerts
+     - deployment health
+     - scaling recommendation
 ========================================================= */
 
 
@@ -33,8 +46,7 @@
 
 const {
   GetMetricStatisticsCommand
-} =
-  require("@aws-sdk/client-cloudwatch");
+} = require("@aws-sdk/client-cloudwatch");
 
 
 /* =========================================================
@@ -43,8 +55,7 @@ const {
 
 const {
   DescribeServicesCommand
-} =
-  require("@aws-sdk/client-ecs");
+} = require("@aws-sdk/client-ecs");
 
 
 /* =========================================================
@@ -54,8 +65,7 @@ const {
 const {
   cloudwatch,
   ecs
-} =
-  require("../config/aws");
+} = require("../config/aws");
 
 
 /* =========================================================
@@ -87,11 +97,17 @@ const ECS_CLUSTER =
 ========================================================= */
 
 const MONITORING_WINDOW_MINUTES =
-  15;
+  Number(
+    process.env.MONITORING_WINDOW_MINUTES ||
+    15
+  );
 
 
 const METRIC_PERIOD_SECONDS =
-  300;
+  Number(
+    process.env.MONITORING_METRIC_PERIOD_SECONDS ||
+    300
+  );
 
 
 /* =========================================================
@@ -99,27 +115,75 @@ const METRIC_PERIOD_SECONDS =
 ========================================================= */
 
 const CPU_WARNING =
-  75;
+  Number(
+    process.env.MONITORING_CPU_WARNING ||
+    75
+  );
 
 
 const CPU_HIGH =
-  85;
+  Number(
+    process.env.MONITORING_CPU_HIGH ||
+    85
+  );
 
 
 const CPU_CRITICAL =
-  95;
+  Number(
+    process.env.MONITORING_CPU_CRITICAL ||
+    95
+  );
 
 
 const MEMORY_WARNING =
-  75;
+  Number(
+    process.env.MONITORING_MEMORY_WARNING ||
+    75
+  );
 
 
 const MEMORY_HIGH =
-  85;
+  Number(
+    process.env.MONITORING_MEMORY_HIGH ||
+    85
+  );
 
 
 const MEMORY_CRITICAL =
-  95;
+  Number(
+    process.env.MONITORING_MEMORY_CRITICAL ||
+    95
+  );
+
+
+/* =========================================================
+   SCALE-DOWN THRESHOLDS
+========================================================= */
+
+const CPU_SCALE_DOWN =
+  Number(
+    process.env.MONITORING_CPU_SCALE_DOWN ||
+    25
+  );
+
+
+const MEMORY_SCALE_DOWN =
+  Number(
+    process.env.MONITORING_MEMORY_SCALE_DOWN ||
+    35
+  );
+
+
+/* =========================================================
+   HEALTH SCORE SETTINGS
+========================================================= */
+
+const HEALTH_SCORE_MIN =
+  0;
+
+
+const HEALTH_SCORE_MAX =
+  100;
 
 
 /* =========================================================
@@ -147,6 +211,71 @@ function cleanString(
       0,
       maxLength
     );
+
+}
+
+
+/* =========================================================
+   SAFE NUMBER
+========================================================= */
+
+function safeNumber(
+  value,
+  fallback = null
+) {
+
+  if (
+    typeof value ===
+    "number" &&
+    Number.isFinite(value)
+  ) {
+
+    return value;
+
+  }
+
+
+  const parsed =
+    Number(value);
+
+
+  if (
+    Number.isFinite(parsed)
+  ) {
+
+    return parsed;
+
+  }
+
+
+  return fallback;
+
+}
+
+
+/* =========================================================
+   ROUND NUMBER
+========================================================= */
+
+function roundNumber(
+  value,
+  decimals = 2
+) {
+
+  if (
+    typeof value !==
+      "number" ||
+    !Number.isFinite(value)
+  ) {
+
+    return null;
+
+  }
+
+
+  return Number(
+    value.toFixed(decimals)
+  );
 
 }
 
@@ -242,7 +371,7 @@ function normalizeProjectName(
 ========================================================= */
 
 /*
- * Must match AWS Agent:
+ * Must match AWS Agent naming:
  *
  * ${projectName}-${deploymentId}-service
  */
@@ -295,9 +424,7 @@ function resolveServiceName(
 ) {
 
   /*
-   * Preferred:
-   *
-   * appData.serviceName
+   * Preferred explicit value.
    */
 
   if (
@@ -333,7 +460,25 @@ function resolveServiceName(
 
 
   /*
-   * Planning/project information.
+   * Alternative AWS response shape.
+   */
+
+  if (
+    typeof appData.aws?.ecs?.serviceName ===
+      "string" &&
+    appData.aws.ecs.serviceName.trim()
+  ) {
+
+    return cleanString(
+      appData.aws.ecs.serviceName,
+      255
+    );
+
+  }
+
+
+  /*
+   * Project information.
    */
 
   const projectName =
@@ -388,6 +533,20 @@ function resolveClusterName(
 
 
   if (
+    typeof appData.aws?.ecs?.clusterName ===
+      "string" &&
+    appData.aws.ecs.clusterName.trim()
+  ) {
+
+    return cleanString(
+      appData.aws.ecs.clusterName,
+      255
+    );
+
+  }
+
+
+  if (
     ECS_CLUSTER
   ) {
 
@@ -426,10 +585,18 @@ function getLatestDatapoint(
   const valid =
     datapoints
       .filter(
-        (point) =>
-          point &&
-          typeof point.Average ===
-            "number"
+        (point) => {
+
+          return (
+            point &&
+            typeof point.Average ===
+              "number" &&
+            Number.isFinite(
+              point.Average
+            )
+          );
+
+        }
       )
       .sort(
         (a, b) => {
@@ -449,6 +616,62 @@ function getLatestDatapoint(
           return (
             timeB -
             timeA
+          );
+
+        }
+      );
+
+
+  return (
+    valid[0] ||
+    null
+  );
+
+}
+
+
+/* =========================================================
+   GET MAXIMUM DATAPOINT
+========================================================= */
+
+function getMaximumDatapoint(
+  datapoints
+) {
+
+  if (
+    !Array.isArray(
+      datapoints
+    ) ||
+    datapoints.length === 0
+  ) {
+
+    return null;
+
+  }
+
+
+  const valid =
+    datapoints
+      .filter(
+        (point) => {
+
+          return (
+            point &&
+            typeof point.Maximum ===
+              "number" &&
+            Number.isFinite(
+              point.Maximum
+            )
+          );
+
+        }
+      )
+      .sort(
+        (a, b) => {
+
+          return (
+            b.Maximum -
+            a.Maximum
           );
 
         }
@@ -558,6 +781,20 @@ async function getMetric(
     );
 
 
+  const maximum =
+    getMaximumDatapoint(
+      datapoints
+    );
+
+
+  /*
+   * IMPORTANT:
+   *
+   * No datapoint means unavailable.
+   *
+   * NEVER return 0.
+   */
+
   if (
     !latest
   ) {
@@ -577,7 +814,13 @@ async function getMetric(
         null,
 
       datapoints:
-        datapoints.length
+        datapoints.length,
+
+      monitoredFrom:
+        startTime.toISOString(),
+
+      monitoredTo:
+        endTime.toISOString()
 
     };
 
@@ -590,20 +833,29 @@ async function getMetric(
       true,
 
     value:
-      latest.Average,
+      roundNumber(
+        latest.Average
+      ),
 
     maximum:
-      typeof latest.Maximum ===
-        "number"
-        ? latest.Maximum
-        : latest.Average,
+      roundNumber(
+        maximum?.Maximum ??
+        latest.Maximum ??
+        latest.Average
+      ),
 
     timestamp:
       latest.Timestamp ||
       null,
 
     datapoints:
-      datapoints.length
+      datapoints.length,
+
+    monitoredFrom:
+      startTime.toISOString(),
+
+    monitoredTo:
+      endTime.toISOString()
 
   };
 
@@ -618,7 +870,8 @@ function createAlert(
   type,
   severity,
   message,
-  value = null
+  value = null,
+  metadata = {}
 ) {
 
   return {
@@ -633,13 +886,249 @@ function createAlert(
 
       typeof value ===
         "number"
-        ? Number(
-            value.toFixed(2)
-          )
+        ? roundNumber(value)
         : null,
+
+    metadata:
+      metadata &&
+      typeof metadata === "object"
+        ? metadata
+        : {},
 
     createdAt:
       new Date().toISOString()
+
+  };
+
+}
+
+
+/* =========================================================
+   ALERT PRIORITY
+========================================================= */
+
+function getAlertPriority(
+  severity
+) {
+
+  switch (
+    severity
+  ) {
+
+    case "critical":
+      return 4;
+
+    case "high":
+      return 3;
+
+    case "medium":
+      return 2;
+
+    case "low":
+      return 1;
+
+    default:
+      return 0;
+
+  }
+
+}
+
+
+/* =========================================================
+   SORT ALERTS
+========================================================= */
+
+function sortAlerts(
+  alerts
+) {
+
+  if (
+    !Array.isArray(
+      alerts
+    )
+  ) {
+
+    return [];
+
+  }
+
+
+  return [
+    ...alerts
+  ].sort(
+    (a, b) => {
+
+      return (
+        getAlertPriority(
+          b?.severity
+        ) -
+        getAlertPriority(
+          a?.severity
+        )
+      );
+
+    }
+  );
+
+}
+
+
+/* =========================================================
+   DEPLOYMENT HEALTH
+========================================================= */
+
+function analyzeDeployments(
+  service
+) {
+
+  const deployments =
+    Array.isArray(
+      service?.deployments
+    )
+      ? service.deployments
+      : [];
+
+
+  const primary =
+    deployments.find(
+      (deployment) =>
+        deployment?.status ===
+        "PRIMARY"
+    ) ||
+    null;
+
+
+  const activeDeployments =
+    deployments.filter(
+      (deployment) =>
+        deployment?.status ===
+        "PRIMARY" ||
+        deployment?.status ===
+        "ACTIVE"
+    );
+
+
+  const rolloutState =
+    service?.rolloutState ||
+    null;
+
+
+  const rolloutStateReason =
+    service?.rolloutStateReason ||
+    null;
+
+
+  const rolloutFailed =
+    rolloutState ===
+      "FAILED" ||
+    Boolean(
+      rolloutStateReason &&
+      /fail|rollback|circuit/i.test(
+        rolloutStateReason
+      )
+    );
+
+
+  const deploymentFailure =
+    deployments.some(
+      (deployment) => {
+
+        const rollout =
+          deployment?.rolloutState;
+
+
+        const reason =
+          deployment?.rolloutStateReason;
+
+
+        return (
+          rollout ===
+            "FAILED" ||
+          (
+            reason &&
+            /fail|rollback|circuit/i.test(
+              reason
+            )
+          )
+        );
+
+      }
+    );
+
+
+  return {
+
+    available:
+      deployments.length > 0,
+
+    count:
+      deployments.length,
+
+    activeCount:
+      activeDeployments.length,
+
+    primary: primary
+      ? {
+
+          id:
+            primary.id ||
+            null,
+
+          status:
+            primary.status ||
+            null,
+
+          desiredCount:
+            safeNumber(
+              primary.desiredCount,
+              0
+            ),
+
+          runningCount:
+            safeNumber(
+              primary.runningCount,
+              0
+            ),
+
+          pendingCount:
+            safeNumber(
+              primary.pendingCount,
+              0
+            ),
+
+          rolloutState:
+            primary.rolloutState ||
+            null,
+
+          rolloutStateReason:
+            primary.rolloutStateReason ||
+            null,
+
+          taskDefinition:
+            primary.taskDefinition ||
+            null,
+
+          createdAt:
+            primary.createdAt ||
+            null,
+
+          updatedAt:
+            primary.updatedAt ||
+            null
+
+        }
+      : null,
+
+    rolloutState,
+
+    rolloutStateReason,
+
+    rolloutFailed:
+      rolloutFailed ||
+      deploymentFailure,
+
+    deploymentFailure
 
   };
 
@@ -655,7 +1144,7 @@ function calculateHealthScore(
 ) {
 
   let score =
-    100;
+    HEALTH_SCORE_MAX;
 
 
   /*
@@ -669,6 +1158,21 @@ function calculateHealthScore(
 
     score -=
       40;
+
+  }
+
+
+  /*
+   * Deployment failure.
+   */
+
+  if (
+    data.deploymentFailed ===
+    true
+  ) {
+
+    score -=
+      35;
 
   }
 
@@ -692,6 +1196,30 @@ function calculateHealthScore(
       Math.min(
         35,
         missingTasks * 15
+      );
+
+  }
+
+
+  /*
+   * Pending tasks.
+   *
+   * Pending tasks alone are not treated
+   * as failure because deployments can
+   * legitimately have pending tasks.
+   */
+
+  if (
+    data.pendingTasks >
+    0 &&
+    data.runningTasks >=
+      data.desiredTasks
+  ) {
+
+    score -=
+      Math.min(
+        10,
+        data.pendingTasks * 2
       );
 
   }
@@ -782,9 +1310,9 @@ function calculateHealthScore(
 
 
   return Math.max(
-    0,
+    HEALTH_SCORE_MIN,
     Math.min(
-      100,
+      HEALTH_SCORE_MAX,
       score
     )
   );
@@ -833,7 +1361,8 @@ function getScalingRecommendation(
   cpuUsage,
   memoryUsage,
   runningTasks,
-  desiredTasks
+  desiredTasks,
+  deploymentFailed = false
 ) {
 
   const cpuAvailable =
@@ -847,9 +1376,36 @@ function getScalingRecommendation(
 
 
   /*
-   * If service has fewer running
-   * tasks than desired, don't recommend
-   * a scale-down.
+   * Failed deployment.
+   *
+   * Do not blindly scale.
+   *
+   * A failed rollout should be investigated
+   * by deployment/fix infrastructure.
+   */
+
+  if (
+    deploymentFailed
+  ) {
+
+    return {
+
+      action:
+        "investigate",
+
+      reason:
+        "ECS deployment or rollout failure detected",
+
+      priority:
+        "critical"
+
+    };
+
+  }
+
+
+  /*
+   * Desired tasks are not running.
    */
 
   if (
@@ -941,15 +1497,20 @@ function getScalingRecommendation(
 
 
   /*
-   * Scale down only when BOTH
-   * metrics are available and low.
+   * Scale down ONLY when:
+   *
+   * - both metrics exist
+   * - both are genuinely low
+   * - more than one desired task exists
    */
 
   if (
     cpuAvailable &&
     memoryAvailable &&
-    cpuUsage <= 25 &&
-    memoryUsage <= 35 &&
+    cpuUsage <=
+      CPU_SCALE_DOWN &&
+    memoryUsage <=
+      MEMORY_SCALE_DOWN &&
     desiredTasks > 1
   ) {
 
@@ -986,6 +1547,143 @@ function getScalingRecommendation(
 
 
 /* =========================================================
+   AWS ERROR CLASSIFICATION
+========================================================= */
+
+function classifyAwsError(
+  error
+) {
+
+  const name =
+    String(
+      error?.name ||
+      ""
+    );
+
+
+  const message =
+    String(
+      error?.message ||
+      ""
+    );
+
+
+  const statusCode =
+    error?.$metadata?.httpStatusCode ||
+    null;
+
+
+  if (
+    /AccessDenied|Unauthorized|UnrecognizedClient|InvalidClientToken/i
+      .test(
+        name + " " + message
+      )
+  ) {
+
+    return "AUTHORIZATION";
+
+  }
+
+
+  if (
+    /ResourceNotFound|ClusterNotFound|ServiceNotFound/i
+      .test(
+        name + " " + message
+      )
+  ) {
+
+    return "RESOURCE_NOT_FOUND";
+
+  }
+
+
+  if (
+    /Throttl|TooManyRequests/i
+      .test(
+        name + " " + message
+      )
+  ) {
+
+    return "THROTTLED";
+
+  }
+
+
+  if (
+    statusCode >= 500 ||
+    /Timeout|timed out|NetworkingError|ECONNRESET|socket/i
+      .test(
+        name + " " + message
+      )
+  ) {
+
+    return "TEMPORARY";
+
+  }
+
+
+  return "UNKNOWN";
+
+}
+
+
+/* =========================================================
+   BUILD ERROR RESPONSE
+========================================================= */
+
+function buildMonitoringError(
+  error,
+  stage,
+  deploymentId,
+  clusterName = null,
+  serviceName = null
+) {
+
+  const classification =
+    classifyAwsError(
+      error
+    );
+
+
+  return {
+
+    success:
+      false,
+
+    message:
+      "Monitoring Agent Failed",
+
+    error:
+      error?.message ||
+      "Unknown monitoring error",
+
+    errorType:
+      classification,
+
+    stage,
+
+    deploymentId:
+      deploymentId ||
+      null,
+
+    monitoring: {
+
+      clusterName:
+        clusterName ||
+        null,
+
+      serviceName:
+        serviceName ||
+        null
+
+    }
+
+  };
+
+}
+
+
+/* =========================================================
    MONITORING AGENT
 ========================================================= */
 
@@ -995,6 +1693,18 @@ async function monitoringAgent(
 
   let currentStage =
     "request-validation";
+
+
+  let deploymentId =
+    null;
+
+
+  let clusterName =
+    null;
+
+
+  let serviceName =
+    null;
 
 
   try {
@@ -1011,7 +1721,8 @@ async function monitoringAgent(
     if (
       !appData ||
       typeof appData !==
-        "object"
+        "object" ||
+      Array.isArray(appData)
     ) {
 
       return {
@@ -1030,7 +1741,7 @@ async function monitoringAgent(
     }
 
 
-    const deploymentId =
+    deploymentId =
       normalizeDeploymentId(
         appData.deploymentId
       );
@@ -1044,7 +1755,7 @@ async function monitoringAgent(
       "cluster-resolution";
 
 
-    const clusterName =
+    clusterName =
       resolveClusterName(
         appData
       );
@@ -1058,7 +1769,7 @@ async function monitoringAgent(
       "service-resolution";
 
 
-    const serviceName =
+    serviceName =
       resolveServiceName(
         appData,
         deploymentId
@@ -1081,7 +1792,11 @@ async function monitoringAgent(
           "Provide serviceName or projectName with deploymentId.",
 
         stage:
-          currentStage
+          currentStage,
+
+        deploymentId,
+
+        clusterName
 
       };
 
@@ -1108,11 +1823,75 @@ async function monitoringAgent(
 
             serviceName
 
+          ],
+
+          include: [
+
+            "TAGS"
+
           ]
 
         })
 
       );
+
+
+    /*
+     * ECS can return failures separately
+     * even when the API request itself succeeds.
+     */
+
+    const serviceFailures =
+      Array.isArray(
+        ecsResult?.failures
+      )
+        ? ecsResult.failures
+        : [];
+
+
+    if (
+      serviceFailures.length > 0
+    ) {
+
+      const failure =
+        serviceFailures[0];
+
+
+      return {
+
+        success:
+          false,
+
+        message:
+          "ECS service lookup failed",
+
+        error:
+          failure?.reason ||
+          failure?.detail ||
+          "ECS DescribeServices returned a failure",
+
+        errorType:
+          "RESOURCE_NOT_FOUND",
+
+        stage:
+          currentStage,
+
+        deploymentId,
+
+        monitoring: {
+
+          clusterName,
+
+          serviceName,
+
+          status:
+            "not_found"
+
+        }
+
+      };
+
+    }
 
 
     const service =
@@ -1138,9 +1917,9 @@ async function monitoringAgent(
         stage:
           currentStage,
 
-        monitoring: {
+        deploymentId,
 
-          deploymentId,
+        monitoring: {
 
           clusterName,
 
@@ -1156,8 +1935,17 @@ async function monitoringAgent(
     }
 
 
+    /* =====================================================
+       SERVICE STATUS
+    ===================================================== */
+
+    const serviceStatus =
+      service.status ||
+      "UNKNOWN";
+
+
     if (
-      service.status ===
+      serviceStatus ===
       "INACTIVE"
     ) {
 
@@ -1173,7 +1961,31 @@ async function monitoringAgent(
           `ECS service '${serviceName}' is inactive.`,
 
         stage:
-          currentStage
+          currentStage,
+
+        deploymentId,
+
+        monitoring: {
+
+          clusterName,
+
+          serviceName,
+
+          status:
+            "inactive",
+
+          service: {
+
+            status:
+              serviceStatus,
+
+            serviceArn:
+              service.serviceArn ||
+              null
+
+          }
+
+        }
 
       };
 
@@ -1185,22 +1997,22 @@ async function monitoringAgent(
     ===================================================== */
 
     const runningTasks =
-      Number(
-        service.runningCount ||
+      safeNumber(
+        service.runningCount,
         0
       );
 
 
     const desiredTasks =
-      Number(
-        service.desiredCount ||
+      safeNumber(
+        service.desiredCount,
         0
       );
 
 
     const pendingTasks =
-      Number(
-        service.pendingCount ||
+      safeNumber(
+        service.pendingCount,
         0
       );
 
@@ -1213,6 +2025,20 @@ async function monitoringAgent(
         desiredTasks -
         runningTasks
 
+      );
+
+
+    /* =====================================================
+       DEPLOYMENT HEALTH
+    ===================================================== */
+
+    currentStage =
+      "ecs-deployment-analysis";
+
+
+    const deploymentHealth =
+      analyzeDeployments(
+        service
       );
 
 
@@ -1262,7 +2088,7 @@ async function monitoringAgent(
 
     const cpuUsage =
       cpuMetric.available
-        ? Number(
+        ? safeNumber(
             cpuMetric.value
           )
         : null;
@@ -1270,7 +2096,7 @@ async function monitoringAgent(
 
     const memoryUsage =
       memoryMetric.available
-        ? Number(
+        ? safeNumber(
             memoryMetric.value
           )
         : null;
@@ -1288,12 +2114,12 @@ async function monitoringAgent(
       [];
 
 
-    /*
-     * Service state.
-     */
+    /* =====================================================
+       SERVICE STATE ALERT
+    ===================================================== */
 
     if (
-      service.status !==
+      serviceStatus !==
       "ACTIVE"
     ) {
 
@@ -1305,7 +2131,15 @@ async function monitoringAgent(
 
           "critical",
 
-          `ECS service state is ${service.status || "unknown"}`
+          `ECS service state is ${serviceStatus}`,
+
+          null,
+
+          {
+
+            serviceStatus
+
+          }
 
         )
 
@@ -1314,9 +2148,9 @@ async function monitoringAgent(
     }
 
 
-    /*
-     * Task availability.
-     */
+    /* =====================================================
+       TASK AVAILABILITY ALERT
+    ===================================================== */
 
     if (
       desiredTasks > 0 &&
@@ -1334,7 +2168,17 @@ async function monitoringAgent(
 
           `${failedTasks} desired task(s) are not currently running`,
 
-          failedTasks
+          failedTasks,
+
+          {
+
+            runningTasks,
+
+            desiredTasks,
+
+            pendingTasks
+
+          }
 
         )
 
@@ -1343,9 +2187,84 @@ async function monitoringAgent(
     }
 
 
-    /*
-     * CPU alerts.
-     */
+    /* =====================================================
+       DEPLOYMENT FAILURE ALERT
+    ===================================================== */
+
+    if (
+      deploymentHealth.deploymentFailure
+    ) {
+
+      alerts.push(
+
+        createAlert(
+
+          "deployment",
+
+          "critical",
+
+          "ECS deployment or rollout failure detected",
+
+          null,
+
+          {
+
+            rolloutState:
+              deploymentHealth.rolloutState,
+
+            rolloutStateReason:
+              deploymentHealth.rolloutStateReason,
+
+            deploymentCount:
+              deploymentHealth.count
+
+          }
+
+        )
+
+      );
+
+    }
+
+
+    /* =====================================================
+       ROLLOUT STATE ALERT
+    ===================================================== */
+
+    if (
+      deploymentHealth.rolloutState ===
+      "IN_PROGRESS"
+    ) {
+
+      alerts.push(
+
+        createAlert(
+
+          "deployment",
+
+          "low",
+
+          "ECS deployment rollout is currently in progress",
+
+          null,
+
+          {
+
+            rolloutState:
+              deploymentHealth.rolloutState
+
+          }
+
+        )
+
+      );
+
+    }
+
+
+    /* =====================================================
+       CPU ALERTS
+    ===================================================== */
 
     if (
       typeof cpuUsage ===
@@ -1367,7 +2286,20 @@ async function monitoringAgent(
 
             "Critical CPU utilization detected",
 
-            cpuUsage
+            cpuUsage,
+
+            {
+
+              warning:
+                CPU_WARNING,
+
+              high:
+                CPU_HIGH,
+
+              critical:
+                CPU_CRITICAL
+
+            }
 
           )
 
@@ -1390,7 +2322,20 @@ async function monitoringAgent(
 
             "High CPU utilization detected",
 
-            cpuUsage
+            cpuUsage,
+
+            {
+
+              warning:
+                CPU_WARNING,
+
+              high:
+                CPU_HIGH,
+
+              critical:
+                CPU_CRITICAL
+
+            }
 
           )
 
@@ -1413,7 +2358,20 @@ async function monitoringAgent(
 
             "Elevated CPU utilization detected",
 
-            cpuUsage
+            cpuUsage,
+
+            {
+
+              warning:
+                CPU_WARNING,
+
+              high:
+                CPU_HIGH,
+
+              critical:
+                CPU_CRITICAL
+
+            }
 
           )
 
@@ -1424,9 +2382,9 @@ async function monitoringAgent(
     }
 
 
-    /*
-     * Memory alerts.
-     */
+    /* =====================================================
+       MEMORY ALERTS
+    ===================================================== */
 
     if (
       typeof memoryUsage ===
@@ -1448,7 +2406,20 @@ async function monitoringAgent(
 
             "Critical memory utilization detected",
 
-            memoryUsage
+            memoryUsage,
+
+            {
+
+              warning:
+                MEMORY_WARNING,
+
+              high:
+                MEMORY_HIGH,
+
+              critical:
+                MEMORY_CRITICAL
+
+            }
 
           )
 
@@ -1471,7 +2442,20 @@ async function monitoringAgent(
 
             "High memory utilization detected",
 
-            memoryUsage
+            memoryUsage,
+
+            {
+
+              warning:
+                MEMORY_WARNING,
+
+              high:
+                MEMORY_HIGH,
+
+              critical:
+                MEMORY_CRITICAL
+
+            }
 
           )
 
@@ -1494,7 +2478,20 @@ async function monitoringAgent(
 
             "Elevated memory utilization detected",
 
-            memoryUsage
+            memoryUsage,
+
+            {
+
+              warning:
+                MEMORY_WARNING,
+
+              high:
+                MEMORY_HIGH,
+
+              critical:
+                MEMORY_CRITICAL
+
+            }
 
           )
 
@@ -1505,9 +2502,9 @@ async function monitoringAgent(
     }
 
 
-    /*
-     * Missing metrics.
-     */
+    /* =====================================================
+       MISSING CPU METRIC
+    ===================================================== */
 
     if (
       !cpuMetric.available
@@ -1521,7 +2518,22 @@ async function monitoringAgent(
 
           "low",
 
-          "CPU utilization metric is currently unavailable"
+          "CPU utilization metric is currently unavailable",
+
+          null,
+
+          {
+
+            metric:
+              "CPUUtilization",
+
+            datapoints:
+              cpuMetric.datapoints,
+
+            windowMinutes:
+              MONITORING_WINDOW_MINUTES
+
+          }
 
         )
 
@@ -1529,6 +2541,10 @@ async function monitoringAgent(
 
     }
 
+
+    /* =====================================================
+       MISSING MEMORY METRIC
+    ===================================================== */
 
     if (
       !memoryMetric.available
@@ -1542,7 +2558,22 @@ async function monitoringAgent(
 
           "low",
 
-          "Memory utilization metric is currently unavailable"
+          "Memory utilization metric is currently unavailable",
+
+          null,
+
+          {
+
+            metric:
+              "MemoryUtilization",
+
+            datapoints:
+              memoryMetric.datapoints,
+
+            windowMinutes:
+              MONITORING_WINDOW_MINUTES
+
+          }
 
         )
 
@@ -1558,12 +2589,16 @@ async function monitoringAgent(
     const healthScore =
       calculateHealthScore({
 
-        serviceStatus:
-          service.status,
+        serviceStatus,
 
         runningTasks,
 
         desiredTasks,
+
+        pendingTasks,
+
+        deploymentFailed:
+          deploymentHealth.deploymentFailure,
 
         cpuUsage,
 
@@ -1591,7 +2626,9 @@ async function monitoringAgent(
 
         runningTasks,
 
-        desiredTasks
+        desiredTasks,
+
+        deploymentHealth.deploymentFailure
 
       );
 
@@ -1640,7 +2677,7 @@ async function monitoringAgent(
       service: {
 
         status:
-          service.status,
+          serviceStatus,
 
         runningTasks,
 
@@ -1656,7 +2693,59 @@ async function monitoringAgent(
 
         serviceArn:
           service.serviceArn ||
+          null,
+
+        deploymentConfiguration:
+          service.deploymentConfiguration ||
+          null,
+
+        schedulingStrategy:
+          service.schedulingStrategy ||
+          null,
+
+        launchType:
+          service.launchType ||
+          null,
+
+        platformVersion:
+          service.platformVersion ||
+          null,
+
+        createdAt:
+          service.createdAt ||
+          null,
+
+        updatedAt:
+          service.updatedAt ||
           null
+
+      },
+
+      deployment: {
+
+        available:
+          deploymentHealth.available,
+
+        count:
+          deploymentHealth.count,
+
+        activeCount:
+          deploymentHealth.activeCount,
+
+        rolloutState:
+          deploymentHealth.rolloutState,
+
+        rolloutStateReason:
+          deploymentHealth.rolloutStateReason,
+
+        rolloutFailed:
+          deploymentHealth.rolloutFailed,
+
+        deploymentFailure:
+          deploymentHealth.deploymentFailure,
+
+        primary:
+          deploymentHealth.primary
 
       },
 
@@ -1684,11 +2773,57 @@ async function monitoringAgent(
         memoryDatapoints:
           memoryMetric.datapoints,
 
+        cpuTimestamp:
+          cpuMetric.timestamp,
+
+        memoryTimestamp:
+          memoryMetric.timestamp,
+
         windowMinutes:
           MONITORING_WINDOW_MINUTES,
 
         periodSeconds:
-          METRIC_PERIOD_SECONDS
+          METRIC_PERIOD_SECONDS,
+
+        monitoredFrom,
+
+        monitoredAt
+
+      },
+
+      thresholds: {
+
+        cpu: {
+
+          warning:
+            CPU_WARNING,
+
+          high:
+            CPU_HIGH,
+
+          critical:
+            CPU_CRITICAL,
+
+          scaleDown:
+            CPU_SCALE_DOWN
+
+        },
+
+        memory: {
+
+          warning:
+            MEMORY_WARNING,
+
+          high:
+            MEMORY_HIGH,
+
+          critical:
+            MEMORY_CRITICAL,
+
+          scaleDown:
+            MEMORY_SCALE_DOWN
+
+        }
 
       },
 
@@ -1702,12 +2837,42 @@ async function monitoringAgent(
 
 
     /* =====================================================
+       SORT ALERTS
+    ===================================================== */
+
+    const sortedAlerts =
+      sortAlerts(
+        alerts
+      );
+
+
+    /* =====================================================
+       SUMMARY
+    ===================================================== */
+
+    const criticalAlerts =
+      sortedAlerts.filter(
+        (alert) =>
+          alert.severity ===
+          "critical"
+      ).length;
+
+
+    const highAlerts =
+      sortedAlerts.filter(
+        (alert) =>
+          alert.severity ===
+          "high"
+      ).length;
+
+
+    /* =====================================================
        SUCCESS LOG
     ===================================================== */
 
     logger.success(
 
-      `📊 Monitoring Completed: ${serviceName} | ${status} | ${healthScore}/100`
+      `📊 Monitoring Completed: ${serviceName} | ${status} | ${healthScore}/100 | alerts=${sortedAlerts.length}`
 
     );
 
@@ -1723,7 +2888,39 @@ async function monitoringAgent(
 
       monitoring,
 
-      alerts
+      alerts:
+        sortedAlerts,
+
+      summary: {
+
+        status,
+
+        healthScore,
+
+        criticalAlerts,
+
+        highAlerts,
+
+        totalAlerts:
+          sortedAlerts.length,
+
+        cpuUsage,
+
+        memoryUsage,
+
+        runningTasks,
+
+        desiredTasks,
+
+        pendingTasks,
+
+        deploymentFailed:
+          deploymentHealth.deploymentFailure,
+
+        scalingAction:
+          scalingRecommendation.action
+
+      }
 
     };
 
@@ -1731,37 +2928,30 @@ async function monitoringAgent(
 
   catch (error) {
 
-    const errorMessage =
-      error?.message ||
-      "Unknown monitoring error";
+    const result =
+      buildMonitoringError(
+
+        error,
+
+        currentStage,
+
+        deploymentId,
+
+        clusterName,
+
+        serviceName
+
+      );
 
 
     logger.error(
 
-      `Monitoring Agent Failed at ${currentStage}: ${errorMessage}`
+      `Monitoring Agent Failed at ${currentStage}: ${error?.message || "Unknown monitoring error"}`
 
     );
 
 
-    return {
-
-      success:
-        false,
-
-      message:
-        "Monitoring Agent Failed",
-
-      error:
-        errorMessage,
-
-      stage:
-        currentStage,
-
-      deploymentId:
-        appData?.deploymentId ||
-        null
-
-    };
+    return result;
 
   }
 
