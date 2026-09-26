@@ -1,6 +1,6 @@
 /* =========================================================
    ZyrionOS SSL AGENT
-   Real AWS ACM Certificate Management
+   Production AWS ACM + Route53 + ALB HTTPS
 
    FLOW:
 
@@ -10,17 +10,21 @@
         ↓
    SSL Agent
         ↓
-   AWS ACM Certificate Request
+   ACM Certificate Discovery
         ↓
-   ACM DNS Validation
+   ACM Certificate Request
         ↓
-   Route53 Validation CNAME
+   ACM DNS Validation CNAME
         ↓
-   ACM Validation
+   Route53 Validation Record
         ↓
-   Certificate ISSUED
+   ACM Certificate Verification
         ↓
    ALB HTTPS Listener
+        ↓
+   ACM Certificate Attachment
+        ↓
+   HTTPS Infrastructure State
 
    IMPORTANT:
 
@@ -29,10 +33,12 @@
    - certificate ID
    - issued date
    - expiry date
-   - validated state
-   - active SSL state
+   - validation state
+   - ALB listener ARN
+   - HTTPS readiness
 
-   ACM is the source of truth.
+   AWS ACM / Route53 / ELBv2 are the
+   sources of truth.
 ========================================================= */
 
 
@@ -56,9 +62,20 @@ const {
 
 
 const {
-  ChangeResourceRecordSetsCommand
+  ChangeResourceRecordSetsCommand,
+  ListHostedZonesByNameCommand,
+  GetChangeCommand
 } =
   require("@aws-sdk/client-route-53");
+
+
+const {
+  ElasticLoadBalancingV2Client,
+  DescribeListenersCommand,
+  CreateListenerCommand,
+  ModifyListenerCommand
+} =
+  require("@aws-sdk/client-elastic-load-balancing-v2");
 
 
 /* =========================================================
@@ -88,12 +105,61 @@ const acm =
   });
 
 
+const elbv2 =
+  new ElasticLoadBalancingV2Client({
+
+    region:
+      AWS_REGION
+
+  });
+
+
 /* =========================================================
    LIMITS
 ========================================================= */
 
 const MAX_DOMAIN_LENGTH =
   253;
+
+
+const MAX_LABEL_LENGTH =
+  63;
+
+
+const DEFAULT_DNS_TTL =
+  300;
+
+
+const DEFAULT_DNS_TIMEOUT_MS =
+  Number(
+    process.env.AWS_ACM_DNS_TIMEOUT_MS ||
+    120000
+  );
+
+
+const DEFAULT_DNS_POLL_INTERVAL_MS =
+  Number(
+    process.env.AWS_ACM_DNS_POLL_INTERVAL_MS ||
+    5000
+  );
+
+
+const DEFAULT_ACM_TIMEOUT_MS =
+  Number(
+    process.env.AWS_ACM_VALIDATION_TIMEOUT_MS ||
+    15 * 60 * 1000
+  );
+
+
+const DEFAULT_ACM_POLL_INTERVAL_MS =
+  Number(
+    process.env.AWS_ACM_VALIDATION_POLL_INTERVAL_MS ||
+    10000
+  );
+
+
+const DEFAULT_HTTPS_PORT =
+  443;
 
 
 /* =========================================================
@@ -106,6 +172,15 @@ const CERTIFICATE_TAG_KEY =
 
 const CERTIFICATE_TAG_VALUE =
   "ZyrionOS";
+
+
+/* =========================================================
+   DEFAULT ALB SSL POLICY
+========================================================= */
+
+const DEFAULT_SSL_POLICY =
+  process.env.AWS_ALB_SSL_POLICY ||
+  "ELBSecurityPolicy-TLS13-1-2-2021-06";
 
 
 /* =========================================================
@@ -153,9 +228,14 @@ function normalizeDomain(
       .toLowerCase();
 
 
-  /*
-   * Remove protocol.
-   */
+  if (
+    !domain
+  ) {
+
+    return "";
+
+  }
+
 
   domain =
     domain.replace(
@@ -164,28 +244,17 @@ function normalizeDomain(
     );
 
 
-  /*
-   * Remove path.
-   */
-
   domain =
     domain.split("/")[0];
 
 
-  /*
-   * Remove query/hash.
-   */
-
   domain =
     domain.split("?")[0];
+
 
   domain =
     domain.split("#")[0];
 
-
-  /*
-   * Remove trailing dot.
-   */
 
   domain =
     domain.replace(
@@ -253,13 +322,14 @@ function validateDomain(
 
 
   for (
-    const label of labels
+    const label
+    of labels
   ) {
 
     if (
       !label ||
       label.length >
-        63
+        MAX_LABEL_LENGTH
     ) {
 
       throw new Error(
@@ -302,6 +372,127 @@ function validateDomain(
 
 
 /* =========================================================
+   HOSTED ZONE ID
+========================================================= */
+
+function normalizeHostedZoneId(
+  value
+) {
+
+  const raw =
+    cleanString(
+      value,
+      300
+    );
+
+
+  if (
+    !raw
+  ) {
+
+    return "";
+
+  }
+
+
+  return raw.replace(
+    /^\/hostedzone\//i,
+    ""
+  );
+
+}
+
+
+/* =========================================================
+   VALIDATE HOSTED ZONE ID
+========================================================= */
+
+function validateHostedZoneId(
+  value,
+  fieldName = "hosted zone ID"
+) {
+
+  const normalized =
+    normalizeHostedZoneId(
+      value
+    );
+
+
+  if (
+    !normalized
+  ) {
+
+    throw new Error(
+      `${fieldName} is required`
+    );
+
+  }
+
+
+  if (
+    !/^Z[A-Z0-9]+$/i.test(
+      normalized
+    )
+  ) {
+
+    throw new Error(
+      `Invalid ${fieldName}: ${normalized}`
+    );
+
+  }
+
+
+  return normalized;
+
+}
+
+
+/* =========================================================
+   ARN VALIDATION
+========================================================= */
+
+function validateArn(
+  value,
+  fieldName
+) {
+
+  const arn =
+    cleanString(
+      value,
+      2000
+    );
+
+
+  if (
+    !arn
+  ) {
+
+    throw new Error(
+      `${fieldName} is required`
+    );
+
+  }
+
+
+  if (
+    !arn.startsWith(
+      "arn:aws:"
+    )
+  ) {
+
+    throw new Error(
+      `Invalid ${fieldName}`
+    );
+
+  }
+
+
+  return arn;
+
+}
+
+
+/* =========================================================
    FIND HOSTED ZONE
 ========================================================= */
 
@@ -315,29 +506,19 @@ async function findHostedZone(
     );
 
 
-  /*
-   * Walk up the domain hierarchy
-   * until the authoritative hosted zone
-   * is found.
-   *
-   * Example:
-   *
-   * app.project.zyrionos.com
-   *
-   * tries:
-   *
-   * app.project.zyrionos.com
-   * project.zyrionos.com
-   * zyrionos.com
-   */
-
   const labels =
     normalizedDomain.split(".");
 
 
+  /*
+   * Search from the full domain toward
+   * the root domain.
+   */
+
   for (
     let index = 0;
-    index < labels.length - 1;
+    index <
+      labels.length - 1;
     index++
   ) {
 
@@ -350,18 +531,13 @@ async function findHostedZone(
     const response =
       await route53.send(
 
-        new (
-          require(
-            "@aws-sdk/client-route-53"
-          )
-            .ListHostedZonesByNameCommand
-        )({
+        new ListHostedZonesByNameCommand({
 
           DNSName:
             `${candidate}.`,
 
           MaxItems:
-            "20"
+            "100"
 
         })
 
@@ -396,22 +572,10 @@ async function findHostedZone(
     ) {
 
       const hostedZoneId =
-        zone.Id
-          ?.replace(
-            /^\/hostedzone\//,
-            ""
-          );
-
-
-      if (
-        !hostedZoneId
-      ) {
-
-        throw new Error(
-          `Route53 hosted zone ID missing for ${candidate}`
+        validateHostedZoneId(
+          zone.Id,
+          "Route53 hosted zone ID"
         );
-
-      }
 
 
       return {
@@ -465,7 +629,13 @@ async function findExistingCertificate(
 
             "INACTIVE",
 
-            "EXPIRED"
+            "EXPIRED",
+
+            "VALIDATION_TIMED_OUT",
+
+            "REVOKED",
+
+            "FAILED"
 
           ],
 
@@ -485,7 +655,8 @@ async function findExistingCertificate(
 
 
     const certificates =
-      response?.CertificateSummaryList ||
+      response
+        ?.CertificateSummaryList ||
       [];
 
 
@@ -523,6 +694,39 @@ async function findExistingCertificate(
 
 
 /* =========================================================
+   IDEMPOTENCY TOKEN
+========================================================= */
+
+function createIdempotencyToken(
+  domain
+) {
+
+  const normalized =
+    domain
+      .replace(
+        /[^a-z0-9]/gi,
+        ""
+      )
+      .toLowerCase();
+
+
+  const token =
+    normalized
+      .slice(
+        0,
+        32
+      );
+
+
+  return (
+    token ||
+    "zyrionosssl"
+  );
+
+}
+
+
+/* =========================================================
    REQUEST ACM CERTIFICATE
 ========================================================= */
 
@@ -541,10 +745,10 @@ async function requestCertificate(
         ValidationMethod:
           "DNS",
 
-        /*
-         * Do NOT automatically request
-         * wildcard certificates.
-         */
+        IdempotencyToken:
+          createIdempotencyToken(
+            domain
+          ),
 
         Tags: [
 
@@ -558,18 +762,7 @@ async function requestCertificate(
 
           }
 
-        ],
-
-        /*
-         * ACM creates the validation
-         * records that we then publish
-         * through Route53.
-         */
-
-        IdempotencyToken:
-          createIdempotencyToken(
-            domain
-          )
+        ]
 
       })
 
@@ -588,41 +781,6 @@ async function requestCertificate(
 
 
   return response.CertificateArn;
-
-}
-
-
-/* =========================================================
-   IDEMPOTENCY TOKEN
-========================================================= */
-
-function createIdempotencyToken(
-  domain
-) {
-
-  /*
-   * ACM idempotency token:
-   * 1-32 characters
-   * alphanumeric only
-   */
-
-  const normalized =
-    domain
-      .replace(
-        /[^a-z0-9]/gi,
-        ""
-      )
-      .toLowerCase();
-
-
-  return (
-    normalized
-      .slice(
-        0,
-        32
-      ) ||
-    "zyrionosssl"
-  );
 
 }
 
@@ -669,10 +827,10 @@ async function describeCertificate(
 
 
 /* =========================================================
-   FIND VALIDATION OPTIONS
+   GET DNS VALIDATION RECORD
 ========================================================= */
 
-function getDnsValidationOptions(
+function getDnsValidationRecord(
   certificate,
   domain
 ) {
@@ -689,10 +847,6 @@ function getDnsValidationOptions(
     );
 
 
-  /*
-   * Prefer exact domain validation.
-   */
-
   const exact =
     options.find(
       (option) =>
@@ -700,6 +854,8 @@ function getDnsValidationOptions(
           option.DomainName
         ) ===
         normalizedDomain &&
+        option.ValidationMethod ===
+          "DNS" &&
         option.ResourceRecord
     );
 
@@ -713,12 +869,7 @@ function getDnsValidationOptions(
   }
 
 
-  /*
-   * Fallback to the first DNS
-   * validation record.
-   */
-
-  const dnsOption =
+  const fallback =
     options.find(
       (option) =>
         option.ValidationMethod ===
@@ -728,7 +879,7 @@ function getDnsValidationOptions(
 
 
   return (
-    dnsOption?.ResourceRecord ||
+    fallback?.ResourceRecord ||
     null
   );
 
@@ -753,7 +904,7 @@ function validateValidationRecord(
         false,
 
       error:
-        "ACM DNS validation record not available yet"
+        "ACM DNS validation record is not available yet"
 
     };
 
@@ -762,7 +913,6 @@ function validateValidationRecord(
 
   if (
     !record.Name ||
-    !record.Type ||
     !record.Value
   ) {
 
@@ -772,7 +922,7 @@ function validateValidationRecord(
         false,
 
       error:
-        "ACM returned an incomplete DNS validation record"
+        "ACM validation record is incomplete"
 
     };
 
@@ -817,9 +967,8 @@ async function upsertValidationRecord(
 ) {
 
   const recordName =
-    cleanString(
-      record.Name,
-      253
+    validateDomain(
+      record.Name
     );
 
 
@@ -831,12 +980,11 @@ async function upsertValidationRecord(
 
 
   if (
-    !recordName ||
     !recordValue
   ) {
 
     throw new Error(
-      "ACM validation DNS record is incomplete"
+      "ACM validation record value is missing"
     );
 
   }
@@ -865,13 +1013,13 @@ async function upsertValidationRecord(
               ResourceRecordSet: {
 
                 Name:
-                  recordName,
+                  `${recordName}.`,
 
                 Type:
                   "CNAME",
 
                 TTL:
-                  300,
+                  DEFAULT_DNS_TTL,
 
                 ResourceRecords: [
 
@@ -919,7 +1067,11 @@ async function upsertValidationRecord(
 
     status:
       changeInfo.Status ||
-      "PENDING"
+      "PENDING",
+
+    recordName,
+
+    recordValue
 
   };
 
@@ -927,11 +1079,612 @@ async function upsertValidationRecord(
 
 
 /* =========================================================
-   BUILD SECURITY INFORMATION
+   GET ROUTE53 CHANGE
+========================================================= */
+
+async function getRoute53Change(
+  changeId
+) {
+
+  const response =
+    await route53.send(
+
+      new GetChangeCommand({
+
+        Id:
+          changeId
+
+      })
+
+    );
+
+
+  return {
+
+    status:
+      response
+        ?.ChangeInfo
+        ?.Status ||
+      "UNKNOWN"
+
+  };
+
+}
+
+
+/* =========================================================
+   WAIT FOR ROUTE53 CHANGE
+========================================================= */
+
+async function waitForRoute53Change(
+  changeId,
+  timeoutMs =
+    DEFAULT_DNS_TIMEOUT_MS,
+  pollIntervalMs =
+    DEFAULT_DNS_POLL_INTERVAL_MS
+) {
+
+  const startedAt =
+    Date.now();
+
+
+  let lastStatus =
+    "UNKNOWN";
+
+
+  while (
+    Date.now() -
+      startedAt <
+    timeoutMs
+  ) {
+
+    const result =
+      await getRoute53Change(
+        changeId
+      );
+
+
+    lastStatus =
+      result.status;
+
+
+    if (
+      lastStatus ===
+      "INSYNC"
+    ) {
+
+      return {
+
+        success:
+          true,
+
+        status:
+          "INSYNC",
+
+        timedOut:
+          false,
+
+        durationMs:
+          Date.now() -
+          startedAt
+
+      };
+
+    }
+
+
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          pollIntervalMs
+        )
+    );
+
+  }
+
+
+  return {
+
+    success:
+      false,
+
+    status:
+      lastStatus,
+
+    timedOut:
+      true,
+
+    durationMs:
+      Date.now() -
+      startedAt
+
+  };
+
+}
+
+
+/* =========================================================
+   WAIT FOR ACM ISSUANCE
+========================================================= */
+
+async function waitForCertificate(
+  certificateArn,
+  timeoutMs =
+    DEFAULT_ACM_TIMEOUT_MS,
+  pollIntervalMs =
+    DEFAULT_ACM_POLL_INTERVAL_MS
+) {
+
+  const startedAt =
+    Date.now();
+
+
+  let certificate =
+    await describeCertificate(
+      certificateArn
+    );
+
+
+  while (
+    Date.now() -
+      startedAt <
+    timeoutMs
+  ) {
+
+    const status =
+      certificate.Status ||
+      "UNKNOWN";
+
+
+    logger.info(
+      `ACM certificate state: ${status}`
+    );
+
+
+    if (
+      status ===
+      "ISSUED"
+    ) {
+
+      return {
+
+        success:
+          true,
+
+        status,
+
+        timedOut:
+          false,
+
+        certificate,
+
+        durationMs:
+          Date.now() -
+          startedAt
+
+      };
+
+    }
+
+
+    if (
+      [
+        "FAILED",
+        "VALIDATION_TIMED_OUT",
+        "REVOKED",
+        "EXPIRED",
+        "INACTIVE"
+      ].includes(
+        status
+      )
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        status,
+
+        timedOut:
+          false,
+
+        certificate,
+
+        durationMs:
+          Date.now() -
+          startedAt
+
+      };
+
+    }
+
+
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          pollIntervalMs
+        )
+    );
+
+
+    certificate =
+      await describeCertificate(
+        certificateArn
+      );
+
+  }
+
+
+  return {
+
+    success:
+      false,
+
+    status:
+      certificate.Status ||
+      "UNKNOWN",
+
+    timedOut:
+      true,
+
+    certificate,
+
+    durationMs:
+      Date.now() -
+      startedAt
+
+  };
+
+}
+
+
+/* =========================================================
+   LOAD BALANCER INPUT
+========================================================= */
+
+function getLoadBalancerData(
+  domainData
+) {
+
+  const loadBalancer =
+    domainData.loadBalancer ||
+    domainData.alb ||
+    domainData.aws?.loadBalancer ||
+    domainData.aws?.alb ||
+    {};
+
+
+  const loadBalancerArn =
+    domainData.loadBalancerArn ||
+    loadBalancer.arn ||
+    loadBalancer.loadBalancerArn ||
+    domainData.aws?.loadBalancerArn ||
+    domainData.aws?.albArn ||
+    "";
+
+
+  const targetGroupArn =
+    domainData.targetGroupArn ||
+    loadBalancer.targetGroupArn ||
+    loadBalancer.targetGroup ||
+    domainData.aws?.targetGroupArn ||
+    domainData.aws?.albTargetGroupArn ||
+    "";
+
+
+  const existingHttpsListenerArn =
+    domainData.httpsListenerArn ||
+    loadBalancer.httpsListenerArn ||
+    domainData.aws?.httpsListenerArn ||
+    "";
+
+
+  return {
+
+    loadBalancerArn:
+      loadBalancerArn
+        ? validateArn(
+            loadBalancerArn,
+            "load balancer ARN"
+          )
+        : "",
+
+    targetGroupArn:
+      targetGroupArn
+        ? validateArn(
+            targetGroupArn,
+            "target group ARN"
+          )
+        : "",
+
+    existingHttpsListenerArn:
+      existingHttpsListenerArn
+        ? validateArn(
+            existingHttpsListenerArn,
+            "HTTPS listener ARN"
+          )
+        : ""
+
+  };
+
+}
+
+
+/* =========================================================
+   FIND HTTPS LISTENER
+========================================================= */
+
+async function findHttpsListener(
+  loadBalancerArn
+) {
+
+  let marker;
+
+
+  do {
+
+    const response =
+      await elbv2.send(
+
+        new DescribeListenersCommand({
+
+          LoadBalancerArn:
+            loadBalancerArn,
+
+          PageSize:
+            100,
+
+          ...(marker
+            ? {
+                Marker:
+                  marker
+              }
+            : {})
+
+        })
+
+      );
+
+
+    const listeners =
+      response?.Listeners ||
+      [];
+
+
+    const httpsListener =
+      listeners.find(
+        (listener) =>
+          listener.Protocol ===
+            "HTTPS" &&
+          Number(
+            listener.Port
+          ) ===
+            DEFAULT_HTTPS_PORT
+      );
+
+
+    if (
+      httpsListener
+    ) {
+
+      return httpsListener;
+
+    }
+
+
+    marker =
+      response?.NextMarker;
+
+  }
+  while (
+    marker
+  );
+
+
+  return null;
+
+}
+
+
+/* =========================================================
+   CREATE HTTPS LISTENER
+========================================================= */
+
+async function createHttpsListener(
+  data
+) {
+
+  const response =
+    await elbv2.send(
+
+      new CreateListenerCommand({
+
+        LoadBalancerArn:
+          data.loadBalancerArn,
+
+        Protocol:
+          "HTTPS",
+
+        Port:
+          DEFAULT_HTTPS_PORT,
+
+        Certificates: [
+
+          {
+
+            CertificateArn:
+              data.certificateArn
+
+          }
+
+        ],
+
+        SslPolicy:
+          data.sslPolicy,
+
+        DefaultActions: [
+
+          {
+
+            Type:
+              "forward",
+
+            TargetGroupArn:
+              data.targetGroupArn
+
+          }
+
+        ]
+
+      })
+
+    );
+
+
+  const listener =
+    response?.Listeners?.[0];
+
+
+  if (
+    !listener?.ListenerArn
+  ) {
+
+    throw new Error(
+      "ALB HTTPS listener was not returned by AWS"
+    );
+
+  }
+
+
+  return listener;
+
+}
+
+
+/* =========================================================
+   UPDATE HTTPS LISTENER
+========================================================= */
+
+async function updateHttpsListener(
+  listenerArn,
+  certificateArn,
+  sslPolicy
+) {
+
+  const response =
+    await elbv2.send(
+
+      new ModifyListenerCommand({
+
+        ListenerArn:
+          listenerArn,
+
+        Certificates: [
+
+          {
+
+            CertificateArn:
+              certificateArn
+
+          }
+
+        ],
+
+        ...(sslPolicy
+          ? {
+              SslPolicy:
+                sslPolicy
+            }
+          : {})
+
+      })
+
+    );
+
+
+  const listener =
+    response?.Listeners?.[0];
+
+
+  if (
+    !listener?.ListenerArn
+  ) {
+
+    throw new Error(
+      "ALB HTTPS listener update did not return listener ARN"
+    );
+
+  }
+
+
+  return listener;
+
+}
+
+
+/* =========================================================
+   VERIFY LISTENER CERTIFICATE
+========================================================= */
+
+function listenerHasCertificate(
+  listener,
+  certificateArn
+) {
+
+  if (
+    !listener ||
+    !certificateArn
+  ) {
+
+    return false;
+
+  }
+
+
+  const defaultCertificate =
+    listener
+      ?.Certificates
+      ?.find(
+        (certificate) =>
+          certificate.IsDefault ===
+          true
+      );
+
+
+  if (
+    defaultCertificate?.CertificateArn ===
+    certificateArn
+  ) {
+
+    return true;
+
+  }
+
+
+  return (
+    listener
+      ?.Certificates
+      ?.some(
+        (certificate) =>
+          certificate.CertificateArn ===
+          certificateArn
+      ) ||
+    false
+  );
+
+}
+
+
+/* =========================================================
+   BUILD SECURITY INFO
 ========================================================= */
 
 function buildSecurityInfo(
-  certificate
+  certificate,
+  sslPolicy
 ) {
 
   return {
@@ -955,20 +1708,14 @@ function buildSecurityInfo(
       certificate.CertificateTransparencyLoggingPreference ||
       null,
 
-    /*
-     * HSTS and security headers are
-     * application / load-balancer
-     * configuration, NOT certificate
-     * properties.
-     */
+    tlsPolicy:
+      sslPolicy ||
+      null,
 
     hsts:
       null,
 
     securityHeaders:
-      null,
-
-    tlsPolicy:
       null
 
   };
@@ -988,6 +1735,10 @@ async function sslAgent(
     "request-validation";
 
 
+  const startedAt =
+    Date.now();
+
+
   try {
 
     logger.info(
@@ -1002,7 +1753,10 @@ async function sslAgent(
     if (
       !domainData ||
       typeof domainData !==
-        "object"
+        "object" ||
+      Array.isArray(
+        domainData
+      )
     ) {
 
       return {
@@ -1021,18 +1775,11 @@ async function sslAgent(
     }
 
 
-    /*
-     * Accept:
-     *
-     * fullDomain
-     * hostname
-     * domain
-     */
-
     const rawDomain =
       domainData.hostname ||
       domainData.domain ||
       domainData.fullDomain ||
+      domainData.domain?.hostname ||
       "";
 
 
@@ -1043,7 +1790,7 @@ async function sslAgent(
 
 
     /* =====================================================
-       CONFIGURATION
+       REGION
     ===================================================== */
 
     currentStage =
@@ -1056,10 +1803,38 @@ async function sslAgent(
     ) {
 
       logger.warning(
-        "AWS_REGION is not explicitly configured; default region is being used."
+        "AWS_REGION is not explicitly configured; using ap-south-1 fallback."
       );
 
     }
+
+
+    /* =====================================================
+       LOAD BALANCER
+    ===================================================== */
+
+    currentStage =
+      "load-balancer-validation";
+
+
+    const loadBalancer =
+      getLoadBalancerData(
+        domainData
+      );
+
+
+    /*
+     * SSL can request/validate an ACM certificate
+     * without an ALB.
+     *
+     * But HTTPS cannot become active without
+     * an ALB listener.
+     */
+
+    const hasLoadBalancer =
+      Boolean(
+        loadBalancer.loadBalancerArn
+      );
 
 
     /* =====================================================
@@ -1082,7 +1857,7 @@ async function sslAgent(
 
 
     /* =====================================================
-       FIND EXISTING CERTIFICATE
+       CERTIFICATE DISCOVERY
     ===================================================== */
 
     currentStage =
@@ -1096,18 +1871,19 @@ async function sslAgent(
 
 
     let certificateArn =
-
       certificateSummary
         ?.CertificateArn ||
       null;
 
 
     let certificateAction =
-      "existing";
+      certificateArn
+        ? "existing"
+        : "requested";
 
 
     /* =====================================================
-       REQUEST NEW CERTIFICATE
+       REQUEST CERTIFICATE
     ===================================================== */
 
     if (
@@ -1124,10 +1900,6 @@ async function sslAgent(
         );
 
 
-      certificateAction =
-        "requested";
-
-
       logger.success(
         `ACM Certificate Requested: ${certificateArn}`
       );
@@ -1136,7 +1908,7 @@ async function sslAgent(
 
 
     /* =====================================================
-       DESCRIBE CERTIFICATE
+       CERTIFICATE DESCRIPTION
     ===================================================== */
 
     currentStage =
@@ -1149,10 +1921,31 @@ async function sslAgent(
       );
 
 
-    /*
-     * Make sure certificate actually
-     * belongs to requested domain.
-     */
+    /* =====================================================
+       REGION VERIFICATION
+    ===================================================== */
+
+    const certificateArnRegion =
+      certificateArn
+        .split(":")[3];
+
+
+    if (
+      certificateArnRegion &&
+      certificateArnRegion !==
+        AWS_REGION
+    ) {
+
+      throw new Error(
+        `ACM certificate is in ${certificateArnRegion}, but deployment region is ${AWS_REGION}`
+      );
+
+    }
+
+
+    /* =====================================================
+       DOMAIN VERIFICATION
+    ===================================================== */
 
     if (
       normalizeDomain(
@@ -1176,8 +1969,8 @@ async function sslAgent(
       "acm-dns-validation";
 
 
-    let validationRecord =
-      getDnsValidationOptions(
+    const validationRecord =
+      getDnsValidationRecord(
         certificate,
         domain
       );
@@ -1189,13 +1982,17 @@ async function sslAgent(
       );
 
 
-    /* =====================================================
-       PUBLISH VALIDATION RECORD
-    ===================================================== */
-
     let dnsChange =
       null;
 
+
+    let route53Validation =
+      null;
+
+
+    /* =====================================================
+       ROUTE53 VALIDATION RECORD
+    ===================================================== */
 
     if (
       validation.valid
@@ -1219,11 +2016,33 @@ async function sslAgent(
         "ACM DNS Validation Record Published"
       );
 
+
+      currentStage =
+        "route53-acm-change-verification";
+
+
+      route53Validation =
+        await waitForRoute53Change(
+
+          dnsChange.changeId,
+
+          Number(
+            domainData.dnsVerificationTimeoutMs ||
+            DEFAULT_DNS_TIMEOUT_MS
+          ),
+
+          Number(
+            domainData.dnsVerificationPollIntervalMs ||
+            DEFAULT_DNS_POLL_INTERVAL_MS
+          )
+
+        );
+
     }
 
 
     /* =====================================================
-       REFRESH CERTIFICATE STATE
+       REFRESH CERTIFICATE
     ===================================================== */
 
     currentStage =
@@ -1236,10 +2055,68 @@ async function sslAgent(
       );
 
 
-    const certificateStatus =
+    let certificateStatus =
       certificate.Status ||
       "UNKNOWN";
 
+
+    /* =====================================================
+       WAIT FOR ACM ISSUANCE
+    ===================================================== */
+
+    const shouldWaitForCertificate =
+      domainData.waitForCertificate ===
+        true ||
+      process.env.AWS_ACM_WAIT_FOR_ISSUANCE ===
+        "true";
+
+
+    let issuance =
+      null;
+
+
+    if (
+      certificateStatus ===
+        "PENDING_VALIDATION" &&
+      shouldWaitForCertificate
+    ) {
+
+      currentStage =
+        "acm-certificate-issuance";
+
+
+      issuance =
+        await waitForCertificate(
+
+          certificateArn,
+
+          Number(
+            domainData.acmValidationTimeoutMs ||
+            DEFAULT_ACM_TIMEOUT_MS
+          ),
+
+          Number(
+            domainData.acmValidationPollIntervalMs ||
+            DEFAULT_ACM_POLL_INTERVAL_MS
+          )
+
+        );
+
+
+      certificate =
+        issuance.certificate;
+
+
+      certificateStatus =
+        certificate.Status ||
+        "UNKNOWN";
+
+    }
+
+
+    /* =====================================================
+       CERTIFICATE STATES
+    ===================================================== */
 
     const isIssued =
       certificateStatus ===
@@ -1253,11 +2130,13 @@ async function sslAgent(
 
     const isFailed =
       [
+
         "FAILED",
         "VALIDATION_TIMED_OUT",
         "REVOKED",
         "EXPIRED",
         "INACTIVE"
+
       ].includes(
         certificateStatus
       );
@@ -1313,7 +2192,170 @@ async function sslAgent(
 
 
     /* =====================================================
-       SSL STATE
+       SSL POLICY
+    ===================================================== */
+
+    const sslPolicy =
+      cleanString(
+        domainData.sslPolicy ||
+        process.env.AWS_ALB_SSL_POLICY ||
+        DEFAULT_SSL_POLICY,
+        300
+      );
+
+
+    /* =====================================================
+       HTTPS LISTENER
+    ===================================================== */
+
+    let listener =
+      null;
+
+
+    let listenerAction =
+      "not_configured";
+
+
+    let httpsEnabled =
+      false;
+
+
+    if (
+      isIssued &&
+      hasLoadBalancer
+    ) {
+
+      currentStage =
+        "alb-https-listener-discovery";
+
+
+      listener =
+        loadBalancer.existingHttpsListenerArn
+          ? null
+          : await findHttpsListener(
+              loadBalancer.loadBalancerArn
+            );
+
+
+      if (
+        loadBalancer.existingHttpsListenerArn
+      ) {
+
+        /*
+         * Caller supplied an authoritative
+         * listener ARN. Describe it through
+         * the load balancer using ARN.
+         */
+
+        const response =
+          await elbv2.send(
+
+            new DescribeListenersCommand({
+
+              ListenerArns: [
+
+                loadBalancer
+                  .existingHttpsListenerArn
+
+              ]
+
+            })
+
+          );
+
+
+        listener =
+          response
+            ?.Listeners?.[0] ||
+          null;
+
+      }
+
+
+      if (
+        listener
+      ) {
+
+        currentStage =
+          "alb-https-listener-update";
+
+
+        listener =
+          await updateHttpsListener(
+
+            listener.ListenerArn,
+
+            certificateArn,
+
+            sslPolicy
+
+          );
+
+
+        listenerAction =
+          "updated";
+
+      }
+
+      else {
+
+        if (
+          !loadBalancer.targetGroupArn
+        ) {
+
+          throw new Error(
+            "ALB HTTPS listener does not exist and targetGroupArn is required to create one"
+          );
+
+        }
+
+
+        currentStage =
+          "alb-https-listener-create";
+
+
+        listener =
+          await createHttpsListener({
+
+            loadBalancerArn:
+              loadBalancer.loadBalancerArn,
+
+            targetGroupArn:
+              loadBalancer.targetGroupArn,
+
+            certificateArn,
+
+            sslPolicy
+
+          });
+
+
+        listenerAction =
+          "created";
+
+      }
+
+
+      httpsEnabled =
+        Boolean(
+          listener?.ListenerArn &&
+          listener.Protocol ===
+            "HTTPS" &&
+          Number(
+            listener.Port
+          ) ===
+            DEFAULT_HTTPS_PORT &&
+          listenerHasCertificate(
+            listener,
+            certificateArn
+          )
+        );
+
+    }
+
+
+    /* =====================================================
+       SSL STATUS
     ===================================================== */
 
     let sslStatus =
@@ -1321,7 +2363,8 @@ async function sslAgent(
 
 
     if (
-      isIssued
+      isIssued &&
+      httpsEnabled
     ) {
 
       sslStatus =
@@ -1339,6 +2382,27 @@ async function sslAgent(
     }
 
     else if (
+      isIssued &&
+      !hasLoadBalancer
+    ) {
+
+      sslStatus =
+        "certificate_issued";
+
+    }
+
+    else if (
+      isIssued &&
+      hasLoadBalancer &&
+      !httpsEnabled
+    ) {
+
+      sslStatus =
+        "listener_pending";
+
+    }
+
+    else if (
       isPending
     ) {
 
@@ -1349,36 +2413,12 @@ async function sslAgent(
 
 
     /* =====================================================
-       HTTPS STATE
-    ===================================================== */
-
-    /*
-     * A certificate being ISSUED does NOT
-     * automatically create an HTTPS listener.
-     *
-     * ALB HTTPS listener configuration is
-     * a separate infrastructure operation.
-     */
-
-    const httpsEnabled =
-      false;
-
-
-    /* =====================================================
        AUTO RENEWAL
     ===================================================== */
 
-    /*
-     * ACM-managed DNS validation supports
-     * managed renewal when the validation
-     * CNAME remains available.
-     */
-
     const autoRenew =
-      (
-        certificate.ValidationMethod ===
-        "DNS"
-      );
+      certificate.ValidationMethod ===
+      "DNS";
 
 
     /* =====================================================
@@ -1387,12 +2427,23 @@ async function sslAgent(
 
     const security =
       buildSecurityInfo(
-        certificate
+        certificate,
+        sslPolicy
       );
 
 
     /* =====================================================
-       SSL OBJECT
+       URL STATE
+    ===================================================== */
+
+    const securedUrl =
+      httpsEnabled
+        ? `https://${domain}`
+        : null;
+
+
+    /* =====================================================
+       FINAL SSL OBJECT
     ===================================================== */
 
     const ssl = {
@@ -1445,23 +2496,18 @@ async function sslAgent(
 
       remainingDays,
 
-      securedUrl:
-        isIssued
-          ? `https://${domain}`
-          : null
+      securedUrl
 
     };
 
 
     /* =====================================================
-       RESULT
+       FINAL DATA
     ===================================================== */
 
     const sslData = {
 
       ssl,
-
-      security,
 
       dnsValidation: {
 
@@ -1474,7 +2520,7 @@ async function sslAgent(
         recordType:
           validationRecord
             ?.Type ||
-          "CNAME",
+          null,
 
         recordName:
           validationRecord
@@ -1495,31 +2541,99 @@ async function sslAgent(
 
         route53ChangeStatus:
           dnsChange?.status ||
-          null
+          null,
+
+        route53Verified:
+          route53Validation?.success ||
+          false
+
+      },
+
+      alb: {
+
+        configured:
+          hasLoadBalancer,
+
+        loadBalancerArn:
+          loadBalancer.loadBalancerArn ||
+          null,
+
+        targetGroupArn:
+          loadBalancer.targetGroupArn ||
+          null,
+
+        listenerArn:
+          listener?.ListenerArn ||
+          loadBalancer.existingHttpsListenerArn ||
+          null,
+
+        listenerProtocol:
+          listener?.Protocol ||
+          null,
+
+        listenerPort:
+          listener?.Port ||
+          null,
+
+        listenerAction,
+
+        certificateAttached:
+          httpsEnabled,
+
+        sslPolicy:
+          listener?.SslPolicy ||
+          sslPolicy
 
       },
 
       sslReady:
         isIssued,
 
+      httpsReady:
+        httpsEnabled,
+
+      fullyReady:
+        isIssued &&
+        httpsEnabled,
+
       certificateStatus,
 
       createdAt:
-        new Date().toISOString()
+        new Date().toISOString(),
+
+      durationMs:
+        Date.now() -
+        startedAt
 
     };
 
 
     /* =====================================================
-       LOG
+       LOGGING
     ===================================================== */
 
     if (
+      isIssued &&
+      httpsEnabled
+    ) {
+
+      logger.success(
+        `🔐 HTTPS ACTIVE: https://${domain}`
+      );
+
+    }
+
+    else if (
       isIssued
     ) {
 
       logger.success(
-        `🔐 SSL Certificate ISSUED: ${domain}`
+        `🔐 ACM Certificate ISSUED: ${domain}`
+      );
+
+
+      logger.warning(
+        "Certificate is issued but HTTPS listener is not verified as active."
       );
 
     }
@@ -1529,7 +2643,7 @@ async function sslAgent(
     ) {
 
       logger.info(
-        `🔐 SSL Certificate Pending Validation: ${domain}`
+        `🔐 ACM Certificate Pending Validation: ${domain}`
       );
 
     }
@@ -1553,9 +2667,16 @@ async function sslAgent(
         !isFailed,
 
       message:
-        isIssued
-          ? "SSL certificate is issued by AWS ACM"
-          : "SSL certificate request is not yet active",
+        isIssued &&
+        httpsEnabled
+
+          ? "SSL certificate is issued and HTTPS listener is active."
+
+          : isIssued
+
+            ? "SSL certificate is issued, but HTTPS listener is not active."
+
+            : "SSL certificate is not yet active.",
 
       ...sslData
 
@@ -1587,7 +2708,11 @@ async function sslAgent(
         errorMessage,
 
       stage:
-        currentStage
+        currentStage,
+
+      durationMs:
+        Date.now() -
+        startedAt
 
     };
 
