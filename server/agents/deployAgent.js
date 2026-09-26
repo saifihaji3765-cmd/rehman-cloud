@@ -3,87 +3,41 @@
    ---------------------------------------------------------
    Production Deployment Orchestrator
 
-   RESPONSIBILITY:
+   FLOW
 
-   Deployment Request
-          ↓
-   Deployment Validation
-          ↓
-   Billing / Entitlement Gate
-          ↓
-   Docker Build
-          ↓
-   AWS Deployment
-          ↓
-   Domain Configuration
-          ↓
+   MASTER
+      ↓
+   BILLING / SUBSCRIPTION GATE
+      ↓
+   DOCKER
+      ↓
+   AWS
+      ↓
+   DOMAIN
+      ↓
    SSL
-          ↓
-   Monitoring
-          ↓
-   Scaling
-          ↓
-   Final Deployment Verification
-          ↓
-   Canonical Deployment Result
+      ↓
+   MONITORING
+      ↓
+   SCALING
+      ↓
+   FINAL VERIFICATION
+      ↓
+   DEPLOYMENT RESULT
 
+   OWNERSHIP
+   ---------------------------------------------------------
+   Deploy Agent owns deployment orchestration.
 
-   IMPORTANT OWNERSHIP:
-
-   Master Agent
-        ↓
-   owns workflow orchestration
-
-   Deploy Agent
-        ↓
-   owns deployment orchestration
-
-   Deploy Agent coordinates:
-
-      Docker
-      AWS
-      Domain
-      SSL
-      Monitoring
-      Scaling
-
-
-   Deploy Agent does NOT:
-
-      - generate source code
-      - directly call AI providers
-      - invent deployment URLs
-      - invent payment success
-      - invent subscription entitlements
-      - automatically charge users merely because
-        deployment was requested
-      - report unhealthy deployments as healthy
-
-
-   BILLING / SUBSCRIPTION:
-
-   Billing and Subscription are financial/business
-   control planes.
-
-   Deployment may consume their authoritative
-   results, but should not blindly create a second
-   payment/subscription operation.
-
-
-   IDEMPOTENCY:
-
-   deploymentId can be supplied by the caller.
-
-   If absent, one is generated.
-
-   workflowId/requestId may be used to correlate
-   deployment attempts.
-
-
-   FINAL SOURCE OF TRUTH:
-
-   This agent only reports facts returned by
-   downstream agents.
+   It does NOT:
+   - generate application code
+   - call AI providers
+   - process payments
+   - invent payment success
+   - invent subscription entitlements
+   - invent URLs
+   - report unverified health as healthy
+   - fabricate infrastructure metrics
 
 ========================================================= */
 
@@ -93,7 +47,7 @@
 ========================================================= */
 
 const {
-  v4: uuidv4
+  v4: uuidv4,
 } = require("uuid");
 
 
@@ -138,6 +92,9 @@ const logger =
    CONSTANTS
 ========================================================= */
 
+const DEPLOYMENT_VERSION =
+  "3.0.0";
+
 const MAX_PROJECT_NAME_LENGTH =
   200;
 
@@ -147,134 +104,93 @@ const MAX_PROMPT_LENGTH =
 const MAX_FILES =
   1000;
 
-const DEPLOYMENT_VERSION =
-  "2.0.0";
-
 
 /* =========================================================
-   SAFE STRING
+   STRING HELPERS
 ========================================================= */
 
 function cleanString(
   value,
   maxLength = 4000
 ) {
-
   if (
     typeof value !==
     "string"
   ) {
-
     return "";
-
   }
 
-
   return value
-    .replace(
-      /\u0000/g,
-      ""
-    )
+    .replace(/\u0000/g, "")
     .trim()
-    .slice(
-      0,
-      maxLength
-    );
-
+    .slice(0, maxLength);
 }
 
 
 /* =========================================================
-   SAFE OBJECT
+   OBJECT HELPERS
 ========================================================= */
 
 function safeObject(
   value
 ) {
-
   if (
     !value ||
     typeof value !==
       "object" ||
-    Array.isArray(
-      value
-    )
+    Array.isArray(value)
   ) {
-
     return {};
-
   }
 
-
   return value;
-
 }
 
 
 /* =========================================================
-   SUCCESS CHECK
+   SUCCESS
 ========================================================= */
 
 function isSuccessful(
   result
 ) {
-
   return Boolean(
-
     result &&
     result.success === true
-
   );
-
 }
 
 
 /* =========================================================
-   ERROR MESSAGE
+   ERROR
 ========================================================= */
 
 function getErrorMessage(
   result,
-  fallback
+  fallback = "Unknown deployment error"
 ) {
-
   return (
-
     result?.error ||
-
     result?.message ||
-
-    fallback ||
-
-    "Unknown deployment error"
-
+    fallback
   );
-
 }
 
 
 /* =========================================================
-   USER ID
+   USER
 ========================================================= */
 
 function getUserId(
   data
 ) {
-
   return (
-
     data?.userId ||
-
     data?.user?.id ||
-
     data?.user?._id ||
-
     data?.user?.userId ||
-
     null
-
   );
-
 }
 
 
@@ -285,727 +201,470 @@ function getUserId(
 function createDeploymentId(
   projectData
 ) {
-
   return (
-
     cleanString(
       projectData.deploymentId,
       300
     ) ||
-
     cleanString(
       projectData.requestId,
       300
     ) ||
-
     cleanString(
       projectData.workflowId,
       300
     ) ||
-
     uuidv4()
-
   );
-
 }
 
 
 /* =========================================================
-   PLAN NORMALIZATION
+   PLAN
 ========================================================= */
 
 function normalizePlan(
   projectData
 ) {
-
   const plan =
-
     projectData.plan ||
-
     projectData.subscriptionPlan ||
-
-    projectData.subscription
-      ?.plan ||
-
+    projectData.subscription?.activePlan ||
+    projectData.subscription?.plan ||
     "Starter";
 
-
-  return cleanString(
-    plan,
-    100
-  ) || "Starter";
-
+  return (
+    cleanString(
+      plan,
+      100
+    ) ||
+    "Starter"
+  );
 }
 
 
 /* =========================================================
-   FRAMEWORK NORMALIZATION
+   FRAMEWORK
 ========================================================= */
 
 function normalizeFramework(
   projectData
 ) {
-
   return (
-
     cleanString(
       projectData.framework,
       200
     ) ||
-
     cleanString(
-      projectData.planning
-        ?.framework,
+      projectData.planning?.framework,
       200
     ) ||
-
     cleanString(
-      projectData.plan
-        ?.framework,
+      projectData.planData?.framework,
       200
     ) ||
-
     "node"
-
   );
-
 }
 
 
 /* =========================================================
-   FILE VALIDATION
+   FILES
 ========================================================= */
 
 function normalizeFiles(
   files
 ) {
-
   if (
-    !Array.isArray(
-      files
-    )
+    !Array.isArray(files)
   ) {
-
     return [];
-
   }
-
 
   return files
     .filter(
-      (
-        file
-      ) =>
+      (file) =>
         file &&
-        typeof file ===
-          "object"
+        typeof file === "object"
     )
     .slice(
       0,
       MAX_FILES
     );
-
 }
 
 
 /* =========================================================
-   REQUIRED INPUT VALIDATION
+   INPUT VALIDATION
 ========================================================= */
 
 function validateProjectData(
   projectData
 ) {
-
   if (
     !projectData ||
     typeof projectData !==
-      "object"
+      "object" ||
+    Array.isArray(projectData)
   ) {
-
     return {
-
-      valid:
-        false,
-
+      valid: false,
       error:
-        "Deployment project data is required."
-
+        "Deployment project data is required.",
     };
-
   }
-
 
   const projectName =
     cleanString(
       projectData.projectName ||
-      projectData.name,
+        projectData.name,
       MAX_PROJECT_NAME_LENGTH
     );
 
-
-  if (
-    !projectName
-  ) {
-
+  if (!projectName) {
     return {
-
-      valid:
-        false,
-
+      valid: false,
       error:
-        "Project name required."
-
+        "Project name required.",
     };
-
   }
 
-
-  const files =
-    normalizeFiles(
-      projectData.files
-    );
-
-
-  /*
-   * Existing-project deployment may sometimes
-   * be performed without files.
-   *
-   * Therefore files are not automatically required.
-   */
-
   return {
-
-    valid:
-      true,
-
+    valid: true,
     projectName,
-
-    files
-
+    files:
+      normalizeFiles(
+        projectData.files
+      ),
   };
-
 }
 
 
 /* =========================================================
-   ENTITLEMENT EXTRACTION
+   RESULT EXTRACTION
 ========================================================= */
 
 function extractSubscription(
   result
 ) {
-
-  if (
-    !result
-  ) {
-
+  if (!result) {
     return null;
-
   }
 
-
   return (
-
     result.subscription ||
-
     result.data?.subscription ||
-
     result.data ||
-
     null
-
   );
-
 }
 
-
-/* =========================================================
-   BILLING EXTRACTION
-========================================================= */
 
 function extractBilling(
   result
 ) {
-
-  if (
-    !result
-  ) {
-
+  if (!result) {
     return null;
-
   }
 
-
   return (
-
     result.billing ||
-
     result.data?.billing ||
-
     result.data ||
-
     null
-
   );
-
 }
 
 
 /* =========================================================
-   ENTITLEMENT CHECK
+   SUBSCRIPTION RESOURCE NORMALIZATION
    ---------------------------------------------------------
-   This does NOT process a payment.
-
-   It only determines whether an authoritative
-   subscription result contains deployment access.
+   Supports the new Subscription Agent contract.
 ========================================================= */
 
-function validateDeploymentEntitlement(
-  subscriptionResult
+function getSubscriptionInfrastructure(
+  subscription
 ) {
+  const infrastructure =
+    safeObject(
+      subscription?.infrastructure
+    );
+
+  return {
+    cpu:
+      infrastructure.cpu ??
+      subscription?.cpu ??
+      null,
+
+    ram:
+      infrastructure.ram ??
+      subscription?.ram ??
+      null,
+
+    storage:
+      infrastructure.storage ??
+      subscription?.storage ??
+      null,
+
+    bandwidth:
+      infrastructure.bandwidth ??
+      subscription?.bandwidth ??
+      null,
+  };
+}
+
+
+/* =========================================================
+   DEPLOYMENT LIMIT
+========================================================= */
+
+function getDeploymentUsage(
+  subscription
+) {
+  return Number(
+    subscription?.usage
+      ?.deploymentsUsed ??
+      subscription?.deploymentsUsed ??
+      0
+  );
+}
+
+
+function getDeploymentLimit(
+  subscription
+) {
+  const limit =
+    subscription?.limits
+      ?.deployments ??
+    subscription?.deploymentsLimit;
 
   if (
-    !isSuccessful(
-      subscriptionResult
-    )
+    limit === -1
   ) {
-
-    return {
-
-      valid:
-        false,
-
-      reason:
-        getErrorMessage(
-          subscriptionResult,
-          "Subscription validation failed."
-        )
-
-    };
-
+    return -1;
   }
 
+  const number =
+    Number(limit);
+
+  return Number.isFinite(number)
+    ? number
+    : 0;
+}
+
+
+/* =========================================================
+   SUBSCRIPTION ENTITLEMENT
+========================================================= */
+
+function validateSubscriptionEntitlement(
+  result
+) {
+  if (
+    !isSuccessful(result)
+  ) {
+    return {
+      valid: false,
+      reason:
+        getErrorMessage(
+          result,
+          "Subscription validation failed."
+        ),
+    };
+  }
 
   const subscription =
     extractSubscription(
-      subscriptionResult
+      result
     );
 
-
-  if (
-    !subscription
-  ) {
-
+  if (!subscription) {
     return {
-
-      valid:
-        false,
-
+      valid: false,
       reason:
-        "Subscription result did not contain subscription data."
-
+        "Subscription result did not contain subscription data.",
     };
-
   }
 
+  if (
+    subscription.status !==
+    "active"
+  ) {
+    return {
+      valid: false,
+      reason:
+        `Subscription is not active: ${
+          subscription.status ||
+          "unknown"
+        }`,
+    };
+  }
 
-  /*
-   * Explicit deployment permission fields.
-   */
+  if (
+    subscription.paymentConfirmed !==
+      true &&
+    subscription.paymentStatus !==
+      "paid"
+  ) {
+    return {
+      valid: false,
+      reason:
+        "Subscription payment has not been confirmed.",
+    };
+  }
 
   if (
     subscription.canDeploy ===
     false
   ) {
-
     return {
-
-      valid:
-        false,
-
+      valid: false,
       reason:
-        "Current subscription does not allow deployment."
-
+        "Current subscription does not allow deployment.",
     };
-
   }
-
 
   if (
     subscription.deploymentAccess ===
     false
   ) {
-
     return {
-
-      valid:
-        false,
-
+      valid: false,
       reason:
-        "Deployment access is disabled for this subscription."
-
+        "Deployment access is disabled.",
     };
-
   }
 
-
-  /*
-   * Deployment limits.
-
-   * Support multiple possible field names so the
-   * agent remains compatible with different
-   * subscription implementations.
-   */
-
-  const deploymentsUsed =
-    Number(
-      subscription.deploymentsUsed
+  const used =
+    getDeploymentUsage(
+      subscription
     );
 
-
-  const deploymentsLimit =
-    Number(
-      subscription.deploymentsLimit
+  const limit =
+    getDeploymentLimit(
+      subscription
     );
-
 
   if (
-    Number.isFinite(
-      deploymentsLimit
-    ) &&
-    deploymentsLimit >= 0
+    limit !== -1 &&
+    used >= limit
   ) {
-
-    if (
-      Number.isFinite(
-        deploymentsUsed
-      ) &&
-      deploymentsUsed >=
-        deploymentsLimit
-    ) {
-
-      return {
-
-        valid:
-          false,
-
-        reason:
-          "Deployment limit reached."
-
-      };
-
-    }
-
+    return {
+      valid: false,
+      reason:
+        "Deployment limit reached.",
+      code:
+        "DEPLOYMENT_LIMIT_REACHED",
+    };
   }
 
-
   return {
-
-    valid:
-      true,
-
-    subscription
-
+    valid: true,
+    subscription,
+    deploymentUsage: {
+      used,
+      limit,
+      remaining:
+        limit === -1
+          ? -1
+          : Math.max(
+              0,
+              limit - used
+            ),
+    },
   };
-
 }
 
 
 /* =========================================================
    BILLING VALIDATION
    ---------------------------------------------------------
-   Billing success is accepted only when explicitly
-   supplied by the billing control plane.
+   Billing is only a payment-state gate here.
 
-   This function NEVER treats missing billing data
-   as successful payment.
+   Deploy Agent NEVER charges.
 ========================================================= */
 
 function validateBillingResult(
-  billingResult,
+  result,
   projectData
 ) {
-
   /*
-   * Existing deployment flows may intentionally
-   * not require a payment operation.
-
-   * In that case caller can explicitly set:
+   * Explicit free/trial/internal workflow.
    *
-   * paymentRequired: false
+   * This must be intentionally supplied by
+   * the trusted orchestration layer.
    */
 
   if (
     projectData.paymentRequired ===
     false
   ) {
-
     return {
-
-      valid:
-        true,
-
-      bypassed:
-        true,
-
+      valid: true,
+      bypassed: true,
       reason:
-        "Payment not required for this deployment workflow."
-
+        "Payment was explicitly marked as not required.",
     };
-
   }
 
-
-  if (
-    !billingResult
-  ) {
-
+  if (!result) {
     return {
-
-      valid:
-        false,
-
+      valid: false,
       reason:
-        "No authoritative billing result was supplied."
-
+        "No authoritative billing result supplied.",
     };
-
   }
 
-
   if (
-    !isSuccessful(
-      billingResult
-    )
+    !isSuccessful(result)
   ) {
-
     return {
-
-      valid:
-        false,
-
+      valid: false,
       reason:
         getErrorMessage(
-          billingResult,
+          result,
           "Billing validation failed."
-        )
-
+        ),
     };
-
   }
-
 
   const billing =
     extractBilling(
-      billingResult
+      result
     );
 
-
   /*
-   * Do not infer payment from an empty object.
-
-   * Some billing agents return success for a
-   * non-payment informational operation. That is
-   * not automatically payment confirmation.
+   * If billing says payment is required,
+   * deployment must have authoritative confirmation.
    */
 
+  const paymentRequired =
+    billing?.paymentRequired ??
+    projectData.paymentRequired ??
+    true;
+
   if (
-    projectData.paymentRequired ===
-    true
+    paymentRequired !== false
   ) {
-
     const confirmed =
-      billing?.paymentConfirmed ===
-        true ||
+      billing?.paymentConfirmed === true ||
+      projectData.paymentConfirmed === true ||
+      billing?.paymentStatus === "paid" ||
+      billing?.status === "paid";
 
-      billing?.paid ===
-        true ||
-
-      billing?.status ===
-        "paid" ||
-
-      billing?.status ===
-        "active";
-
-
-    if (
-      !confirmed
-    ) {
-
+    if (!confirmed) {
       return {
-
-        valid:
-          false,
-
+        valid: false,
         reason:
-          "Billing agent did not provide authoritative payment confirmation."
-
+          "Payment has not been authoritatively confirmed.",
       };
-
     }
-
   }
-
 
   return {
-
-    valid:
-      true,
-
-    billing
-
+    valid: true,
+    billing,
   };
-
-}
-
-
-/* =========================================================
-   SUBSCRIPTION RESOLUTION
-   ---------------------------------------------------------
-   Priority:
-
-   1. subscriptionResult supplied by Master
-   2. subscription supplied directly
-   3. read/validation call to Subscription Agent
-
-   The agent should not silently create a new
-   subscription just because deployment was requested.
-========================================================= */
-
-async function resolveSubscription(
-  projectData,
-  deploymentId
-) {
-
-  if (
-    projectData.subscriptionResult
-  ) {
-
-    return {
-
-      result:
-        projectData.subscriptionResult,
-
-      source:
-        "master"
-
-    };
-
-  }
-
-
-  if (
-    projectData.subscription
-  ) {
-
-    return {
-
-      result: {
-
-        success:
-          true,
-
-        subscription:
-          projectData.subscription
-
-      },
-
-      source:
-        "request"
-
-    };
-
-  }
-
-
-  /*
-   * Ask Subscription Agent for the current
-   * deployment entitlement.
-
-   * This is a validation/read operation.
-   */
-
-  try {
-
-    const result =
-      await subscriptionAgent({
-
-        operation:
-          "validate-deployment",
-
-        action:
-          "validate-deployment",
-
-        userId:
-          getUserId(
-            projectData
-          ),
-
-        projectId:
-          projectData.projectId ||
-          null,
-
-        plan:
-          normalizePlan(
-            projectData
-          ),
-
-        paymentId:
-          projectData.paymentId ||
-          null,
-
-        providerCustomerId:
-          projectData.providerCustomerId ||
-          null,
-
-        providerSubscriptionId:
-          projectData.providerSubscriptionId ||
-          null,
-
-        deploymentId,
-
-        workflowId:
-          projectData.workflowId ||
-          null
-
-      });
-
-
-    return {
-
-      result,
-
-      source:
-        "subscriptionAgent"
-
-    };
-
-  }
-
-  catch (
-    error
-  ) {
-
-    return {
-
-      result: {
-
-        success:
-          false,
-
-        error:
-          error?.message ||
-          "Subscription validation failed."
-
-      },
-
-      source:
-        "subscriptionAgent"
-
-    };
-
-  }
-
 }
 
 
@@ -1017,106 +676,71 @@ async function resolveBilling(
   projectData,
   deploymentId
 ) {
-
   /*
-   * Master-provided authoritative result wins.
+   * Master result has highest priority.
    */
 
   if (
     projectData.billingResult
   ) {
-
     return {
-
       result:
         projectData.billingResult,
-
       source:
-        "master"
-
+        "master",
     };
-
   }
 
-
   /*
-   * Direct billing result supplied by request.
+   * Existing billing state.
    */
 
   if (
     projectData.billing
   ) {
-
     return {
-
       result: {
-
-        success:
-          true,
-
+        success: true,
         billing:
-          projectData.billing
-
+          projectData.billing,
       },
-
       source:
-        "request"
-
+        "request",
     };
-
   }
 
-
   /*
-   * If payment is explicitly not required,
-   * do not call the billing agent.
+   * Explicitly payment-free workflow.
    */
 
   if (
     projectData.paymentRequired ===
     false
   ) {
-
     return {
-
       result: {
-
-        success:
-          true,
-
+        success: true,
         billing: {
-
           paymentRequired:
-            false
-
-        }
-
+            false,
+          paymentConfirmed:
+            true,
+        },
       },
-
       source:
-        "not-required"
-
+        "not-required",
     };
-
   }
 
-
   /*
-   * Billing validation.
-
-   * IMPORTANT:
-   * This should validate billing state rather than
-   * blindly create a second payment.
+   * Validate existing payment state.
    *
-   * The Billing Agent must honor the operation
-   * field.
+   * Do NOT create a new subscription/payment.
    */
 
   try {
-
     const result =
       await billingAgent({
-
         operation:
           "validate-deployment",
 
@@ -1157,556 +781,425 @@ async function resolveBilling(
           projectData.providerSubscriptionId ||
           null,
 
+        paymentConfirmed:
+          projectData.paymentConfirmed ===
+          true,
+
         deploymentId,
 
         workflowId:
           projectData.workflowId ||
-          null
-
+          null,
       });
 
-
     return {
-
       result,
-
       source:
-        "billingAgent"
-
+        "billingAgent",
     };
-
-  }
-
-  catch (
-    error
-  ) {
-
+  } catch (error) {
     return {
-
       result: {
-
-        success:
-          false,
-
+        success: false,
         error:
           error?.message ||
-          "Billing validation failed."
-
+          "Billing validation failed.",
       },
-
       source:
-        "billingAgent"
-
+        "billingAgent",
     };
-
   }
-
 }
 
 
 /* =========================================================
-   DOCKER RESULT VALIDATION
+   SUBSCRIPTION RESOLUTION
+========================================================= */
+
+async function resolveSubscription(
+  projectData,
+  deploymentId
+) {
+  /*
+   * Master-provided result.
+   */
+
+  if (
+    projectData.subscriptionResult
+  ) {
+    return {
+      result:
+        projectData.subscriptionResult,
+      source:
+        "master",
+    };
+  }
+
+  /*
+   * Direct subscription.
+   */
+
+  if (
+    projectData.subscription
+  ) {
+    return {
+      result: {
+        success: true,
+        subscription:
+          projectData.subscription,
+      },
+      source:
+        "request",
+    };
+  }
+
+  /*
+   * Read/validation operation only.
+   */
+
+  try {
+    const result =
+      await subscriptionAgent({
+        operation:
+          "validate-deployment",
+
+        action:
+          "validate-deployment",
+
+        userId:
+          getUserId(
+            projectData
+          ),
+
+        projectId:
+          projectData.projectId ||
+          null,
+
+        plan:
+          normalizePlan(
+            projectData
+          ),
+
+        paymentId:
+          projectData.paymentId ||
+          null,
+
+        providerCustomerId:
+          projectData.providerCustomerId ||
+          null,
+
+        providerSubscriptionId:
+          projectData.providerSubscriptionId ||
+          null,
+
+        paymentConfirmed:
+          projectData.paymentConfirmed ===
+          true,
+
+        deploymentId,
+
+        workflowId:
+          projectData.workflowId ||
+          null,
+      });
+
+    return {
+      result,
+      source:
+        "subscriptionAgent",
+    };
+  } catch (error) {
+    return {
+      result: {
+        success: false,
+        error:
+          error?.message ||
+          "Subscription validation failed.",
+      },
+      source:
+        "subscriptionAgent",
+    };
+  }
+}
+
+
+/* =========================================================
+   DOCKER VALIDATION
 ========================================================= */
 
 function validateDockerResult(
-  docker
+  result
 ) {
-
   if (
-    !isSuccessful(
-      docker
-    )
+    !isSuccessful(result)
   ) {
-
     return {
-
-      valid:
-        false,
-
+      valid: false,
       reason:
         getErrorMessage(
-          docker,
+          result,
           "Docker build failed."
-        )
-
+        ),
     };
-
   }
 
-
-  /*
-   * Docker result may expose different structures.
-   */
-
-  const dockerData =
-    docker.docker ||
-    docker.data?.docker ||
-    docker.data ||
+  const docker =
+    result.docker ||
+    result.data?.docker ||
+    result.data ||
     null;
 
-
-  if (
-    !dockerData
-  ) {
-
+  if (!docker) {
     return {
-
-      valid:
-        false,
-
+      valid: false,
       reason:
-        "Docker Agent succeeded but returned no Docker artifact."
-
+        "Docker Agent succeeded but returned no Docker artifact.",
     };
-
   }
 
-
   return {
-
-    valid:
-      true,
-
-    docker:
-      dockerData
-
+    valid: true,
+    docker,
   };
-
 }
 
 
 /* =========================================================
-   AWS RESULT VALIDATION
+   AWS VALIDATION
 ========================================================= */
 
 function validateAwsResult(
-  aws
+  result
 ) {
-
   if (
-    !isSuccessful(
-      aws
-    )
+    !isSuccessful(result)
   ) {
-
     return {
-
-      valid:
-        false,
-
+      valid: false,
       reason:
         getErrorMessage(
-          aws,
+          result,
           "AWS deployment failed."
-        )
-
+        ),
     };
-
   }
 
-
-  const awsData =
-    aws.aws ||
-    aws.data?.aws ||
-    aws.data ||
+  const aws =
+    result.aws ||
+    result.data?.aws ||
+    result.data ||
     null;
 
-
-  if (
-    !awsData
-  ) {
-
+  if (!aws) {
     return {
-
-      valid:
-        false,
-
+      valid: false,
       reason:
-        "AWS Agent succeeded but returned no deployment information."
-
+        "AWS Agent succeeded but returned no deployment information.",
     };
-
   }
 
-
   return {
-
-    valid:
-      true,
-
-    aws:
-      awsData
-
+    valid: true,
+    aws,
   };
-
 }
 
 
 /* =========================================================
-   DOMAIN RESULT VALIDATION
+   DOMAIN VALIDATION
 ========================================================= */
 
 function validateDomainResult(
-  domain
+  result
 ) {
-
   if (
-    !isSuccessful(
-      domain
-    )
+    !isSuccessful(result)
   ) {
-
     return {
-
-      valid:
-        false,
-
+      valid: false,
       reason:
         getErrorMessage(
-          domain,
+          result,
           "Domain configuration failed."
-        )
-
+        ),
     };
-
   }
 
-
-  const domainData =
-    domain.domain ||
-    domain.data?.domain ||
-    domain.data ||
+  const domain =
+    result.domain ||
+    result.data?.domain ||
+    result.data ||
     null;
 
-
-  if (
-    !domainData
-  ) {
-
+  if (!domain) {
     return {
-
-      valid:
-        false,
-
+      valid: false,
       reason:
-        "Domain Agent succeeded but returned no domain information."
-
+        "Domain Agent succeeded but returned no domain information.",
     };
-
   }
 
-
   return {
-
-    valid:
-      true,
-
-    domain:
-      domainData
-
+    valid: true,
+    domain,
   };
-
 }
 
 
 /* =========================================================
-   SSL RESULT VALIDATION
+   SSL VALIDATION
 ========================================================= */
 
 function validateSslResult(
-  ssl
+  result
 ) {
-
   if (
-    !isSuccessful(
-      ssl
-    )
+    !isSuccessful(result)
   ) {
-
     return {
-
-      valid:
-        false,
-
+      valid: false,
       reason:
         getErrorMessage(
-          ssl,
+          result,
           "SSL activation failed."
-        )
-
+        ),
     };
-
   }
 
-
-  const sslData =
-    ssl.ssl ||
-    ssl.data?.ssl ||
-    ssl.data ||
+  const ssl =
+    result.ssl ||
+    result.data?.ssl ||
+    result.data ||
     null;
 
-
-  if (
-    !sslData
-  ) {
-
+  if (!ssl) {
     return {
-
-      valid:
-        false,
-
+      valid: false,
       reason:
-        "SSL Agent succeeded but returned no SSL information."
-
+        "SSL Agent succeeded but returned no SSL information.",
     };
-
   }
-
 
   return {
-
-    valid:
-      true,
-
-    ssl:
-      sslData
-
+    valid: true,
+    ssl,
   };
-
 }
 
 
 /* =========================================================
-   LIVE URL RESOLUTION
-========================================================= */
-
-function resolveLiveUrl(
-  sslData,
-  domainData,
-  awsData
-) {
-
-  /*
-   * Preferred:
-
-   * SSL secured URL
-   */
-
-  const sslUrl =
-
-    sslData?.securedUrl ||
-
-    sslData?.httpsUrl ||
-
-    sslData?.liveUrl;
-
-
-  if (
-    typeof sslUrl ===
-      "string" &&
-    sslUrl.trim()
-  ) {
-
-    return sslUrl.trim();
-
-  }
-
-
-  /*
-   * Canonical/custom domain
-   */
-
-  const domainUrl =
-
-    domainData?.fullDomain ||
-
-    domainData?.httpsUrl ||
-
-    domainData?.url;
-
-
-  if (
-    typeof domainUrl ===
-      "string" &&
-    domainUrl.trim()
-  ) {
-
-    return domainUrl.trim();
-
-  }
-
-
-  /*
-   * Provider URL.
-
-   * This is a fallback only.
-   */
-
-  const providerUrl =
-
-    awsData?.publicUrl ||
-
-    awsData?.serviceUrl ||
-
-    awsData?.loadBalancerUrl ||
-
-    awsData?.url;
-
-
-  if (
-    typeof providerUrl ===
-      "string" &&
-    providerUrl.trim()
-  ) {
-
-    return providerUrl.trim();
-
-  }
-
-
-  return null;
-
-}
-
-
-/* =========================================================
-   HEALTH RESOLUTION
+   MONITORING
 ========================================================= */
 
 function resolveHealth(
-  monitoring
+  result
 ) {
-
   if (
-    !monitoring ||
-    monitoring.success !==
-      true
+    !isSuccessful(result)
   ) {
-
     return {
-
       status:
         "unknown",
-
       verified:
-        false
-
+        false,
     };
-
   }
-
 
   const data =
-    monitoring.monitoring ||
-    monitoring.data?.monitoring ||
-    monitoring.data ||
+    result.monitoring ||
+    result.data?.monitoring ||
+    result.data ||
     {};
 
-
-  const health =
+  const raw =
     data.health ||
-    data.status ||
     data.healthStatus ||
+    data.status ||
     null;
 
-
   if (
-    typeof health ===
-      "string"
+    typeof raw !==
+    "string"
   ) {
-
-    const normalized =
-      health
-        .trim()
-        .toLowerCase();
-
-
-    if (
-      [
-        "healthy",
-        "ok",
-        "running",
-        "operational"
-      ].includes(
-        normalized
-      )
-    ) {
-
-      return {
-
-        status:
-          "healthy",
-
-        verified:
-          true
-
-      };
-
-    }
-
-
-    if (
-      [
-        "unhealthy",
-        "failed",
-        "down",
-        "error"
-      ].includes(
-        normalized
-      )
-    ) {
-
-      return {
-
-        status:
-          "unhealthy",
-
-        verified:
-          true
-
-      };
-
-    }
-
+    return {
+      status:
+        "unknown",
+      verified:
+        false,
+    };
   }
 
+  const health =
+    raw
+      .trim()
+      .toLowerCase();
+
+  if (
+    [
+      "healthy",
+      "ok",
+      "running",
+      "operational",
+    ].includes(
+      health
+    )
+  ) {
+    return {
+      status:
+        "healthy",
+      verified:
+        true,
+    };
+  }
+
+  if (
+    [
+      "unhealthy",
+      "failed",
+      "down",
+      "error",
+    ].includes(
+      health
+    )
+  ) {
+    return {
+      status:
+        "unhealthy",
+      verified:
+        true,
+    };
+  }
 
   return {
-
     status:
       "unknown",
-
     verified:
-      false
-
+      false,
   };
-
 }
 
 
 /* =========================================================
-   RUN MONITORING SAFELY
+   MONITORING EXECUTION
 ========================================================= */
 
 async function runMonitoring(
   projectData,
-  deploymentId
+  deploymentId,
+  aws
 ) {
-
   try {
-
     return await monitoringAgent({
-
       deploymentId,
 
       projectId:
         projectData.projectId ||
         null,
 
-      appName:
+      projectName:
         projectData.projectName,
 
-      projectName:
+      appName:
         projectData.projectName,
 
       userId:
@@ -1717,55 +1210,35 @@ async function runMonitoring(
       user:
         projectData.user,
 
+      aws,
+
       workflowId:
         projectData.workflowId ||
-        null
-
+        null,
     });
-
-  }
-
-  catch (
-    error
-  ) {
-
+  } catch (error) {
     return {
-
-      success:
-        false,
-
+      success: false,
       error:
         error?.message ||
-        "Monitoring failed."
-
+        "Monitoring failed.",
     };
-
   }
-
 }
 
 
 /* =========================================================
-   RUN SCALING SAFELY
-   ---------------------------------------------------------
-   IMPORTANT:
-
-   No fake CPU/RAM/user metrics.
-
-   Scaling Agent should use actual infrastructure
-   metrics or configure policy from subscription.
+   SCALING
 ========================================================= */
 
 async function runScaling(
   projectData,
   deploymentId,
-  subscription
+  subscription,
+  aws
 ) {
-
   try {
-
     return await scalingAgent({
-
       deploymentId,
 
       projectId:
@@ -1792,40 +1265,77 @@ async function runScaling(
 
       subscription,
 
-      autoScaling:
-        subscription?.autoScaling ===
-        true,
+      aws,
 
-      /*
-       * Explicitly tell Scaling Agent to
-       * obtain real metrics rather than using
-       * fabricated numbers.
-       */
+      autoScaling:
+        subscription?.featureFlags
+          ?.autoScaling === true ||
+        subscription?.autoScaling === true,
 
       metricsSource:
-        "infrastructure"
-
+        "infrastructure",
     });
-
-  }
-
-  catch (
-    error
-  ) {
-
+  } catch (error) {
     return {
-
-      success:
-        false,
-
+      success: false,
       error:
         error?.message ||
-        "Scaling failed."
-
+        "Scaling failed.",
     };
+  }
+}
 
+
+/* =========================================================
+   LIVE URL
+========================================================= */
+
+function resolveLiveUrl(
+  ssl,
+  domain,
+  aws
+) {
+  const sslUrl =
+    ssl?.securedUrl ||
+    ssl?.httpsUrl ||
+    ssl?.liveUrl;
+
+  if (
+    typeof sslUrl ===
+      "string" &&
+    sslUrl.trim()
+  ) {
+    return sslUrl.trim();
   }
 
+  const domainUrl =
+    domain?.fullDomain ||
+    domain?.httpsUrl ||
+    domain?.url;
+
+  if (
+    typeof domainUrl ===
+      "string" &&
+    domainUrl.trim()
+  ) {
+    return domainUrl.trim();
+  }
+
+  const providerUrl =
+    aws?.publicUrl ||
+    aws?.serviceUrl ||
+    aws?.loadBalancerUrl ||
+    aws?.url;
+
+  if (
+    typeof providerUrl ===
+      "string" &&
+    providerUrl.trim()
+  ) {
+    return providerUrl.trim();
+  }
+
+  return null;
 }
 
 
@@ -1837,9 +1347,7 @@ function createDeploymentState(
   deploymentId,
   projectData
 ) {
-
   return {
-
     deploymentId,
 
     workflowId:
@@ -1857,7 +1365,6 @@ function createDeploymentState(
       "initializing",
 
     stages: {
-
       billing:
         "pending",
 
@@ -1880,43 +1387,36 @@ function createDeploymentState(
         "pending",
 
       scaling:
-        "pending"
-
+        "pending",
     },
 
     startedAt:
-      new Date()
-
+      new Date(),
   };
-
 }
 
 
 /* =========================================================
-   DEPLOY AGENT
+   MAIN DEPLOY AGENT
 ========================================================= */
 
 async function deployAgent(
   projectData = {}
 ) {
-
   const startedAt =
     Date.now();
-
 
   let state =
     null;
 
-
   try {
-
     logger.info(
-      "🚀 ZyrionOS Deployment Agent Started"
+      "ZYRIONOS Deploy Agent Started"
     );
 
 
     /* =====================================================
-       INPUT VALIDATION
+       VALIDATION
     ===================================================== */
 
     const validation =
@@ -1924,20 +1424,11 @@ async function deployAgent(
         projectData
       );
 
-
     if (
       !validation.valid
     ) {
-
-      logger.error(
-        `Deployment Validation Failed: ${validation.error}`
-      );
-
-
       return {
-
-        success:
-          false,
+        success: false,
 
         message:
           "Deployment validation failed",
@@ -1946,38 +1437,31 @@ async function deployAgent(
           validation.error,
 
         stage:
-          "validation"
-
+          "validation",
       };
-
     }
 
 
     const projectName =
       validation.projectName;
 
-
     const files =
       validation.files;
-
 
     const framework =
       normalizeFramework(
         projectData
       );
 
-
-    const selectedPlan =
+    const plan =
       normalizePlan(
         projectData
       );
-
 
     const userId =
       getUserId(
         projectData
       );
-
 
     const deploymentId =
       createDeploymentId(
@@ -1989,22 +1473,17 @@ async function deployAgent(
       createDeploymentState(
         deploymentId,
         {
-
           ...projectData,
-
-          projectName
-
+          projectName,
         }
-
       );
 
 
     /* =====================================================
-       DEPLOYMENT CONTEXT
+       CONTEXT
     ===================================================== */
 
     const deploymentContext = {
-
       deploymentId,
 
       workflowId:
@@ -2021,8 +1500,7 @@ async function deployAgent(
 
       framework,
 
-      plan:
-        selectedPlan,
+      plan,
 
       paymentId:
         projectData.paymentId ||
@@ -2042,29 +1520,12 @@ async function deployAgent(
 
       providerSubscriptionId:
         projectData.providerSubscriptionId ||
-        null
-
+        null,
     };
-
-
-    logger.info(
-
-      `Deployment Context Created` +
-      ` | deploymentId=${deploymentId}` +
-      ` | project=${projectName}` +
-      ` | plan=${selectedPlan}`
-
-    );
 
 
     /* =====================================================
        BILLING GATE
-       -----------------------------------------------------
-       Do not automatically charge merely because
-       deployAgent was invoked.
-
-       If Master already validated billing,
-       reuse that result.
     ===================================================== */
 
     state.stages.billing =
@@ -2088,18 +1549,14 @@ async function deployAgent(
     if (
       !billingValidation.valid
     ) {
-
       state.status =
         "blocked";
 
       state.stages.billing =
         "failed";
 
-
       return {
-
-        success:
-          false,
+        success: false,
 
         message:
           "Deployment blocked by billing validation",
@@ -2110,35 +1567,22 @@ async function deployAgent(
         stage:
           "billing",
 
-        deployment:
-          {
-
-            deploymentId,
-
-            projectName,
-
-            status:
-              "blocked"
-
-          },
+        deployment: {
+          deploymentId,
+          projectName,
+          status:
+            "blocked",
+        },
 
         billing:
           billingResolution.result ||
-
-          null
-
+          null,
       };
-
     }
 
 
     state.stages.billing =
       "validated";
-
-
-    logger.success(
-      "Deployment Billing Gate Passed"
-    );
 
 
     /* =====================================================
@@ -2157,7 +1601,7 @@ async function deployAgent(
 
 
     const subscriptionValidation =
-      validateDeploymentEntitlement(
+      validateSubscriptionEntitlement(
         subscriptionResolution.result
       );
 
@@ -2165,18 +1609,14 @@ async function deployAgent(
     if (
       !subscriptionValidation.valid
     ) {
-
       state.status =
         "blocked";
 
       state.stages.subscription =
         "failed";
 
-
       return {
-
-        success:
-          false,
+        success: false,
 
         message:
           "Deployment blocked by subscription entitlement",
@@ -2188,23 +1628,16 @@ async function deployAgent(
           "subscription",
 
         deployment: {
-
           deploymentId,
-
           projectName,
-
           status:
-            "blocked"
-
+            "blocked",
         },
 
         subscription:
           subscriptionResolution.result ||
-
-          null
-
+          null,
       };
-
     }
 
 
@@ -2216,13 +1649,14 @@ async function deployAgent(
       subscriptionValidation.subscription;
 
 
-    logger.success(
-      "Deployment Subscription Gate Passed"
-    );
+    const infrastructure =
+      getSubscriptionInfrastructure(
+        subscription
+      );
 
 
     /* =====================================================
-       DOCKER BUILD
+       DOCKER
     ===================================================== */
 
     state.stages.docker =
@@ -2231,12 +1665,9 @@ async function deployAgent(
 
     let docker;
 
-
     try {
-
       docker =
         await dockerAgent({
-
           ...deploymentContext,
 
           projectName,
@@ -2258,27 +1689,19 @@ async function deployAgent(
 
           workflow:
             projectData.workflow ||
-            null
+            null,
 
+          subscription,
+
+          infrastructure,
         });
-
-    }
-
-    catch (
-      error
-    ) {
-
+    } catch (error) {
       docker = {
-
-        success:
-          false,
-
+        success: false,
         error:
           error?.message ||
-          "Docker Agent failed."
-
+          "Docker Agent failed.",
       };
-
     }
 
 
@@ -2291,18 +1714,14 @@ async function deployAgent(
     if (
       !dockerValidation.valid
     ) {
-
       state.status =
         "failed";
 
       state.stages.docker =
         "failed";
 
-
       return {
-
-        success:
-          false,
+        success: false,
 
         message:
           "Docker build failed",
@@ -2314,26 +1733,14 @@ async function deployAgent(
           "docker",
 
         deployment: {
-
           deploymentId,
-
           projectName,
-
           status:
-            "failed"
-
+            "failed",
         },
 
-        billing:
-          billingResolution.result,
-
-        subscription:
-          subscriptionResolution.result,
-
-        docker
-
+        docker,
       };
-
     }
 
 
@@ -2341,13 +1748,8 @@ async function deployAgent(
       "completed";
 
 
-    logger.success(
-      "Docker Build Completed"
-    );
-
-
     /* =====================================================
-       AWS DEPLOYMENT
+       AWS
     ===================================================== */
 
     state.stages.aws =
@@ -2356,12 +1758,9 @@ async function deployAgent(
 
     let aws;
 
-
     try {
-
       aws =
         await awsAgent({
-
           ...deploymentContext,
 
           projectName,
@@ -2373,47 +1772,32 @@ async function deployAgent(
 
           subscription,
 
-          /*
-           * Infrastructure limits are passed from
-           * the authoritative subscription result.
-           */
+          infrastructure,
 
           cpu:
-            subscription?.cpu,
+            infrastructure.cpu,
 
           ram:
-            subscription?.ram,
+            infrastructure.ram,
 
           storage:
-            subscription?.storage,
+            infrastructure.storage,
 
           bandwidth:
-            subscription?.bandwidth,
+            infrastructure.bandwidth,
 
           region:
             projectData.region ||
             process.env.AWS_REGION ||
-            null
-
+            null,
         });
-
-    }
-
-    catch (
-      error
-    ) {
-
+    } catch (error) {
       aws = {
-
-        success:
-          false,
-
+        success: false,
         error:
           error?.message ||
-          "AWS Agent failed."
-
+          "AWS Agent failed.",
       };
-
     }
 
 
@@ -2426,18 +1810,14 @@ async function deployAgent(
     if (
       !awsValidation.valid
     ) {
-
       state.status =
         "failed";
 
       state.stages.aws =
         "failed";
 
-
       return {
-
-        success:
-          false,
+        success: false,
 
         message:
           "AWS deployment failed",
@@ -2449,22 +1829,15 @@ async function deployAgent(
           "aws",
 
         deployment: {
-
           deploymentId,
-
           projectName,
-
           status:
-            "failed"
-
+            "failed",
         },
 
         docker,
-
-        aws
-
+        aws,
       };
-
     }
 
 
@@ -2472,16 +1845,8 @@ async function deployAgent(
       "completed";
 
 
-    logger.success(
-      "AWS Deployment Completed"
-    );
-
-
     /* =====================================================
        DOMAIN
-       -----------------------------------------------------
-       Pass the AWS deployment target so the domain
-       layer knows what the domain should point to.
     ===================================================== */
 
     state.stages.domain =
@@ -2490,12 +1855,9 @@ async function deployAgent(
 
     let domain;
 
-
     try {
-
       domain =
         await domainAgent({
-
           ...deploymentContext,
 
           projectName,
@@ -2506,39 +1868,23 @@ async function deployAgent(
             awsValidation.aws,
 
           publicUrl:
-            awsValidation
-              .aws
+            awsValidation.aws
               ?.publicUrl ||
-
-            awsValidation
-              .aws
+            awsValidation.aws
               ?.serviceUrl ||
-
-            awsValidation
-              .aws
+            awsValidation.aws
               ?.loadBalancerUrl ||
+            null,
 
-            null
-
+          subscription,
         });
-
-    }
-
-    catch (
-      error
-    ) {
-
+    } catch (error) {
       domain = {
-
-        success:
-          false,
-
+        success: false,
         error:
           error?.message ||
-          "Domain Agent failed."
-
+          "Domain Agent failed.",
       };
-
     }
 
 
@@ -2551,18 +1897,14 @@ async function deployAgent(
     if (
       !domainValidation.valid
     ) {
-
       state.status =
         "failed";
 
       state.stages.domain =
         "failed";
 
-
       return {
-
-        success:
-          false,
+        success: false,
 
         message:
           "Domain configuration failed",
@@ -2574,40 +1916,26 @@ async function deployAgent(
           "domain",
 
         deployment: {
-
           deploymentId,
-
           projectName,
-
           status:
             "failed",
 
           providerUrl:
-            awsValidation
-              .aws
+            awsValidation.aws
               ?.publicUrl ||
-            null
-
+            null,
         },
 
         docker,
-
         aws,
-
-        domain
-
+        domain,
       };
-
     }
 
 
     state.stages.domain =
       "completed";
-
-
-    logger.success(
-      "Domain Configuration Completed"
-    );
 
 
     /* =====================================================
@@ -2620,12 +1948,9 @@ async function deployAgent(
 
     let ssl;
 
-
     try {
-
       ssl =
         await sslAgent({
-
           ...deploymentContext,
 
           projectName,
@@ -2636,27 +1961,17 @@ async function deployAgent(
             domainValidation.domain,
 
           aws:
-            awsValidation.aws
+            awsValidation.aws,
 
+          subscription,
         });
-
-    }
-
-    catch (
-      error
-    ) {
-
+    } catch (error) {
       ssl = {
-
-        success:
-          false,
-
+        success: false,
         error:
           error?.message ||
-          "SSL Agent failed."
-
+          "SSL Agent failed.",
       };
-
     }
 
 
@@ -2669,21 +1984,24 @@ async function deployAgent(
     if (
       !sslValidation.valid
     ) {
-
       state.status =
-        "failed";
+        "deployed_without_verified_ssl";
 
       state.stages.ssl =
         "failed";
 
 
-      return {
+      /*
+       * Infrastructure may already exist.
+       * Do NOT falsely call entire deployment
+       * destroyed.
+       */
 
-        success:
-          false,
+      return {
+        success: false,
 
         message:
-          "SSL activation failed",
+          "Infrastructure deployed but SSL activation failed",
 
         error:
           sslValidation.reason,
@@ -2692,7 +2010,6 @@ async function deployAgent(
           "ssl",
 
         deployment: {
-
           deploymentId,
 
           projectName,
@@ -2701,26 +2018,19 @@ async function deployAgent(
             "deployed_without_verified_ssl",
 
           providerUrl:
-            awsValidation
-              .aws
+            awsValidation.aws
               ?.publicUrl ||
             null,
 
           domain:
-            domainValidation.domain
-
+            domainValidation.domain,
         },
 
         docker,
-
         aws,
-
         domain,
-
-        ssl
-
+        ssl,
       };
-
     }
 
 
@@ -2728,15 +2038,8 @@ async function deployAgent(
       "completed";
 
 
-    logger.success(
-      "SSL Activation Completed"
-    );
-
-
     /* =====================================================
        MONITORING
-       -----------------------------------------------------
-       Monitoring is verification, not decoration.
     ===================================================== */
 
     state.stages.monitoring =
@@ -2746,15 +2049,13 @@ async function deployAgent(
     const monitoring =
       await runMonitoring(
         {
-
           ...projectData,
-
-          projectName
-
+          projectName,
         },
 
-        deploymentId
+        deploymentId,
 
+        awsValidation.aws
       );
 
 
@@ -2769,71 +2070,56 @@ async function deployAgent(
         monitoring
       )
     ) {
-
       state.stages.monitoring =
         "completed";
-
-      logger.success(
-        "Monitoring Verification Completed"
-      );
-
-    }
-
-    else {
-
-      /*
-       * Monitoring failure does NOT mean the
-       * deployment itself failed.
-
-       * It means health could not be verified.
-       */
-
+    } else {
       state.stages.monitoring =
         "unverified";
 
-
       logger.warning(
-        `Monitoring verification unavailable: ${getErrorMessage(
+        `Deployment health could not be verified: ${getErrorMessage(
           monitoring,
           "Unknown monitoring error"
         )}`
       );
-
     }
 
 
     /* =====================================================
-       AUTO SCALING
+       SCALING
     ===================================================== */
 
     let scaling =
       null;
 
 
-    if (
-      subscription?.autoScaling ===
-      true
-    ) {
+    const autoScalingEnabled =
+      subscription
+        ?.featureFlags
+        ?.autoScaling === true ||
+      subscription
+        ?.autoScaling === true;
 
+
+    if (
+      autoScalingEnabled
+    ) {
       state.stages.scaling =
         "running";
 
 
       scaling =
         await runScaling(
-
           {
-
             ...projectData,
-
-            projectName
-
+            projectName,
           },
 
           deploymentId,
 
-          subscription
+          subscription,
 
+          awsValidation.aws
         );
 
 
@@ -2842,39 +2128,22 @@ async function deployAgent(
           scaling
         )
       ) {
-
         state.stages.scaling =
           "completed";
-
-
-        logger.success(
-          "Auto Scaling Configuration Completed"
-        );
-
-      }
-
-      else {
-
+      } else {
         state.stages.scaling =
           "unverified";
 
-
         logger.warning(
-          `Auto Scaling configuration unavailable: ${getErrorMessage(
+          `Auto scaling could not be verified: ${getErrorMessage(
             scaling,
             "Unknown scaling error"
           )}`
         );
-
       }
-
-    }
-
-    else {
-
+    } else {
       state.stages.scaling =
         "not-enabled";
-
     }
 
 
@@ -2884,79 +2153,44 @@ async function deployAgent(
 
     const liveUrl =
       resolveLiveUrl(
-
         sslValidation.ssl,
-
         domainValidation.domain,
-
         awsValidation.aws
-
       );
 
 
     /* =====================================================
-       FINAL DEPLOYMENT VALIDATION
+       FINAL STATUS
     ===================================================== */
 
-    if (
-      !liveUrl
-    ) {
-
+    if (!liveUrl) {
       state.status =
         "deployed_without_url";
-
-      logger.warning(
-        "Deployment completed but no authoritative live URL was returned."
-      );
-
-    }
-
-    else {
-
+    } else if (
+      health.verified &&
+      health.status ===
+        "healthy"
+    ) {
       state.status =
-        health.verified
-          ? (
-              health.status ===
-              "healthy"
-                ? "deployed"
-                : "deployed_unhealthy"
-            )
-          : "deployed_health_unverified";
-
+        "deployed";
+    } else if (
+      health.verified &&
+      health.status ===
+        "unhealthy"
+    ) {
+      state.status =
+        "deployed_unhealthy";
+    } else {
+      state.status =
+        "deployed_health_unverified";
     }
 
 
     /* =====================================================
-       INFRASTRUCTURE LIMITS
-    ===================================================== */
-
-    const infrastructure = {
-
-      cpu:
-        subscription?.cpu ??
-        null,
-
-      ram:
-        subscription?.ram ??
-        null,
-
-      storage:
-        subscription?.storage ??
-        null,
-
-      bandwidth:
-        subscription?.bandwidth ??
-        null
-
-    };
-
-
-    /* =====================================================
-       FINAL RESULT
+       FINAL DEPLOYMENT OBJECT
     ===================================================== */
 
     const deployment = {
-
       deploymentId,
 
       workflowId:
@@ -2966,6 +2200,12 @@ async function deployAgent(
       projectId:
         projectData.projectId ||
         null,
+
+      projectName,
+
+      framework,
+
+      plan,
 
       status:
         state.status,
@@ -2979,32 +2219,24 @@ async function deployAgent(
       provider:
         "AWS",
 
-      projectName,
-
-      framework,
-
       liveUrl,
 
       providerUrl:
-
-        awsValidation
-          .aws
+        awsValidation.aws
           ?.publicUrl ||
-
-        awsValidation
-          .aws
+        awsValidation.aws
           ?.serviceUrl ||
-
-        awsValidation
-          .aws
+        awsValidation.aws
           ?.loadBalancerUrl ||
-
         null,
 
       infrastructure,
 
-      services: {
+      deploymentUsage:
+        subscriptionValidation
+          .deploymentUsage,
 
+      services: {
         docker:
           dockerValidation.docker,
 
@@ -3019,18 +2251,13 @@ async function deployAgent(
 
         monitoring:
           monitoring?.monitoring ||
-
           monitoring?.data ||
-
           null,
 
         scaling:
           scaling?.scaling ||
-
           scaling?.data ||
-
-          null
-
+          null,
       },
 
       billing:
@@ -3044,7 +2271,6 @@ async function deployAgent(
         state.stages,
 
       metadata: {
-
         environment:
           process.env.NODE_ENV ||
           "production",
@@ -3060,50 +2286,32 @@ async function deployAgent(
         deploymentAgent:
           "zyrionos-deploy-agent",
 
-        deploymentDurationMs:
+        durationMs:
           Date.now() -
-          startedAt
-
+          startedAt,
       },
 
       deployedAt:
-        new Date()
-
+        new Date(),
     };
 
 
     /* =====================================================
-       FINAL LOGGING
+       SUCCESS
     ===================================================== */
 
     logger.success(
-
-      `🚀 Deployment Completed` +
-
-      ` | Project=${projectName}` +
-
-      ` | Deployment=${deploymentId}` +
-
-      ` | Status=${state.status}` +
-
-      ` | URL=${liveUrl || "unavailable"}`
-
+      `Deployment Completed | project=${projectName} | deploymentId=${deploymentId} | status=${state.status}`
     );
 
 
-    /* =====================================================
-       FINAL RESPONSE
-    ===================================================== */
-
     return {
-
-      success:
-        true,
+      success: true,
 
       message:
         liveUrl
           ? "Deployment completed."
-          : "Deployment completed but live URL could not be verified.",
+          : "Deployment completed but no authoritative live URL was returned.",
 
       deployment,
 
@@ -3126,9 +2334,11 @@ async function deployAgent(
       scaling,
 
       metadata: {
-
         agent:
           "deployAgent",
+
+        version:
+          DEPLOYMENT_VERSION,
 
         deploymentId,
 
@@ -3138,18 +2348,11 @@ async function deployAgent(
 
         durationMs:
           Date.now() -
-          startedAt
-
-      }
-
+          startedAt,
+      },
     };
 
-  }
-
-  catch (
-    error
-  ) {
-
+  } catch (error) {
     const message =
       error?.message ||
       "Unknown deployment error";
@@ -3160,20 +2363,14 @@ async function deployAgent(
     );
 
 
-    if (
-      state
-    ) {
-
+    if (state) {
       state.status =
         "failed";
-
     }
 
 
     return {
-
-      success:
-        false,
+      success: false,
 
       message:
         "Deployment failed",
@@ -3186,10 +2383,8 @@ async function deployAgent(
         null,
 
       deployment:
-
         state
           ? {
-
               deploymentId:
                 state.deploymentId,
 
@@ -3197,27 +2392,23 @@ async function deployAgent(
                 state.projectName,
 
               status:
-                "failed"
-
+                "failed",
             }
-
           : null,
 
       metadata: {
-
         agent:
           "deployAgent",
 
+        version:
+          DEPLOYMENT_VERSION,
+
         durationMs:
           Date.now() -
-          startedAt
-
-      }
-
+          startedAt,
+      },
     };
-
   }
-
 }
 
 
@@ -3226,46 +2417,30 @@ async function deployAgent(
 ========================================================= */
 
 deployAgent.version =
-DEPLOYMENT_VERSION;
+  DEPLOYMENT_VERSION;
 
 
 deployAgent.owns = [
-
-  "docker",
-
-  "aws",
-
-  "domain",
-
-  "ssl",
-
-  "monitoring",
-
-  "scaling",
-
-  "deployment_url"
-
+  "deployment",
+  "docker-orchestration",
+  "aws-orchestration",
+  "domain-orchestration",
+  "ssl-orchestration",
+  "deployment-health-verification",
+  "deployment-url-resolution",
+  "deployment-lifecycle",
 ];
 
 
 deployAgent.dependencies = [
-
   "dockerAgent",
-
   "awsAgent",
-
   "domainAgent",
-
   "sslAgent",
-
   "billingAgent",
-
   "subscriptionAgent",
-
   "monitoringAgent",
-
-  "scalingAgent"
-
+  "scalingAgent",
 ];
 
 
@@ -3274,4 +2449,4 @@ deployAgent.dependencies = [
 ========================================================= */
 
 module.exports =
-deployAgent;
+  deployAgent;
