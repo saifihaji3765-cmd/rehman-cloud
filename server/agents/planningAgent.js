@@ -1,25 +1,40 @@
 /* =========================================================
    ZYRIONOS PLANNING AGENT
-   Intent → Planning → Builder Contract
+   ---------------------------------------------------------
+   ROLE:
+   Intent → Implementation Blueprint → Builder Contract
 
-   AI PROVIDER ARCHITECTURE:
+   RESPONSIBILITY:
+   - Convert the user's request into an implementation plan
+   - Decompose large projects into manageable modules
+   - Define implementation phases
+   - Identify technical dependencies
+   - Define frontend/backend/data/auth/deployment needs
+   - Define acceptance criteria
+   - Define validation strategy
+   - Provide Builder with a deterministic blueprint
 
-   Planning Agent
-        ↓
-   Central AI Provider Service
-        ↓
-   Gemini ONLY
-        ↓
-   Gemini 3.8 Flash
-        ↓ transient failure
-   Gemini 3.7 Flash
-        ↓ transient failure
-   Gemini 3.6 Flash
+   DOES NOT:
+   - Generate source code
+   - Generate final file contents
+   - Execute tools
+   - Deploy infrastructure
+   - Create credentials
+   - Claim deployment success
+   - Directly select an AI provider
 
-   OpenAI:
-   - NOT USED
-   - NOT CALLED
-   - TEMPORARILY DISABLED
+   PROVIDER ARCHITECTURE:
+
+       Planning Agent
+             ↓
+       aiProviderService
+             ↓
+       Central provider routing
+             ↓
+       Active configured providers
+
+   The Planning Agent MUST NOT hardcode
+   Gemini, OpenAI, Sarvam, Bedrock, etc.
 ========================================================= */
 
 
@@ -59,6 +74,85 @@ const VALID_INTENTS = [
 
 
 /* =========================================================
+   VALID COMPLEXITIES
+========================================================= */
+
+const VALID_COMPLEXITIES = [
+
+  "low",
+  "medium",
+  "high"
+
+];
+
+
+/* =========================================================
+   VALID PROJECT SCALES
+========================================================= */
+
+const VALID_PROJECT_SCALES = [
+
+  "none",
+  "task",
+  "feature",
+  "application",
+  "large_project",
+  "system"
+
+];
+
+
+/* =========================================================
+   LIMITS
+   ---------------------------------------------------------
+   These limits prevent a planning response from becoming
+   an uncontrolled giant object.
+========================================================= */
+
+const MAX_PROMPT_LENGTH =
+  12000;
+
+const MAX_MEMORY_LENGTH =
+  4000;
+
+const MAX_USER_CONTEXT_LENGTH =
+  1500;
+
+const MAX_PROJECT_NAME_LENGTH =
+  200;
+
+const MAX_DESCRIPTION_LENGTH =
+  6000;
+
+const MAX_FRAMEWORK_LENGTH =
+  200;
+
+const MAX_ARRAY_ITEMS =
+  300;
+
+const MAX_SHORT_ARRAY_ITEMS =
+  100;
+
+const MAX_STRING_ITEM_LENGTH =
+  1000;
+
+const MAX_MODULES =
+  100;
+
+const MAX_PHASES =
+  100;
+
+const MAX_DEPENDENCIES =
+  300;
+
+const MAX_ACCEPTANCE_CRITERIA =
+  200;
+
+const MAX_RISKS =
+  100;
+
+
+/* =========================================================
    SAFE STRING
 ========================================================= */
 
@@ -76,8 +170,12 @@ function cleanString(
   }
 
   return value
+    .replace(/\u0000/g, "")
     .trim()
-    .slice(0, maxLength);
+    .slice(
+      0,
+      maxLength
+    );
 
 }
 
@@ -115,11 +213,13 @@ function safeJson(
 
 
 /* =========================================================
-   NORMALIZE ARRAY
+   NORMALIZE STRING ARRAY
 ========================================================= */
 
-function normalizeArray(
-  value
+function normalizeStringArray(
+  value,
+  maxItems = MAX_ARRAY_ITEMS,
+  maxItemLength = MAX_STRING_ITEM_LENGTH
 ) {
 
   if (
@@ -130,35 +230,68 @@ function normalizeArray(
 
   }
 
-  return value
 
-    .filter(
-      (item) =>
-        item !== null &&
-        item !== undefined
-    )
+  const result = [];
 
-    .map(
-      (item) => {
 
-        if (
-          typeof item === "string"
-        ) {
+  for (
+    const item of value
+  ) {
 
-          return item
-            .trim()
-            .slice(0, 1000);
+    if (
+      typeof item === "string"
+    ) {
 
-        }
+      const normalized =
+        cleanString(
+          item,
+          maxItemLength
+        );
 
-        return item;
+
+      if (
+        normalized
+      ) {
+
+        result.push(
+          normalized
+        );
 
       }
-    )
 
-    .filter(
-      Boolean
-    );
+    }
+
+    else if (
+      item &&
+      typeof item === "object" &&
+      !Array.isArray(item)
+    ) {
+
+      /*
+       * Preserve structured planning objects.
+       * These are normalized separately where needed.
+       */
+
+      result.push(
+        item
+      );
+
+    }
+
+
+    if (
+      result.length >=
+      maxItems
+    ) {
+
+      break;
+
+    }
+
+  }
+
+
+  return result;
 
 }
 
@@ -187,6 +320,104 @@ function normalizeObject(
 
 
 /* =========================================================
+   NORMALIZE SIMPLE OBJECT LIST
+========================================================= */
+
+function normalizeObjectList(
+  value,
+  maxItems,
+  normalizer
+) {
+
+  if (
+    !Array.isArray(value)
+  ) {
+
+    return [];
+
+  }
+
+
+  const result = [];
+
+
+  for (
+    const item of value
+  ) {
+
+    if (
+      !item ||
+      typeof item !== "object" ||
+      Array.isArray(item)
+    ) {
+
+      continue;
+
+    }
+
+
+    const normalized =
+      normalizer(
+        item
+      );
+
+
+    if (
+      normalized
+    ) {
+
+      result.push(
+        normalized
+      );
+
+    }
+
+
+    if (
+      result.length >=
+      maxItems
+    ) {
+
+      break;
+
+    }
+
+  }
+
+
+  return result;
+
+}
+
+
+/* =========================================================
+   NORMALIZE UNIQUE STRING
+========================================================= */
+
+function uniqueStrings(
+  values,
+  maxItems = MAX_ARRAY_ITEMS
+) {
+
+  const normalized =
+    normalizeStringArray(
+      values,
+      maxItems
+    );
+
+
+  return [
+
+    ...new Set(
+      normalized
+    )
+
+  ];
+
+}
+
+
+/* =========================================================
    DEFAULT PLAN
 ========================================================= */
 
@@ -195,16 +426,33 @@ function createDefaultPlan(
   intent
 ) {
 
+  const intentType =
+    intent?.type ||
+    "build";
+
+
   return {
+
+    planVersion:
+      2,
 
     projectName:
       "ZyrionOS Project",
 
     description:
-      prompt,
+      cleanString(
+        prompt,
+        MAX_DESCRIPTION_LENGTH
+      ),
 
     framework:
       "",
+
+    projectScale:
+      "application",
+
+    complexity:
+      "medium",
 
     frontend: {
 
@@ -271,9 +519,517 @@ function createDefaultPlan(
     performance:
       [],
 
+    modules:
+      [],
+
+    dependencies:
+      [],
+
+    implementationPhases:
+      [],
+
+    acceptanceCriteria:
+      [],
+
+    environmentRequirements:
+      [],
+
+    validationStrategy:
+      [],
+
+    risks:
+      [],
+
+    buildStrategy: {
+
+      mode:
+        "dependency-aware",
+
+      batchSize:
+        3,
+
+      generateByDependency:
+        true,
+
+      validateAfterEachBatch:
+        true,
+
+      runFinalValidation:
+        true
+
+    },
+
+    explicitNonGoals:
+      [],
+
+    assumptions:
+      [],
+
     intent:
-      intent?.type ||
-      "build"
+      intentType
+
+  };
+
+}
+
+
+/* =========================================================
+   NORMALIZE MODULE
+========================================================= */
+
+function normalizeModule(
+  module
+) {
+
+  const value =
+    normalizeObject(
+      module
+    );
+
+
+  const id =
+    cleanString(
+      value.id,
+      100
+    );
+
+
+  const name =
+    cleanString(
+      value.name,
+      200
+    );
+
+
+  if (
+    !id &&
+    !name
+  ) {
+
+    return null;
+
+  }
+
+
+  return {
+
+    id:
+      id ||
+      name
+        .toLowerCase()
+        .replace(
+          /[^a-z0-9]+/g,
+          "-"
+        )
+        .replace(
+          /^-+|-+$/g,
+          ""
+        )
+        .slice(
+          0,
+          100
+        ),
+
+    name:
+      name ||
+      id,
+
+    purpose:
+      cleanString(
+        value.purpose,
+        1200
+      ),
+
+    type:
+      cleanString(
+        value.type,
+        100
+      ),
+
+    responsibilities:
+      uniqueStrings(
+        value.responsibilities,
+        30
+      ),
+
+    files:
+      uniqueStrings(
+        value.files,
+        100
+      ),
+
+    dependencies:
+      uniqueStrings(
+        value.dependencies,
+        50
+      ),
+
+    exports:
+      uniqueStrings(
+        value.exports,
+        100
+      ),
+
+    inputs:
+      uniqueStrings(
+        value.inputs,
+        50
+      ),
+
+    outputs:
+      uniqueStrings(
+        value.outputs,
+        50
+      )
+
+  };
+
+}
+
+
+/* =========================================================
+   NORMALIZE DEPENDENCY
+========================================================= */
+
+function normalizeDependency(
+  dependency
+) {
+
+  const value =
+    normalizeObject(
+      dependency
+    );
+
+
+  const from =
+    cleanString(
+      value.from,
+      200
+    );
+
+
+  const to =
+    cleanString(
+      value.to,
+      200
+    );
+
+
+  if (
+    !from ||
+    !to
+  ) {
+
+    return null;
+
+  }
+
+
+  return {
+
+    from,
+
+    to,
+
+    type:
+      cleanString(
+        value.type,
+        100
+      ) ||
+      "runtime",
+
+    reason:
+      cleanString(
+        value.reason,
+        1000
+      )
+
+  };
+
+}
+
+
+/* =========================================================
+   NORMALIZE IMPLEMENTATION PHASE
+========================================================= */
+
+function normalizeImplementationPhase(
+  phase,
+  index
+) {
+
+  const value =
+    normalizeObject(
+      phase
+    );
+
+
+  const id =
+    cleanString(
+      value.id,
+      100
+    ) ||
+    `phase-${index + 1}`;
+
+
+  const name =
+    cleanString(
+      value.name,
+      200
+    );
+
+
+  if (
+    !name
+  ) {
+
+    return null;
+
+  }
+
+
+  return {
+
+    id,
+
+    name,
+
+    purpose:
+      cleanString(
+        value.purpose,
+        1200
+      ),
+
+    order:
+      Number.isFinite(
+        Number(
+          value.order
+        )
+      )
+        ? Number(
+            value.order
+          )
+        : index + 1,
+
+    modules:
+      uniqueStrings(
+        value.modules,
+        50
+      ),
+
+    dependencies:
+      uniqueStrings(
+        value.dependencies,
+        50
+      ),
+
+    prerequisites:
+      uniqueStrings(
+        value.prerequisites,
+        50
+      ),
+
+    validation:
+      uniqueStrings(
+        value.validation,
+        50
+      )
+
+  };
+
+}
+
+
+/* =========================================================
+   NORMALIZE ACCEPTANCE CRITERION
+========================================================= */
+
+function normalizeAcceptanceCriterion(
+  criterion,
+  index
+) {
+
+  const value =
+    normalizeObject(
+      criterion
+    );
+
+
+  if (
+    typeof criterion ===
+    "string"
+  ) {
+
+    const text =
+      cleanString(
+        criterion,
+        1200
+      );
+
+
+    if (
+      !text
+    ) {
+
+      return null;
+
+    }
+
+
+    return {
+
+      id:
+        `AC-${index + 1}`,
+
+      description:
+        text,
+
+      priority:
+        "required"
+
+    };
+
+  }
+
+
+  const description =
+    cleanString(
+      value.description,
+      1200
+    );
+
+
+  if (
+    !description
+  ) {
+
+    return null;
+
+  }
+
+
+  return {
+
+    id:
+      cleanString(
+        value.id,
+        100
+      ) ||
+      `AC-${index + 1}`,
+
+    description,
+
+    priority:
+      cleanString(
+        value.priority,
+        50
+      ) ||
+      "required",
+
+    verification:
+      cleanString(
+        value.verification,
+        1000
+      )
+
+  };
+
+}
+
+
+/* =========================================================
+   NORMALIZE RISK
+========================================================= */
+
+function normalizeRisk(
+  risk,
+  index
+) {
+
+  const value =
+    normalizeObject(
+      risk
+    );
+
+
+  if (
+    typeof risk ===
+    "string"
+  ) {
+
+    const description =
+      cleanString(
+        risk,
+        1200
+      );
+
+
+    if (
+      !description
+    ) {
+
+      return null;
+
+    }
+
+
+    return {
+
+      id:
+        `RISK-${index + 1}`,
+
+      description,
+
+      mitigation:
+        "",
+
+      severity:
+        "medium"
+
+    };
+
+  }
+
+
+  const description =
+    cleanString(
+      value.description,
+      1200
+    );
+
+
+  if (
+    !description
+  ) {
+
+    return null;
+
+  }
+
+
+  return {
+
+    id:
+      cleanString(
+        value.id,
+        100
+      ) ||
+      `RISK-${index + 1}`,
+
+    description,
+
+    mitigation:
+      cleanString(
+        value.mitigation,
+        1200
+      ),
+
+    severity:
+      cleanString(
+        value.severity,
+        50
+      ) ||
+      "medium"
 
   };
 
@@ -338,28 +1094,274 @@ function normalizePlan(
     );
 
 
+  const buildStrategy =
+    normalizeObject(
+      parsed.buildStrategy
+    );
+
+
   const projectName =
     cleanString(
       parsed.projectName,
-      200
+      MAX_PROJECT_NAME_LENGTH
     );
 
 
   const description =
     cleanString(
       parsed.description,
-      5000
+      MAX_DESCRIPTION_LENGTH
     );
 
 
   const framework =
     cleanString(
       parsed.framework,
-      200
+      MAX_FRAMEWORK_LENGTH
     );
 
 
+  let projectScale =
+    cleanString(
+      parsed.projectScale,
+      100
+    )
+      .toLowerCase();
+
+
+  if (
+    !VALID_PROJECT_SCALES.includes(
+      projectScale
+    )
+  ) {
+
+    projectScale =
+      fallback.projectScale;
+
+  }
+
+
+  let complexity =
+    cleanString(
+      parsed.complexity,
+      100
+    )
+      .toLowerCase();
+
+
+  if (
+    !VALID_COMPLEXITIES.includes(
+      complexity
+    )
+  ) {
+
+    complexity =
+      fallback.complexity;
+
+  }
+
+
+  /*
+   * Preserve the Intent Agent's decision.
+   *
+   * Planning may refine implementation details,
+   * but it must not turn a large request into
+   * a small one.
+   */
+
+  const intentScale =
+    cleanString(
+      intent?.projectScale,
+      100
+    )
+      .toLowerCase();
+
+
+  if (
+    intentScale ===
+    "large_project" ||
+    intentScale ===
+    "system"
+  ) {
+
+    projectScale =
+      intentScale;
+
+    complexity =
+      "high";
+
+  }
+
+
+  const modules =
+    normalizeObjectList(
+      parsed.modules,
+      MAX_MODULES,
+      normalizeModule
+    );
+
+
+  const dependencies =
+    normalizeObjectList(
+      parsed.dependencies,
+      MAX_DEPENDENCIES,
+      normalizeDependency
+    );
+
+
+  const implementationPhases =
+    normalizeObjectList(
+      parsed.implementationPhases,
+      MAX_PHASES,
+      (
+        item
+      ) =>
+        normalizeImplementationPhase(
+          item,
+          0
+        )
+    );
+
+
+  const acceptanceCriteria =
+    normalizeObjectList(
+      parsed.acceptanceCriteria,
+      MAX_ACCEPTANCE_CRITERIA,
+      (
+        item
+      ) =>
+        normalizeAcceptanceCriterion(
+          item,
+          0
+        )
+    );
+
+
+  /*
+   * Object-list normalization above does not
+   * support primitive strings for every section,
+   * so normalize acceptance strings separately.
+   */
+
+  const rawAcceptance =
+    Array.isArray(
+      parsed.acceptanceCriteria
+    )
+      ? parsed.acceptanceCriteria
+      : [];
+
+
+  const normalizedAcceptanceCriteria =
+    rawAcceptance
+      .map(
+        (
+          item,
+          index
+        ) =>
+          normalizeAcceptanceCriterion(
+            item,
+            index
+          )
+      )
+      .filter(Boolean)
+      .slice(
+        0,
+        MAX_ACCEPTANCE_CRITERIA
+      );
+
+
+  const rawRisks =
+    Array.isArray(
+      parsed.risks
+    )
+      ? parsed.risks
+      : [];
+
+
+  const risks =
+    rawRisks
+      .map(
+        (
+          item,
+          index
+        ) =>
+          normalizeRisk(
+            item,
+            index
+          )
+      )
+      .filter(Boolean)
+      .slice(
+        0,
+        MAX_RISKS
+      );
+
+
+  const normalizedPhases =
+    (
+      Array.isArray(
+        parsed.implementationPhases
+      )
+        ? parsed.implementationPhases
+        : []
+    )
+      .map(
+        (
+          item,
+          index
+        ) =>
+          normalizeImplementationPhase(
+            item,
+            index
+          )
+      )
+      .filter(Boolean)
+      .slice(
+        0,
+        MAX_PHASES
+      );
+
+
+  const normalizedModules =
+    modules;
+
+
+  const normalizedDependencies =
+    dependencies;
+
+
+  /*
+   * Build strategy.
+   */
+
+  const requestedBatchSize =
+    Number(
+      buildStrategy.batchSize
+    );
+
+
+  const batchSize =
+    Number.isFinite(
+      requestedBatchSize
+    )
+      ? Math.max(
+          1,
+          Math.min(
+            10,
+            Math.floor(
+              requestedBatchSize
+            )
+          )
+        )
+      : 3;
+
+
   return {
+
+    planVersion:
+      Number(
+        parsed.planVersion
+      ) || 2,
 
     projectName:
       projectName ||
@@ -373,20 +1375,25 @@ function normalizePlan(
       framework ||
       cleanString(
         frontend.framework,
-        200
+        MAX_FRAMEWORK_LENGTH
       ),
+
+    projectScale,
+
+    complexity,
 
     frontend: {
 
       framework:
         cleanString(
           frontend.framework,
-          200
+          MAX_FRAMEWORK_LENGTH
         ),
 
       pages:
-        normalizeArray(
-          frontend.pages
+        normalizeStringArray(
+          frontend.pages,
+          MAX_SHORT_ARRAY_ITEMS
         )
 
     },
@@ -396,12 +1403,13 @@ function normalizePlan(
       framework:
         cleanString(
           backend.framework,
-          200
+          MAX_FRAMEWORK_LENGTH
         ),
 
       routes:
-        normalizeArray(
-          backend.routes
+        normalizeStringArray(
+          backend.routes,
+          MAX_SHORT_ARRAY_ITEMS
         )
 
     },
@@ -411,12 +1419,13 @@ function normalizePlan(
       type:
         cleanString(
           database.type,
-          200
+          MAX_FRAMEWORK_LENGTH
         ),
 
       collections:
-        normalizeArray(
-          database.collections
+        normalizeStringArray(
+          database.collections,
+          MAX_SHORT_ARRAY_ITEMS
         )
 
     },
@@ -424,15 +1433,17 @@ function normalizePlan(
     authentication: {
 
       providers:
-        normalizeArray(
-          authentication.providers
+        normalizeStringArray(
+          authentication.providers,
+          MAX_SHORT_ARRAY_ITEMS
         )
 
     },
 
     aiSystems:
-      normalizeArray(
-        parsed.aiSystems
+      normalizeStringArray(
+        parsed.aiSystems,
+        MAX_SHORT_ARRAY_ITEMS
       ),
 
     deployment: {
@@ -440,44 +1451,121 @@ function normalizePlan(
       provider:
         cleanString(
           deployment.provider,
-          200
+          MAX_FRAMEWORK_LENGTH
         ),
 
       services:
-        normalizeArray(
-          deployment.services
+        normalizeStringArray(
+          deployment.services,
+          MAX_SHORT_ARRAY_ITEMS
         )
 
     },
 
+    /*
+     * BACKWARD-COMPATIBLE BUILDER CONTRACT
+     */
+
     projectStructure:
-      normalizeArray(
-        parsed.projectStructure
+      normalizeStringArray(
+        parsed.projectStructure,
+        MAX_ARRAY_ITEMS
       ),
 
     requirements:
-      normalizeArray(
-        parsed.requirements
+      normalizeStringArray(
+        parsed.requirements,
+        MAX_ARRAY_ITEMS
       ),
 
     security:
-      normalizeArray(
-        parsed.security
+      normalizeStringArray(
+        parsed.security,
+        MAX_SHORT_ARRAY_ITEMS
       ),
 
     scalability:
-      normalizeArray(
-        parsed.scalability
+      normalizeStringArray(
+        parsed.scalability,
+        MAX_SHORT_ARRAY_ITEMS
       ),
 
     performance:
-      normalizeArray(
-        parsed.performance
+      normalizeStringArray(
+        parsed.performance,
+        MAX_SHORT_ARRAY_ITEMS
       ),
+
+    /*
+     * NEW ENGINEERING PLAN
+     */
+
+    modules:
+      normalizedModules,
+
+    dependencies:
+      normalizedDependencies,
+
+    implementationPhases:
+      normalizedPhases,
+
+    acceptanceCriteria:
+      normalizedAcceptanceCriteria,
+
+    environmentRequirements:
+      normalizeStringArray(
+        parsed.environmentRequirements,
+        MAX_SHORT_ARRAY_ITEMS
+      ),
+
+    validationStrategy:
+      normalizeStringArray(
+        parsed.validationStrategy,
+        MAX_SHORT_ARRAY_ITEMS
+      ),
+
+    risks,
+
+    explicitNonGoals:
+      normalizeStringArray(
+        parsed.explicitNonGoals,
+        MAX_SHORT_ARRAY_ITEMS
+      ),
+
+    assumptions:
+      normalizeStringArray(
+        parsed.assumptions,
+        MAX_SHORT_ARRAY_ITEMS
+      ),
+
+    buildStrategy: {
+
+      mode:
+        cleanString(
+          buildStrategy.mode,
+          100
+        ) ||
+        "dependency-aware",
+
+      batchSize,
+
+      generateByDependency:
+        buildStrategy.generateByDependency !==
+        false,
+
+      validateAfterEachBatch:
+        buildStrategy.validateAfterEachBatch !==
+        false,
+
+      runFinalValidation:
+        buildStrategy.runFinalValidation !==
+        false
+
+    },
 
     intent:
       intent?.type ||
-      "build"
+      fallback.intent
 
   };
 
@@ -485,12 +1573,634 @@ function normalizePlan(
 
 
 /* =========================================================
-   PLANNING AGENT
+   PLAN QUALITY VALIDATION
+========================================================= */
+
+function validatePlan(
+  plan
+) {
+
+  const errors = [];
+
+
+  if (
+    !plan ||
+    typeof plan !== "object"
+  ) {
+
+    errors.push(
+      "Plan must be an object."
+    );
+
+    return errors;
+
+  }
+
+
+  if (
+    !plan.projectName
+  ) {
+
+    errors.push(
+      "projectName is required."
+    );
+
+  }
+
+
+  if (
+    !plan.description
+  ) {
+
+    errors.push(
+      "description is required."
+    );
+
+  }
+
+
+  if (
+    !VALID_INTENTS.includes(
+      plan.intent
+    )
+  ) {
+
+    errors.push(
+      `Invalid intent: ${plan.intent}`
+    );
+
+  }
+
+
+  if (
+    !VALID_COMPLEXITIES.includes(
+      plan.complexity
+    )
+  ) {
+
+    errors.push(
+      `Invalid complexity: ${plan.complexity}`
+    );
+
+  }
+
+
+  if (
+    !VALID_PROJECT_SCALES.includes(
+      plan.projectScale
+    )
+  ) {
+
+    errors.push(
+      `Invalid projectScale: ${plan.projectScale}`
+    );
+
+  }
+
+
+  if (
+    !Array.isArray(
+      plan.projectStructure
+    )
+  ) {
+
+    errors.push(
+      "projectStructure must be an array."
+    );
+
+  }
+
+
+  if (
+    !Array.isArray(
+      plan.requirements
+    )
+  ) {
+
+    errors.push(
+      "requirements must be an array."
+    );
+
+  }
+
+
+  if (
+    !Array.isArray(
+      plan.modules
+    )
+  ) {
+
+    errors.push(
+      "modules must be an array."
+    );
+
+  }
+
+
+  if (
+    !Array.isArray(
+      plan.dependencies
+    )
+  ) {
+
+    errors.push(
+      "dependencies must be an array."
+    );
+
+  }
+
+
+  /*
+   * Large project safety:
+   *
+   * A large project without modules is not
+   * considered a useful implementation plan.
+   */
+
+  if (
+    (
+      plan.projectScale ===
+      "large_project" ||
+      plan.projectScale ===
+      "system"
+    ) &&
+    plan.modules.length === 0
+  ) {
+
+    errors.push(
+      "Large project requires module decomposition."
+    );
+
+  }
+
+
+  if (
+    (
+      plan.projectScale ===
+      "large_project" ||
+      plan.projectScale ===
+      "system"
+    ) &&
+    plan.implementationPhases.length === 0
+  ) {
+
+    errors.push(
+      "Large project requires implementation phases."
+    );
+
+  }
+
+
+  return errors;
+
+}
+
+
+/* =========================================================
+   SYSTEM PROMPT
+========================================================= */
+
+const PLANNING_SYSTEM_PROMPT = `
+
+You are the Planning Agent of ZyrionOS,
+an autonomous production AI software system.
+
+Your job is to transform the CURRENT USER REQUEST
+into a structured implementation blueprint that
+downstream engineering agents can execute.
+
+You are NOT the Builder.
+
+You DO NOT write source code.
+
+You DO NOT generate final file contents.
+
+You DO NOT deploy anything.
+
+You DO NOT claim that anything succeeded.
+
+You DO NOT create credentials or secrets.
+
+You DO NOT invent resources that the user did not request.
+
+=========================================================
+CORE PRINCIPLE
+=========================================================
+
+The user's request is the source of truth.
+
+The plan must describe WHAT needs to be built
+and HOW the project should be decomposed.
+
+The Builder later decides exact source-code
+implementation using this plan and the approved
+project manifest.
+
+Do not turn Planning into code generation.
+
+=========================================================
+CURRENT INTENT
+=========================================================
+
+The current intent will be provided separately.
+
+Respect it.
+
+For BUILD:
+create an implementation blueprint.
+
+For FIX:
+identify affected modules, likely technical
+areas, dependencies and verification strategy.
+
+For DEPLOY:
+describe deployment requirements only.
+
+For MONITOR:
+describe monitoring requirements only.
+
+For SCALE:
+describe scalability architecture.
+
+For BILLING/SUBSCRIPTION:
+describe the required application/payment
+architecture without performing transactions.
+
+For AUTOMATION:
+describe triggers, workflows, workers and
+integrations.
+
+For INFRASTRUCTURE:
+describe infrastructure components and
+relationships.
+
+For FILE:
+describe the requested file operation.
+
+For THUMBNAIL:
+describe the generation pipeline.
+
+=========================================================
+LARGE PROJECT RULE
+=========================================================
+
+Never attempt to describe a large software system
+as one giant undivided task.
+
+Decompose large projects into:
+
+1. Modules
+2. Dependencies
+3. Implementation phases
+4. Acceptance criteria
+5. Validation strategy
+
+Example:
+
+Authentication
+    ↓
+User/Data Layer
+    ↓
+Core Services
+    ↓
+Feature Modules
+    ↓
+API Layer
+    ↓
+Frontend
+    ↓
+Integration
+    ↓
+Testing
+    ↓
+Deployment
+
+The exact decomposition must depend on the
+actual user request.
+
+=========================================================
+MODULE RULES
+=========================================================
+
+Each module should have:
+
+- id
+- name
+- purpose
+- type
+- responsibilities
+- files
+- dependencies
+- exports
+- inputs
+- outputs
+
+Do NOT invent unnecessary modules.
+
+Every module must have a reason to exist.
+
+=========================================================
+DEPENDENCY RULES
+=========================================================
+
+Dependencies must describe real relationships.
+
+Examples:
+
+frontend → api
+api → service
+service → database
+feature → authentication
+
+Do not create circular dependencies unless
+the user explicitly requires them and the
+architecture genuinely needs them.
+
+Prefer dependency direction:
+
+foundation
+    ↓
+core
+    ↓
+features
+    ↓
+integration
+    ↓
+entrypoints
+
+=========================================================
+IMPLEMENTATION PHASE RULES
+=========================================================
+
+Large projects must be divided into phases.
+
+A phase should contain:
+
+- id
+- name
+- purpose
+- order
+- modules
+- dependencies
+- prerequisites
+- validation
+
+Generation should happen in dependency-aware order.
+
+Do not generate a file before the modules it
+depends on are understood.
+
+=========================================================
+FILE RULE
+=========================================================
+
+projectStructure must describe ONLY files/folders
+that are justified by the request and architecture.
+
+Do not add:
+
+- random demo files
+- unnecessary libraries
+- fake configuration
+- unused components
+- speculative services
+- duplicate modules
+
+The final Builder output should contain only
+approved manifest files.
+
+=========================================================
+REQUIREMENTS RULE
+=========================================================
+
+requirements should contain concise implementation
+requirements required by the user request.
+
+Do not invent unrelated features.
+
+=========================================================
+ACCEPTANCE CRITERIA
+=========================================================
+
+Acceptance criteria must describe observable
+conditions that can later be tested.
+
+Examples:
+
+"Authenticated users can create projects."
+
+"Project data persists after reload."
+
+"Unauthorized users cannot access private routes."
+
+Avoid vague criteria such as:
+
+"Application should be good."
+
+=========================================================
+SECURITY
+=========================================================
+
+Identify concrete requirements such as:
+
+- authentication
+- authorization
+- input validation
+- secret handling
+- access control
+- API protection
+- data protection
+
+Only include requirements relevant to the project.
+
+Never create real credentials.
+
+=========================================================
+SCALABILITY
+=========================================================
+
+For large applications identify relevant
+scalability concerns such as:
+
+- modular services
+- stateless APIs
+- caching
+- queue workers
+- database indexing
+- pagination
+- asynchronous jobs
+- horizontal scaling
+
+Only include what the actual system needs.
+
+=========================================================
+PERFORMANCE
+=========================================================
+
+Identify meaningful performance requirements.
+
+Do not invent arbitrary benchmarks unless
+the user supplied them.
+
+=========================================================
+ENVIRONMENT REQUIREMENTS
+=========================================================
+
+List required environment/configuration variables
+by PURPOSE only.
+
+Never output real secrets.
+
+Example:
+
+"DATABASE_URL"
+"AUTH_SECRET"
+"PAYMENT_PROVIDER_KEY"
+
+Do not provide actual values.
+
+=========================================================
+NON-GOALS
+=========================================================
+
+explicitNonGoals should prevent downstream agents
+from adding unrelated functionality.
+
+Example:
+
+"Do not add social login unless requested."
+
+=========================================================
+ASSUMPTIONS
+=========================================================
+
+If a minor ambiguity exists, make the smallest
+reasonable assumption and record it.
+
+Do not silently invent major product requirements.
+
+=========================================================
+PROVIDER INDEPENDENCE
+=========================================================
+
+Do not mention or require a specific AI provider
+unless the USER explicitly requested one.
+
+The central aiProviderService controls which
+AI provider executes this planning request.
+
+=========================================================
+OUTPUT
+=========================================================
+
+Return ONLY valid JSON.
+
+No markdown.
+
+No explanation.
+
+Use this exact top-level structure:
+
+{
+  "planVersion": 2,
+  "projectName": "",
+  "description": "",
+  "framework": "",
+  "projectScale": "",
+  "complexity": "",
+
+  "frontend": {
+    "framework": "",
+    "pages": []
+  },
+
+  "backend": {
+    "framework": "",
+    "routes": []
+  },
+
+  "database": {
+    "type": "",
+    "collections": []
+  },
+
+  "authentication": {
+    "providers": []
+  },
+
+  "aiSystems": [],
+
+  "deployment": {
+    "provider": "",
+    "services": []
+  },
+
+  "projectStructure": [],
+  "requirements": [],
+  "security": [],
+  "scalability": [],
+  "performance": [],
+
+  "modules": [],
+
+  "dependencies": [],
+
+  "implementationPhases": [],
+
+  "acceptanceCriteria": [],
+
+  "environmentRequirements": [],
+
+  "validationStrategy": [],
+
+  "risks": [],
+
+  "explicitNonGoals": [],
+
+  "assumptions": [],
+
+  "buildStrategy": {
+    "mode": "dependency-aware",
+    "batchSize": 3,
+    "generateByDependency": true,
+    "validateAfterEachBatch": true,
+    "runFinalValidation": true
+  }
+}
+
+=========================================================
+IMPORTANT
+=========================================================
+
+Do not generate source code.
+
+Do not generate file contents.
+
+Do not claim execution.
+
+Do not claim deployment.
+
+Do not create credentials.
+
+Do not add features not justified by the request.
+
+For large projects, decomposition is more important
+than producing a giant response.
+
+`;
+
+
+/* =========================================================
+   MAIN PLANNING AGENT
 ========================================================= */
 
 async function planningAgent(
   data = {}
 ) {
+
+  const startedAt =
+    Date.now();
+
 
   let currentStage =
     "input-normalization";
@@ -523,7 +2233,7 @@ async function planningAgent(
       projectIdea =
         cleanString(
           data,
-          4000
+          MAX_PROMPT_LENGTH
         );
 
     }
@@ -536,7 +2246,7 @@ async function planningAgent(
       projectIdea =
         cleanString(
           data.prompt,
-          4000
+          MAX_PROMPT_LENGTH
         );
 
       intent =
@@ -564,7 +2274,8 @@ async function planningAgent(
 
       return {
 
-        success: false,
+        success:
+          false,
 
         message:
           "Project idea required",
@@ -573,7 +2284,15 @@ async function planningAgent(
           "Planning Agent received an empty project prompt.",
 
         stage:
-          currentStage
+          currentStage,
+
+        metadata: {
+
+          durationMs:
+            Date.now() -
+            startedAt
+
+        }
 
       };
 
@@ -588,41 +2307,29 @@ async function planningAgent(
       "build";
 
 
+    let intentData =
+      {};
+
+
     if (
       intent &&
       typeof intent === "object"
     ) {
 
+      intentData =
+        intent?.data &&
+        typeof intent.data === "object"
+          ? intent.data
+          : intent;
+
+
       if (
-        typeof intent.type === "string"
+        typeof intentData.type ===
+        "string"
       ) {
 
         const intentType =
-          intent.type
-            .trim()
-            .toLowerCase();
-
-
-        if (
-          VALID_INTENTS.includes(
-            intentType
-          )
-        ) {
-
-          normalizedIntent =
-            intentType;
-
-        }
-
-      }
-
-      else if (
-        intent.data &&
-        typeof intent.data.type === "string"
-      ) {
-
-        const intentType =
-          intent.data.type
+          intentData.type
             .trim()
             .toLowerCase();
 
@@ -643,19 +2350,12 @@ async function planningAgent(
     }
 
 
-    /* =====================================================
-       INTENT DATA
-    ===================================================== */
-
-    const intentData =
-      intent?.data ||
-      intent ||
-      {
-
-        type:
-          normalizedIntent
-
-      };
+    /*
+     * If Planning is called directly without
+     * Intent Agent output, BUILD remains the
+     * safe default because this agent historically
+     * served the Builder pipeline.
+     */
 
 
     /* =====================================================
@@ -673,16 +2373,20 @@ async function planningAgent(
       memorySummary =
         safeJson(
           memoryContext
-        ).slice(
-          0,
-          4000
-        );
+        )
+          .slice(
+            0,
+            MAX_MEMORY_LENGTH
+          );
 
     }
 
 
     /* =====================================================
        SAFE USER CONTEXT
+       -----------------------------------------------------
+       Do not send unnecessary user information
+       to the AI provider.
     ===================================================== */
 
     let userSummary =
@@ -696,14 +2400,11 @@ async function planningAgent(
 
       const safeUser = {
 
-        id:
-          user.id ||
-          user._id ||
-          undefined,
-
         role:
-          user.role ||
-          undefined
+          cleanString(
+            user.role,
+            100
+          )
 
       };
 
@@ -711,12 +2412,33 @@ async function planningAgent(
       userSummary =
         safeJson(
           safeUser
-        ).slice(
-          0,
-          1500
-        );
+        )
+          .slice(
+            0,
+            MAX_USER_CONTEXT_LENGTH
+          );
 
     }
+
+
+    /* =====================================================
+       PROJECT SCALE HINT
+    ===================================================== */
+
+    const requestedScale =
+      cleanString(
+        intentData.projectScale,
+        100
+      )
+        .toLowerCase();
+
+
+    const requestedComplexity =
+      cleanString(
+        intentData.complexity,
+        100
+      )
+        .toLowerCase();
 
 
     /* =====================================================
@@ -724,20 +2446,14 @@ async function planningAgent(
        -----------------------------------------------------
        IMPORTANT:
 
-       This agent NEVER calls OpenAI directly.
+       No provider is hardcoded.
 
-       The centralized provider service is responsible
-       for Gemini model selection and Gemini failover.
-
-       Current production chain:
-
-       Gemini 3.8 Flash
-            ↓
-       Gemini 3.7 Flash
-            ↓
-       Gemini 3.6 Flash
-
-       OpenAI is intentionally disabled.
+       aiProviderService controls:
+       - provider selection
+       - provider fallback
+       - retries
+       - cooldowns
+       - structured JSON validation
     ===================================================== */
 
     currentStage =
@@ -747,28 +2463,11 @@ async function planningAgent(
     const result =
       await generateJSON({
 
-        /*
-         * Explicitly request Gemini.
-         *
-         * aiProviderService still controls the actual
-         * Gemini model fallback chain.
-         */
-
-        provider:
-          "gemini",
-
-        /*
-         * Do not specify a model here.
-         *
-         * This allows aiProviderService to use its
-         * complete Gemini model fallback chain.
-         */
+        maxTokens:
+          6500,
 
         thinkingLevel:
           "medium",
-
-        maxTokens:
-          3000,
 
         messages: [
 
@@ -777,170 +2476,8 @@ async function planningAgent(
             role:
               "system",
 
-            content: `
-
-You are the Planning Agent of ZyrionOS,
-an autonomous production AI software system.
-
-Your responsibility is to transform the
-user request into an implementation-ready
-software architecture plan.
-
-You DO NOT write final source code.
-
-You DO NOT claim that code was created.
-
-You DO NOT claim that deployment happened.
-
-You DO NOT invent infrastructure,
-credentials, API keys, URLs, secrets,
-external resources, or successful operations.
-
-Your output is consumed by the Builder Agent.
-
-CURRENT INTENT:
-
-${normalizedIntent}
-
-PLANNING OBJECTIVE:
-
-Create a practical production-ready plan
-that another engineering agent can directly
-use to build the requested system.
-
-For BUILD:
-Create the complete implementation plan.
-
-For FIX:
-Identify the relevant technical areas,
-files/components likely involved, and
-required verification steps.
-
-For DEPLOY:
-Describe deployment architecture and
-requirements without claiming deployment
-success.
-
-For MONITOR:
-Describe monitoring requirements.
-
-For SCALE:
-Describe scalability requirements.
-
-For BILLING or SUBSCRIPTION:
-Describe the required application and
-financial integration architecture.
-
-For AUTOMATION:
-Describe triggers, workflows, workers,
-and required integrations.
-
-For INFRASTRUCTURE:
-Describe the required infrastructure
-architecture.
-
-For THUMBNAIL:
-Describe the required generation pipeline.
-
-For FILE:
-Describe required file operations.
-
-Return ONLY valid JSON.
-
-NO markdown.
-
-NO explanation outside JSON.
-
-REQUIRED JSON:
-
-{
-  "projectName": "",
-  "description": "",
-  "framework": "",
-  "frontend": {
-    "framework": "",
-    "pages": []
-  },
-  "backend": {
-    "framework": "",
-    "routes": []
-  },
-  "database": {
-    "type": "",
-    "collections": []
-  },
-  "authentication": {
-    "providers": []
-  },
-  "aiSystems": [],
-  "deployment": {
-    "provider": "",
-    "services": []
-  },
-  "projectStructure": [],
-  "requirements": [],
-  "security": [],
-  "scalability": [],
-  "performance": []
-}
-
-RULES:
-
-1. Keep projectName concise.
-
-2. description must describe the actual
-   requested objective.
-
-3. Identify frameworks only when known
-   or reasonably required.
-
-4. frontend.pages must contain meaningful
-   UI pages/routes when a frontend exists.
-
-5. backend.routes must contain meaningful
-   API routes when a backend exists.
-
-6. database.collections must contain actual
-   entities required by the project.
-
-7. authentication.providers must contain
-   only authentication methods actually
-   relevant to the project.
-
-8. aiSystems must contain actual AI components.
-
-9. deployment.services must contain only
-   relevant infrastructure services.
-
-10. projectStructure must describe folders
-    and important files that Builder should
-    create.
-
-11. security must contain concrete security
-    requirements.
-
-12. scalability must contain concrete
-    scalability requirements.
-
-13. performance must contain concrete
-    performance requirements.
-
-14. Do not generate source code.
-
-15. Do not generate fake credentials.
-
-16. Do not generate placeholder secrets.
-
-17. Do not claim resources already exist.
-
-18. Do not claim deployment succeeded.
-
-19. Prefer production architecture over
-    toy/demo architecture.
-
-20. Keep every section internally consistent.
-
-`
+            content:
+              PLANNING_SYSTEM_PROMPT
 
           },
 
@@ -951,7 +2488,7 @@ RULES:
 
             content: `
 
-USER REQUEST:
+CURRENT USER REQUEST:
 
 ${projectIdea}
 
@@ -961,6 +2498,16 @@ ${safeJson(
   intentData
 )}
 
+REQUESTED PROJECT SCALE:
+
+${requestedScale ||
+  "not specified"}
+
+REQUESTED COMPLEXITY:
+
+${requestedComplexity ||
+  "not specified"}
+
 MEMORY CONTEXT:
 
 ${memorySummary}
@@ -969,7 +2516,18 @@ SAFE USER CONTEXT:
 
 ${userSummary}
 
-Create the implementation plan now.
+Create the implementation blueprint.
+
+Remember:
+
+- The current request is the source of truth.
+- Do not invent unrelated features.
+- Do not generate source code.
+- Large projects must be decomposed.
+- Dependencies must be explicit.
+- Builder must be able to use this plan.
+- Final files must later come from the approved
+  project manifest, not from arbitrary model output.
 
 `
 
@@ -991,20 +2549,32 @@ Create the implementation plan now.
 
       const providerError =
         result?.error ||
-        "Gemini provider returned an unsuccessful result.";
+        result?.message ||
+        "Central AI provider service returned an unsuccessful result.";
 
 
       logger.error(
-        `Planning Agent Gemini Provider Failed: ${providerError}`
+        `Planning Agent Provider Failed: ${providerError}`
       );
 
 
+      /*
+       * IMPORTANT:
+       *
+       * Do NOT return success with a fake plan.
+       *
+       * A fake plan would reach Builder and create
+       * a project that does not actually represent
+       * the user's request.
+       */
+
       return {
 
-        success: false,
+        success:
+          false,
 
         message:
-          "Planning Agent Gemini provider failed",
+          "Planning Agent provider failed",
 
         error:
           providerError,
@@ -1014,11 +2584,19 @@ Create the implementation plan now.
 
         provider:
           result?.provider ||
-          "gemini",
+          null,
 
         model:
           result?.model ||
-          null
+          null,
+
+        metadata: {
+
+          durationMs:
+            Date.now() -
+            startedAt
+
+        }
 
       };
 
@@ -1029,6 +2607,10 @@ Create the implementation plan now.
        RAW RESPONSE VALIDATION
     ===================================================== */
 
+    currentStage =
+      "response-validation";
+
+
     const parsed =
       result.data;
 
@@ -1036,34 +2618,45 @@ Create the implementation plan now.
     if (
       !parsed ||
       typeof parsed !== "object" ||
-      Array.isArray(parsed)
+      Array.isArray(
+        parsed
+      )
     ) {
 
-      logger.warning(
-        "Planning Agent received invalid structured Gemini response"
+      logger.error(
+        "Planning Agent received invalid structured AI response"
       );
 
 
       return {
 
-        success: false,
+        success:
+          false,
 
         message:
           "Planning Agent received an invalid AI response",
 
         error:
-          "Gemini returned an invalid planning object.",
+          "AI returned an invalid planning object.",
 
         stage:
           currentStage,
 
         provider:
           result.provider ||
-          "gemini",
+          null,
 
         model:
           result.model ||
-          null
+          null,
+
+        metadata: {
+
+          durationMs:
+            Date.now() -
+            startedAt
+
+        }
 
       };
 
@@ -1082,38 +2675,76 @@ Create the implementation plan now.
       normalizePlan(
         parsed,
         projectIdea,
-        intentData
+        {
+
+          ...intentData,
+
+          type:
+            normalizedIntent
+
+        }
       );
 
 
     /* =====================================================
-       FINAL VALIDATION
+       PLAN VALIDATION
     ===================================================== */
 
+    currentStage =
+      "plan-validation";
+
+
+    const validationErrors =
+      validatePlan(
+        normalizedPlan
+      );
+
+
     if (
-      !normalizedPlan.projectName
+      validationErrors.length > 0
     ) {
+
+      logger.error(
+        `Planning Agent Plan Validation Failed: ${validationErrors.join(" | ")}`
+      );
+
 
       return {
 
-        success: false,
+        success:
+          false,
 
         message:
-          "Planning Agent returned an invalid project plan",
+          "Planning Agent generated an invalid plan",
 
         error:
-          "projectName is required.",
+          validationErrors.join(
+            " | "
+          ),
 
         stage:
           currentStage,
 
         provider:
           result.provider ||
-          "gemini",
+          null,
 
         model:
           result.model ||
-          null
+          null,
+
+        data:
+          normalizedPlan,
+
+        metadata: {
+
+          durationMs:
+            Date.now() -
+            startedAt,
+
+          validationErrors
+
+        }
 
       };
 
@@ -1121,31 +2752,165 @@ Create the implementation plan now.
 
 
     /* =====================================================
-       SUCCESS
+       BUILD STRATEGY SAFETY
+    ===================================================== */
+
+    if (
+      normalizedIntent ===
+      "build"
+    ) {
+
+      normalizedPlan.buildStrategy =
+        {
+
+          ...normalizedPlan.buildStrategy,
+
+          mode:
+            "dependency-aware",
+
+          generateByDependency:
+            true,
+
+          validateAfterEachBatch:
+            true,
+
+          runFinalValidation:
+            true
+
+        };
+
+    }
+
+
+    /* =====================================================
+       LARGE PROJECT SAFETY
+    ===================================================== */
+
+    if (
+      normalizedPlan.projectScale ===
+        "large_project" ||
+      normalizedPlan.projectScale ===
+        "system"
+    ) {
+
+      normalizedPlan.complexity =
+        "high";
+
+
+      if (
+        normalizedPlan.modules.length ===
+        0
+      ) {
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "Large project decomposition missing",
+
+          error:
+            "Large projects require explicit modules before Builder execution.",
+
+          stage:
+            "large-project-validation",
+
+          provider:
+            result.provider ||
+            null,
+
+          model:
+            result.model ||
+            null
+
+        };
+
+      }
+
+
+      if (
+        normalizedPlan.implementationPhases
+          .length ===
+        0
+      ) {
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "Large project phases missing",
+
+          error:
+            "Large projects require dependency-aware implementation phases.",
+
+          stage:
+            "large-project-validation",
+
+          provider:
+            result.provider ||
+            null,
+
+          model:
+            result.model ||
+            null
+
+        };
+
+      }
+
+    }
+
+
+    /* =====================================================
+       SUCCESS LOGGING
     ===================================================== */
 
     logger.success(
-      `Planning Agent Completed: ${normalizedPlan.projectName}`
+
+      `Planning Agent Completed: ` +
+      `${normalizedPlan.projectName}` +
+      ` | Scale: ${normalizedPlan.projectScale}` +
+      ` | Complexity: ${normalizedPlan.complexity}` +
+      ` | Modules: ${normalizedPlan.modules.length}` +
+      ` | Phases: ${normalizedPlan.implementationPhases.length}` +
+      ` | Dependencies: ${normalizedPlan.dependencies.length}`
+
     );
 
 
     logger.info(
-      `Planning Agent Provider: ${result.provider || "gemini"}`
+
+      `Planning Agent Provider: ` +
+      `${result.provider || "unknown"}`
+
     );
 
 
     logger.info(
-      `Planning Agent Model: ${result.model || "unknown"}`
+
+      `Planning Agent Model: ` +
+      `${result.model || "unknown"}`
+
     );
 
 
     /* =====================================================
        RESPONSE
+       -----------------------------------------------------
+       Existing fields are preserved so the current
+       Builder can continue consuming the plan.
+
+       New engineering fields are added for the
+       next pipeline stages.
     ===================================================== */
 
     return {
 
-      success: true,
+      success:
+        true,
 
       data:
         normalizedPlan,
@@ -1158,7 +2923,7 @@ Create the implementation plan now.
 
         provider:
           result.provider ||
-          "gemini",
+          null,
 
         agent:
           "planningAgent",
@@ -1166,8 +2931,34 @@ Create the implementation plan now.
         intent:
           normalizedPlan.intent,
 
+        projectScale:
+          normalizedPlan.projectScale,
+
+        complexity:
+          normalizedPlan.complexity,
+
+        modules:
+          normalizedPlan.modules.length,
+
+        dependencies:
+          normalizedPlan.dependencies.length,
+
+        implementationPhases:
+          normalizedPlan
+            .implementationPhases
+            .length,
+
+        acceptanceCriteria:
+          normalizedPlan
+            .acceptanceCriteria
+            .length,
+
         generatedAt:
-          new Date()
+          new Date(),
+
+        durationMs:
+          Date.now() -
+          startedAt
 
       }
 
@@ -1189,9 +2980,17 @@ Create the implementation plan now.
     );
 
 
+    /*
+     * Do not manufacture a successful plan.
+     *
+     * If all configured providers fail,
+     * Builder must not receive fake architecture.
+     */
+
     return {
 
-      success: false,
+      success:
+        false,
 
       message:
         "Planning Agent Failed",
@@ -1203,11 +3002,19 @@ Create the implementation plan now.
         currentStage,
 
       provider:
-        "gemini",
+        null,
 
       model:
         error?.model ||
-        null
+        null,
+
+      metadata: {
+
+        durationMs:
+          Date.now() -
+          startedAt
+
+      }
 
     };
 
