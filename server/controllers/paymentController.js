@@ -1,38 +1,40 @@
 /* =========================================================
-   ZyrionOS PAYMENT CONTROLLER
-   =========================================================
+   ZyrionOS PAYMENT CONTROLLER v2.0.0
 
    Responsibilities:
-   - Create Stripe PaymentIntent
-   - Create Razorpay Order
-   - Validate authenticated user
-   - Validate plan through Billing Agent
-   - Never trust client-supplied plan price
-   - Verify Razorpay payment signature
-   - Never activate subscription directly
-   - Subscription activation happens through verified webhook
-   - Return real provider data only
+   - Stripe PaymentIntent creation
+   - Razorpay Order creation
+   - Authenticated user validation
+   - Billing Agent authoritative plan validation
+   - Client price protection
+   - Provider normalization
+   - Billing-cycle normalization
+   - Razorpay payment signature verification
+   - No direct subscription activation
+   - Webhook remains authoritative for activation
+   - Billing history
+   - Credit lookup
+   - Stripe + Razorpay compatibility
 
-   Plans:
-   Starter     $19
-   Pro         $99
-   Business    $199
-   Scale       $299
-   Enterprise  $499
+   IMPORTANT:
+   - Never trust client supplied amount.
+   - Never activate subscription from payment creation.
+   - Never activate subscription from Razorpay signature verification.
+   - Provider webhooks are authoritative for final payment state.
 ========================================================= */
 
 
-/* =========================
+/* =========================================================
    PACKAGES
-========================= */
+========================================================= */
 
 const crypto =
   require("crypto");
 
 
-/* =========================
+/* =========================================================
    SERVICES
-========================= */
+========================================================= */
 
 const formatResponse =
   require("../utils/formatResponse");
@@ -41,17 +43,17 @@ const logger =
   require("../services/loggerService");
 
 
-/* =========================
+/* =========================================================
    AGENTS
-========================= */
+========================================================= */
 
 const billingAgent =
   require("../agents/billingAgent");
 
 
-/* =========================
+/* =========================================================
    PAYMENT SERVICES
-========================= */
+========================================================= */
 
 const razorpayService =
   require("../services/razorpayService");
@@ -61,29 +63,56 @@ const stripeService =
 
 
 /* =========================================================
-   HELPERS
+   CONSTANTS
 ========================================================= */
 
+const ALLOWED_PLANS = [
+  "Starter",
+  "Pro",
+  "Business",
+  "Scale",
+  "Enterprise"
+];
 
-/* =========================
+
+const ALLOWED_PROVIDERS = [
+  "stripe",
+  "razorpay"
+];
+
+
+const ALLOWED_BILLING_CYCLES = [
+  "monthly",
+  "yearly"
+];
+
+
+/* =========================================================
    AUTH USER
-========================= */
+========================================================= */
 
 function getUserId(req) {
 
-  return (
+  const value =
     req?.user?.id ||
     req?.user?._id ||
     req?.user?.userId ||
-    null
-  );
+    null;
+
+
+  if (!value) {
+    return null;
+  }
+
+
+  return String(value).trim();
 
 }
 
 
-/* =========================
+/* =========================================================
    NORMALIZE PROVIDER
-========================= */
+========================================================= */
 
 function normalizeProvider(
   provider
@@ -93,28 +122,32 @@ function normalizeProvider(
     return null;
   }
 
+
   const value =
     String(provider)
       .trim()
       .toLowerCase();
 
+
   if (
-    value === "stripe" ||
-    value === "razorpay"
+    ALLOWED_PROVIDERS.includes(
+      value
+    )
   ) {
 
     return value;
 
   }
 
+
   return null;
 
 }
 
 
-/* =========================
+/* =========================================================
    NORMALIZE PLAN
-========================= */
+========================================================= */
 
 function normalizePlan(
   plan
@@ -124,10 +157,12 @@ function normalizePlan(
     return null;
   }
 
+
   const value =
     String(plan)
       .trim()
       .toLowerCase();
+
 
   const aliases = {
 
@@ -148,6 +183,7 @@ function normalizePlan(
 
   };
 
+
   return (
     aliases[value] ||
     null
@@ -156,9 +192,68 @@ function normalizePlan(
 }
 
 
-/* =========================
-   BILLING PLAN
-========================= */
+/* =========================================================
+   NORMALIZE BILLING CYCLE
+========================================================= */
+
+function normalizeBillingCycle(
+  billingCycle
+) {
+
+  const value =
+    String(
+      billingCycle ||
+      "monthly"
+    )
+      .trim()
+      .toLowerCase();
+
+
+  return value === "yearly"
+    ? "yearly"
+    : "monthly";
+
+}
+
+
+/* =========================================================
+   NORMALIZE CURRENCY
+========================================================= */
+
+function normalizeCurrency(
+  currency
+) {
+
+  if (!currency) {
+    return null;
+  }
+
+
+  const value =
+    String(currency)
+      .trim()
+      .toUpperCase();
+
+
+  if (
+    !/^[A-Z]{3}$/.test(
+      value
+    )
+  ) {
+
+    return null;
+
+  }
+
+
+  return value;
+
+}
+
+
+/* =========================================================
+   BILLING PLAN RESOLUTION
+========================================================= */
 
 async function resolvePlan({
   userId,
@@ -173,10 +268,7 @@ async function resolvePlan({
 
       plan,
 
-      billingCycle:
-        billingCycle === "yearly"
-          ? "yearly"
-          : "monthly"
+      billingCycle
 
     });
 
@@ -193,8 +285,10 @@ async function resolvePlan({
         "Unable to validate billing plan"
       );
 
+
     error.code =
       "BILLING_PLAN_INVALID";
+
 
     throw error;
 
@@ -207,15 +301,78 @@ async function resolvePlan({
       ?.selectedPlan;
 
 
-  if (!selectedPlan) {
+  if (
+    !selectedPlan
+  ) {
 
     const error =
       new Error(
         "Billing agent returned no selected plan"
       );
 
+
     error.code =
       "PLAN_DATA_MISSING";
+
+
+    throw error;
+
+  }
+
+
+  const billingData =
+    billing?.billing ||
+    {};
+
+
+  const amount =
+    Number(
+      billingData.amount ??
+      selectedPlan.amount
+    );
+
+
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0
+  ) {
+
+    const error =
+      new Error(
+        "Billing Agent returned an invalid plan amount"
+      );
+
+
+    error.code =
+      "INVALID_SERVER_PLAN_PRICE";
+
+
+    throw error;
+
+  }
+
+
+  const currency =
+    normalizeCurrency(
+      selectedPlan.currency ||
+      billingData.currency ||
+      "USD"
+    );
+
+
+  if (
+    !currency
+  ) {
+
+    const error =
+      new Error(
+        "Billing Agent returned an invalid plan currency"
+      );
+
+
+    error.code =
+      "INVALID_PLAN_CURRENCY";
+
 
     throw error;
 
@@ -226,19 +383,25 @@ async function resolvePlan({
 
     billing,
 
+    billingData,
+
     plan:
-      selectedPlan
+      selectedPlan,
+
+    amount,
+
+    currency
 
   };
 
 }
 
 
-/* =========================
-   SAFE AMOUNT
-========================= */
+/* =========================================================
+   MONEY
+========================================================= */
 
-function getAmountInMinorUnits(
+function toMinorUnits(
   amount
 ) {
 
@@ -261,6 +424,404 @@ function getAmountInMinorUnits(
   return Math.round(
     numeric * 100
   );
+
+}
+
+
+/* =========================================================
+   SAFE PROVIDER ERROR
+========================================================= */
+
+function providerError(
+  provider,
+  error,
+  fallbackMessage
+) {
+
+  const message =
+    error?.message ||
+    fallbackMessage;
+
+
+  const result =
+    new Error(
+      message
+    );
+
+
+  result.code =
+    error?.code ||
+    `${provider.toUpperCase()}_PAYMENT_FAILED`;
+
+
+  result.provider =
+    provider;
+
+
+  return result;
+
+}
+
+
+/* =========================================================
+   STRIPE PAYMENT CREATION
+========================================================= */
+
+async function createStripePayment({
+  amount,
+  currency,
+  userId,
+  plan,
+  billingCycle,
+  billingData
+}) {
+
+  if (
+    currency !==
+    "USD"
+  ) {
+
+    const error =
+      new Error(
+        "Stripe payment requires a configured USD plan"
+      );
+
+
+    error.code =
+      "STRIPE_CURRENCY_UNSUPPORTED";
+
+
+    throw error;
+
+  }
+
+
+  if (
+    !stripeService ||
+    typeof stripeService.createPaymentIntent !==
+      "function"
+  ) {
+
+    const error =
+      new Error(
+        "Stripe payment service is not configured correctly"
+      );
+
+
+    error.code =
+      "STRIPE_SERVICE_UNAVAILABLE";
+
+
+    throw error;
+
+  }
+
+
+  const payment =
+    await stripeService
+      .createPaymentIntent({
+
+        amount,
+
+        currency:
+          "USD",
+
+        userId,
+
+        plan,
+
+        billingCycle,
+
+        billingId:
+          billingData?.billingId ||
+          null
+
+      });
+
+
+  if (
+    !payment ||
+    payment.success !== true
+  ) {
+
+    throw providerError(
+      "stripe",
+      payment,
+      "Stripe payment initialization failed"
+    );
+
+  }
+
+
+  const paymentIntent =
+    payment.paymentIntent ||
+    {};
+
+
+  if (
+    !paymentIntent.id
+  ) {
+
+    const error =
+      new Error(
+        "Stripe service returned no PaymentIntent ID"
+      );
+
+
+    error.code =
+      "STRIPE_PAYMENT_ID_MISSING";
+
+
+    throw error;
+
+  }
+
+
+  return {
+
+    provider:
+      "stripe",
+
+    paymentIntentId:
+      paymentIntent.id,
+
+    clientSecret:
+      paymentIntent.client_secret ||
+      null,
+
+    amount,
+
+    currency:
+      "USD",
+
+    plan,
+
+    billingCycle
+
+  };
+
+}
+
+
+/* =========================================================
+   RAZORPAY SERVICE ADAPTER
+========================================================= */
+
+/*
+ * Supports common service contracts without
+ * inventing provider data.
+ *
+ * Preferred:
+ *   razorpayService.createOrder(...)
+ *
+ * Compatibility:
+ *   razorpayService.createPayment(...)
+ */
+
+async function createRazorpayOrder({
+  amount,
+  currency,
+  userId,
+  plan,
+  billingCycle,
+  billingData
+}) {
+
+  if (
+    currency !==
+    "INR"
+  ) {
+
+    const error =
+      new Error(
+        "Razorpay requires a configured INR plan price"
+      );
+
+
+    error.code =
+      "RAZORPAY_CURRENCY_UNSUPPORTED";
+
+
+    throw error;
+
+  }
+
+
+  if (
+    !razorpayService
+  ) {
+
+    const error =
+      new Error(
+        "Razorpay payment service is not configured"
+      );
+
+
+    error.code =
+      "RAZORPAY_SERVICE_UNAVAILABLE";
+
+
+    throw error;
+
+  }
+
+
+  const orderPayload = {
+
+    amount:
+      toMinorUnits(
+        amount
+      ),
+
+    currency:
+      "INR",
+
+    receipt:
+      `zyrionos_${userId}_${Date.now()}`,
+
+    notes: {
+
+      userId:
+        String(userId),
+
+      plan:
+        String(plan),
+
+      billingCycle:
+        String(billingCycle),
+
+      billingId:
+        String(
+          billingData?.billingId ||
+          ""
+        )
+
+    }
+
+  };
+
+
+  let payment;
+
+
+  if (
+    typeof razorpayService.createOrder ===
+      "function"
+  ) {
+
+    payment =
+      await razorpayService
+        .createOrder(
+          orderPayload
+        );
+
+  }
+
+  else if (
+    typeof razorpayService.createPayment ===
+      "function"
+  ) {
+
+    payment =
+      await razorpayService
+        .createPayment(
+          orderPayload
+        );
+
+  }
+
+  else {
+
+    const error =
+      new Error(
+        "Razorpay service does not expose createOrder/createPayment"
+      );
+
+
+    error.code =
+      "RAZORPAY_SERVICE_METHOD_MISSING";
+
+
+    throw error;
+
+  }
+
+
+  if (
+    !payment ||
+    payment.success !== true
+  ) {
+
+    throw providerError(
+      "razorpay",
+      payment,
+      "Razorpay order creation failed"
+    );
+
+  }
+
+
+  const order =
+    payment.order ||
+    payment.data?.order ||
+    payment.data ||
+    {};
+
+
+  const orderId =
+    order.id ||
+    payment.orderId ||
+    payment.id ||
+    null;
+
+
+  if (
+    !orderId
+  ) {
+
+    const error =
+      new Error(
+        "Razorpay service returned no order ID"
+      );
+
+
+    error.code =
+      "RAZORPAY_ORDER_ID_MISSING";
+
+
+    throw error;
+
+  }
+
+
+  return {
+
+    provider:
+      "razorpay",
+
+    orderId,
+
+    amount:
+      Number(
+        order.amount ??
+        orderPayload.amount
+      ),
+
+    currency:
+      String(
+        order.currency ||
+        "INR"
+      ).toUpperCase(),
+
+    receipt:
+      order.receipt ||
+      orderPayload.receipt,
+
+    plan,
+
+    billingCycle
+
+  };
 
 }
 
@@ -289,7 +850,9 @@ async function createPaymentController(
       getUserId(req);
 
 
-    if (!userId) {
+    if (
+      !userId
+    ) {
 
       return res
         .status(401)
@@ -312,27 +875,43 @@ async function createPaymentController(
        REQUEST
     ========================= */
 
-    const {
-      plan,
-      provider,
-      billingCycle = "monthly",
-      currency
-    } =
-      req.body || {};
+    const body =
+      req.body ||
+      {};
+
+
+    const normalizedPlan =
+      normalizePlan(
+        body.plan
+      );
+
+
+    const normalizedProvider =
+      normalizeProvider(
+        body.provider ||
+        body.paymentProvider
+      );
+
+
+    const normalizedCycle =
+      normalizeBillingCycle(
+        body.billingCycle
+      );
+
+
+    const requestedCurrency =
+      normalizeCurrency(
+        body.currency
+      );
 
 
     /* =========================
-       VALIDATION
-    ========================= */
+       PLAN VALIDATION
+       ========================= */
 
-    const normalizedPlan =
-      normalizePlan(plan);
-
-    const normalizedProvider =
-      normalizeProvider(provider);
-
-
-    if (!normalizedPlan) {
+    if (
+      !normalizedPlan
+    ) {
 
       return res
         .status(400)
@@ -345,13 +924,8 @@ async function createPaymentController(
             message:
               "Valid plan is required",
 
-            allowedPlans: [
-              "Starter",
-              "Pro",
-              "Business",
-              "Scale",
-              "Enterprise"
-            ]
+            allowedPlans:
+              ALLOWED_PLANS
 
           })
         );
@@ -359,7 +933,13 @@ async function createPaymentController(
     }
 
 
-    if (!normalizedProvider) {
+    /* =========================
+       PROVIDER VALIDATION
+       ========================= */
+
+    if (
+      !normalizedProvider
+    ) {
 
       return res
         .status(400)
@@ -372,10 +952,8 @@ async function createPaymentController(
             message:
               "Valid payment provider is required",
 
-            allowedProviders: [
-              "stripe",
-              "razorpay"
-            ]
+            allowedProviders:
+              ALLOWED_PROVIDERS
 
           })
         );
@@ -383,23 +961,16 @@ async function createPaymentController(
     }
 
 
-    const normalizedCycle =
-      billingCycle === "yearly"
-        ? "yearly"
-        : "monthly";
-
-
-    /* =====================================================
-       BILLING AGENT
-       =====================================================
-
-       IMPORTANT:
-       Client does NOT control the final price.
-    */
+    /* =========================
+       BILLING
+       ========================= */
 
     const {
       billing,
-      plan: selectedPlan
+      billingData,
+      plan: selectedPlan,
+      amount,
+      currency
     } =
       await resolvePlan({
 
@@ -414,66 +985,16 @@ async function createPaymentController(
       });
 
 
-    const amount =
-      Number(
-        billing
-          ?.billing
-          ?.amount
-      );
-
-
-    if (
-      !Number.isFinite(amount) ||
-      amount <= 0
-    ) {
-
-      return res
-        .status(500)
-        .json(
-          formatResponse({
-
-            success:
-              false,
-
-            message:
-              "Invalid server-side plan price"
-
-          })
-        );
-
-    }
-
-
-    /* =====================================================
-       CURRENCY
-    ===================================================== */
-
-    const planCurrency =
-      String(
-        selectedPlan.currency ||
-        "USD"
-      ).toUpperCase();
-
-
     /*
-     * Current ZyrionOS pricing is USD.
-     *
-     * Stripe receives USD directly.
-     *
-     * Razorpay orders generally require a supported
-     * settlement currency. We do NOT silently convert
-     * USD into INR because that would create an
-     * unverified exchange-rate/pricing system.
+     * The client supplied currency can only
+     * request a currency. It cannot override
+     * the Billing Agent's authoritative price.
      */
 
     if (
-      normalizedProvider ===
-        "razorpay" &&
-      planCurrency !== "INR" &&
-      String(
-        currency ||
-        planCurrency
-      ).toUpperCase() !== "INR"
+      requestedCurrency &&
+      requestedCurrency !==
+        currency
     ) {
 
       return res
@@ -485,21 +1006,15 @@ async function createPaymentController(
               false,
 
             message:
-              "Razorpay requires an INR-priced billing configuration",
+              "Requested currency does not match the configured plan currency",
 
             code:
-              "RAZORPAY_CURRENCY_UNSUPPORTED",
+              "PLAN_CURRENCY_MISMATCH",
 
-            planCurrency,
+            planCurrency:
+              currency,
 
-            requestedCurrency:
-              String(
-                currency ||
-                planCurrency
-              ).toUpperCase(),
-
-            hint:
-              "Use Stripe for the current USD subscription plans, or configure an official INR price mapping before enabling Razorpay for USD plans."
+            requestedCurrency
 
           })
         );
@@ -516,36 +1031,17 @@ async function createPaymentController(
       "stripe"
     ) {
 
-      if (
-        planCurrency !==
-        "USD"
-      ) {
-
-        return res
-          .status(400)
-          .json(
-            formatResponse({
-
-              success:
-                false,
-
-              message:
-                "Stripe pricing configuration is not USD"
-
-            })
-          );
-
-      }
+      let payment;
 
 
-      const payment =
-        await stripeService
-          .createPaymentIntent({
+      try {
+
+        payment =
+          await createStripePayment({
 
             amount,
 
-            currency:
-              "USD",
+            currency,
 
             userId,
 
@@ -553,18 +1049,25 @@ async function createPaymentController(
               normalizedPlan,
 
             billingCycle:
-              normalizedCycle
+              normalizedCycle,
+
+            billingData
 
           });
 
+      }
 
-      if (
-        !payment ||
-        payment.success !== true
-      ) {
+      catch (error) {
+
+        const status =
+          error?.code ===
+            "STRIPE_CURRENCY_UNSUPPORTED"
+            ? 400
+            : 502;
+
 
         return res
-          .status(502)
+          .status(status)
           .json(
             formatResponse({
 
@@ -578,8 +1081,8 @@ async function createPaymentController(
                 "Stripe payment initialization failed",
 
               error:
-                payment?.error ||
-                "Stripe service returned an unsuccessful result"
+                error?.message ||
+                "Stripe payment initialization failed"
 
             })
           );
@@ -604,45 +1107,40 @@ async function createPaymentController(
           data: {
 
             paymentIntentId:
-              payment
-                ?.paymentIntent
-                ?.id ||
-              null,
+              payment.paymentIntentId,
 
             clientSecret:
-              payment
-                ?.paymentIntent
-                ?.client_secret ||
-              null,
+              payment.clientSecret,
 
-            amount,
+            amount:
+              payment.amount,
 
             currency:
-              "USD",
+              payment.currency,
 
             plan:
-              normalizedPlan,
+              payment.plan,
 
             billingCycle:
-              normalizedCycle
+              payment.billingCycle
 
           },
 
           billing: {
 
             billingId:
-              billing
-                ?.billing
-                ?.billingId ||
+              billingData?.billingId ||
               null,
 
             amount,
 
-            currency:
-              "USD",
+            currency,
 
             plan:
-              normalizedPlan
+              normalizedPlan,
+
+            billingCycle:
+              normalizedCycle
 
           },
 
@@ -665,40 +1163,177 @@ async function createPaymentController(
     ) {
 
       /*
-       * Current public plan catalog is USD.
-       * Do not invent an INR conversion.
+       * IMPORTANT:
+       *
+       * We do NOT convert the USD plan price to INR.
+       *
+       * Billing Agent must expose a verified INR price
+       * if Razorpay is to be used.
        */
 
-      return res
-        .status(400)
-        .json(
-          formatResponse({
+      if (
+        currency !==
+        "INR"
+      ) {
 
-            success:
-              false,
+        return res
+          .status(400)
+          .json(
+            formatResponse({
 
-            provider:
-              "razorpay",
+              success:
+                false,
 
-            message:
-              "Razorpay is not enabled for the current USD plan catalog",
+              provider:
+                "razorpay",
 
-            code:
-              "RAZORPAY_USD_PLAN_NOT_CONFIGURED",
+              message:
+                "Razorpay requires a separately configured INR plan price",
+
+              code:
+                "RAZORPAY_INR_PRICE_REQUIRED",
+
+              plan:
+                normalizedPlan,
+
+              configuredCurrency:
+                currency,
+
+              amount,
+
+              hint:
+                "Add an authoritative INR price to the Billing Agent plan configuration. Do not use an automatic USD-to-INR conversion."
+
+            })
+          );
+
+      }
+
+
+      let payment;
+
+
+      try {
+
+        payment =
+          await createRazorpayOrder({
+
+            amount,
+
+            currency,
+
+            userId,
 
             plan:
               normalizedPlan,
 
+            billingCycle:
+              normalizedCycle,
+
+            billingData
+
+          });
+
+      }
+
+      catch (error) {
+
+        logger.error(
+          `Razorpay order creation failed: ${error?.message}`
+        );
+
+
+        const status =
+          error?.code ===
+            "RAZORPAY_CURRENCY_UNSUPPORTED"
+            ? 400
+            : 502;
+
+
+        return res
+          .status(status)
+          .json(
+            formatResponse({
+
+              success:
+                false,
+
+              provider:
+                "razorpay",
+
+              message:
+                "Razorpay order creation failed",
+
+              error:
+                error?.message ||
+                "Razorpay order creation failed"
+
+            })
+          );
+
+      }
+
+
+      logger.success(
+        `Razorpay order created for ${normalizedPlan}: ${payment.orderId}`
+      );
+
+
+      return res.json(
+        formatResponse({
+
+          success:
+            true,
+
+          provider:
+            "razorpay",
+
+          data: {
+
+            orderId:
+              payment.orderId,
+
+            amount:
+              payment.amount,
+
+            currency:
+              payment.currency,
+
+            receipt:
+              payment.receipt,
+
+            plan:
+              payment.plan,
+
+            billingCycle:
+              payment.billingCycle
+
+          },
+
+          billing: {
+
+            billingId:
+              billingData?.billingId ||
+              null,
+
             amount,
 
             currency:
-              planCurrency,
+              "INR",
 
-            hint:
-              "Configure verified INR prices separately before accepting Razorpay payments for these plans."
+            plan:
+              normalizedPlan,
 
-          })
-        );
+            billingCycle:
+              normalizedCycle
+
+          },
+
+          subscriptionActivation:
+            "pending_webhook"
+
+        })
+      );
 
     }
 
@@ -721,21 +1356,30 @@ async function createPaymentController(
 
   catch (error) {
 
-    const message =
-      error?.message ||
-      "Payment creation failed";
-
-
     logger.error(
-      `Payment creation failed: ${message}`
+      `Payment creation failed: ${error?.message}`
     );
 
 
-    const status =
+    let status =
+      500;
+
+
+    if (
       error?.code ===
-        "BILLING_PLAN_INVALID"
-        ? 400
-        : 500;
+        "BILLING_PLAN_INVALID" ||
+      error?.code ===
+        "PLAN_DATA_MISSING" ||
+      error?.code ===
+        "INVALID_SERVER_PLAN_PRICE" ||
+      error?.code ===
+        "INVALID_PLAN_CURRENCY"
+    ) {
+
+      status =
+        400;
+
+    }
 
 
     return res
@@ -750,7 +1394,12 @@ async function createPaymentController(
             "Payment creation failed",
 
           error:
-            message
+            error?.message ||
+            "Unknown payment error",
+
+          code:
+            error?.code ||
+            "PAYMENT_CREATION_FAILED"
 
         })
       );
@@ -775,7 +1424,9 @@ async function verifyPaymentController(
       getUserId(req);
 
 
-    if (!userId) {
+    if (
+      !userId
+    ) {
 
       return res
         .status(401)
@@ -794,22 +1445,36 @@ async function verifyPaymentController(
     }
 
 
-    const {
-      razorpay_order_id,
-      razorpay_payment_id,
-      razorpay_signature
-    } =
-      req.body || {};
+    const body =
+      req.body ||
+      {};
 
 
-    /* =========================
-       VALIDATION
-    ========================= */
+    const razorpayOrderId =
+      String(
+        body.razorpay_order_id ||
+        ""
+      ).trim();
+
+
+    const razorpayPaymentId =
+      String(
+        body.razorpay_payment_id ||
+        ""
+      ).trim();
+
+
+    const razorpaySignature =
+      String(
+        body.razorpay_signature ||
+        ""
+      ).trim();
+
 
     if (
-      !razorpay_order_id ||
-      !razorpay_payment_id ||
-      !razorpay_signature
+      !razorpayOrderId ||
+      !razorpayPaymentId ||
+      !razorpaySignature
     ) {
 
       return res
@@ -829,18 +1494,23 @@ async function verifyPaymentController(
     }
 
 
+    /* =====================================================
+       SECRET
+    ===================================================== */
+
     const secret =
-      process.env
-        .RAZORPAY_KEY_SECRET ||
-      process.env
-        .RAZORPAY_SECRET;
+      process.env.RAZORPAY_KEY_SECRET ||
+      process.env.RAZORPAY_SECRET;
 
 
-    if (!secret) {
+    if (
+      !secret
+    ) {
 
       logger.error(
-        "Razorpay secret is not configured"
+        "Razorpay verification secret is not configured"
       );
+
 
       return res
         .status(500)
@@ -863,6 +1533,10 @@ async function verifyPaymentController(
        SIGNATURE
     ===================================================== */
 
+    const payload =
+      `${razorpayOrderId}|${razorpayPaymentId}`;
+
+
     const generatedSignature =
       crypto
         .createHmac(
@@ -870,14 +1544,11 @@ async function verifyPaymentController(
           secret
         )
         .update(
-          `${razorpay_order_id}|${razorpay_payment_id}`
+          payload,
+          "utf8"
         )
         .digest("hex");
 
-
-    /* =====================================================
-       TIMING-SAFE COMPARISON
-    ===================================================== */
 
     const expectedBuffer =
       Buffer.from(
@@ -885,26 +1556,29 @@ async function verifyPaymentController(
         "utf8"
       );
 
+
     const receivedBuffer =
       Buffer.from(
-        String(
-          razorpay_signature
-        ),
+        razorpaySignature,
         "utf8"
       );
 
 
-    if (
-      expectedBuffer.length !==
-      receivedBuffer.length ||
-      !crypto.timingSafeEqual(
+    const signatureValid =
+      expectedBuffer.length ===
+        receivedBuffer.length &&
+      crypto.timingSafeEqual(
         expectedBuffer,
         receivedBuffer
-      )
+      );
+
+
+    if (
+      !signatureValid
     ) {
 
       logger.warning(
-        "Razorpay payment signature verification failed"
+        `Razorpay signature verification failed for user ${userId}`
       );
 
 
@@ -914,6 +1588,9 @@ async function verifyPaymentController(
           formatResponse({
 
             success:
+              false,
+
+            verified:
               false,
 
             message:
@@ -926,18 +1603,16 @@ async function verifyPaymentController(
 
 
     /*
-     * IMPORTANT:
+     * CRITICAL:
      *
-     * Signature verification does NOT mean the
-     * subscription is activated here.
+     * A valid client-side payment signature does NOT
+     * activate the subscription.
      *
-     * The authoritative webhook must confirm the
-     * payment event and activate the subscription.
+     * The webhook remains authoritative.
      */
 
-
     logger.success(
-      `Razorpay payment signature verified: ${razorpay_payment_id}`
+      `Razorpay payment signature verified: ${razorpayPaymentId}`
     );
 
 
@@ -954,16 +1629,16 @@ async function verifyPaymentController(
           "razorpay",
 
         paymentId:
-          razorpay_payment_id,
+          razorpayPaymentId,
 
         orderId:
-          razorpay_order_id,
+          razorpayOrderId,
 
         subscriptionActivation:
           "pending_webhook",
 
         message:
-          "Payment signature verified. Subscription activation will occur after the verified webhook."
+          "Payment signature verified. Subscription activation remains pending until the verified Razorpay webhook is processed."
 
       })
     );
@@ -1002,15 +1677,16 @@ async function verifyPaymentController(
 
 /* =========================================================
    CREATE SUBSCRIPTION
-   =========================================================
-
-   Legacy-compatible endpoint.
-
-   It does NOT activate a subscription.
-
-   Payment must happen first and the verified webhook
-   is responsible for activation.
 ========================================================= */
+
+/*
+ * Compatibility endpoint.
+ *
+ * It intentionally DOES NOT activate a subscription.
+ *
+ * Payment creation + provider webhook are the
+ * authoritative activation path.
+ */
 
 async function createSubscriptionController(
   req,
@@ -1023,7 +1699,9 @@ async function createSubscriptionController(
       getUserId(req);
 
 
-    if (!userId) {
+    if (
+      !userId
+    ) {
 
       return res
         .status(401)
@@ -1042,23 +1720,34 @@ async function createSubscriptionController(
     }
 
 
-    const {
-      plan,
-      planName,
-      billingCycle = "monthly",
-      paymentProvider
-    } =
-      req.body || {};
+    const body =
+      req.body ||
+      {};
 
 
     const selectedPlan =
       normalizePlan(
-        plan ||
-        planName
+        body.plan ||
+        body.planName
       );
 
 
-    if (!selectedPlan) {
+    const billingCycle =
+      normalizeBillingCycle(
+        body.billingCycle
+      );
+
+
+    const paymentProvider =
+      normalizeProvider(
+        body.paymentProvider ||
+        body.provider
+      );
+
+
+    if (
+      !selectedPlan
+    ) {
 
       return res
         .status(400)
@@ -1069,18 +1758,16 @@ async function createSubscriptionController(
               false,
 
             message:
-              "Valid plan is required"
+              "Valid plan is required",
+
+            allowedPlans:
+              ALLOWED_PLANS
 
           })
         );
 
     }
 
-
-    /*
-     * This endpoint is intentionally not allowed
-     * to activate a subscription.
-     */
 
     return res
       .status(409)
@@ -1099,16 +1786,9 @@ async function createSubscriptionController(
           plan:
             selectedPlan,
 
-          billingCycle:
-            billingCycle ===
-            "yearly"
-              ? "yearly"
-              : "monthly",
+          billingCycle,
 
-          paymentProvider:
-            normalizeProvider(
-              paymentProvider
-            ),
+          paymentProvider,
 
           nextStep:
             "Create and complete payment. The verified provider webhook will activate the subscription."
@@ -1169,7 +1849,9 @@ async function billingHistoryController(
       getUserId(req);
 
 
-    if (!userId) {
+    if (
+      !userId
+    ) {
 
       return res
         .status(401)
@@ -1265,7 +1947,9 @@ async function creditsController(
       getUserId(req);
 
 
-    if (!userId) {
+    if (
+      !userId
+    ) {
 
       return res
         .status(401)
@@ -1287,19 +1971,25 @@ async function creditsController(
     const subscription =
       await Subscription
         .findOne({
+
           userId,
 
           status:
             "active"
+
         })
         .sort({
+
           createdAt:
             -1
+
         })
         .lean();
 
 
-    if (!subscription) {
+    if (
+      !subscription
+    ) {
 
       return res.json(
         formatResponse({
@@ -1316,7 +2006,10 @@ async function creditsController(
               0,
 
             remaining:
-              0
+              0,
+
+            unlimited:
+              false
 
           }
 
@@ -1341,12 +2034,17 @@ async function creditsController(
       );
 
 
+    const unlimited =
+      total === -1;
+
+
     const remaining =
-      total === -1
+      unlimited
         ? -1
         : Math.max(
             0,
-            total - used
+            total -
+            used
           );
 
 
@@ -1364,8 +2062,7 @@ async function creditsController(
 
           remaining,
 
-          unlimited:
-            total === -1
+          unlimited
 
         }
 
@@ -1405,16 +2102,17 @@ async function creditsController(
 
 
 /* =========================================================
-   WEBHOOK FUNCTIONS
-   =========================================================
-
-   Kept as compatibility exports.
-
-   Actual webhook processing should be handled by
-   webhookController.js so that provider signature
-   verification and subscription activation have one
-   authoritative path.
+   WEBHOOK COMPATIBILITY EXPORTS
 ========================================================= */
+
+/*
+ * Actual webhook processing must live in the dedicated
+ * webhook controller/service layer.
+ *
+ * These functions remain exported so existing routes
+ * do not immediately crash while the webhook layer is
+ * being migrated.
+ */
 
 async function stripeWebhookController(
   req,
@@ -1430,7 +2128,10 @@ async function stripeWebhookController(
           false,
 
         message:
-          "Stripe webhook endpoint moved to webhookController"
+          "Stripe webhook endpoint moved to the dedicated webhook controller",
+
+        code:
+          "WEBHOOK_ENDPOINT_MOVED"
 
       })
     );
@@ -1452,7 +2153,10 @@ async function razorpayWebhookController(
           false,
 
         message:
-          "Razorpay webhook endpoint moved to webhookController"
+          "Razorpay webhook endpoint moved to the dedicated webhook controller",
+
+        code:
+          "WEBHOOK_ENDPOINT_MOVED"
 
       })
     );
@@ -1478,6 +2182,16 @@ module.exports = {
 
   stripeWebhookController,
 
-  razorpayWebhookController
+  razorpayWebhookController,
+
+  normalizeProvider,
+
+  normalizePlan,
+
+  normalizeBillingCycle,
+
+  normalizeCurrency,
+
+  resolvePlan
 
 };
