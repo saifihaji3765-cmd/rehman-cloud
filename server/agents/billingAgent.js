@@ -1,419 +1,735 @@
 /* =========================================================
-   BILLING AGENT
-   =========================================================
+   ZYRIONOS BILLING AGENT
+   ---------------------------------------------------------
    Responsibilities:
-   - Manage official ZyrionOS pricing plans
+
+   - Own official ZyrionOS pricing catalog
+   - Own resource entitlement catalog
    - Validate billing requests
    - Calculate monthly/yearly pricing
-   - Return normalized plan data
-   - Provide the contract consumed by Subscription Agent
-   - Never claim payment success
-   - Never activate a subscription by itself
-   ========================================================= */
+   - Return immutable plan snapshots
+   - Provide resource limits to Subscription Agent
+   - Provide deployment resource limits to Deploy Agent
+   - Validate payment-related state when supplied
+   - NEVER claim payment success without authoritative
+     payment confirmation
+   - NEVER activate a subscription by itself
+   - NEVER invent resources outside the selected plan
+   - NEVER grant unlimited infrastructure accidentally
 
-const { v4: uuidv4 } =
-  require("uuid");
+   RESOURCE MODEL:
 
-/* =========================
+   Lower price
+       ↓
+   Lower resources
+
+   Higher price
+       ↓
+   Higher resources
+
+   Every plan has explicit:
+
+   - CPU
+   - RAM
+   - Storage
+   - Bandwidth
+   - Deployment limits
+   - AI credits
+   - Thumbnail credits
+   - Video credits
+   - Feature entitlements
+
+   AWS FARGATE COMPATIBILITY:
+
+   Resource combinations are intentionally selected
+   from supported Fargate CPU/memory combinations.
+
+========================================================= */
+
+
+/* =========================================================
+   PACKAGES
+========================================================= */
+
+const {
+  v4: uuidv4
+} = require("uuid");
+
+
+/* =========================================================
    SERVICES
-========================= */
+========================================================= */
 
 const logger =
   require("../services/loggerService");
 
+
 /* =========================================================
-   PLANS
-   =========================================================
-   Monthly pricing:
-   Starter     $19
-   Pro         $99
-   Business    $199
-   Scale       $299
-   Enterprise  $499
-   ========================================================= */
+   CONSTANTS
+========================================================= */
+
+const BILLING_VERSION =
+  "2.0.0";
+
+
+const SUPPORTED_CURRENCY =
+  "USD";
+
+
+const SUPPORTED_PAYMENT_PROVIDERS = [
+
+  "stripe",
+
+  "razorpay"
+
+];
+
+
+/* =========================================================
+   OFFICIAL PLAN CATALOG
+=========================================================
+
+   IMPORTANT:
+
+   These values are the SOURCE OF TRUTH for the
+   application-level entitlement layer.
+
+   Subscription Agent and Deploy Agent should consume
+   the resulting plan snapshot instead of inventing
+   their own resource values.
+
+========================================================= */
 
 const plans = [
-  /* =========================
-     STARTER — $19
-  ========================= */
+
+  /* =======================================================
+     STARTER
+     $19 / month
+  ======================================================= */
 
   {
-    name: "Starter",
 
-    monthlyPrice: 19,
+    name:
+      "Starter",
 
-    yearlyPrice: 190,
+    monthlyPrice:
+      19,
 
-    currency: "USD",
+    yearlyPrice:
+      190,
 
-    ram: "2GB",
+    currency:
+      SUPPORTED_CURRENCY,
 
-    cpu: "1 vCPU",
+    resources: {
 
-    storage: "25GB",
+      /*
+       * Fargate-compatible:
+       * 0.25 vCPU + 1 GB RAM
+       */
 
-    bandwidth: "250GB",
+      cpu:
+        "0.25 vCPU",
 
-    deploymentsLimit: 3,
+      cpuUnits:
+        256,
 
-    aiCredits: 2000,
+      ram:
+        "1GB",
 
-    thumbnailCredits: 500,
+      ramGB:
+        1,
 
-    videoCredits: 100,
+      storage:
+        "10GB",
 
-    customDomain: true,
+      storageGB:
+        10,
 
-    autoSSL: true,
+      bandwidth:
+        "100GB",
 
-    autoScaling: false,
+      bandwidthGB:
+        100
 
-    advancedMonitoring: false,
+    },
 
-    priorityDeployments: false,
+    limits: {
 
-    dedicatedInfrastructure: false,
+      deployments:
+        3,
 
-    dedicatedSupport: false,
+      aiCredits:
+        2000,
+
+      thumbnailCredits:
+        500,
+
+      videoCredits:
+        100
+
+    },
+
+    features: {
+
+      customDomain:
+        true,
+
+      autoSSL:
+        true,
+
+      autoScaling:
+        false,
+
+      advancedMonitoring:
+        false,
+
+      priorityDeployments:
+        false,
+
+      dedicatedInfrastructure:
+        false,
+
+      dedicatedSupport:
+        false
+
+    },
 
     support:
       "Community Support",
 
-    features: [
+    featureList: [
+
       "Basic Deployments",
+
       "AI Assistant",
+
       "SSL",
-      "Custom Domains",
-    ],
+
+      "Custom Domains"
+
+    ]
+
   },
 
-  /* =========================
-     PRO — $99
-  ========================= */
+
+  /* =======================================================
+     PRO
+     $99 / month
+  ======================================================= */
 
   {
-    name: "Pro",
 
-    monthlyPrice: 99,
+    name:
+      "Pro",
 
-    yearlyPrice: 990,
+    monthlyPrice:
+      99,
 
-    currency: "USD",
+    yearlyPrice:
+      990,
 
-    ram: "8GB",
+    currency:
+      SUPPORTED_CURRENCY,
 
-    cpu: "4 vCPU",
+    resources: {
 
-    storage: "100GB",
+      /*
+       * Fargate-compatible:
+       * 1 vCPU + 2 GB RAM
+       */
 
-    bandwidth: "1TB",
+      cpu:
+        "1 vCPU",
 
-    deploymentsLimit: 15,
+      cpuUnits:
+        1024,
 
-    aiCredits: 10000,
+      ram:
+        "2GB",
 
-    thumbnailCredits: 5000,
+      ramGB:
+        2,
 
-    videoCredits: 1000,
+      storage:
+        "50GB",
 
-    customDomain: true,
+      storageGB:
+        50,
 
-    autoSSL: true,
+      bandwidth:
+        "500GB",
 
-    autoScaling: true,
+      bandwidthGB:
+        500
 
-    advancedMonitoring: true,
+    },
 
-    priorityDeployments: true,
+    limits: {
 
-    dedicatedInfrastructure: false,
+      deployments:
+        15,
 
-    dedicatedSupport: false,
+      aiCredits:
+        10000,
+
+      thumbnailCredits:
+        5000,
+
+      videoCredits:
+        1000
+
+    },
+
+    features: {
+
+      customDomain:
+        true,
+
+      autoSSL:
+        true,
+
+      autoScaling:
+        true,
+
+      advancedMonitoring:
+        true,
+
+      priorityDeployments:
+        true,
+
+      dedicatedInfrastructure:
+        false,
+
+      dedicatedSupport:
+        false
+
+    },
 
     support:
       "Priority Support",
 
-    features: [
+    featureList: [
+
       "Advanced AI",
+
       "Priority Deployments",
+
       "AI Thumbnail Generator",
+
       "Advanced Monitoring",
-      "Auto Scaling",
-    ],
+
+      "Auto Scaling"
+
+    ]
+
   },
 
-  /* =========================
-     BUSINESS — $199
-  ========================= */
+
+  /* =======================================================
+     BUSINESS
+     $199 / month
+  ======================================================= */
 
   {
-    name: "Business",
 
-    monthlyPrice: 199,
+    name:
+      "Business",
 
-    yearlyPrice: 1990,
+    monthlyPrice:
+      199,
 
-    currency: "USD",
+    yearlyPrice:
+      1990,
 
-    ram: "16GB",
+    currency:
+      SUPPORTED_CURRENCY,
 
-    cpu: "8 vCPU",
+    resources: {
 
-    storage: "250GB",
+      /*
+       * Fargate-compatible:
+       * 2 vCPU + 4 GB RAM
+       */
 
-    bandwidth: "Unlimited",
+      cpu:
+        "2 vCPU",
 
-    deploymentsLimit: 100,
+      cpuUnits:
+        2048,
 
-    aiCredits: 50000,
+      ram:
+        "4GB",
 
-    thumbnailCredits: 25000,
+      ramGB:
+        4,
 
-    videoCredits: 10000,
+      storage:
+        "150GB",
 
-    customDomain: true,
+      storageGB:
+        150,
 
-    autoSSL: true,
+      bandwidth:
+        "1TB",
 
-    autoScaling: true,
+      bandwidthGB:
+        1024
 
-    advancedMonitoring: true,
+    },
 
-    priorityDeployments: true,
+    limits: {
 
-    dedicatedInfrastructure: false,
+      deployments:
+        100,
 
-    dedicatedSupport: true,
+      aiCredits:
+        50000,
+
+      thumbnailCredits:
+        25000,
+
+      videoCredits:
+        10000
+
+    },
+
+    features: {
+
+      customDomain:
+        true,
+
+      autoSSL:
+        true,
+
+      autoScaling:
+        true,
+
+      advancedMonitoring:
+        true,
+
+      priorityDeployments:
+        true,
+
+      dedicatedInfrastructure:
+        false,
+
+      dedicatedSupport:
+        true
+
+    },
 
     support:
-      "24/7 Premium Support",
-
-    features: [
-      "Business AI Automation",
-      "Auto Scaling",
-      "Advanced Analytics",
-      "Team Features",
-      "Priority AI Processing",
       "Premium Support",
-    ],
+
+    featureList: [
+
+      "Business AI Automation",
+
+      "Auto Scaling",
+
+      "Advanced Analytics",
+
+      "Team Features",
+
+      "Priority AI Processing",
+
+      "Premium Support"
+
+    ]
+
   },
 
-  /* =========================
-     SCALE — $299
-  ========================= */
+
+  /* =======================================================
+     SCALE
+     $299 / month
+  ======================================================= */
 
   {
-    name: "Scale",
 
-    monthlyPrice: 299,
+    name:
+      "Scale",
 
-    yearlyPrice: 2990,
+    monthlyPrice:
+      299,
 
-    currency: "USD",
+    yearlyPrice:
+      2990,
 
-    ram: "32GB",
+    currency:
+      SUPPORTED_CURRENCY,
 
-    cpu: "12 vCPU",
+    resources: {
 
-    storage: "500GB",
+      /*
+       * Fargate-compatible:
+       * 4 vCPU + 8 GB RAM
+       */
 
-    bandwidth: "Unlimited",
+      cpu:
+        "4 vCPU",
 
-    deploymentsLimit: 250,
+      cpuUnits:
+        4096,
 
-    aiCredits: 100000,
+      ram:
+        "8GB",
 
-    thumbnailCredits: 50000,
+      ramGB:
+        8,
 
-    videoCredits: 25000,
+      storage:
+        "300GB",
 
-    customDomain: true,
+      storageGB:
+        300,
 
-    autoSSL: true,
+      bandwidth:
+        "2TB",
 
-    autoScaling: true,
+      bandwidthGB:
+        2048
 
-    advancedMonitoring: true,
+    },
 
-    priorityDeployments: true,
+    limits: {
 
-    dedicatedInfrastructure: true,
+      deployments:
+        250,
 
-    dedicatedSupport: true,
+      aiCredits:
+        100000,
+
+      thumbnailCredits:
+        50000,
+
+      videoCredits:
+        25000
+
+    },
+
+    features: {
+
+      customDomain:
+        true,
+
+      autoSSL:
+        true,
+
+      autoScaling:
+        true,
+
+      advancedMonitoring:
+        true,
+
+      priorityDeployments:
+        true,
+
+      dedicatedInfrastructure:
+        true,
+
+      dedicatedSupport:
+        true
+
+    },
 
     support:
       "Priority Business Support",
 
-    features: [
+    featureList: [
+
       "High-Scale AI Automation",
+
       "Advanced Auto Scaling",
+
       "Advanced Analytics",
+
       "Team Collaboration",
+
       "Priority AI Processing",
+
       "Dedicated Infrastructure",
-      "Premium Monitoring",
-    ],
+
+      "Premium Monitoring"
+
+    ]
+
   },
 
-  /* =========================
-     ENTERPRISE — $499
-  ========================= */
+
+  /* =======================================================
+     ENTERPRISE
+     $499 / month
+  ======================================================= */
 
   {
-    name: "Enterprise",
 
-    monthlyPrice: 499,
+    name:
+      "Enterprise",
 
-    yearlyPrice: 4990,
+    monthlyPrice:
+      499,
 
-    currency: "USD",
+    yearlyPrice:
+      4990,
 
-    ram: "64GB",
+    currency:
+      SUPPORTED_CURRENCY,
 
-    cpu: "16 vCPU",
+    resources: {
 
-    storage: "1TB",
+      /*
+       * Fargate-compatible:
+       * 8 vCPU + 16 GB RAM
+       */
 
-    bandwidth: "Unlimited",
+      cpu:
+        "8 vCPU",
 
-    deploymentsLimit: -1,
+      cpuUnits:
+        8192,
 
-    aiCredits: -1,
+      ram:
+        "16GB",
 
-    thumbnailCredits: -1,
+      ramGB:
+        16,
 
-    videoCredits: -1,
+      storage:
+        "1TB",
 
-    customDomain: true,
+      storageGB:
+        1024,
 
-    autoSSL: true,
+      bandwidth:
+        "5TB",
 
-    autoScaling: true,
+      bandwidthGB:
+        5120
 
-    advancedMonitoring: true,
+    },
 
-    priorityDeployments: true,
+    limits: {
 
-    dedicatedInfrastructure: true,
+      /*
+       * Enterprise does not mean literally
+       * infinite infrastructure.
+       */
 
-    dedicatedSupport: true,
+      deployments:
+        500,
+
+      aiCredits:
+        500000,
+
+      thumbnailCredits:
+        100000,
+
+      videoCredits:
+        50000
+
+    },
+
+    features: {
+
+      customDomain:
+        true,
+
+      autoSSL:
+        true,
+
+      autoScaling:
+        true,
+
+      advancedMonitoring:
+        true,
+
+      priorityDeployments:
+        true,
+
+      dedicatedInfrastructure:
+        true,
+
+      dedicatedSupport:
+        true
+
+    },
 
     support:
-      "Dedicated Success Manager",
+      "Dedicated Success Support",
 
-    features: [
-      "Unlimited AI",
-      "Unlimited Deployments",
+    featureList: [
+
+      "Enterprise AI",
+
+      "High-Scale Deployments",
+
       "Dedicated Infrastructure",
+
       "Enterprise Monitoring",
+
       "Priority AI Processing",
+
       "Advanced Automation",
-      "Dedicated Support",
-    ],
-  },
+
+      "Dedicated Support"
+
+    ]
+
+  }
+
 ];
 
-/* =========================================================
-   PLAN VALIDATION
-========================================================= */
-
-function validatePlan(plan) {
-  if (
-    !plan ||
-    typeof plan !== "object"
-  ) {
-    return false;
-  }
-
-  if (
-    !plan.name ||
-    !plan.currency
-  ) {
-    return false;
-  }
-
-  if (
-    !Number.isFinite(
-      Number(plan.monthlyPrice)
-    ) ||
-    Number(plan.monthlyPrice) < 0
-  ) {
-    return false;
-  }
-
-  if (
-    !Number.isFinite(
-      Number(plan.yearlyPrice)
-    ) ||
-    Number(plan.yearlyPrice) < 0
-  ) {
-    return false;
-  }
-
-  const limits = [
-    plan.deploymentsLimit,
-    plan.aiCredits,
-    plan.thumbnailCredits,
-    plan.videoCredits,
-  ];
-
-  for (const limit of limits) {
-    if (
-      limit !== -1 &&
-      (
-        !Number.isFinite(
-          Number(limit)
-        ) ||
-        Number(limit) < 0
-      )
-    ) {
-      return false;
-    }
-  }
-
-  return true;
-}
 
 /* =========================================================
-   GET PLAN
+   SAFE STRING
 ========================================================= */
 
-function getPlanByName(
-  planName
+function cleanString(
+  value,
+  maxLength = 500
 ) {
-  if (!planName) {
-    return null;
+
+  if (
+    typeof value !==
+    "string"
+  ) {
+
+    return "";
+
   }
 
-  const normalizedName =
-    String(planName)
-      .trim()
-      .toLowerCase();
 
-  return plans.find(
-    (plan) =>
-      plan.name
-        .toLowerCase() ===
-      normalizedName
-  ) || null;
+  return value
+    .trim()
+    .slice(
+      0,
+      maxLength
+    );
+
 }
 
+
 /* =========================================================
-   USER VALIDATION
+   USER ID
 ========================================================= */
 
 function normalizeUserId(
   value
 ) {
-  if (!value) {
-    return null;
-  }
 
   const userId =
-    String(value).trim();
+    cleanString(
+      value,
+      300
+    );
+
 
   return userId || null;
+
 }
+
 
 /* =========================================================
    BILLING CYCLE
@@ -422,68 +738,480 @@ function normalizeUserId(
 function normalizeBillingCycle(
   value
 ) {
-  return value === "yearly"
+
+  return value ===
+    "yearly"
+
     ? "yearly"
+
     : "monthly";
+
 }
 
+
 /* =========================================================
-   NEXT BILLING DATE
+   PLAN LOOKUP
+========================================================= */
+
+function getPlanByName(
+  planName
+) {
+
+  const normalized =
+    cleanString(
+      planName,
+      100
+    )
+      .toLowerCase();
+
+
+  if (
+    !normalized
+  ) {
+
+    return null;
+
+  }
+
+
+  return (
+
+    plans.find(
+      (
+        plan
+      ) =>
+        plan.name
+          .toLowerCase() ===
+        normalized
+    ) ||
+
+    null
+
+  );
+
+}
+
+
+/* =========================================================
+   PLAN VALIDATION
+========================================================= */
+
+function validatePlan(
+  plan
+) {
+
+  if (
+    !plan ||
+    typeof plan !==
+      "object"
+  ) {
+
+    return false;
+
+  }
+
+
+  if (
+    !plan.name ||
+    !plan.currency
+  ) {
+
+    return false;
+
+  }
+
+
+  if (
+    plan.currency !==
+    SUPPORTED_CURRENCY
+  ) {
+
+    return false;
+
+  }
+
+
+  if (
+    !Number.isFinite(
+      Number(
+        plan.monthlyPrice
+      )
+    ) ||
+
+    Number(
+      plan.monthlyPrice
+    ) < 0
+  ) {
+
+    return false;
+
+  }
+
+
+  if (
+    !Number.isFinite(
+      Number(
+        plan.yearlyPrice
+      )
+    ) ||
+
+    Number(
+      plan.yearlyPrice
+    ) < 0
+  ) {
+
+    return false;
+
+  }
+
+
+  if (
+    !plan.resources
+  ) {
+
+    return false;
+
+  }
+
+
+  if (
+    !Number.isFinite(
+      Number(
+        plan.resources
+          .cpuUnits
+      )
+    )
+  ) {
+
+    return false;
+
+  }
+
+
+  if (
+    !Number.isFinite(
+      Number(
+        plan.resources
+          .ramGB
+      )
+    ) ||
+
+    Number(
+      plan.resources.ramGB
+    ) <= 0
+  ) {
+
+    return false;
+
+  }
+
+
+  if (
+    !Number.isFinite(
+      Number(
+        plan.resources
+          .storageGB
+      )
+    ) ||
+
+    Number(
+      plan.resources.storageGB
+    ) <= 0
+  ) {
+
+    return false;
+
+  }
+
+
+  if (
+    !Number.isFinite(
+      Number(
+        plan.resources
+          .bandwidthGB
+      )
+    ) ||
+
+    Number(
+      plan.resources.bandwidthGB
+    ) <= 0
+  ) {
+
+    return false;
+
+  }
+
+
+  if (
+    !plan.limits
+  ) {
+
+    return false;
+
+  }
+
+
+  const limits = [
+
+    plan.limits.deployments,
+
+    plan.limits.aiCredits,
+
+    plan.limits.thumbnailCredits,
+
+    plan.limits.videoCredits
+
+  ];
+
+
+  for (
+    const limit of limits
+  ) {
+
+    if (
+      !Number.isFinite(
+        Number(limit)
+      ) ||
+
+      Number(limit) < 0
+    ) {
+
+      return false;
+
+    }
+
+  }
+
+
+  return true;
+
+}
+
+
+/* =========================================================
+   RESOURCE SANITY VALIDATION
+=========================================================
+
+   These rules prevent accidental plan configuration
+   explosions.
+
+========================================================= */
+
+function validateResourceEconomics(
+  plan
+) {
+
+  if (
+    !validatePlan(
+      plan
+    )
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      reason:
+        "Invalid plan structure."
+
+    };
+
+  }
+
+
+  const price =
+    Number(
+      plan.monthlyPrice
+    );
+
+
+  const ram =
+    Number(
+      plan.resources.ramGB
+    );
+
+
+  const storage =
+    Number(
+      plan.resources.storageGB
+    );
+
+
+  /*
+   * Basic safety ceiling.
+
+   * These are intentionally conservative.
+   */
+
+  const maxRamByPrice = {
+
+    19:
+      1,
+
+    99:
+      2,
+
+    199:
+      4,
+
+    299:
+      8,
+
+    499:
+      16
+
+  };
+
+
+  if (
+    maxRamByPrice[price] &&
+    ram >
+      maxRamByPrice[price]
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      reason:
+        `RAM entitlement exceeds configured economic ceiling for ${plan.name}.`
+
+    };
+
+  }
+
+
+  /*
+   * Storage should remain bounded relative
+   * to the plan price.
+
+   * This is a guardrail, not the pricing formula.
+   */
+
+  const maxStorageByPrice = {
+
+    19:
+      10,
+
+    99:
+      50,
+
+    199:
+      150,
+
+    299:
+      300,
+
+    499:
+      1024
+
+  };
+
+
+  if (
+    maxStorageByPrice[price] &&
+    storage >
+      maxStorageByPrice[price]
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      reason:
+        `Storage entitlement exceeds configured economic ceiling for ${plan.name}.`
+
+    };
+
+  }
+
+
+  return {
+
+    valid:
+      true
+
+  };
+
+}
+
+
+/* =========================================================
+   CALCULATE NEXT BILLING DATE
 ========================================================= */
 
 function calculateNextBillingDate(
   startDate,
   billingCycle
 ) {
+
   const nextDate =
-    new Date(startDate);
+    new Date(
+      startDate
+    );
+
 
   if (
-    billingCycle === "yearly"
+    billingCycle ===
+    "yearly"
   ) {
+
     nextDate.setFullYear(
       nextDate.getFullYear() + 1
     );
 
+
     return nextDate;
+
   }
 
-  /*
-   * Calendar-month calculation.
-   * This avoids treating every month as exactly
-   * 30 days.
-   */
 
   const originalDay =
     nextDate.getDate();
+
 
   nextDate.setMonth(
     nextDate.getMonth() + 1
   );
 
+
   /*
-   * Handle months with fewer days.
+   * Handle dates such as January 31
+   * moving into shorter months.
    */
 
   if (
     nextDate.getDate() !==
     originalDay
   ) {
-    nextDate.setDate(0);
+
+    nextDate.setDate(
+      0
+    );
+
   }
 
+
   return nextDate;
+
 }
 
+
 /* =========================================================
-   PLAN SNAPSHOT
+   DEEP PLAN SNAPSHOT
 ========================================================= */
 
 function createPlanSnapshot(
   plan
 ) {
+
   return {
-    name: plan.name,
+
+    name:
+      plan.name,
 
     monthlyPrice:
       plan.monthlyPrice,
@@ -494,68 +1222,207 @@ function createPlanSnapshot(
     currency:
       plan.currency,
 
+    /*
+     * Legacy-compatible top-level resources.
+     */
+
     ram:
-      plan.ram,
+      plan.resources.ram,
+
+    ramGB:
+      plan.resources.ramGB,
 
     cpu:
-      plan.cpu,
+      plan.resources.cpu,
+
+    cpuUnits:
+      plan.resources.cpuUnits,
 
     storage:
-      plan.storage,
+      plan.resources.storage,
+
+    storageGB:
+      plan.resources.storageGB,
 
     bandwidth:
-      plan.bandwidth,
+      plan.resources.bandwidth,
+
+    bandwidthGB:
+      plan.resources.bandwidthGB,
 
     /*
-     * IMPORTANT:
-     * -1 MUST remain -1.
-     *
-     * Subscription Agent uses -1 to represent
-     * unlimited resources.
+     * Structured resource contract.
+     */
+
+    resources: {
+
+      cpu:
+        plan.resources.cpu,
+
+      cpuUnits:
+        plan.resources.cpuUnits,
+
+      ram:
+        plan.resources.ram,
+
+      ramGB:
+        plan.resources.ramGB,
+
+      storage:
+        plan.resources.storage,
+
+      storageGB:
+        plan.resources.storageGB,
+
+      bandwidth:
+        plan.resources.bandwidth,
+
+      bandwidthGB:
+        plan.resources.bandwidthGB
+
+    },
+
+    /*
+     * Legacy-compatible limits.
      */
 
     deploymentsLimit:
-      plan.deploymentsLimit,
+      plan.limits.deployments,
 
     aiCredits:
-      plan.aiCredits,
+      plan.limits.aiCredits,
 
     thumbnailCredits:
-      plan.thumbnailCredits,
+      plan.limits.thumbnailCredits,
 
     videoCredits:
-      plan.videoCredits,
+      plan.limits.videoCredits,
+
+    /*
+     * Feature entitlements.
+     */
 
     customDomain:
-      plan.customDomain,
+      plan.features.customDomain,
 
     autoSSL:
-      plan.autoSSL,
+      plan.features.autoSSL,
 
     autoScaling:
-      plan.autoScaling,
+      plan.features.autoScaling,
 
     advancedMonitoring:
-      plan.advancedMonitoring,
+      plan.features.advancedMonitoring,
 
     priorityDeployments:
-      plan.priorityDeployments,
+      plan.features.priorityDeployments,
 
     dedicatedInfrastructure:
-      plan.dedicatedInfrastructure,
+      plan.features.dedicatedInfrastructure,
 
     dedicatedSupport:
-      plan.dedicatedSupport,
+      plan.features.dedicatedSupport,
 
     support:
       plan.support,
 
     features:
-      Array.isArray(plan.features)
-        ? [...plan.features]
-        : [],
+      [
+        ...plan.featureList
+      ]
+
   };
+
 }
+
+
+/* =========================================================
+   PAYMENT PROVIDER NORMALIZATION
+========================================================= */
+
+function normalizePaymentProvider(
+  value
+) {
+
+  if (
+    !value
+  ) {
+
+    return null;
+
+  }
+
+
+  return cleanString(
+    value,
+    50
+  ).toLowerCase();
+
+}
+
+
+/* =========================================================
+   AUTHORITATIVE PAYMENT CHECK
+========================================================= */
+
+function hasAuthoritativePayment(
+  data
+) {
+
+  if (
+    data.paymentConfirmed ===
+    true
+  ) {
+
+    return true;
+
+  }
+
+
+  if (
+    data.paymentStatus ===
+    "paid"
+  ) {
+
+    return true;
+
+  }
+
+
+  if (
+    data.paymentStatus ===
+    "succeeded"
+  ) {
+
+    return true;
+
+  }
+
+
+  if (
+    data.status ===
+    "paid"
+  ) {
+
+    return true;
+
+  }
+
+
+  if (
+    data.status ===
+    "succeeded"
+  ) {
+
+    return true;
+
+  }
+
+
+  return false;
+
+}
+
 
 /* =========================================================
    BILLING AGENT
@@ -564,123 +1431,215 @@ function createPlanSnapshot(
 async function billingAgent(
   userData = {}
 ) {
+
   try {
+
     logger.info(
-      "Billing Agent Started"
+      "💳 ZyrionOS Billing Agent Started"
     );
 
-    /* =========================
+
+    /* =====================================================
        PAYLOAD VALIDATION
-    ========================= */
+    ===================================================== */
 
     if (
       !userData ||
-      typeof userData !== "object"
+      typeof userData !==
+        "object" ||
+      Array.isArray(
+        userData
+      )
     ) {
+
       return {
-        success: false,
+
+        success:
+          false,
 
         message:
-          "Invalid billing payload",
+          "Invalid billing payload"
+
       };
+
     }
 
-    /* =========================
-       USER ID
-    ========================= */
+
+    /* =====================================================
+       USER
+    ===================================================== */
 
     const userId =
       normalizeUserId(
         userData.userId
       );
 
-    /*
-     * Billing must belong to a real
-     * authenticated user.
-     */
 
-    if (!userId) {
+    if (
+      !userId
+    ) {
+
       return {
-        success: false,
+
+        success:
+          false,
 
         message:
-          "Authenticated user ID required",
+          "Authenticated user ID required"
+
       };
+
     }
 
-    /* =========================
+
+    /* =====================================================
+       OPERATION
+    ===================================================== */
+
+    const operation =
+      cleanString(
+        userData.operation ||
+        userData.action ||
+        "quote",
+        100
+      )
+        .toLowerCase();
+
+
+    /* =====================================================
        PLAN
-    ========================= */
+    ===================================================== */
 
     const planName =
       userData.plan ||
       "Starter";
+
 
     const selectedPlan =
       getPlanByName(
         planName
       );
 
-    if (!selectedPlan) {
+
+    if (
+      !selectedPlan
+    ) {
+
       return {
-        success: false,
+
+        success:
+          false,
 
         message:
           "Invalid plan selected",
 
         availablePlans:
           plans.map(
-            (plan) =>
+            (
+              plan
+            ) =>
               plan.name
-          ),
+          )
+
       };
+
     }
 
-    /* =========================
+
+    /* =====================================================
        PLAN VALIDATION
-    ========================= */
+    ===================================================== */
 
     if (
       !validatePlan(
         selectedPlan
       )
     ) {
+
       logger.error(
-        `Invalid configuration for plan: ${selectedPlan.name}`
+        `Invalid billing configuration: ${selectedPlan.name}`
       );
 
+
       return {
-        success: false,
+
+        success:
+          false,
 
         message:
-          "Selected billing plan is incorrectly configured",
+          "Selected billing plan is incorrectly configured"
+
       };
+
     }
 
-    /* =========================
+
+    /* =====================================================
+       ECONOMIC VALIDATION
+    ===================================================== */
+
+    const economics =
+      validateResourceEconomics(
+        selectedPlan
+      );
+
+
+    if (
+      !economics.valid
+    ) {
+
+      logger.error(
+        economics.reason
+      );
+
+
+      return {
+
+        success:
+          false,
+
+        message:
+          "Billing resource configuration failed",
+
+        error:
+          economics.reason
+
+      };
+
+    }
+
+
+    /* =====================================================
        BILLING CYCLE
-    ========================= */
+    ===================================================== */
 
     const billingCycle =
       normalizeBillingCycle(
         userData.billingCycle
       );
 
-    /* =========================
+
+    /* =====================================================
        PRICE
-    ========================= */
+    ===================================================== */
 
     const finalPrice =
-      billingCycle === "yearly"
+
+      billingCycle ===
+      "yearly"
+
         ? selectedPlan.yearlyPrice
+
         : selectedPlan.monthlyPrice;
 
-    /* =========================
-       BILLING DATES
-    ========================= */
+
+    /* =====================================================
+       DATES
+    ===================================================== */
 
     const now =
       new Date();
+
 
     const nextBillingDate =
       calculateNextBillingDate(
@@ -688,62 +1647,121 @@ async function billingAgent(
         billingCycle
       );
 
-    /* =========================
+
+    /* =====================================================
        BILLING ID
-    ========================= */
+    ===================================================== */
 
     const billingId =
+      cleanString(
+        userData.billingId,
+        300
+      ) ||
       uuidv4();
 
-    /* =========================
+
+    /* =====================================================
        PAYMENT PROVIDER
-    ========================= */
+    ===================================================== */
 
     const paymentProvider =
-      userData.paymentProvider
-        ? String(
-            userData.paymentProvider
-          )
-            .trim()
-            .toLowerCase()
-        : null;
+      normalizePaymentProvider(
+        userData.paymentProvider
+      );
 
-    const allowedProviders = [
-      "stripe",
-      "razorpay",
-    ];
 
     if (
       paymentProvider &&
-      !allowedProviders.includes(
-        paymentProvider
-      )
+      !SUPPORTED_PAYMENT_PROVIDERS
+        .includes(
+          paymentProvider
+        )
     ) {
+
       return {
-        success: false,
+
+        success:
+          false,
 
         message:
           "Unsupported payment provider",
+
+        supportedProviders:
+          [
+            ...SUPPORTED_PAYMENT_PROVIDERS
+          ]
+
       };
+
     }
 
-    /* =========================
+
+    /* =====================================================
+       PAYMENT STATE
+    ===================================================== */
+
+    const paymentConfirmed =
+      hasAuthoritativePayment(
+        userData
+      );
+
+
+    /*
+     * Billing Agent itself never turns a pending
+     * payment into a successful payment.
+     *
+     * It only preserves an authoritative state
+     * supplied by the payment layer.
+     */
+
+    const paymentStatus =
+
+      paymentConfirmed
+
+        ? "paid"
+
+        : "pending";
+
+
+    const invoiceStatus =
+
+      paymentConfirmed
+
+        ? "paid"
+
+        : "unpaid";
+
+
+    const subscriptionStatus =
+
+      paymentConfirmed
+
+        ? "active"
+
+        : "pending";
+
+
+    /* =====================================================
        PLAN SNAPSHOT
-    ========================= */
+    ===================================================== */
 
     const planSnapshot =
       createPlanSnapshot(
         selectedPlan
       );
 
-    /* =========================
-       BILLING OBJECT
-    ========================= */
+
+    /* =====================================================
+       BILLING DATA
+    ===================================================== */
 
     const billingData = {
+
       billingId,
 
       userId,
+
+      operation,
 
       selectedPlan:
         planSnapshot,
@@ -758,21 +1776,16 @@ async function billingAgent(
 
       paymentProvider,
 
-      /*
-       * Billing Agent does NOT claim that
-       * payment succeeded.
-       */
+      paymentStatus,
 
-      paymentStatus:
-        "pending",
+      invoiceStatus,
 
-      invoiceStatus:
-        "unpaid",
+      subscriptionStatus,
 
-      subscriptionStatus:
-        "pending",
+      paymentConfirmed,
 
-      paymentConfirmed: false,
+      entitlementActive:
+        paymentConfirmed,
 
       providerCustomerId:
         userData.providerCustomerId ||
@@ -786,50 +1799,238 @@ async function billingAgent(
         userData.paymentId ||
         null,
 
-      nextBillingDate,
-
       autoRenew:
-        userData.autoRenew !== false,
+        userData.autoRenew !==
+        false,
+
+      nextBillingDate,
 
       createdAt:
         now,
 
       updatedAt:
-        now,
+        now
+
     };
 
-    /* =========================
-       LOG
-    ========================= */
+
+    /* =====================================================
+       OPERATION-SPECIFIC SAFETY
+    ===================================================== */
+
+    if (
+      [
+        "activate",
+        "activate-subscription",
+        "payment-confirmation"
+      ].includes(
+        operation
+      )
+    ) {
+
+      if (
+        !paymentConfirmed
+      ) {
+
+        logger.warning(
+          `Billing activation blocked: payment not confirmed for ${planSnapshot.name}`
+        );
+
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "Payment confirmation required before activation",
+
+          billing:
+            billingData,
+
+          paymentRequired:
+            true,
+
+          paymentConfirmed:
+            false,
+
+          entitlementActive:
+            false
+
+        };
+
+      }
+
+    }
+
+
+    /* =====================================================
+       DEPLOYMENT VALIDATION
+    ===================================================== */
+
+    if (
+      [
+        "validate-deployment",
+        "deployment-validation"
+      ].includes(
+        operation
+      )
+    ) {
+
+      /*
+       * If deployment requires payment, payment
+       * must already be authoritative.
+
+       * If caller explicitly says payment is not
+       * required, validation can proceed.
+       */
+
+      const paymentRequired =
+        userData.paymentRequired !==
+        false;
+
+
+      if (
+        paymentRequired &&
+        !paymentConfirmed
+      ) {
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "Deployment requires confirmed payment",
+
+          billing:
+            billingData,
+
+          paymentRequired:
+            true,
+
+          paymentConfirmed:
+            false,
+
+          entitlementActive:
+            false
+
+        };
+
+      }
+
+    }
+
+
+    /* =====================================================
+       SUCCESS LOG
+    ===================================================== */
 
     logger.success(
-      `Billing Generated: ${selectedPlan.name} - ${selectedPlan.currency} ${finalPrice}`
+
+      `Billing Contract Ready` +
+
+      ` | Plan=${planSnapshot.name}` +
+
+      ` | Price=${selectedPlan.currency} ${finalPrice}` +
+
+      ` | Cycle=${billingCycle}` +
+
+      ` | RAM=${planSnapshot.ram}` +
+
+      ` | CPU=${planSnapshot.cpu}` +
+
+      ` | Storage=${planSnapshot.storage}`
+
     );
 
-    /* =========================
-       RETURN
-    ========================= */
+
+    /* =====================================================
+       RESPONSE
+    ===================================================== */
 
     return {
-      success: true,
+
+      success:
+        true,
 
       billing:
         billingData,
 
+      paymentRequired:
+        true,
+
+      paymentConfirmed,
+
+      entitlementActive:
+        paymentConfirmed,
+
       /*
-       * These values make the contract
-       * explicit for Subscription Agent.
+       * Explicit resource contract for
+       * Subscription and Deploy agents.
        */
 
-      paymentRequired: true,
+      resources:
+        planSnapshot.resources,
 
-      paymentConfirmed: false,
+      limits: {
 
-      entitlementActive: false,
+        deployments:
+          planSnapshot
+            .deploymentsLimit,
+
+        aiCredits:
+          planSnapshot
+            .aiCredits,
+
+        thumbnailCredits:
+          planSnapshot
+            .thumbnailCredits,
+
+        videoCredits:
+          planSnapshot
+            .videoCredits
+
+      },
+
+      features: {
+
+        customDomain:
+          planSnapshot
+            .customDomain,
+
+        autoSSL:
+          planSnapshot
+            .autoSSL,
+
+        autoScaling:
+          planSnapshot
+            .autoScaling,
+
+        advancedMonitoring:
+          planSnapshot
+            .advancedMonitoring,
+
+        priorityDeployments:
+          planSnapshot
+            .priorityDeployments,
+
+        dedicatedInfrastructure:
+          planSnapshot
+            .dedicatedInfrastructure,
+
+        dedicatedSupport:
+          planSnapshot
+            .dedicatedSupport
+
+      },
 
       availablePlans:
         plans.map(
-          (plan) => ({
+          (
+            plan
+          ) => ({
+
             name:
               plan.name,
 
@@ -841,45 +2042,267 @@ async function billingAgent(
 
             currency:
               plan.currency,
+
+            resources:
+              createPlanSnapshot(
+                plan
+              ).resources,
+
+            deploymentsLimit:
+              plan.limits
+                .deployments
+
           })
         ),
+
+      metadata: {
+
+        agent:
+          "billingAgent",
+
+        version:
+          BILLING_VERSION,
+
+        generatedAt:
+          now
+
+      }
+
     };
-  } catch (error) {
+
+  }
+
+  catch (
+    error
+  ) {
+
     logger.error(
-      error?.message ||
-        "Billing agent failed"
+
+      `Billing Agent Failed: ${
+        error?.message ||
+        "Unknown billing error"
+      }`
+
     );
 
+
     return {
-      success: false,
+
+      success:
+        false,
 
       message:
-        "Billing agent failed",
+        "Billing Agent Failed",
 
       error:
         error?.message ||
-        "Unknown billing error",
+        "Unknown billing error"
+
     };
+
   }
+
 }
 
+
 /* =========================================================
-   PLAN ACCESS
+   PUBLIC PLAN API
 ========================================================= */
 
-billingAgent.getPlanByName =
-  getPlanByName;
 
-billingAgent.getPlans =
-  () =>
-    plans.map(
-      (plan) =>
-        createPlanSnapshot(plan)
+/*
+ * Return one immutable-style snapshot.
+ */
+
+billingAgent.getPlanByName =
+  function (
+    planName
+  ) {
+
+    const plan =
+      getPlanByName(
+        planName
+      );
+
+
+    if (
+      !plan
+    ) {
+
+      return null;
+
+    }
+
+
+    return createPlanSnapshot(
+      plan
     );
 
-/* =========================
+  };
+
+
+/*
+ * Return all public plans.
+ */
+
+billingAgent.getPlans =
+  function () {
+
+    return plans.map(
+      (
+        plan
+      ) =>
+        createPlanSnapshot(
+          plan
+        )
+    );
+
+  };
+
+
+/*
+ * Return only the resource contract.
+ */
+
+billingAgent.getPlanResources =
+  function (
+    planName
+  ) {
+
+    const plan =
+      getPlanByName(
+        planName
+      );
+
+
+    if (
+      !plan
+    ) {
+
+      return null;
+
+    }
+
+
+    return {
+
+      ...createPlanSnapshot(
+        plan
+      ).resources
+
+    };
+
+  };
+
+
+/*
+ * Validate the complete catalog at startup
+ * or during tests.
+ */
+
+billingAgent.validateCatalog =
+  function () {
+
+    const errors = [];
+
+
+    for (
+      const plan of plans
+    ) {
+
+      if (
+        !validatePlan(
+          plan
+        )
+      ) {
+
+        errors.push(
+          `${plan?.name || "unknown"}: invalid plan`
+        );
+
+        continue;
+
+      }
+
+
+      const economics =
+        validateResourceEconomics(
+          plan
+        );
+
+
+      if (
+        !economics.valid
+      ) {
+
+        errors.push(
+          `${plan.name}: ${economics.reason}`
+        );
+
+      }
+
+    }
+
+
+    return {
+
+      valid:
+        errors.length ===
+        0,
+
+      errors
+
+    };
+
+  };
+
+
+/* =========================================================
+   METADATA
+========================================================= */
+
+billingAgent.version =
+  BILLING_VERSION;
+
+
+billingAgent.supportedPaymentProviders =
+  [
+    ...SUPPORTED_PAYMENT_PROVIDERS
+  ];
+
+
+billingAgent.planCount =
+  plans.length;
+
+
+/* =========================================================
+   STARTUP VALIDATION
+========================================================= */
+
+const catalogValidation =
+  billingAgent.validateCatalog();
+
+
+if (
+  !catalogValidation.valid
+) {
+
+  logger.error(
+
+    `Billing plan catalog validation failed: ${
+      catalogValidation.errors.join(
+        " | "
+      )
+    }`
+
+  );
+
+}
+
+
+/* =========================================================
    EXPORT
-========================= */
+========================================================= */
 
 module.exports =
   billingAgent;
