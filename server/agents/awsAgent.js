@@ -22,7 +22,7 @@
       ↓
    ECS Service Create / Update
       ↓
-   Running Task Verification
+   Deployment Stabilization
       ↓
    Real Deployment State
 
@@ -32,6 +32,10 @@
    - public URL
    - healthy state
    - ECR image
+   - deployment success
+
+   AWS Agent ONLY reports state verified
+   from AWS APIs.
 ========================================================= */
 
 
@@ -42,8 +46,7 @@
 const {
   ecs,
   ecr
-} =
-  require("../config/aws");
+} = require("../config/aws");
 
 
 /* =========================================================
@@ -56,8 +59,7 @@ const {
   CreateServiceCommand,
   UpdateServiceCommand,
   DescribeServicesCommand
-} =
-  require("@aws-sdk/client-ecs");
+} = require("@aws-sdk/client-ecs");
 
 
 /* =========================================================
@@ -66,8 +68,7 @@ const {
 
 const {
   DescribeImagesCommand
-} =
-  require("@aws-sdk/client-ecr");
+} = require("@aws-sdk/client-ecr");
 
 
 /* =========================================================
@@ -78,8 +79,7 @@ const {
   CloudWatchLogsClient,
   DescribeLogGroupsCommand,
   CreateLogGroupCommand
-} =
-  require("@aws-sdk/client-cloudwatch-logs");
+} = require("@aws-sdk/client-cloudwatch-logs");
 
 
 /* =========================================================
@@ -88,8 +88,7 @@ const {
 
 const {
   v4: uuidv4
-} =
-  require("uuid");
+} = require("uuid");
 
 
 /* =========================================================
@@ -121,9 +120,49 @@ const EXECUTION_ROLE_ARN =
   "";
 
 
+const DEFAULT_TASK_ROLE_ARN =
+  process.env.AWS_ECS_TASK_ROLE ||
+  "";
+
+
 const DEFAULT_LOG_GROUP =
   process.env.AWS_ECS_LOG_GROUP ||
   "/ecs/zyrionos";
+
+
+const DEFAULT_DESIRED_COUNT =
+  Number(
+    process.env.AWS_ECS_DESIRED_COUNT ||
+    1
+  );
+
+
+const DEFAULT_DEPLOYMENT_TIMEOUT_MS =
+  Number(
+    process.env.AWS_ECS_DEPLOYMENT_TIMEOUT_MS ||
+    15 * 60 * 1000
+  );
+
+
+const DEFAULT_POLL_INTERVAL_MS =
+  Number(
+    process.env.AWS_ECS_DEPLOYMENT_POLL_INTERVAL_MS ||
+    10000
+  );
+
+
+const DEFAULT_HEALTHY_PERCENT =
+  Number(
+    process.env.AWS_ECS_MIN_HEALTHY_PERCENT ||
+    100
+  );
+
+
+const DEFAULT_MAX_PERCENT =
+  Number(
+    process.env.AWS_ECS_MAX_PERCENT ||
+    200
+  );
 
 
 const cloudWatchLogs =
@@ -142,91 +181,196 @@ const cloudWatchLogs =
 const MAX_PROJECT_NAME_LENGTH =
   60;
 
+
 const MAX_SERVICE_NAME_LENGTH =
   255;
 
+
 const MAX_TASK_FAMILY_LENGTH =
   255;
+
+
+const MAX_CONTAINER_NAME_LENGTH =
+  255;
+
+
+const MAX_LOG_GROUP_LENGTH =
+  512;
+
+
+const MAX_ENVIRONMENT_VARIABLES =
+  100;
+
+
+const MAX_DESIRED_COUNT =
+  10;
 
 
 /* =========================================================
    SUPPORTED FRAMEWORKS
 ========================================================= */
 
-const FRAMEWORK_CONFIG =
-  {
+const FRAMEWORK_CONFIG = {
 
-    node: {
+  node: {
+    port: 3000
+  },
 
-      port:
-        3000
+  express: {
+    port: 3000
+  },
 
-    },
+  javascript: {
+    port: 3000
+  },
 
-    express: {
+  next: {
+    port: 3000
+  },
 
-      port:
-        3000
+  nextjs: {
+    port: 3000
+  },
 
-    },
+  react: {
+    port: 80
+  },
 
-    javascript: {
+  vite: {
+    port: 80
+  },
 
-      port:
-        3000
+  python: {
+    port: 8000
+  },
 
-    },
+  fastapi: {
+    port: 8000
+  },
 
-    next: {
+  flask: {
+    port: 8000
+  }
 
-      port:
-        3000
+};
 
-    },
 
-    nextjs: {
+/* =========================================================
+   FARGATE CPU / MEMORY MATRIX
+========================================================= */
 
-      port:
-        3000
+const FARGATE_MEMORY_BY_CPU = {
 
-    },
+  "256": new Set([
 
-    react: {
+    "512",
+    "1024",
+    "2048"
 
-      port:
-        80
+  ]),
 
-    },
+  "512": new Set([
 
-    vite: {
+    "1024",
+    "2048",
+    "3072",
+    "4096"
 
-      port:
-        80
+  ]),
 
-    },
+  "1024": new Set([
 
-    python: {
+    "2048",
+    "3072",
+    "4096",
+    "5120",
+    "6144",
+    "7168",
+    "8192"
 
-      port:
-        8000
+  ]),
 
-    },
+  "2048": new Set([
 
-    fastapi: {
+    "4096",
+    "5120",
+    "6144",
+    "7168",
+    "8192",
+    "9216",
+    "10240",
+    "11264",
+    "12288",
+    "13312",
+    "14336",
+    "15360",
+    "16384"
 
-      port:
-        8000
+  ]),
 
-    },
+  "4096": new Set([
 
-    flask: {
+    "8192",
+    "9216",
+    "10240",
+    "11264",
+    "12288",
+    "13312",
+    "14336",
+    "15360",
+    "16384",
+    "17408",
+    "18432",
+    "19456",
+    "20480",
+    "21504",
+    "22528",
+    "23552",
+    "24576",
+    "25600",
+    "26624",
+    "27648",
+    "28672",
+    "29696",
+    "30720"
 
-      port:
-        8000
+  ]),
 
-    }
+  "8192": new Set([
 
-  };
+    "16384",
+    "20480",
+    "24576",
+    "28672",
+    "32768",
+    "36864",
+    "40960",
+    "45056",
+    "49152",
+    "53248",
+    "57344",
+    "61440"
+
+  ]),
+
+  "16384": new Set([
+
+    "32768",
+    "40960",
+    "49152",
+    "57344",
+    "65536",
+    "73728",
+    "81920",
+    "90112",
+    "98304",
+    "106496",
+    "114688",
+    "122880"
+
+  ])
+
+};
 
 
 /* =========================================================
@@ -254,6 +398,66 @@ function cleanString(
       0,
       maxLength
     );
+
+}
+
+
+/* =========================================================
+   SAFE BOOLEAN
+========================================================= */
+
+function normalizeBoolean(
+  value,
+  fallback = false
+) {
+
+  if (
+    typeof value ===
+    "boolean"
+  ) {
+
+    return value;
+
+  }
+
+
+  if (
+    typeof value !==
+    "string"
+  ) {
+
+    return fallback;
+
+  }
+
+
+  const normalized =
+    value
+      .trim()
+      .toLowerCase();
+
+
+  if (
+    normalized ===
+    "true"
+  ) {
+
+    return true;
+
+  }
+
+
+  if (
+    normalized ===
+    "false"
+  ) {
+
+    return false;
+
+  }
+
+
+  return fallback;
 
 }
 
@@ -349,7 +553,7 @@ function normalizeDeploymentId(
 
 
 /* =========================================================
-   CPU / MEMORY VALIDATION
+   CPU NORMALIZATION
 ========================================================= */
 
 function normalizeCpu(
@@ -363,24 +567,8 @@ function normalizeCpu(
     ).trim();
 
 
-  const allowed =
-    new Set([
-
-      "256",
-      "512",
-      "1024",
-      "2048",
-      "4096",
-      "8192",
-      "16384"
-
-    ]);
-
-
   if (
-    !allowed.has(
-      cpu
-    )
+    !FARGATE_MEMORY_BY_CPU[cpu]
   ) {
 
     throw new Error(
@@ -395,6 +583,10 @@ function normalizeCpu(
 }
 
 
+/* =========================================================
+   MEMORY NORMALIZATION
+========================================================= */
+
 function normalizeMemory(
   value
 ) {
@@ -406,46 +598,33 @@ function normalizeMemory(
     ).trim();
 
 
-  const allowed =
-    new Set([
+  const allMemoryValues =
+    new Set();
 
-      "512",
-      "1024",
-      "2048",
-      "3072",
-      "4096",
-      "5120",
-      "6144",
-      "7168",
-      "8192",
-      "9216",
-      "10240",
-      "11264",
-      "12288",
-      "13312",
-      "14336",
-      "15360",
-      "16384",
-      "17408",
-      "18432",
-      "19456",
-      "20480",
-      "21504",
-      "22528",
-      "23552",
-      "24576",
-      "25600",
-      "26624",
-      "27648",
-      "28672",
-      "29696",
-      "30720"
 
-    ]);
+  for (
+    const values
+    of Object.values(
+      FARGATE_MEMORY_BY_CPU
+    )
+  ) {
+
+    for (
+      const memoryValue
+      of values
+    ) {
+
+      allMemoryValues.add(
+        memoryValue
+      );
+
+    }
+
+  }
 
 
   if (
-    !allowed.has(
+    !allMemoryValues.has(
       memory
     )
   ) {
@@ -458,6 +637,48 @@ function normalizeMemory(
 
 
   return memory;
+
+}
+
+
+/* =========================================================
+   CPU + MEMORY COMPATIBILITY
+========================================================= */
+
+function validateFargateResources(
+  cpu,
+  memory
+) {
+
+  const allowedMemory =
+    FARGATE_MEMORY_BY_CPU[cpu];
+
+
+  if (
+    !allowedMemory
+  ) {
+
+    throw new Error(
+      `Unsupported Fargate CPU value: ${cpu}`
+    );
+
+  }
+
+
+  if (
+    !allowedMemory.has(
+      memory
+    )
+  ) {
+
+    throw new Error(
+      `Invalid Fargate CPU/memory combination: ${cpu} CPU with ${memory} MiB memory`
+    );
+
+  }
+
+
+  return true;
 
 }
 
@@ -480,9 +701,7 @@ function normalizeFramework(
 
 
   if (
-    FRAMEWORK_CONFIG[
-      value
-    ]
+    FRAMEWORK_CONFIG[value]
   ) {
 
     return {
@@ -491,20 +710,12 @@ function normalizeFramework(
         value,
 
       port:
-        FRAMEWORK_CONFIG[
-          value
-        ].port
+        FRAMEWORK_CONFIG[value].port
 
     };
 
   }
 
-
-  /*
-   * Unknown framework is treated as
-   * node only when explicitly supplied
-   * by upstream architecture.
-   */
 
   return {
 
@@ -520,15 +731,42 @@ function normalizeFramework(
 
 
 /* =========================================================
-   IMAGE URI VALIDATION
+   PORT
 ========================================================= */
 
-/*
- * Expected:
- *
- * ACCOUNT.dkr.ecr.REGION.amazonaws.com/
- * repository:tag
- */
+function normalizePort(
+  value,
+  fallback
+) {
+
+  const port =
+    Number(
+      value ||
+      fallback
+    );
+
+
+  if (
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65535
+  ) {
+
+    throw new Error(
+      `Invalid container port: ${value}`
+    );
+
+  }
+
+
+  return port;
+
+}
+
+
+/* =========================================================
+   IMAGE URI VALIDATION
+========================================================= */
 
 function parseEcrImageUri(
   imageUri
@@ -555,7 +793,7 @@ function parseEcrImageUri(
   const match =
     value.match(
 
-      /^([0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com)\/(.+):([^/:]+)$/
+      /^([0-9]{12})\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com\/(.+):([^/:]+)$/
 
     );
 
@@ -571,16 +809,32 @@ function parseEcrImageUri(
   }
 
 
-  const registry =
+  const accountId =
     match[1];
 
 
-  const repositoryName =
+  const region =
     match[2];
 
 
-  const imageTag =
+  const repositoryName =
     match[3];
+
+
+  const imageTag =
+    match[4];
+
+
+  if (
+    region !==
+    AWS_REGION
+  ) {
+
+    throw new Error(
+      `ECR image region ${region} does not match AWS region ${AWS_REGION}`
+    );
+
+  }
 
 
   if (
@@ -600,7 +854,12 @@ function parseEcrImageUri(
     imageUri:
       value,
 
-    registry,
+    accountId,
+
+    region,
+
+    registry:
+      `${accountId}.dkr.ecr.${region}.amazonaws.com`,
 
     repositoryName,
 
@@ -620,7 +879,7 @@ function getSubnets() {
   const raw =
     cleanString(
       process.env.AWS_SUBNETS,
-      2000
+      4000
     );
 
 
@@ -659,17 +918,50 @@ function getSubnets() {
   }
 
 
-  return subnets;
+  const unique =
+    [
+      ...new Set(
+        subnets
+      )
+    ];
+
+
+  for (
+    const subnet
+    of unique
+  ) {
+
+    if (
+      !/^subnet-[a-zA-Z0-9]+$/.test(
+        subnet
+      )
+    ) {
+
+      throw new Error(
+        `Invalid subnet ID: ${subnet}`
+      );
+
+    }
+
+  }
+
+
+  return unique;
 
 }
 
+
+/* =========================================================
+   SECURITY GROUPS
+========================================================= */
 
 function getSecurityGroups() {
 
   const raw =
     cleanString(
-      process.env.AWS_SECURITY_GROUP,
-      1000
+      process.env.AWS_SECURITY_GROUP ||
+      process.env.AWS_SECURITY_GROUPS,
+      2000
     );
 
 
@@ -708,13 +1000,41 @@ function getSecurityGroups() {
   }
 
 
-  return securityGroups;
+  const unique =
+    [
+      ...new Set(
+        securityGroups
+      )
+    ];
+
+
+  for (
+    const securityGroup
+    of unique
+  ) {
+
+    if (
+      !/^sg-[a-zA-Z0-9]+$/.test(
+        securityGroup
+      )
+    ) {
+
+      throw new Error(
+        `Invalid security group ID: ${securityGroup}`
+      );
+
+    }
+
+  }
+
+
+  return unique;
 
 }
 
 
 /* =========================================================
-   VERIFY REQUIRED CONFIG
+   CONFIGURATION VALIDATION
 ========================================================= */
 
 function validateConfiguration() {
@@ -756,7 +1076,10 @@ function validateConfiguration() {
 
 
   if (
-    !process.env.AWS_SECURITY_GROUP
+    !(
+      process.env.AWS_SECURITY_GROUP ||
+      process.env.AWS_SECURITY_GROUPS
+    )
   ) {
 
     missing.push(
@@ -772,6 +1095,21 @@ function validateConfiguration() {
 
     throw new Error(
       `Missing AWS configuration: ${missing.join(", ")}`
+    );
+
+  }
+
+
+  if (
+    !Number.isFinite(
+      DEFAULT_DEPLOYMENT_TIMEOUT_MS
+    ) ||
+    DEFAULT_DEPLOYMENT_TIMEOUT_MS <
+      30000
+  ) {
+
+    throw new Error(
+      "AWS_ECS_DEPLOYMENT_TIMEOUT_MS must be at least 30000ms"
     );
 
   }
@@ -793,14 +1131,35 @@ async function verifyCluster(
       new DescribeClustersCommand({
 
         clusters: [
-
           clusterName
+        ],
 
+        include: [
+          "ATTACHMENTS",
+          "CONFIGURATIONS",
+          "SETTINGS",
+          "STATISTICS",
+          "TAGS"
         ]
 
       })
 
     );
+
+
+  if (
+    response?.failures?.length
+  ) {
+
+    const failure =
+      response.failures[0];
+
+
+    throw new Error(
+      `ECS cluster lookup failed: ${failure.reason || failure.detail || "unknown error"}`
+    );
+
+  }
 
 
   const cluster =
@@ -855,10 +1214,8 @@ async function verifyEcrImage(
         imageIds: [
 
           {
-
             imageTag:
               image.imageTag
-
           }
 
         ]
@@ -884,6 +1241,17 @@ async function verifyEcrImage(
   }
 
 
+  if (
+    !details.imageDigest
+  ) {
+
+    throw new Error(
+      `ECR image has no digest: ${image.imageUri}`
+    );
+
+  }
+
+
   return details;
 
 }
@@ -897,6 +1265,35 @@ async function ensureLogGroup(
   logGroupName
 ) {
 
+  const name =
+    cleanString(
+      logGroupName,
+      MAX_LOG_GROUP_LENGTH
+    );
+
+
+  if (
+    !name
+  ) {
+
+    throw new Error(
+      "CloudWatch log group name required"
+    );
+
+  }
+
+
+  if (
+    !name.startsWith("/")
+  ) {
+
+    throw new Error(
+      "CloudWatch log group must start with /"
+    );
+
+  }
+
+
   try {
 
     const response =
@@ -905,7 +1302,7 @@ async function ensureLogGroup(
         new DescribeLogGroupsCommand({
 
           logGroupNamePrefix:
-            logGroupName,
+            name,
 
           limit:
             50
@@ -921,7 +1318,7 @@ async function ensureLogGroup(
         ?.some(
           (group) =>
             group.logGroupName ===
-            logGroupName
+            name
         );
 
 
@@ -934,7 +1331,8 @@ async function ensureLogGroup(
         created:
           false,
 
-        logGroupName
+        logGroupName:
+          name
 
       };
 
@@ -943,10 +1341,6 @@ async function ensureLogGroup(
   }
 
   catch (error) {
-
-    /*
-     * Continue to create it.
-     */
 
     if (
       error?.name !==
@@ -968,7 +1362,8 @@ async function ensureLogGroup(
 
       new CreateLogGroupCommand({
 
-        logGroupName
+        logGroupName:
+          name
 
       })
 
@@ -976,7 +1371,7 @@ async function ensureLogGroup(
 
 
     logger.success(
-      `CloudWatch Log Group Created: ${logGroupName}`
+      `CloudWatch Log Group Created: ${name}`
     );
 
 
@@ -985,18 +1380,14 @@ async function ensureLogGroup(
       created:
         true,
 
-      logGroupName
+      logGroupName:
+        name
 
     };
 
   }
 
   catch (error) {
-
-    /*
-     * Another deployment may have
-     * created it between lookup/create.
-     */
 
     if (
       error?.name ===
@@ -1008,7 +1399,8 @@ async function ensureLogGroup(
         created:
           false,
 
-        logGroupName
+        logGroupName:
+          name
 
       };
 
@@ -1023,7 +1415,7 @@ async function ensureLogGroup(
 
 
 /* =========================================================
-   BUILD TASK FAMILY
+   RESOURCE NAMES
 ========================================================= */
 
 function createTaskFamily(
@@ -1054,10 +1446,6 @@ function createTaskFamily(
 }
 
 
-/* =========================================================
-   BUILD SERVICE NAME
-========================================================= */
-
 function createServiceName(
   projectName,
   deploymentId
@@ -1087,7 +1475,158 @@ function createServiceName(
 
 
 /* =========================================================
-   REGISTER TASK DEFINITION
+   ENVIRONMENT VARIABLES
+========================================================= */
+
+function normalizeEnvironment(
+  environment,
+  containerPort
+) {
+
+  const result = [
+
+    {
+      name:
+        "NODE_ENV",
+
+      value:
+        process.env.NODE_ENV ||
+        "production"
+    },
+
+    {
+      name:
+        "PORT",
+
+      value:
+        String(
+          containerPort
+        )
+    }
+
+  ];
+
+
+  if (
+    !environment
+  ) {
+
+    return result;
+
+  }
+
+
+  if (
+    !Array.isArray(
+      environment
+    )
+  ) {
+
+    throw new Error(
+      "deploymentData.environment must be an array"
+    );
+
+  }
+
+
+  if (
+    environment.length >
+    MAX_ENVIRONMENT_VARIABLES
+  ) {
+
+    throw new Error(
+      `Environment variable count exceeds ${MAX_ENVIRONMENT_VARIABLES}`
+    );
+
+  }
+
+
+  const reserved =
+    new Set([
+
+      "NODE_ENV",
+      "PORT"
+
+    ]);
+
+
+  for (
+    const item
+    of environment
+  ) {
+
+    if (
+      !item ||
+      typeof item !==
+        "object"
+    ) {
+
+      throw new Error(
+        "Invalid environment variable entry"
+      );
+
+    }
+
+
+    const name =
+      cleanString(
+        item.name,
+        256
+      );
+
+
+    if (
+      !/^[A-Za-z_][A-Za-z0-9_]*$/.test(
+        name
+      )
+    ) {
+
+      throw new Error(
+        `Invalid environment variable name: ${name}`
+      );
+
+    }
+
+
+    if (
+      reserved.has(
+        name
+      )
+    ) {
+
+      continue;
+
+    }
+
+
+    const value =
+      typeof item.value ===
+      "string"
+        ? item.value
+        : String(
+            item.value ??
+            ""
+          );
+
+
+    result.push({
+
+      name,
+
+      value
+
+    });
+
+  }
+
+
+  return result;
+
+}
+
+
+/* =========================================================
+   TASK DEFINITION
 ========================================================= */
 
 async function registerTaskDefinition(
@@ -1097,7 +1636,7 @@ async function registerTaskDefinition(
   const response =
     await ecs.send(
 
-      new RegisterTaskDefinitionCommand({
+      new RegisterTaskDefinition({
 
         family:
           data.taskFamily,
@@ -1167,32 +1706,8 @@ async function registerTaskDefinition(
 
             ],
 
-            environment: [
-
-              {
-
-                name:
-                  "NODE_ENV",
-
-                value:
-                  process.env.NODE_ENV ||
-                  "production"
-
-              },
-
-              {
-
-                name:
-                  "PORT",
-
-                value:
-                  String(
-                    data.containerPort
-                  )
-
-              }
-
-            ],
+            environment:
+              data.environment,
 
             logConfiguration: {
 
@@ -1208,11 +1723,45 @@ async function registerTaskDefinition(
                   AWS_REGION,
 
                 "awslogs-stream-prefix":
-                  "ecs"
+                  "zyrionos"
 
               }
 
             }
+
+          }
+
+        ],
+
+        tags: [
+
+          {
+
+            key:
+              "Project",
+
+            value:
+              data.projectName
+
+          },
+
+          {
+
+            key:
+              "DeploymentId",
+
+            value:
+              data.deploymentId
+
+          },
+
+          {
+
+            key:
+              "ManagedBy",
+
+            value:
+              "ZyrionOS"
 
           }
 
@@ -1275,10 +1824,10 @@ async function createEcsService(
         deploymentConfiguration: {
 
           minimumHealthyPercent:
-            100,
+            data.minimumHealthyPercent,
 
           maximumPercent:
-            200,
+            data.maximumPercent,
 
           deploymentCircuitBreaker: {
 
@@ -1291,6 +1840,9 @@ async function createEcsService(
           }
 
         },
+
+        healthCheckGracePeriodSeconds:
+          data.healthCheckGracePeriodSeconds,
 
         networkConfiguration: {
 
@@ -1310,7 +1862,41 @@ async function createEcsService(
         },
 
         enableExecuteCommand:
-          data.enableExecuteCommand
+          data.enableExecuteCommand,
+
+        tags: [
+
+          {
+
+            key:
+              "Project",
+
+            value:
+              data.projectName
+
+          },
+
+          {
+
+            key:
+              "DeploymentId",
+
+            value:
+              data.deploymentId
+
+          },
+
+          {
+
+            key:
+              "ManagedBy",
+
+            value:
+              "ZyrionOS"
+
+          }
+
+        ]
 
       })
 
@@ -1364,7 +1950,33 @@ async function updateEcsService(
           data.desiredCount,
 
         forceNewDeployment:
-          true
+          true,
+
+        deploymentConfiguration: {
+
+          minimumHealthyPercent:
+            data.minimumHealthyPercent,
+
+          maximumPercent:
+            data.maximumPercent,
+
+          deploymentCircuitBreaker: {
+
+            enable:
+              true,
+
+            rollback:
+              true
+
+          }
+
+        },
+
+        healthCheckGracePeriodSeconds:
+          data.healthCheckGracePeriodSeconds,
+
+        enableExecuteCommand:
+          data.enableExecuteCommand
 
       })
 
@@ -1420,6 +2032,31 @@ async function findService(
     );
 
 
+  if (
+    response?.failures?.length
+  ) {
+
+    const failure =
+      response.failures[0];
+
+
+    if (
+      failure.reason ===
+      "MISSING"
+    ) {
+
+      return null;
+
+    }
+
+
+    throw new Error(
+      `ECS service lookup failed: ${failure.reason || failure.detail || "unknown error"}`
+    );
+
+  }
+
+
   const service =
     response
       ?.services?.[0];
@@ -1450,10 +2087,10 @@ async function findService(
 
 
 /* =========================================================
-   VERIFY DEPLOYMENT
+   DESCRIBE DEPLOYMENT STATE
 ========================================================= */
 
-async function verifyDeployment(
+async function describeDeployment(
   clusterName,
   serviceName
 ) {
@@ -1475,6 +2112,44 @@ async function verifyDeployment(
       })
 
     );
+
+
+  if (
+    response?.failures?.length
+  ) {
+
+    const failure =
+      response.failures[0];
+
+
+    return {
+
+      exists:
+        false,
+
+      status:
+        "NOT_FOUND",
+
+      failure:
+        failure.reason ||
+        failure.detail ||
+        "unknown",
+
+      runningCount:
+        0,
+
+      desiredCount:
+        0,
+
+      pendingCount:
+        0,
+
+      deploymentStatus:
+        "UNKNOWN"
+
+    };
+
+  }
 
 
   const service =
@@ -1512,18 +2187,49 @@ async function verifyDeployment(
 
 
   const runningCount =
-    service.runningCount ||
-    0;
+    Number(
+      service.runningCount ||
+      0
+    );
 
 
   const desiredCount =
-    service.desiredCount ||
-    0;
+    Number(
+      service.desiredCount ||
+      0
+    );
 
 
   const pendingCount =
-    service.pendingCount ||
-    0;
+    Number(
+      service.pendingCount ||
+      0
+    );
+
+
+  const failedDeployments =
+    (
+      service.deployments ||
+      []
+    )
+      .filter(
+        (deployment) =>
+          deployment.rolloutState ===
+            "FAILED" ||
+          deployment.rolloutStateReason
+      );
+
+
+  const primary =
+    (
+      service.deployments ||
+      []
+    )
+      .find(
+        (deployment) =>
+          deployment.status ===
+          "PRIMARY"
+      );
 
 
   let deploymentStatus =
@@ -1531,6 +2237,26 @@ async function verifyDeployment(
 
 
   if (
+    primary?.rolloutState ===
+    "FAILED"
+  ) {
+
+    deploymentStatus =
+      "FAILED";
+
+  }
+
+  else if (
+    primary?.rolloutState ===
+    "COMPLETED"
+  ) {
+
+    deploymentStatus =
+      "RUNNING";
+
+  }
+
+  else if (
     runningCount >=
       desiredCount &&
     desiredCount > 0 &&
@@ -1542,32 +2268,12 @@ async function verifyDeployment(
 
   }
 
-
-  if (
-    service.deployments &&
-    service.deployments.length >
-      0
+  else if (
+    runningCount > 0
   ) {
 
-    const primary =
-      service.deployments.find(
-        (deployment) =>
-          deployment.status ===
-          "PRIMARY"
-      );
-
-
-    if (
-      primary &&
-      primary.runningCount >=
-        primary.desiredCount &&
-      primary.desiredCount > 0
-    ) {
-
-      deploymentStatus =
-        "RUNNING";
-
-    }
+    deploymentStatus =
+      "STARTING";
 
   }
 
@@ -1588,13 +2294,352 @@ async function verifyDeployment(
 
     deploymentStatus,
 
+    rolloutState:
+      primary?.rolloutState ||
+      null,
+
+    rolloutStateReason:
+      primary?.rolloutStateReason ||
+      null,
+
     taskDefinition:
       service.taskDefinition,
 
     serviceArn:
-      service.serviceArn
+      service.serviceArn,
+
+    serviceName:
+      service.serviceName,
+
+    createdAt:
+      service.createdAt ||
+      null,
+
+    deployments:
+      service.deployments ||
+      [],
+
+    failedDeployments
 
   };
+
+}
+
+
+/* =========================================================
+   WAIT FOR DEPLOYMENT
+========================================================= */
+
+async function waitForDeployment(
+  clusterName,
+  serviceName,
+  options = {}
+) {
+
+  const timeoutMs =
+    Number(
+      options.timeoutMs ||
+      DEFAULT_DEPLOYMENT_TIMEOUT_MS
+    );
+
+
+  const pollIntervalMs =
+    Number(
+      options.pollIntervalMs ||
+      DEFAULT_POLL_INTERVAL_MS
+    );
+
+
+  const startedAt =
+    Date.now();
+
+
+  let lastState =
+    null;
+
+
+  while (
+    Date.now() -
+      startedAt <
+    timeoutMs
+  ) {
+
+    const state =
+      await describeDeployment(
+        clusterName,
+        serviceName
+      );
+
+
+    lastState =
+      state;
+
+
+    logger.info(
+      `AWS deployment state: ${state.deploymentStatus} | running=${state.runningCount}/${state.desiredCount} | pending=${state.pendingCount}`
+    );
+
+
+    if (
+      state.deploymentStatus ===
+      "FAILED"
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        stable:
+          false,
+
+        timedOut:
+          false,
+
+        state
+
+      };
+
+    }
+
+
+    if (
+      state.deploymentStatus ===
+      "RUNNING"
+    ) {
+
+      return {
+
+        success:
+          true,
+
+        stable:
+          true,
+
+        timedOut:
+          false,
+
+        state
+
+      };
+
+    }
+
+
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          pollIntervalMs
+        )
+    );
+
+  }
+
+
+  return {
+
+    success:
+      false,
+
+    stable:
+      false,
+
+    timedOut:
+      true,
+
+    state:
+      lastState
+
+  };
+
+}
+
+
+/* =========================================================
+   HEALTH CHECK GRACE PERIOD
+========================================================= */
+
+function normalizeHealthGracePeriod(
+  value
+) {
+
+  const gracePeriod =
+    Number(
+      value ??
+      process.env.AWS_ECS_HEALTH_CHECK_GRACE_PERIOD ||
+      60
+    );
+
+
+  if (
+    !Number.isInteger(
+      gracePeriod
+    ) ||
+    gracePeriod < 0 ||
+    gracePeriod > 3600
+  ) {
+
+    throw new Error(
+      "Health check grace period must be between 0 and 3600 seconds"
+    );
+
+  }
+
+
+  return gracePeriod;
+
+}
+
+
+/* =========================================================
+   DEPLOYMENT PERCENTAGES
+========================================================= */
+
+function normalizeDeploymentPercentages(
+  deploymentData
+) {
+
+  const minimumHealthyPercent =
+    Number(
+      deploymentData.minimumHealthyPercent ??
+      DEFAULT_HEALTHY_PERCENT
+    );
+
+
+  const maximumPercent =
+    Number(
+      deploymentData.maximumPercent ??
+      DEFAULT_MAX_PERCENT
+    );
+
+
+  if (
+    !Number.isInteger(
+      minimumHealthyPercent
+    ) ||
+    minimumHealthyPercent < 0 ||
+    minimumHealthyPercent > 100
+  ) {
+
+    throw new Error(
+      "minimumHealthyPercent must be between 0 and 100"
+    );
+
+  }
+
+
+  if (
+    !Number.isInteger(
+      maximumPercent
+    ) ||
+    maximumPercent < 100 ||
+    maximumPercent > 200
+  ) {
+
+    throw new Error(
+      "maximumPercent must be between 100 and 200"
+    );
+
+  }
+
+
+  return {
+
+    minimumHealthyPercent,
+
+    maximumPercent
+
+  };
+
+}
+
+
+/* =========================================================
+   DESIRED COUNT
+========================================================= */
+
+function normalizeDesiredCount(
+  value
+) {
+
+  const desiredCount =
+    Number(
+      value ??
+      DEFAULT_DESIRED_COUNT
+    );
+
+
+  if (
+    !Number.isInteger(
+      desiredCount
+    ) ||
+    desiredCount < 1 ||
+    desiredCount > MAX_DESIRED_COUNT
+  ) {
+
+    throw new Error(
+      `Desired task count must be between 1 and ${MAX_DESIRED_COUNT}`
+    );
+
+  }
+
+
+  return desiredCount;
+
+}
+
+
+/* =========================================================
+   PUBLIC URL
+========================================================= */
+
+function getVerifiedPublicUrl(
+  deploymentData
+) {
+
+  /*
+   * AWS Agent intentionally does not
+   * manufacture a URL.
+   *
+   * Only an authoritative URL supplied
+   * by a later networking/domain layer
+   * may be returned.
+   */
+
+  const candidate =
+    deploymentData.verifiedPublicUrl ||
+    deploymentData.publicUrl ||
+    deploymentData.domain?.verifiedUrl ||
+    null;
+
+
+  if (
+    typeof candidate !==
+    "string"
+  ) {
+
+    return null;
+
+  }
+
+
+  const value =
+    candidate.trim();
+
+
+  if (
+    !/^https?:\/\//i.test(
+      value
+    )
+  ) {
+
+    return null;
+
+  }
+
+
+  return value;
 
 }
 
@@ -1611,6 +2656,10 @@ async function awsAgent(
     "request-validation";
 
 
+  const startedAt =
+    Date.now();
+
+
   try {
 
     logger.info(
@@ -1625,7 +2674,10 @@ async function awsAgent(
     if (
       !deploymentData ||
       typeof deploymentData !==
-        "object"
+        "object" ||
+      Array.isArray(
+        deploymentData
+      )
     ) {
 
       return {
@@ -1665,8 +2717,8 @@ async function awsAgent(
 
 
     /*
-     * Docker Agent MUST provide the
-     * actual pushed ECR image.
+     * Docker Agent MUST provide
+     * the real ECR image.
      */
 
     const imageUri =
@@ -1729,6 +2781,13 @@ async function awsAgent(
       );
 
 
+    const containerPort =
+      normalizePort(
+        deploymentData.containerPort,
+        framework.port
+      );
+
+
     const image =
       parseEcrImageUri(
         imageUri
@@ -1748,45 +2807,47 @@ async function awsAgent(
       );
 
 
+    validateFargateResources(
+      cpu,
+      memory
+    );
+
+
     const desiredCount =
-      Number(
-        deploymentData.desiredCount ||
-        1
+      normalizeDesiredCount(
+        deploymentData.desiredCount
       );
 
 
-    if (
-      !Number.isInteger(
-        desiredCount
-      ) ||
-      desiredCount < 1 ||
-      desiredCount > 10
-    ) {
-
-      throw new Error(
-        "Desired task count must be between 1 and 10"
+    const deploymentPercentages =
+      normalizeDeploymentPercentages(
+        deploymentData
       );
 
-    }
+
+    const healthCheckGracePeriodSeconds =
+      normalizeHealthGracePeriod(
+        deploymentData.healthCheckGracePeriodSeconds
+      );
 
 
     const assignPublicIp =
-      (
-        String(
-          deploymentData.assignPublicIp ??
-          process.env.AWS_ASSIGN_PUBLIC_IP ??
-          "ENABLED"
-        )
-          .toUpperCase() ===
-        "DISABLED"
+      String(
+        deploymentData.assignPublicIp ??
+        process.env.AWS_ASSIGN_PUBLIC_IP ??
+        "ENABLED"
       )
+        .toUpperCase() ===
+      "DISABLED"
         ? "DISABLED"
         : "ENABLED";
 
 
     const enableExecuteCommand =
-      deploymentData.enableExecuteCommand ===
-      true;
+      normalizeBoolean(
+        deploymentData.enableExecuteCommand,
+        false
+      );
 
 
     const subnets =
@@ -1797,9 +2858,20 @@ async function awsAgent(
       getSecurityGroups();
 
 
+    const environment =
+      normalizeEnvironment(
+        deploymentData.environment,
+        containerPort
+      );
+
+
     /* =====================================================
        RESOURCE NAMES
     ===================================================== */
+
+    currentStage =
+      "resource-name-generation";
+
 
     const taskFamily =
       createTaskFamily(
@@ -1816,23 +2888,30 @@ async function awsAgent(
 
 
     const containerName =
-      `${projectName}-container`
-        .slice(
-          0,
-          255
-        );
+      sanitizeName(
+        `${projectName}-container`,
+        MAX_CONTAINER_NAME_LENGTH
+      );
 
 
     const logGroupName =
       cleanString(
         deploymentData.logGroup ||
         DEFAULT_LOG_GROUP,
-        512
+        MAX_LOG_GROUP_LENGTH
+      );
+
+
+    const taskRoleArn =
+      cleanString(
+        deploymentData.taskRoleArn ||
+        DEFAULT_TASK_ROLE_ARN,
+        1000
       );
 
 
     /* =====================================================
-       VERIFY CLUSTER
+       VERIFY ECS CLUSTER
     ===================================================== */
 
     currentStage =
@@ -1896,24 +2975,29 @@ async function awsAgent(
 
         taskFamily,
 
+        deploymentId,
+
+        projectName,
+
         imageUri:
           image.imageUri,
 
         containerName,
 
-        containerPort:
-          framework.port,
+        containerPort,
 
         cpu,
 
         memory,
 
+        environment,
+
         logGroupName:
           logGroup.logGroupName,
 
         taskRoleArn:
-          deploymentData.taskRoleArn ||
-          process.env.AWS_ECS_TASK_ROLE
+          taskRoleArn ||
+          undefined
 
       });
 
@@ -1938,9 +3022,12 @@ async function awsAgent(
       );
 
 
-    let service;
+    let service =
+      null;
 
-    let serviceAction;
+
+    let serviceAction =
+      null;
 
 
     /* =====================================================
@@ -1955,37 +3042,116 @@ async function awsAgent(
         "ecs-service-create";
 
 
-      service =
-        await createEcsService({
+      try {
 
-          clusterName:
-            ECS_CLUSTER,
+        service =
+          await createEcsService({
 
-          serviceName,
+            clusterName:
+              ECS_CLUSTER,
 
-          taskDefinitionArn:
-            taskDefinition.taskDefinitionArn,
+            serviceName,
 
-          desiredCount,
+            taskDefinitionArn:
+              taskDefinition.taskDefinitionArn,
 
-          subnets,
+            desiredCount,
 
-          securityGroups,
+            subnets,
 
-          assignPublicIp,
+            securityGroups,
 
-          enableExecuteCommand
+            assignPublicIp,
 
-        });
+            enableExecuteCommand,
+
+            projectName,
+
+            deploymentId,
+
+            minimumHealthyPercent:
+              deploymentPercentages.minimumHealthyPercent,
+
+            maximumPercent:
+              deploymentPercentages.maximumPercent,
+
+            healthCheckGracePeriodSeconds
+
+          });
 
 
-      serviceAction =
-        "created";
+        serviceAction =
+          "created";
 
 
-      logger.success(
-        `ECS Service Created: ${serviceName}`
-      );
+        logger.success(
+          `ECS Service Created: ${serviceName}`
+        );
+
+      }
+
+      catch (error) {
+
+        /*
+         * Race condition protection:
+         *
+         * Another deployment may have created
+         * the same service between our lookup
+         * and CreateService call.
+         */
+
+        if (
+          error?.name ===
+          "ServiceAlreadyExistsException"
+        ) {
+
+          logger.warning(
+            `ECS Service already exists. Switching to update: ${serviceName}`
+          );
+
+
+          currentStage =
+            "ecs-service-update";
+
+
+          service =
+            await updateEcsService({
+
+              clusterName:
+                ECS_CLUSTER,
+
+              serviceName,
+
+              taskDefinitionArn:
+                taskDefinition.taskDefinitionArn,
+
+              desiredCount,
+
+              enableExecuteCommand,
+
+              minimumHealthyPercent:
+                deploymentPercentages.minimumHealthyPercent,
+
+              maximumPercent:
+                deploymentPercentages.maximumPercent,
+
+              healthCheckGracePeriodSeconds
+
+            });
+
+
+          serviceAction =
+            "updated";
+
+        }
+
+        else {
+
+          throw error;
+
+        }
+
+      }
 
     }
 
@@ -2010,7 +3176,17 @@ async function awsAgent(
           taskDefinitionArn:
             taskDefinition.taskDefinitionArn,
 
-          desiredCount
+          desiredCount,
+
+          enableExecuteCommand,
+
+          minimumHealthyPercent:
+            deploymentPercentages.minimumHealthyPercent,
+
+          maximumPercent:
+            deploymentPercentages.maximumPercent,
+
+          healthCheckGracePeriodSeconds
 
         });
 
@@ -2027,15 +3203,67 @@ async function awsAgent(
 
 
     /* =====================================================
-       VERIFY SERVICE
+       DEPLOYMENT VERIFICATION
     ===================================================== */
 
     currentStage =
       "ecs-deployment-verification";
 
 
-    const deployment =
-      await verifyDeployment(
+    const initialDeployment =
+      await describeDeployment(
+
+        ECS_CLUSTER,
+
+        serviceName
+
+      );
+
+
+    if (
+      !initialDeployment.exists
+    ) {
+
+      throw new Error(
+        "ECS service disappeared immediately after deployment"
+      );
+
+    }
+
+
+    /* =====================================================
+       WAIT FOR ECS ROLLOUT
+    ===================================================== */
+
+    currentStage =
+      "ecs-deployment-stabilization";
+
+
+    const stabilization =
+      await waitForDeployment(
+
+        ECS_CLUSTER,
+
+        serviceName,
+
+        {
+
+          timeoutMs:
+            deploymentData.deploymentTimeoutMs ||
+            DEFAULT_DEPLOYMENT_TIMEOUT_MS,
+
+          pollIntervalMs:
+            deploymentData.deploymentPollIntervalMs ||
+            DEFAULT_POLL_INTERVAL_MS
+
+        }
+
+      );
+
+
+    const finalDeployment =
+      stabilization.state ||
+      await describeDeployment(
 
         ECS_CLUSTER,
 
@@ -2049,31 +3277,55 @@ async function awsAgent(
     ===================================================== */
 
     const deploymentReady =
-      deployment.exists &&
-      deployment.runningCount >=
-        deployment.desiredCount &&
-      deployment.desiredCount > 0;
+      stabilization.success &&
+      finalDeployment.exists &&
+      finalDeployment.runningCount >=
+        finalDeployment.desiredCount &&
+      finalDeployment.desiredCount > 0 &&
+      finalDeployment.pendingCount === 0;
 
 
-    const deploymentState =
+    let deploymentState =
+      "provisioning";
+
+
+    if (
       deploymentReady
-        ? "running"
-        : "provisioning";
+    ) {
+
+      deploymentState =
+        "running";
+
+    }
+
+    else if (
+      stabilization.timedOut
+    ) {
+
+      deploymentState =
+        "timeout";
+
+    }
+
+    else if (
+      finalDeployment.deploymentStatus ===
+      "FAILED"
+    ) {
+
+      deploymentState =
+        "failed";
+
+    }
 
 
     /* =====================================================
-       NO FAKE PUBLIC URL
+       AUTHORITATIVE PUBLIC URL
     ===================================================== */
 
-    /*
-     * ECS/Fargate itself does NOT automatically
-     * create:
-     *
-     * https://service.domain
-     *
-     * Domain + ALB + Route53 will be handled
-     * by the later Domain/Networking layer.
-     */
+    const publicUrl =
+      getVerifiedPublicUrl(
+        deploymentData
+      );
 
 
     /* =====================================================
@@ -2104,6 +3356,12 @@ async function awsAgent(
 
           uri:
             image.imageUri,
+
+          registry:
+            image.registry,
+
+          accountId:
+            image.accountId,
 
           repository:
             image.repositoryName,
@@ -2150,19 +3408,25 @@ async function awsAgent(
             taskDefinition.revision,
 
           status:
-            deployment.status,
+            finalDeployment.status,
 
           desiredCount:
-            deployment.desiredCount,
+            finalDeployment.desiredCount,
 
           runningCount:
-            deployment.runningCount,
+            finalDeployment.runningCount,
 
           pendingCount:
-            deployment.pendingCount,
+            finalDeployment.pendingCount,
 
           deploymentStatus:
-            deployment.deploymentStatus
+            finalDeployment.deploymentStatus,
+
+          rolloutState:
+            finalDeployment.rolloutState,
+
+          rolloutStateReason:
+            finalDeployment.rolloutStateReason
 
         },
 
@@ -2175,8 +3439,7 @@ async function awsAgent(
 
           memory,
 
-          containerPort:
-            framework.port,
+          containerPort,
 
           subnets,
 
@@ -2184,7 +3447,12 @@ async function awsAgent(
 
           assignPublicIp,
 
-          enableExecuteCommand
+          enableExecuteCommand,
+
+          taskRoleConfigured:
+            Boolean(
+              taskRoleArn
+            )
 
         },
 
@@ -2205,15 +3473,76 @@ async function awsAgent(
 
         deploymentReady,
 
-        publicUrl:
-          null,
+        stabilization: {
+
+          success:
+            stabilization.success,
+
+          stable:
+            stabilization.stable,
+
+          timedOut:
+            stabilization.timedOut,
+
+          timeoutMs:
+            deploymentData.deploymentTimeoutMs ||
+            DEFAULT_DEPLOYMENT_TIMEOUT_MS,
+
+          pollIntervalMs:
+            deploymentData.deploymentPollIntervalMs ||
+            DEFAULT_POLL_INTERVAL_MS
+
+        },
+
+        publicUrl,
 
         deployedAt:
-          new Date().toISOString()
+          new Date().toISOString(),
+
+        durationMs:
+          Date.now() -
+          startedAt
 
       }
 
     };
+
+
+    /*
+     * A deployment may still be provisioning.
+     * That is NOT the same as healthy.
+     *
+     * We therefore preserve success=true for
+     * an accepted ECS deployment operation while
+     * exposing deploymentReady/deploymentState
+     * truthfully.
+     */
+
+    if (
+      deploymentState ===
+      "failed"
+    ) {
+
+      result.success =
+        false;
+
+      result.message =
+        "ECS deployment rollout failed";
+
+    }
+
+    else if (
+      deploymentState ===
+      "timeout"
+    ) {
+
+      result.success =
+        false;
+
+      result.message =
+        "ECS deployment did not stabilize within the configured timeout";
+
+    }
 
 
     logger.success(
@@ -2253,7 +3582,11 @@ async function awsAgent(
 
       deploymentId:
         deploymentData?.deploymentId ||
-        null
+        null,
+
+      durationMs:
+        Date.now() -
+        startedAt
 
     };
 
