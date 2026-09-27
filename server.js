@@ -1,22 +1,30 @@
 /**
- * ZyrionOS SERVER
- * Version: 5.0.0
+ * =========================================================
+ * ZYRIONOS SERVER
+ * =========================================================
+ *
+ * Version: 5.1.0
  *
  * Responsibilities:
+ *
  * - Application bootstrap
  * - Environment validation
  * - Security middleware
  * - CORS
+ * - Request / correlation IDs
  * - Webhook raw-body isolation
  * - Body parsing
  * - Authentication initialization
  * - API route mounting
  * - Environment management
+ * - Deployment Log System
+ * - Auto Fix trigger API
  * - Health/readiness endpoints
  * - Global error handling
  * - MongoDB startup
  * - Redis startup
  * - Graceful shutdown
+ *
  *
  * IMPORTANT:
  *
@@ -27,6 +35,8 @@
  *
  * because payment/webhook signature verification may require
  * the original raw request body.
+ *
+ * =========================================================
  */
 
 "use strict";
@@ -43,19 +53,26 @@ require("dotenv").config();
    PACKAGES
 ========================================================= */
 
-const express = require("express");
+const express =
+  require("express");
 
-const cors = require("cors");
+const cors =
+  require("cors");
 
-const passport = require("passport");
+const passport =
+  require("passport");
 
-const helmet = require("helmet");
+const helmet =
+  require("helmet");
 
-const compression = require("compression");
+const compression =
+  require("compression");
 
-const morgan = require("morgan");
+const morgan =
+  require("morgan");
 
-const cookieParser = require("cookie-parser");
+const cookieParser =
+  require("cookie-parser");
 
 const mongoSanitize =
   require("express-mongo-sanitize");
@@ -73,8 +90,10 @@ const mongoose =
 
 require("./server/config/passport");
 
+
 const env =
   require("./server/config/env");
+
 
 const validateEnv =
   require("./server/config/validateEnv");
@@ -86,6 +105,7 @@ const validateEnv =
 
 const connectMongo =
   require("./server/database/mongo");
+
 
 const {
   connectRedis,
@@ -100,26 +120,38 @@ const {
 const authRoutes =
   require("./server/routes/authRoutes");
 
+
 const aiRoutes =
   require("./server/routes/aiRoutes");
+
 
 const deployRoutes =
   require("./server/routes/deployRoutes");
 
+
 const paymentRoutes =
   require("./server/routes/paymentRoutes");
+
 
 const webhookRoutes =
   require("./server/routes/webhookRoutes");
 
+
 const subscriptionRoutes =
   require("./server/routes/subscriptionRoutes");
+
 
 const projectRoutes =
   require("./server/routes/projectRoutes");
 
+
 const financialRoutes =
   require("./server/routes/financialRoutes");
+
+
+/* =========================================================
+   ENVIRONMENT ROUTES
+========================================================= */
 
 /**
  * Environment System
@@ -130,14 +162,49 @@ const financialRoutes =
  *   ↓
  * Controller
  *   ↓
+ * Agent
+ *   ↓
  * Service
  *   ↓
  * Model
  *   ↓
  * MongoDB
  */
+
 const environmentRoutes =
   require("./server/routes/environmentRoutes");
+
+
+/* =========================================================
+   DEPLOYMENT LOG ROUTES
+========================================================= */
+
+/**
+ * Deployment Log System
+ *
+ * Flow:
+ *
+ * Deployment
+ *      ↓
+ * Deployment Log
+ *      ↓
+ * Error Recording
+ *      ↓
+ * Auto Fix Eligibility
+ *      ↓
+ * Auto Fix Trigger
+ *      ↓
+ * Fix Agent Handoff
+ *
+ *
+ * Streaming is intentionally NOT mounted here.
+ *
+ * Current architecture uses request/response based
+ * deployment log operations.
+ */
+
+const deploymentLogRoutes =
+  require("./server/routes/deploymentLogRoutes");
 
 
 /* =========================================================
@@ -221,7 +288,10 @@ const allowedOrigins = [
     (origin) =>
       String(origin)
         .trim()
-        .replace(/\/+$/, "")
+        .replace(
+          /\/+$/,
+          ""
+        )
   );
 
 
@@ -258,7 +328,10 @@ app.use(
         const normalizedOrigin =
           String(origin)
             .trim()
-            .replace(/\/+$/, "");
+            .replace(
+              /\/+$/,
+              ""
+            );
 
 
         if (
@@ -301,8 +374,10 @@ app.use(
 
       },
 
+
     credentials:
       true,
+
 
     methods: [
 
@@ -320,6 +395,7 @@ app.use(
 
     ],
 
+
     allowedHeaders: [
 
       "Content-Type",
@@ -336,6 +412,7 @@ app.use(
 
     ],
 
+
     exposedHeaders: [
 
       "X-Request-ID",
@@ -350,31 +427,41 @@ app.use(
 
 /* =========================================================
    REQUEST ID
-=========================================================
-
-   The frontend can send:
-
-      X-Request-ID
-
-   Otherwise the existing request ID is preserved if present.
-
-   This becomes important later for:
-
-      GitHub
-      Deployment Logs
-      Auto-Fix
-      AI Agents
-      AWS deployments
-
 ========================================================= */
 
+/**
+ * The frontend can send:
+ *
+ *    X-Request-ID
+ *
+ * Otherwise:
+ *
+ *    X-Correlation-ID
+ *
+ * Otherwise a new request ID is generated.
+ *
+ *
+ * This becomes important for:
+ *
+ *    GitHub
+ *    Deployment Logs
+ *    Auto-Fix
+ *    AI Agents
+ *    AWS deployments
+ */
+
 app.use(
-  (req, res, next) => {
+  (
+    req,
+    res,
+    next
+  ) => {
 
     const incomingRequestId =
       req.headers[
         "x-request-id"
       ];
+
 
     const incomingCorrelationId =
       req.headers[
@@ -391,7 +478,9 @@ app.use(
 
 
     req.requestId =
-      String(requestId);
+      String(
+        requestId
+      );
 
 
     res.setHeader(
@@ -414,9 +503,6 @@ app.use(
 
 /* =========================================================
    HTTP LOGGER
-=========================================================
-
-   Morgan must be mounted before API routes.
 ========================================================= */
 
 app.use(
@@ -431,22 +517,24 @@ app.use(
 
 /* =========================================================
    WEBHOOK ROUTES
-=========================================================
-
-   CRITICAL ORDER:
-
-   webhookRoutes
-        ↓
-   raw-body handling
-        ↓
-   signature verification
-        ↓
-   webhook controller
-        ↓
-   normal body parsers
-
-   DO NOT MOVE express.json() ABOVE THIS.
 ========================================================= */
+
+/**
+ * CRITICAL ORDER:
+ *
+ * webhookRoutes
+ *      ↓
+ * raw-body handling
+ *      ↓
+ * signature verification
+ *      ↓
+ * webhook controller
+ *      ↓
+ * normal body parsers
+ *
+ *
+ * DO NOT MOVE express.json() ABOVE THIS.
+ */
 
 app.use(
   "/api/webhook",
@@ -532,7 +620,10 @@ app.use(
    API ROUTES
 ========================================================= */
 
-/* ----------------------------- AUTH ---------------------- */
+
+/* =========================================================
+   AUTH
+========================================================= */
 
 app.use(
   "/api/auth",
@@ -540,7 +631,9 @@ app.use(
 );
 
 
-/* ------------------------------ AI ----------------------- */
+/* =========================================================
+   AI
+========================================================= */
 
 app.use(
   "/api/ai",
@@ -548,7 +641,9 @@ app.use(
 );
 
 
-/* ---------------------------- DEPLOY --------------------- */
+/* =========================================================
+   DEPLOYMENT
+========================================================= */
 
 app.use(
   "/api/deploy",
@@ -556,7 +651,9 @@ app.use(
 );
 
 
-/* --------------------------- PAYMENT --------------------- */
+/* =========================================================
+   PAYMENT
+========================================================= */
 
 app.use(
   "/api/payment",
@@ -564,7 +661,9 @@ app.use(
 );
 
 
-/* ------------------------ SUBSCRIPTION ------------------- */
+/* =========================================================
+   SUBSCRIPTION
+========================================================= */
 
 app.use(
   "/api/subscription",
@@ -572,7 +671,9 @@ app.use(
 );
 
 
-/* --------------------------- PROJECTS --------------------- */
+/* =========================================================
+   PROJECTS
+========================================================= */
 
 app.use(
   "/api/projects",
@@ -580,7 +681,9 @@ app.use(
 );
 
 
-/* -------------------------- FINANCIAL --------------------- */
+/* =========================================================
+   FINANCIAL
+========================================================= */
 
 app.use(
   "/api/financial",
@@ -588,7 +691,9 @@ app.use(
 );
 
 
-/* ------------------------- ENVIRONMENT -------------------- */
+/* =========================================================
+   ENVIRONMENT SYSTEM
+========================================================= */
 
 /**
  * Environment Management API
@@ -610,9 +715,82 @@ app.use(
  * DELETE
  * /api/environments/PROJECT_ID/production/variables/API_KEY
  */
+
 app.use(
   "/api/environments",
   environmentRoutes
+);
+
+
+/* =========================================================
+   DEPLOYMENT LOG SYSTEM
+========================================================= */
+
+/**
+ * Deployment Log Management API
+ *
+ * Examples:
+ *
+ * GET
+ * /api/deployment-logs/health
+ *
+ * POST
+ * /api/deployment-logs
+ *
+ * GET
+ * /api/deployment-logs/search
+ *
+ * GET
+ * /api/deployment-logs/project/PROJECT_ID
+ *
+ * GET
+ * /api/deployment-logs/project/PROJECT_ID/active
+ *
+ * GET
+ * /api/deployment-logs/DEPLOYMENT_ID
+ *
+ * GET
+ * /api/deployment-logs/DEPLOYMENT_ID/latest
+ *
+ * POST
+ * /api/deployment-logs/DEPLOYMENT_ID/start
+ *
+ * POST
+ * /api/deployment-logs/DEPLOYMENT_ID/complete
+ *
+ * POST
+ * /api/deployment-logs/DEPLOYMENT_ID/events
+ *
+ * PATCH
+ * /api/deployment-logs/DEPLOYMENT_ID/progress
+ *
+ * POST
+ * /api/deployment-logs/DEPLOYMENT_ID/errors
+ *
+ * POST
+ * /api/deployment-logs/DEPLOYMENT_ID/warnings
+ *
+ * POST
+ * /api/deployment-logs/DEPLOYMENT_ID/auto-fix/eligible
+ *
+ * POST
+ * /api/deployment-logs/DEPLOYMENT_ID/auto-fix/triggered
+ *
+ * POST
+ * /api/deployment-logs/DEPLOYMENT_ID/archive
+ *
+ *
+ * IMPORTANT:
+ *
+ * Streaming is intentionally not mounted.
+ *
+ * Auto Fix is triggered through the backend Log Agent
+ * boundary, not directly from the frontend.
+ */
+
+app.use(
+  "/api/deployment-logs",
+  deploymentLogRoutes
 );
 
 
@@ -622,7 +800,10 @@ app.use(
 
 app.get(
   "/",
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
 
     return res
       .status(200)
@@ -640,13 +821,14 @@ app.get(
             : "online",
 
         version:
-          "5.0.0",
+          "5.1.0",
 
         requestId:
           req.requestId,
 
         timestamp:
-          new Date().toISOString(),
+          new Date()
+            .toISOString(),
 
       });
 
@@ -656,18 +838,22 @@ app.get(
 
 /* =========================================================
    LIVENESS
-=========================================================
-
-   Liveness answers:
-
-      "Is the Node process alive?"
-
-   It intentionally does not require MongoDB or Redis.
 ========================================================= */
+
+/**
+ * Liveness answers:
+ *
+ *    "Is the Node process alive?"
+ *
+ * It intentionally does not require MongoDB or Redis.
+ */
 
 app.get(
   "/api/health",
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
 
     return res
       .status(200)
@@ -689,7 +875,7 @@ app.get(
           "development",
 
         version:
-          "5.0.0",
+          "5.1.0",
 
         uptime:
           process.uptime(),
@@ -704,7 +890,8 @@ app.get(
           req.requestId,
 
         timestamp:
-          new Date().toISOString(),
+          new Date()
+            .toISOString(),
 
       });
 
@@ -714,26 +901,35 @@ app.get(
 
 /* =========================================================
    READINESS
-=========================================================
-
-   Readiness answers:
-
-      "Can this instance actually serve the application?"
-
-   MongoDB:
-      mandatory
-
-   Redis:
-      degraded but non-fatal under current architecture
-
 ========================================================= */
+
+/**
+ * Readiness answers:
+ *
+ *    "Can this instance actually serve the application?"
+ *
+ *
+ * MongoDB:
+ *
+ *    mandatory
+ *
+ *
+ * Redis:
+ *
+ *    degraded but non-fatal under current architecture
+ */
 
 app.get(
   "/api/health/ready",
-  async (req, res) => {
+  async (
+    req,
+    res
+  ) => {
 
     const mongoReady =
-      mongoose.connection.readyState === 1;
+      mongoose
+        .connection
+        .readyState === 1;
 
 
     const redisReady =
@@ -800,7 +996,8 @@ app.get(
           req.requestId,
 
         timestamp:
-          new Date().toISOString(),
+          new Date()
+            .toISOString(),
 
       });
 
@@ -809,19 +1006,33 @@ app.get(
 
 
 /* =========================================================
-   ENVIRONMENT SYSTEM HEALTH
-=========================================================
-
-   This is separate from application readiness.
-
-   Environment service itself exposes:
-
-      /api/environments/health
-
-   so authentication and environment-service health can
-   remain separated from infrastructure liveness.
-
+   DEPLOYMENT LOG HEALTH
 ========================================================= */
+
+/**
+ * Deployment Log System has its own health endpoint:
+ *
+ *    /api/deployment-logs/health
+ *
+ * It remains separate from global application health.
+ *
+ * This allows deployment-log failures to be diagnosed
+ * without pretending that the entire API is down.
+ */
+
+
+/* =========================================================
+   ENVIRONMENT SYSTEM HEALTH
+========================================================= */
+
+/**
+ * Environment service exposes its own health endpoint:
+ *
+ *    /api/environments/health
+ *
+ * Authentication and environment-service health remain
+ * separated from infrastructure liveness.
+ */
 
 
 /* =========================================================
@@ -829,7 +1040,10 @@ app.get(
 ========================================================= */
 
 app.use(
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
 
     return res
       .status(404)
@@ -899,7 +1113,8 @@ app.use(
       (
         process.env.NODE_ENV ||
         "development"
-      ) === "production";
+      ) ===
+      "production";
 
 
     /* =====================================================
@@ -1090,7 +1305,9 @@ app.use(
      * production.
      */
 
-    if (!isProduction) {
+    if (
+      !isProduction
+    ) {
 
       response.error =
         err?.message;
@@ -1102,8 +1319,12 @@ app.use(
 
 
     return res
-      .status(safeStatus)
-      .json(response);
+      .status(
+        safeStatus
+      )
+      .json(
+        response
+      );
 
   }
 );
@@ -1226,7 +1447,9 @@ async function startServer() {
 
     server.on(
       "error",
-      (error) => {
+      (
+        error
+      ) => {
 
         applicationState.ready =
           false;
@@ -1323,10 +1546,14 @@ async function startServer() {
            STOP HTTP SERVER
         ================================================= */
 
-        if (server) {
+        if (
+          server
+        ) {
 
           await new Promise(
-            (resolve) => {
+            (
+              resolve
+            ) => {
 
               server.close(
                 () => {
@@ -1353,13 +1580,17 @@ async function startServer() {
         try {
 
           if (
-            mongoose.connection.readyState !==
+            mongoose
+              .connection
+              .readyState !==
             0
           ) {
 
-            await mongoose.connection.close(
-              false
-            );
+            await mongoose
+              .connection
+              .close(
+                false
+              );
 
 
             console.log(
@@ -1414,14 +1645,18 @@ async function startServer() {
     process.once(
       "SIGTERM",
       () =>
-        shutdown("SIGTERM")
+        shutdown(
+          "SIGTERM"
+        )
     );
 
 
     process.once(
       "SIGINT",
       () =>
-        shutdown("SIGINT")
+        shutdown(
+          "SIGINT"
+        )
     );
 
 
@@ -1431,7 +1666,9 @@ async function startServer() {
 
     process.on(
       "unhandledRejection",
-      (reason) => {
+      (
+        reason
+      ) => {
 
         console.error(
           "UNHANDLED REJECTION:",
@@ -1444,7 +1681,9 @@ async function startServer() {
           logger.error(
             `Unhandled rejection: ${
               reason?.message ||
-              String(reason)
+              String(
+                reason
+              )
             }`
           );
 
@@ -1469,7 +1708,9 @@ async function startServer() {
 
     process.on(
       "uncaughtException",
-      async (error) => {
+      async (
+        error
+      ) => {
 
         console.error(
           "UNCAUGHT EXCEPTION:",
@@ -1565,13 +1806,17 @@ async function startServer() {
     try {
 
       if (
-        mongoose.connection.readyState !==
+        mongoose
+          .connection
+          .readyState !==
         0
       ) {
 
-        await mongoose.connection.close(
-          false
-        );
+        await mongoose
+          .connection
+          .close(
+            false
+          );
 
       }
 
@@ -1603,12 +1848,13 @@ startServer();
 
 /* =========================================================
    EXPORT
-=========================================================
-
-   Exporting app allows integration/smoke tests to import
-   the application without needing to construct another
-   Express instance.
-
 ========================================================= */
 
-module.exports = app;
+/**
+ * Exporting app allows integration/smoke tests to import
+ * the application without needing to construct another
+ * Express instance.
+ */
+
+module.exports =
+  app;
