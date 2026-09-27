@@ -1,52 +1,50 @@
 /**
  * ZyrionOS - Environment Agent
- * Version: 1.0.0
+ * Version: 2.0.0
  *
  * Responsibilities:
- * - Orchestrate environment operations
- * - Create/update/delete environments
- * - Manage environment variables
- * - Validate configuration
- * - Check deployment readiness
- * - Create deployment snapshots
- * - Mark deployments as completed
- * - Archive/unarchive environments
- * - Copy environments
- * - Coordinate deployment secret resolution
- * - Protect secret boundaries
- * - Provide a stable Agent API for Master/Deploy Agents
+ * - Environment orchestration
+ * - Environment CRUD
+ * - Environment variable management
+ * - Configuration validation
+ * - Deployment readiness
+ * - Deployment snapshots
+ * - Trusted deployment secret resolution
+ * - Deployment state tracking
+ * - Archive / unarchive
+ * - Environment copying
+ * - Secret boundary enforcement
  *
  * IMPORTANT:
  *
  * This Agent:
- * - DOES NOT call an AI provider.
- * - DOES NOT decrypt secrets itself.
- * - DOES NOT expose secret values to users.
- * - DOES NOT modify MongoDB directly.
+ * - DOES NOT call AI providers.
+ * - DOES NOT directly access MongoDB.
  * - DOES NOT deploy infrastructure.
+ * - DOES NOT expose deployment secrets to clients.
  *
  * Architecture:
  *
- * Master Agent
- *      ↓
+ * Master
+ *   ↓
  * Environment Agent
- *      ↓
+ *   ↓
  * Environment Service
- *      ↓
+ *   ↓
  * Environment Model
- *      ↓
+ *   ↓
  * MongoDB
  *
  * Deployment:
  *
  * Deploy Agent
- *      ↓
+ *   ↓
  * Environment Agent
- *      ↓
+ *   ↓
  * Environment Service
- *      ↓
- * resolveForDeployment()
- *      ↓
+ *   ↓
+ * Trusted Resolution
+ *   ↓
  * Docker / AWS
  */
 
@@ -72,7 +70,7 @@ const AGENT_NAME =
   "environmentAgent";
 
 const AGENT_VERSION =
-  "1.0.0";
+  "2.0.0";
 
 
 const ENVIRONMENT_NAMES =
@@ -103,13 +101,21 @@ const VARIABLE_SCOPES =
 const MAX_VARIABLES =
   500;
 
+const MAX_KEY_LENGTH =
+  256;
+
+const MAX_DESCRIPTION_LENGTH =
+  1000;
+
+const MAX_SOURCE_REF_LENGTH =
+  500;
+
 
 /* =========================================================
    ERROR CLASS
 ========================================================= */
 
-class EnvironmentAgentError
-  extends Error {
+class EnvironmentAgentError extends Error {
 
   constructor(
     message,
@@ -136,30 +142,18 @@ class EnvironmentAgentError
       this,
       EnvironmentAgentError
     );
-
   }
-
 }
 
 
 /* =========================================================
-   SAFE LOGGING
+   SECRET FIELD DETECTION
 ========================================================= */
 
-/**
- * Never log:
- *
- * - secret values
- * - encrypted values
- * - environment variable values
- * - authorization headers
- * - API keys
- * - passwords
- * - tokens
- */
 const SECRET_FIELD_NAMES =
   new Set([
     "value",
+    "plainValue",
     "secret",
     "password",
     "token",
@@ -168,18 +162,66 @@ const SECRET_FIELD_NAMES =
     "accessToken",
     "refreshToken",
     "privateKey",
+    "private_key",
     "encryptedValue",
-    "plainValue",
+    "encrypted",
     "credentials",
+    "authorization",
+    "cookie",
+    "session",
   ]);
 
+
+function isSensitiveKey(
+  key
+) {
+
+  const normalized =
+    String(key || "")
+      .trim()
+      .toLowerCase();
+
+  if (
+    SECRET_FIELD_NAMES.has(
+      key
+    )
+  ) {
+    return true;
+  }
+
+  return [
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "private_key",
+    "privatekey",
+    "access_token",
+    "refresh_token",
+    "authorization",
+    "credential",
+  ].some(
+    fragment =>
+      normalized.includes(
+        fragment
+      )
+  );
+}
+
+
+/* =========================================================
+   SAFE SANITIZATION
+========================================================= */
 
 function sanitizeDetails(
   value,
   depth = 0
 ) {
 
-  if (depth > 5) {
+  if (
+    depth > 6
+  ) {
     return "[truncated]";
   }
 
@@ -188,24 +230,25 @@ function sanitizeDetails(
     value === null ||
     value === undefined
   ) {
-
     return value;
-
   }
 
 
   if (
-    typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "boolean"
+    typeof value ===
+      "string" ||
+    typeof value ===
+      "number" ||
+    typeof value ===
+      "boolean"
   ) {
-
     return value;
-
   }
 
 
-  if (Array.isArray(value)) {
+  if (
+    Array.isArray(value)
+  ) {
 
     return value.map(
       item =>
@@ -214,26 +257,27 @@ function sanitizeDetails(
           depth + 1
         )
     );
-
   }
 
 
   if (
-    typeof value === "object"
+    typeof value ===
+    "object"
   ) {
 
     const result = {};
-
 
     for (
       const [
         key,
         item
-      ] of Object.entries(value)
+      ] of Object.entries(
+        value
+      )
     ) {
 
       if (
-        SECRET_FIELD_NAMES.has(
+        isSensitiveKey(
           key
         )
       ) {
@@ -242,26 +286,20 @@ function sanitizeDetails(
           "[REDACTED]";
 
         continue;
-
       }
-
 
       result[key] =
         sanitizeDetails(
           item,
           depth + 1
         );
-
     }
 
-
     return result;
-
   }
 
 
   return "[unsupported]";
-
 }
 
 
@@ -274,6 +312,11 @@ function logInfo(
   metadata = {}
 ) {
 
+  const safe =
+    sanitizeDetails(
+      metadata
+    );
+
   try {
 
     if (
@@ -283,31 +326,23 @@ function logInfo(
 
       logger.info(
         message,
-        sanitizeDetails(
-          metadata
-        )
+        safe
       );
 
       return;
-
     }
 
   } catch (
     error
   ) {
-
-    // Fall through to console.
-
+    // fallback below
   }
 
 
   console.log(
     `[${AGENT_NAME}] ${message}`,
-    sanitizeDetails(
-      metadata
-    )
+    safe
   );
-
 }
 
 
@@ -315,6 +350,11 @@ function logWarn(
   message,
   metadata = {}
 ) {
+
+  const safe =
+    sanitizeDetails(
+      metadata
+    );
 
   try {
 
@@ -325,31 +365,36 @@ function logWarn(
 
       logger.warn(
         message,
-        sanitizeDetails(
-          metadata
-        )
+        safe
       );
 
       return;
+    }
 
+    if (
+      typeof logger?.warning ===
+      "function"
+    ) {
+
+      logger.warning(
+        message,
+        safe
+      );
+
+      return;
     }
 
   } catch (
     error
   ) {
-
-    // Fall through.
-
+    // fallback below
   }
 
 
   console.warn(
     `[${AGENT_NAME}] ${message}`,
-    sanitizeDetails(
-      metadata
-    )
+    safe
   );
-
 }
 
 
@@ -362,7 +407,6 @@ function logError(
     sanitizeDetails(
       metadata
     );
-
 
   try {
 
@@ -377,15 +421,12 @@ function logError(
       );
 
       return;
-
     }
 
   } catch (
     error
   ) {
-
-    // Fall through.
-
+    // fallback below
   }
 
 
@@ -393,7 +434,6 @@ function logError(
     `[${AGENT_NAME}] ${message}`,
     safe
   );
-
 }
 
 
@@ -409,10 +449,10 @@ function getUserId(
     input.userId ||
     input.user?._id ||
     input.user?.id ||
+    input.user?.userId ||
     input.auth?.userId ||
     null
   );
-
 }
 
 
@@ -426,7 +466,6 @@ function getProjectId(
     input.project?.id ||
     null
   );
-
 }
 
 
@@ -438,19 +477,13 @@ function normalizeId(
     value === null ||
     value === undefined
   ) {
-
     return null;
-
   }
-
 
   const normalized =
     String(value).trim();
 
-
-  return normalized ||
-    null;
-
+  return normalized || null;
 }
 
 
@@ -471,16 +504,16 @@ function normalizeEnvironmentName(
   ) {
 
     throw new EnvironmentAgentError(
-      `Invalid environment: ${normalized || "empty"}`,
+      `Invalid environment: ${
+        normalized || "empty"
+      }`,
       "INVALID_ENVIRONMENT",
       400
     );
-
   }
 
 
   return normalized;
-
 }
 
 
@@ -500,12 +533,12 @@ function normalizeVariableKey(
       "VARIABLE_KEY_REQUIRED",
       400
     );
-
   }
 
 
   if (
-    key.length > 256
+    key.length >
+    MAX_KEY_LENGTH
   ) {
 
     throw new EnvironmentAgentError(
@@ -513,7 +546,6 @@ function normalizeVariableKey(
       "INVALID_VARIABLE_KEY",
       400
     );
-
   }
 
 
@@ -528,12 +560,10 @@ function normalizeVariableKey(
       "INVALID_VARIABLE_KEY",
       400
     );
-
   }
 
 
   return key;
-
 }
 
 
@@ -560,12 +590,10 @@ function normalizeVariableType(
       "INVALID_VARIABLE_TYPE",
       400
     );
-
   }
 
 
   return type;
-
 }
 
 
@@ -592,12 +620,10 @@ function normalizeVariableScope(
       "INVALID_VARIABLE_SCOPE",
       400
     );
-
   }
 
 
   return scope;
-
 }
 
 
@@ -610,9 +636,7 @@ function normalizeBoolean(
     value === undefined ||
     value === null
   ) {
-
     return defaultValue;
-
   }
 
 
@@ -620,9 +644,7 @@ function normalizeBoolean(
     typeof value ===
     "boolean"
   ) {
-
     return value;
-
   }
 
 
@@ -633,35 +655,32 @@ function normalizeBoolean(
 
 
   if (
-    normalized ===
-      "true" ||
-    normalized ===
-      "1" ||
-    normalized ===
-      "yes"
+    [
+      "true",
+      "1",
+      "yes",
+    ].includes(
+      normalized
+    )
   ) {
-
     return true;
-
   }
 
 
   if (
-    normalized ===
-      "false" ||
-    normalized ===
-      "0" ||
-    normalized ===
-      "no"
+    [
+      "false",
+      "0",
+      "no",
+    ].includes(
+      normalized
+    )
   ) {
-
     return false;
-
   }
 
 
   return defaultValue;
-
 }
 
 
@@ -674,9 +693,7 @@ function normalizeVersion(
     value === null ||
     value === ""
   ) {
-
     return undefined;
-
   }
 
 
@@ -696,17 +713,65 @@ function normalizeVersion(
       "INVALID_VERSION",
       400
     );
-
   }
 
 
   return version;
-
 }
 
 
 /* =========================================================
-   SERVICE VALIDATION
+   CONTEXT
+========================================================= */
+
+function requireContext(
+  input
+) {
+
+  const userId =
+    normalizeId(
+      getUserId(
+        input
+      )
+    );
+
+  const projectId =
+    normalizeId(
+      getProjectId(
+        input
+      )
+    );
+
+
+  if (!userId) {
+
+    throw new EnvironmentAgentError(
+      "User ID is required.",
+      "UNAUTHORIZED",
+      401
+    );
+  }
+
+
+  if (!projectId) {
+
+    throw new EnvironmentAgentError(
+      "Project ID is required.",
+      "PROJECT_ID_REQUIRED",
+      400
+    );
+  }
+
+
+  return {
+    userId,
+    projectId,
+  };
+}
+
+
+/* =========================================================
+   SERVICE METHOD VALIDATION
 ========================================================= */
 
 function requireServiceMethod(
@@ -723,119 +788,112 @@ function requireServiceMethod(
     throw new EnvironmentAgentError(
       `Environment service method '${methodName}' is unavailable.`,
       "ENVIRONMENT_SERVICE_METHOD_MISSING",
-      500
+      500,
+      {
+        method:
+          methodName,
+      }
     );
-
   }
 
 
   return environmentService[
     methodName
   ];
-
 }
 
 
 /* =========================================================
-   SERVICE CALL
+   SERVICE ERROR MAPPING
 ========================================================= */
 
-async function callService(
-  methodName,
-  payload
+function mapErrorCodeToStatus(
+  code
 ) {
 
-  const method =
-    requireServiceMethod(
-      methodName
-    );
+  const map = {
+
+    UNAUTHORIZED:
+      401,
+
+    FORBIDDEN:
+      403,
+
+    TRUSTED_CONTEXT_REQUIRED:
+      403,
+
+    ENVIRONMENT_NOT_FOUND:
+      404,
+
+    PROJECT_NOT_FOUND:
+      404,
+
+    INVALID_ENVIRONMENT:
+      400,
+
+    INVALID_VARIABLE:
+      400,
+
+    INVALID_VARIABLE_KEY:
+      400,
+
+    INVALID_VARIABLE_TYPE:
+      400,
+
+    INVALID_VARIABLE_SCOPE:
+      400,
+
+    VARIABLE_KEY_REQUIRED:
+      400,
+
+    VARIABLE_VALUE_REQUIRED:
+      400,
+
+    INVALID_JSON_VARIABLE:
+      400,
+
+    VERSION_CONFLICT:
+      409,
+
+    CONCURRENCY_CONFLICT:
+      409,
+
+    ENVIRONMENT_LOCKED:
+      409,
+
+    ENVIRONMENT_ARCHIVED:
+      409,
+
+    ENVIRONMENT_NOT_READY:
+      409,
+
+    DEPLOYMENT_NOT_ALLOWED:
+      409,
+
+    ENVIRONMENT_EXISTS:
+      409,
+
+    DUPLICATE_ENVIRONMENT:
+      409,
+
+    DEPLOYMENT_ID_REQUIRED:
+      400,
+
+    WORKFLOW_ID_REQUIRED:
+      400,
+
+  };
 
 
-  const safePayload =
-    sanitizeDetails(
-      payload
-    );
-
-
-  logInfo(
-    `Calling environment service: ${methodName}`,
-    {
-      method:
-        methodName,
-
-      userId:
-        payload?.userId,
-
-      projectId:
-        payload?.projectId,
-
-      environment:
-        payload?.name ||
-        payload?.environmentName,
-
-      requestId:
-        payload?.requestId,
-    }
+  return (
+    map[code] ||
+    500
   );
-
-
-  try {
-
-    return await method(
-      payload
-    );
-
-  } catch (
-    error
-  ) {
-
-    logError(
-      `Environment service failed: ${methodName}`,
-      {
-        method:
-          methodName,
-
-        userId:
-          payload?.userId,
-
-        projectId:
-          payload?.projectId,
-
-        environment:
-          payload?.name ||
-          payload?.environmentName,
-
-        requestId:
-          payload?.requestId,
-
-        error: {
-          code:
-            error?.code,
-
-          message:
-            error?.message,
-
-          details:
-            error?.details,
-        },
-
-        payload:
-          safePayload,
-      }
-    );
-
-
-    throw normalizeServiceError(
-      error
-    );
-
-  }
-
 }
 
 
 /* =========================================================
-   SERVICE ERROR NORMALIZATION
+   ERROR NORMALIZATION
 ========================================================= */
 
 function normalizeServiceError(
@@ -846,9 +904,7 @@ function normalizeServiceError(
     error instanceof
     EnvironmentAgentError
   ) {
-
     return error;
-
   }
 
 
@@ -883,132 +939,1283 @@ function normalizeServiceError(
     statusCode,
     error?.details
   );
-
-}
-
-
-function mapErrorCodeToStatus(
-  code
-) {
-
-  const map = {
-
-    UNAUTHORIZED:
-      401,
-
-    FORBIDDEN:
-      403,
-
-    ENVIRONMENT_NOT_FOUND:
-      404,
-
-    PROJECT_NOT_FOUND:
-      404,
-
-    INVALID_ENVIRONMENT:
-      400,
-
-    INVALID_VARIABLE:
-      400,
-
-    VARIABLE_KEY_REQUIRED:
-      400,
-
-    INVALID_VARIABLE_KEY:
-      400,
-
-    INVALID_VARIABLE_TYPE:
-      400,
-
-    INVALID_VARIABLE_SCOPE:
-      400,
-
-    VERSION_CONFLICT:
-      409,
-
-    CONCURRENCY_CONFLICT:
-      409,
-
-    ENVIRONMENT_LOCKED:
-      409,
-
-    ENVIRONMENT_ARCHIVED:
-      409,
-
-    ENVIRONMENT_NOT_READY:
-      409,
-
-    DEPLOYMENT_NOT_ALLOWED:
-      409,
-
-    ENVIRONMENT_EXISTS:
-      409,
-
-    DUPLICATE_ENVIRONMENT:
-      409,
-
-  };
-
-
-  return (
-    map[code] ||
-    500
-  );
-
 }
 
 
 /* =========================================================
-   CONTEXT VALIDATION
+   SERVICE CALL
 ========================================================= */
 
-function requireContext(
-  input
+async function callService(
+  methodName,
+  payload
 ) {
 
-  const userId =
-    normalizeId(
-      getUserId(
-        input
+  const method =
+    requireServiceMethod(
+      methodName
+    );
+
+
+  logInfo(
+    `Calling environment service: ${methodName}`,
+    {
+      method:
+        methodName,
+
+      userId:
+        payload?.userId,
+
+      projectId:
+        payload?.projectId,
+
+      environment:
+        payload?.name ||
+        payload?.environmentName,
+
+      workflowId:
+        payload?.workflowId,
+
+      deploymentId:
+        payload?.deploymentId,
+
+      requestId:
+        payload?.requestId,
+    }
+  );
+
+
+  try {
+
+    return await method(
+      payload
+    );
+
+  } catch (
+    error
+  ) {
+
+    const normalized =
+      normalizeServiceError(
+        error
+      );
+
+
+    logError(
+      `Environment service failed: ${methodName}`,
+      {
+        method:
+          methodName,
+
+        userId:
+          payload?.userId,
+
+        projectId:
+          payload?.projectId,
+
+        environment:
+          payload?.name ||
+          payload?.environmentName,
+
+        requestId:
+          payload?.requestId,
+
+        error: {
+          code:
+            normalized.code,
+
+          message:
+            normalized.message,
+
+          statusCode:
+            normalized.statusCode,
+
+          details:
+            normalized.details,
+        },
+      }
+    );
+
+
+    throw normalized;
+  }
+}
+
+
+/* =========================================================
+   VARIABLE NORMALIZATION
+========================================================= */
+
+function normalizeSource(
+  value
+) {
+
+  const source =
+    String(
+      value || "manual"
+    )
+      .trim()
+      .toLowerCase();
+
+
+  const allowed =
+    new Set([
+      "manual",
+      "github",
+      "import",
+      "generated",
+      "system",
+    ]);
+
+
+  return allowed.has(
+    source
+  )
+    ? source
+    : "manual";
+}
+
+
+function normalizeVariableInput(
+  input = {},
+  options = {}
+) {
+
+  const hasValue =
+    Object.prototype.hasOwnProperty.call(
+      input,
+      "value"
+    );
+
+
+  const variable = {
+
+    key:
+      input.key
+        ? normalizeVariableKey(
+            input.key
+          )
+        : "",
+
+    type:
+      normalizeVariableType(
+        input.type
+      ),
+
+    scope:
+      normalizeVariableScope(
+        input.scope
+      ),
+
+    isSecret:
+      normalizeBoolean(
+        input.isSecret,
+        false
+      ),
+
+    required:
+      normalizeBoolean(
+        input.required,
+        false
+      ),
+
+    description:
+      String(
+        input.description ||
+        ""
       )
-    );
+        .trim()
+        .slice(
+          0,
+          MAX_DESCRIPTION_LENGTH
+        ),
 
+    source:
+      normalizeSource(
+        input.source
+      ),
 
-  const projectId =
-    normalizeId(
-      getProjectId(
-        input
+    sourceRef:
+      String(
+        input.sourceRef ||
+        ""
       )
-    );
+        .trim()
+        .slice(
+          0,
+          MAX_SOURCE_REF_LENGTH
+        ),
+  };
 
 
-  if (!userId) {
+  if (
+    hasValue
+  ) {
 
-    throw new EnvironmentAgentError(
-      "User ID is required.",
-      "UNAUTHORIZED",
-      401
-    );
+    variable.value =
+      input.value;
 
+  } else if (
+    options.allowMissingValue !==
+    true
+  ) {
+
+    variable.value =
+      undefined;
   }
 
 
-  if (!projectId) {
+  return variable;
+}
+
+
+function normalizeVariables(
+  variables
+) {
+
+  if (
+    variables === undefined ||
+    variables === null
+  ) {
+    return [];
+  }
+
+
+  if (
+    !Array.isArray(
+      variables
+    )
+  ) {
 
     throw new EnvironmentAgentError(
-      "Project ID is required.",
-      "PROJECT_ID_REQUIRED",
+      "Environment variables must be an array.",
+      "INVALID_VARIABLES",
       400
     );
+  }
 
+
+  if (
+    variables.length >
+    MAX_VARIABLES
+  ) {
+
+    throw new EnvironmentAgentError(
+      `Maximum ${MAX_VARIABLES} environment variables are allowed.`,
+      "TOO_MANY_VARIABLES",
+      413
+    );
+  }
+
+
+  return variables.map(
+    variable =>
+      normalizeVariableInput(
+        variable || {}
+      )
+  );
+}
+
+
+/* =========================================================
+   VARIABLE VALIDATION
+========================================================= */
+
+function validateVariable(
+  variable,
+  {
+    requireValue = false,
+  } = {}
+) {
+
+  if (
+    !variable.key
+  ) {
+
+    throw new EnvironmentAgentError(
+      "Environment variable key is required.",
+      "VARIABLE_KEY_REQUIRED",
+      400
+    );
+  }
+
+
+  if (
+    !VARIABLE_TYPES.has(
+      variable.type
+    )
+  ) {
+
+    throw new EnvironmentAgentError(
+      "Invalid environment variable type.",
+      "INVALID_VARIABLE_TYPE",
+      400
+    );
+  }
+
+
+  if (
+    !VARIABLE_SCOPES.has(
+      variable.scope
+    )
+  ) {
+
+    throw new EnvironmentAgentError(
+      "Invalid environment variable scope.",
+      "INVALID_VARIABLE_SCOPE",
+      400
+    );
+  }
+
+
+  if (
+    requireValue &&
+    (
+      variable.value ===
+        undefined ||
+      variable.value ===
+        null ||
+      String(
+        variable.value
+      ).length === 0
+    )
+  ) {
+
+    throw new EnvironmentAgentError(
+      "Environment variable value is required.",
+      "VARIABLE_VALUE_REQUIRED",
+      400
+    );
+  }
+
+
+  if (
+    variable.type ===
+      "json" &&
+    variable.value !==
+      undefined &&
+    variable.value !==
+      null
+  ) {
+
+    if (
+      typeof variable.value ===
+      "string"
+    ) {
+
+      try {
+
+        JSON.parse(
+          variable.value
+        );
+
+      } catch (
+        error
+      ) {
+
+        throw new EnvironmentAgentError(
+          "Environment variable contains invalid JSON.",
+          "INVALID_JSON_VARIABLE",
+          400
+        );
+      }
+    }
+  }
+
+
+  return true;
+}
+
+
+/* =========================================================
+   RESULT EXTRACTION
+========================================================= */
+
+function extractEnvironment(
+  result
+) {
+
+  if (!result) {
+    return null;
+  }
+
+
+  if (
+    result.environment
+  ) {
+    return result.environment;
+  }
+
+
+  if (
+    result.data?.environment
+  ) {
+    return result.data.environment;
+  }
+
+
+  if (
+    result.data
+  ) {
+    return result.data;
+  }
+
+
+  return result;
+}
+
+
+function extractEnvironments(
+  result
+) {
+
+  if (!result) {
+    return [];
+  }
+
+
+  if (
+    Array.isArray(
+      result.environments
+    )
+  ) {
+    return result.environments;
+  }
+
+
+  if (
+    Array.isArray(
+      result.data?.environments
+    )
+  ) {
+    return result.data.environments;
+  }
+
+
+  if (
+    Array.isArray(
+      result.data
+    )
+  ) {
+    return result.data;
+  }
+
+
+  if (
+    Array.isArray(
+      result
+    )
+  ) {
+    return result;
+  }
+
+
+  return [];
+}
+
+
+/* =========================================================
+   SAFE VARIABLE RESULT
+========================================================= */
+
+function sanitizeVariable(
+  variable
+) {
+
+  if (!variable) {
+    return null;
+  }
+
+
+  const isSecret =
+    variable.isSecret === true;
+
+
+  return {
+
+    key:
+      variable.key ||
+      null,
+
+    type:
+      variable.type ||
+      "string",
+
+    scope:
+      variable.scope ||
+      "runtime",
+
+    isSecret,
+
+    required:
+      variable.required ===
+      true,
+
+    description:
+      variable.description ||
+      "",
+
+    source:
+      variable.source ||
+      "manual",
+
+    sourceRef:
+      variable.sourceRef ||
+      "",
+
+    hasValue:
+      variable.hasValue ===
+      true ||
+      Boolean(
+        variable.valueSet
+      ),
+
+    maskedValue:
+      isSecret
+        ? "••••••••"
+        : (
+            variable.hasValue ===
+              true
+              ? (
+                  variable.maskedValue ||
+                  ""
+                )
+              : ""
+          ),
+
+    validation:
+      sanitizeVariableValidation(
+        variable.validation
+      ),
+  };
+}
+
+
+/* =========================================================
+   SAFE ENVIRONMENT RESULT
+========================================================= */
+
+function sanitizeEnvironmentResult(
+  environment
+) {
+
+  if (!environment) {
+    return null;
+  }
+
+
+  if (
+    typeof environment.toSafeObject ===
+    "function"
+  ) {
+
+    try {
+
+      return environment.toSafeObject();
+
+    } catch (
+      error
+    ) {
+      // Fall through to manual sanitizer.
+    }
   }
 
 
   return {
-    userId,
-    projectId,
-  };
 
+    id:
+      environment.id ||
+      environment._id ||
+      null,
+
+    userId:
+      environment.userId ||
+      null,
+
+    projectId:
+      environment.projectId ||
+      null,
+
+    name:
+      environment.name ||
+      null,
+
+    displayName:
+      environment.displayName ||
+      null,
+
+    description:
+      environment.description ||
+      "",
+
+    status:
+      environment.status ||
+      "draft",
+
+    isActive:
+      environment.isActive !==
+      false,
+
+    isArchived:
+      environment.isArchived ===
+      true,
+
+    version:
+      environment.version ||
+      1,
+
+    variables:
+      Array.isArray(
+        environment.variables
+      )
+        ? environment.variables.map(
+            sanitizeVariable
+          )
+        : [],
+
+    validation:
+      sanitizeValidation(
+        environment.validation
+      ),
+
+    deployment:
+      sanitizeDeploymentMetadata(
+        environment.deployment
+      ),
+
+    source:
+      sanitizeSourceMetadata(
+        environment.source
+      ),
+
+    audit:
+      sanitizeAudit(
+        environment.audit
+      ),
+
+    configurationHash:
+      environment.configurationHash ||
+      null,
+
+    deploymentLock:
+      sanitizeDeploymentLock(
+        environment.deploymentLock
+      ),
+
+    createdAt:
+      environment.createdAt ||
+      null,
+
+    updatedAt:
+      environment.updatedAt ||
+      null,
+  };
+}
+
+
+/* =========================================================
+   VALIDATION SANITIZERS
+========================================================= */
+
+function sanitizeValidation(
+  validation
+) {
+
+  if (!validation) {
+
+    return {
+
+      status:
+        "unknown",
+
+      checkedAt:
+        null,
+
+      totalVariables:
+        0,
+
+      configuredVariables:
+        0,
+
+      missingRequiredVariables:
+        0,
+
+      invalidVariables:
+        0,
+
+      errors:
+        [],
+    };
+  }
+
+
+  return {
+
+    status:
+      validation.status ||
+      "unknown",
+
+    checkedAt:
+      validation.checkedAt ||
+      null,
+
+    totalVariables:
+      Number(
+        validation.totalVariables ||
+        0
+      ),
+
+    configuredVariables:
+      Number(
+        validation.configuredVariables ||
+        0
+      ),
+
+    missingRequiredVariables:
+      Number(
+        validation.missingRequiredVariables ||
+        0
+      ),
+
+    invalidVariables:
+      Number(
+        validation.invalidVariables ||
+        0
+      ),
+
+    errors:
+      Array.isArray(
+        validation.errors
+      )
+        ? validation.errors.map(
+            error => ({
+
+              key:
+                error?.key ||
+                null,
+
+              message:
+                error?.message ||
+                "Validation error.",
+            })
+          )
+        : [],
+  };
+}
+
+
+function sanitizeVariableValidation(
+  validation
+) {
+
+  if (!validation) {
+
+    return {
+
+      status:
+        "unknown",
+
+      message:
+        "",
+
+      checkedAt:
+        null,
+    };
+  }
+
+
+  return {
+
+    status:
+      validation.status ||
+      "unknown",
+
+    message:
+      validation.message ||
+      "",
+
+    checkedAt:
+      validation.checkedAt ||
+      null,
+  };
+}
+
+
+/* =========================================================
+   DEPLOYMENT SANITIZERS
+========================================================= */
+
+function sanitizeDeploymentMetadata(
+  deployment
+) {
+
+  if (!deployment) {
+
+    return {
+
+      version:
+        0,
+
+      status:
+        "never",
+
+      deploymentId:
+        null,
+
+      workflowId:
+        null,
+
+      startedAt:
+        null,
+
+      completedAt:
+        null,
+
+      lastError:
+        "",
+
+      variableCount:
+        0,
+
+      configurationHash:
+        null,
+    };
+  }
+
+
+  return {
+
+    version:
+      deployment.version ||
+      0,
+
+    status:
+      deployment.status ||
+      "never",
+
+    deploymentId:
+      deployment.deploymentId ||
+      null,
+
+    workflowId:
+      deployment.workflowId ||
+      null,
+
+    startedAt:
+      deployment.startedAt ||
+      null,
+
+    completedAt:
+      deployment.completedAt ||
+      null,
+
+    lastError:
+      deployment.lastError ||
+      "",
+
+    variableCount:
+      Number(
+        deployment.variableCount ||
+        0
+      ),
+
+    configurationHash:
+      deployment.configurationHash ||
+      null,
+  };
+}
+
+
+function sanitizeDeploymentSnapshot(
+  snapshot
+) {
+
+  return sanitizeDeploymentMetadata(
+    snapshot
+  );
+}
+
+
+/* =========================================================
+   DEPLOYMENT READINESS
+========================================================= */
+
+function sanitizeDeploymentReadiness(
+  result
+) {
+
+  if (!result) {
+
+    return {
+
+      ready:
+        false,
+
+      deployable:
+        false,
+
+      status:
+        "unknown",
+
+      validation:
+        null,
+
+      reason:
+        "No readiness information returned.",
+    };
+  }
+
+
+  const source =
+    result.readiness ||
+    result.data?.readiness ||
+    result;
+
+
+  return {
+
+    ready:
+      source.ready ===
+      true,
+
+    deployable:
+      source.deployable ===
+      true,
+
+    status:
+      source.status ||
+      null,
+
+    validation:
+      sanitizeValidation(
+        source.validation
+      ),
+
+    reason:
+      source.reason ||
+      source.message ||
+      null,
+  };
+}
+
+
+/* =========================================================
+   SOURCE / AUDIT
+========================================================= */
+
+function sanitizeSourceMetadata(
+  source
+) {
+
+  if (!source) {
+
+    return {
+
+      type:
+        "manual",
+
+      provider:
+        null,
+
+      repository:
+        null,
+
+      branch:
+        null,
+
+      commitSha:
+        null,
+
+      importedAt:
+        null,
+    };
+  }
+
+
+  return {
+
+    type:
+      source.type ||
+      "manual",
+
+    provider:
+      source.provider ||
+      null,
+
+    repository:
+      source.repository ||
+      null,
+
+    branch:
+      source.branch ||
+      null,
+
+    commitSha:
+      source.commitSha ||
+      null,
+
+    importedAt:
+      source.importedAt ||
+      null,
+  };
+}
+
+
+function sanitizeAudit(
+  audit
+) {
+
+  if (!audit) {
+
+    return {
+
+      createdBy:
+        null,
+
+      updatedBy:
+        null,
+
+      lastAction:
+        null,
+
+      lastActionAt:
+        null,
+    };
+  }
+
+
+  return {
+
+    createdBy:
+      audit.createdBy ||
+      null,
+
+    updatedBy:
+      audit.updatedBy ||
+      null,
+
+    lastAction:
+      audit.lastAction ||
+      null,
+
+    lastActionAt:
+      audit.lastActionAt ||
+      null,
+  };
+}
+
+
+function sanitizeDeploymentLock(
+  lock
+) {
+
+  if (!lock) {
+
+    return {
+
+      locked:
+        false,
+
+      workflowId:
+        null,
+
+      lockedAt:
+        null,
+    };
+  }
+
+
+  return {
+
+    locked:
+      lock.locked ===
+      true,
+
+    workflowId:
+      lock.workflowId ||
+      null,
+
+    lockedAt:
+      lock.lockedAt ||
+      null,
+  };
+}
+
+
+/* =========================================================
+   CONFIGURATION SUMMARY
+========================================================= */
+
+function sanitizeConfigurationSummary(
+  result
+) {
+
+  const source =
+    result?.summary ||
+    result?.data?.summary ||
+    result ||
+    {};
+
+
+  return {
+
+    totalVariables:
+      Number(
+        source.totalVariables ||
+        0
+      ),
+
+    configuredVariables:
+      Number(
+        source.configuredVariables ||
+        0
+      ),
+
+    secretVariables:
+      Number(
+        source.secretVariables ||
+        0
+      ),
+
+    requiredVariables:
+      Number(
+        source.requiredVariables ||
+        0
+      ),
+
+    missingRequiredVariables:
+      Number(
+        source.missingRequiredVariables ||
+        0
+      ),
+
+    invalidVariables:
+      Number(
+        source.invalidVariables ||
+        0
+      ),
+
+    validationStatus:
+      source.validationStatus ||
+      source.status ||
+      "unknown",
+
+    variables:
+      Array.isArray(
+        source.variables
+      )
+        ? source.variables.map(
+            variable => ({
+
+              key:
+                variable?.key ||
+                null,
+
+              isSecret:
+                variable?.isSecret ===
+                true,
+
+              hasValue:
+                variable?.hasValue ===
+                true,
+
+              required:
+                variable?.required ===
+                true,
+
+              type:
+                variable?.type ||
+                "string",
+
+              scope:
+                variable?.scope ||
+                "runtime",
+
+              validation:
+                variable?.validation?.status ||
+                "unknown",
+            })
+          )
+        : [],
+  };
+}
+
+
+/* =========================================================
+   HEALTH
+========================================================= */
+
+function sanitizeHealth(
+  result
+) {
+
+  const source =
+    result?.health ||
+    result?.data ||
+    result ||
+    {};
+
+
+  return {
+
+    status:
+      source.status ||
+      "unknown",
+
+    service:
+      source.service ||
+      "environment",
+
+    version:
+      source.version ||
+      AGENT_VERSION,
+
+    encryption:
+      source.encryption
+        ? {
+
+            configured:
+              source.encryption
+                .configured ===
+              true,
+
+            version:
+              source.encryption
+                .version ||
+              null,
+          }
+        : undefined,
+  };
+}
+
+
+/* =========================================================
+   SUCCESS RESPONSE
+========================================================= */
+
+function agentSuccess(
+  message,
+  data = {}
+) {
+
+  return {
+
+    success:
+      true,
+
+    agent:
+      AGENT_NAME,
+
+    version:
+      AGENT_VERSION,
+
+    message,
+
+    timestamp:
+      new Date().toISOString(),
+
+    ...data,
+  };
 }
 
 
@@ -1047,32 +2254,19 @@ async function createEnvironment(
     );
 
 
-  if (
-    variables.length >
-    MAX_VARIABLES
+  for (
+    const variable
+    of variables
   ) {
 
-    throw new EnvironmentAgentError(
-      `Maximum ${MAX_VARIABLES} environment variables are allowed.`,
-      "TOO_MANY_VARIABLES",
-      413
+    validateVariable(
+      variable,
+      {
+        requireValue:
+          true,
+      }
     );
-
   }
-
-
-  logInfo(
-    "Creating environment",
-    {
-      userId,
-      projectId,
-      name,
-      variableCount:
-        variables.length,
-      requestId:
-        input.requestId,
-    }
-  );
 
 
   const result =
@@ -1083,7 +2277,9 @@ async function createEnvironment(
 
         userId,
         projectId,
+
         name,
+
         variables,
 
         requestId:
@@ -1111,7 +2307,6 @@ async function createEnvironment(
         startedAt,
     }
   );
-
 }
 
 
@@ -1166,7 +2361,6 @@ async function listEnvironments(
         ),
     }
   );
-
 }
 
 
@@ -1223,7 +2417,6 @@ async function getEnvironment(
       "ENVIRONMENT_NOT_FOUND",
       404
     );
-
   }
 
 
@@ -1239,7 +2432,6 @@ async function getEnvironment(
         ),
     }
   );
-
 }
 
 
@@ -1347,7 +2539,6 @@ async function addVariable(
         ),
     }
   );
-
 }
 
 
@@ -1391,28 +2582,6 @@ async function updateVariable(
           true,
       }
     );
-
-
-  if (
-    variable.key &&
-    !variable.key.length
-  ) {
-
-    variable.key =
-      currentKey;
-
-  }
-
-
-  if (
-    variable.key
-  ) {
-
-    normalizeVariableKey(
-      variable.key
-    );
-
-  }
 
 
   const payload = {
@@ -1461,18 +2630,9 @@ async function updateVariable(
     requestId:
       input.requestId ||
       null,
-
   };
 
 
-  /**
-   * Critical:
-   *
-   * If `value` was not supplied, do NOT send an
-   * undefined value to the service.
-   *
-   * This allows metadata-only updates.
-   */
   if (
     Object.prototype.hasOwnProperty.call(
       input,
@@ -1483,6 +2643,20 @@ async function updateVariable(
     payload.value =
       input.value;
 
+
+    validateVariable(
+      {
+        ...variable,
+
+        key:
+          variable.key ||
+          currentKey,
+      },
+      {
+        requireValue:
+          true,
+      }
+    );
   }
 
 
@@ -1507,7 +2681,6 @@ async function updateVariable(
         ),
     }
   );
-
 }
 
 
@@ -1580,7 +2753,6 @@ async function deleteVariable(
         ),
     }
   );
-
 }
 
 
@@ -1648,7 +2820,6 @@ async function validateEnvironment(
         ),
     }
   );
-
 }
 
 
@@ -1677,12 +2848,54 @@ async function checkDeploymentReadiness(
     );
 
 
-  /**
-   * The service owns the actual deployment-secret
-   * boundary.
+  /*
+   * Prefer a dedicated service method if available.
    *
-   * We ask for metadata/readiness only.
+   * This avoids resolving plaintext secrets merely
+   * to answer "is deployment possible?"
    */
+
+  if (
+    typeof environmentService
+      .checkDeploymentReadiness ===
+      "function"
+  ) {
+
+    const result =
+      await callService(
+        "checkDeploymentReadiness",
+        {
+          userId,
+          projectId,
+          name,
+
+          requestId:
+            input.requestId ||
+            null,
+        }
+      );
+
+
+    return agentSuccess(
+      "Environment deployment readiness checked.",
+      {
+        operation:
+          "deployment_readiness",
+
+        readiness:
+          sanitizeDeploymentReadiness(
+            result
+          ),
+      }
+    );
+  }
+
+
+  /*
+   * Backward compatibility for the current
+   * environmentService implementation.
+   */
+
   const result =
     await callService(
       "resolveForDeployment",
@@ -1713,23 +2926,26 @@ async function checkDeploymentReadiness(
         ),
     }
   );
-
 }
 
 
 /* =========================================================
-   RESOLVE FOR DEPLOYMENT
-=========================================================
-
-   This is the ONLY Agent-level operation that is allowed
-   to receive resolved deployment configuration.
-
-   IMPORTANT:
-   - It must only be called by a trusted server-side
-     deployment workflow.
-   - It must NEVER be exposed directly to frontend routes.
-   - It must NEVER log its returned values.
+   TRUSTED DEPLOYMENT RESOLUTION
 ========================================================= */
+
+/**
+ * This is the only Agent operation allowed to
+ * return real deployment variables.
+ *
+ * Requirements:
+ *
+ * - trustedContext === true
+ * - workflowId required
+ * - server-side deployment flow only
+ *
+ * The returned object MUST remain inside the
+ * trusted Deploy Agent pipeline.
+ */
 
 async function resolveForDeployment(
   input = {}
@@ -1762,7 +2978,6 @@ async function resolveForDeployment(
       "TRUSTED_CONTEXT_REQUIRED",
       403
     );
-
   }
 
 
@@ -1775,7 +2990,22 @@ async function resolveForDeployment(
       "WORKFLOW_ID_REQUIRED",
       400
     );
+  }
 
+
+  const deploymentId =
+    normalizeId(
+      input.deploymentId
+    );
+
+
+  if (!deploymentId) {
+
+    throw new EnvironmentAgentError(
+      "Deployment ID is required for deployment environment resolution.",
+      "DEPLOYMENT_ID_REQUIRED",
+      400
+    );
   }
 
 
@@ -1785,19 +3015,24 @@ async function resolveForDeployment(
       userId,
       projectId,
       name,
+
       workflowId:
         input.workflowId,
+
+      deploymentId,
+
       requestId:
         input.requestId,
     }
   );
 
 
-  /**
-   * DO NOT log this result.
+  /*
+   * DO NOT log the service result.
    *
-   * It can contain plaintext deployment secrets.
+   * It may contain plaintext secrets.
    */
+
   const result =
     await callService(
       "resolveForDeployment",
@@ -1809,9 +3044,7 @@ async function resolveForDeployment(
         workflowId:
           input.workflowId,
 
-        deploymentId:
-          input.deploymentId ||
-          null,
+        deploymentId,
 
         metadataOnly:
           false,
@@ -1823,43 +3056,61 @@ async function resolveForDeployment(
     );
 
 
-  /**
-   * Return internally only.
-   *
-   * The caller is responsible for keeping this object
-   * inside the trusted deployment pipeline.
-   */
+  const variables =
+    result?.variables ||
+    result?.resolvedVariables ||
+    result?.env ||
+    result?.data?.variables ||
+    result?.data?.resolvedVariables ||
+    result?.data?.env ||
+    {};
+
+
   return {
+
     success:
       true,
+
+    agent:
+      AGENT_NAME,
+
+    version:
+      AGENT_VERSION,
 
     operation:
       "resolve_for_deployment",
 
     environment:
-      result?.environment ||
+      sanitizeEnvironmentResult(
+        result?.environment
+      ),
+
+    environmentId:
+      result?.environmentId ||
+      result?.environment?.id ||
+      result?.environment?._id ||
       null,
 
-    variables:
-      result?.variables ||
-      result?.resolvedVariables ||
-      result?.env ||
-      {},
+    variables,
 
     deployment:
       sanitizeDeploymentMetadata(
         result?.deployment
       ),
 
+    deploymentSnapshotId:
+      result?.deploymentSnapshotId ||
+      result?.snapshot?.deploymentSnapshotId ||
+      null,
+
     resolvedAt:
       new Date().toISOString(),
   };
-
 }
 
 
 /* =========================================================
-   CREATE DEPLOYMENT SNAPSHOT
+   DEPLOYMENT SNAPSHOT
 ========================================================= */
 
 async function createDeploymentSnapshot(
@@ -1884,10 +3135,9 @@ async function createDeploymentSnapshot(
 
 
   const deploymentId =
-    String(
-      input.deploymentId ||
-      ""
-    ).trim();
+    normalizeId(
+      input.deploymentId
+    );
 
 
   if (!deploymentId) {
@@ -1897,7 +3147,22 @@ async function createDeploymentSnapshot(
       "DEPLOYMENT_ID_REQUIRED",
       400
     );
+  }
 
+
+  const workflowId =
+    normalizeId(
+      input.workflowId
+    );
+
+
+  if (!workflowId) {
+
+    throw new EnvironmentAgentError(
+      "Workflow ID is required.",
+      "WORKFLOW_ID_REQUIRED",
+      400
+    );
   }
 
 
@@ -1911,9 +3176,7 @@ async function createDeploymentSnapshot(
 
         deploymentId,
 
-        workflowId:
-          input.workflowId ||
-          null,
+        workflowId,
 
         requestId:
           input.requestId ||
@@ -1922,22 +3185,32 @@ async function createDeploymentSnapshot(
     );
 
 
+  const snapshot =
+    result?.snapshot ||
+    result?.deployment ||
+    result?.data?.snapshot ||
+    result?.data ||
+    result;
+
+
   return agentSuccess(
     "Deployment environment snapshot created.",
     {
       operation:
         "create_deployment_snapshot",
 
+      deploymentSnapshotId:
+        result?.deploymentSnapshotId ||
+        snapshot?.deploymentSnapshotId ||
+        snapshot?.id ||
+        null,
+
       snapshot:
         sanitizeDeploymentSnapshot(
-          result?.snapshot ||
-          result?.deployment ||
-          result?.data ||
-          result
+          snapshot
         ),
     }
   );
-
 }
 
 
@@ -1967,10 +3240,9 @@ async function markDeployed(
 
 
   const deploymentId =
-    String(
-      input.deploymentId ||
-      ""
-    ).trim();
+    normalizeId(
+      input.deploymentId
+    );
 
 
   if (!deploymentId) {
@@ -1980,40 +3252,63 @@ async function markDeployed(
       "DEPLOYMENT_ID_REQUIRED",
       400
     );
-
   }
+
+
+  const workflowId =
+    normalizeId(
+      input.workflowId
+    );
+
+
+  const payload = {
+
+    userId,
+
+    projectId,
+
+    name,
+
+    deploymentId,
+
+    workflowId,
+
+    version:
+      normalizeVersion(
+        input.version
+      ),
+
+    deployedAt:
+      input.deployedAt
+        ? new Date(
+            input.deployedAt
+          )
+        : new Date(),
+
+    status:
+      input.status ||
+      "deployed",
+
+    liveUrl:
+      typeof input.liveUrl ===
+      "string"
+        ? input.liveUrl
+        : null,
+
+    deploymentSnapshotId:
+      input.deploymentSnapshotId ||
+      null,
+
+    requestId:
+      input.requestId ||
+      null,
+  };
 
 
   const result =
     await callService(
       "markDeployed",
-      {
-        userId,
-        projectId,
-        name,
-
-        deploymentId,
-
-        workflowId:
-          input.workflowId ||
-          null,
-
-        version:
-          normalizeVersion(
-            input.version
-          ),
-
-        deployedAt:
-          input.deployedAt
-            ? new Date(
-                input.deployedAt
-              )
-            : new Date(),
-
-        requestId:
-          input.requestId ||
-          null,
-      }
+      payload
     );
 
 
@@ -2029,14 +3324,19 @@ async function markDeployed(
             result
           )
         ),
+
+      deployment:
+        sanitizeDeploymentMetadata(
+          result?.deployment ||
+          result?.data?.deployment
+        ),
     }
   );
-
 }
 
 
 /* =========================================================
-   ARCHIVE ENVIRONMENT
+   ARCHIVE
 ========================================================= */
 
 async function archiveEnvironment(
@@ -2097,12 +3397,11 @@ async function archiveEnvironment(
         ),
     }
   );
-
 }
 
 
 /* =========================================================
-   UNARCHIVE ENVIRONMENT
+   UNARCHIVE
 ========================================================= */
 
 async function unarchiveEnvironment(
@@ -2163,12 +3462,11 @@ async function unarchiveEnvironment(
         ),
     }
   );
-
 }
 
 
 /* =========================================================
-   DELETE ENVIRONMENT
+   DELETE
 ========================================================= */
 
 async function deleteEnvironment(
@@ -2192,11 +3490,9 @@ async function deleteEnvironment(
     );
 
 
-  /**
-   * Production deletion requires explicit confirmation.
-   */
   if (
-    name === "production" &&
+    name ===
+      "production" &&
     input.confirmProduction !==
       true
   ) {
@@ -2206,7 +3502,6 @@ async function deleteEnvironment(
       "PRODUCTION_DELETE_CONFIRMATION_REQUIRED",
       400
     );
-
   }
 
 
@@ -2254,12 +3549,11 @@ async function deleteEnvironment(
         ),
     }
   );
-
 }
 
 
 /* =========================================================
-   COPY ENVIRONMENT
+   COPY
 ========================================================= */
 
 async function copyEnvironment(
@@ -2299,14 +3593,9 @@ async function copyEnvironment(
       "SAME_SOURCE_TARGET_ENVIRONMENT",
       400
     );
-
   }
 
 
-  /**
-   * Secret copying is deliberately disabled unless explicitly
-   * requested by a trusted server-side workflow.
-   */
   const copySecrets =
     input.trustedContext ===
       true &&
@@ -2353,7 +3642,6 @@ async function copyEnvironment(
         copySecrets,
     }
   );
-
 }
 
 
@@ -2409,12 +3697,11 @@ async function getConfigurationSummary(
         ),
     }
   );
-
 }
 
 
 /* =========================================================
-   SERVICE HEALTH
+   HEALTH
 ========================================================= */
 
 async function healthCheck(
@@ -2440,1265 +3727,11 @@ async function healthCheck(
         ),
     }
   );
-
 }
 
 
 /* =========================================================
-   VARIABLE NORMALIZATION
-========================================================= */
-
-function normalizeVariableInput(
-  input = {},
-  options = {}
-) {
-
-  const hasValue =
-    Object.prototype.hasOwnProperty.call(
-      input,
-      "value"
-    );
-
-
-  const variable = {
-
-    key:
-      input.key
-        ? normalizeVariableKey(
-            input.key
-          )
-        : "",
-
-    type:
-      normalizeVariableType(
-        input.type
-      ),
-
-    scope:
-      normalizeVariableScope(
-        input.scope
-      ),
-
-    isSecret:
-      normalizeBoolean(
-        input.isSecret,
-        false
-      ),
-
-    required:
-      normalizeBoolean(
-        input.required,
-        false
-      ),
-
-    description:
-      String(
-        input.description ||
-        ""
-      )
-        .trim()
-        .slice(
-          0,
-          1000
-        ),
-
-    source:
-      normalizeSource(
-        input.source
-      ),
-
-    sourceRef:
-      String(
-        input.sourceRef ||
-        ""
-      )
-        .trim()
-        .slice(
-          0,
-          500
-        ),
-
-  };
-
-
-  if (
-    hasValue
-  ) {
-
-    variable.value =
-      input.value;
-
-  } else if (
-    options.allowMissingValue !==
-    true
-  ) {
-
-    variable.value =
-      undefined;
-
-  }
-
-
-  return variable;
-
-}
-
-
-function normalizeVariables(
-  variables
-) {
-
-  if (
-    variables ===
-      undefined ||
-    variables ===
-      null
-  ) {
-
-    return [];
-
-  }
-
-
-  if (
-    !Array.isArray(
-      variables
-    )
-  ) {
-
-    throw new EnvironmentAgentError(
-      "Environment variables must be an array.",
-      "INVALID_VARIABLES",
-      400
-    );
-
-  }
-
-
-  return variables.map(
-    variable =>
-      normalizeVariableInput(
-        variable || {}
-      )
-  );
-
-}
-
-
-function normalizeSource(
-  value
-) {
-
-  const source =
-    String(
-      value || "manual"
-    )
-      .trim()
-      .toLowerCase();
-
-
-  const allowed =
-    new Set([
-      "manual",
-      "github",
-      "import",
-      "generated",
-      "system",
-    ]);
-
-
-  return allowed.has(
-    source
-  )
-    ? source
-    : "manual";
-
-}
-
-
-/* =========================================================
-   VARIABLE VALIDATION
-========================================================= */
-
-function validateVariable(
-  variable,
-  {
-    requireValue = false,
-  } = {}
-) {
-
-  if (
-    !variable.key
-  ) {
-
-    throw new EnvironmentAgentError(
-      "Environment variable key is required.",
-      "VARIABLE_KEY_REQUIRED",
-      400
-    );
-
-  }
-
-
-  if (
-    !variable.type ||
-    !VARIABLE_TYPES.has(
-      variable.type
-    )
-  ) {
-
-    throw new EnvironmentAgentError(
-      "Invalid environment variable type.",
-      "INVALID_VARIABLE_TYPE",
-      400
-    );
-
-  }
-
-
-  if (
-    !variable.scope ||
-    !VARIABLE_SCOPES.has(
-      variable.scope
-    )
-  ) {
-
-    throw new EnvironmentAgentError(
-      "Invalid environment variable scope.",
-      "INVALID_VARIABLE_SCOPE",
-      400
-    );
-
-  }
-
-
-  if (
-    requireValue &&
-    (
-      variable.value ===
-        undefined ||
-      variable.value ===
-        null ||
-      String(
-        variable.value
-      ).length === 0
-    )
-  ) {
-
-    throw new EnvironmentAgentError(
-      "Environment variable value is required.",
-      "VARIABLE_VALUE_REQUIRED",
-      400
-    );
-
-  }
-
-
-  if (
-    variable.type ===
-      "json" &&
-    variable.value !==
-      undefined &&
-    variable.value !==
-      null
-  ) {
-
-    try {
-
-      if (
-        typeof variable.value ===
-        "string"
-      ) {
-
-        JSON.parse(
-          variable.value
-        );
-
-      }
-
-    } catch (
-      error
-    ) {
-
-      throw new EnvironmentAgentError(
-        "Environment variable contains invalid JSON.",
-        "INVALID_JSON_VARIABLE",
-        400
-      );
-
-    }
-
-  }
-
-
-  return true;
-
-}
-
-
-/* =========================================================
-   RESULT HELPERS
-========================================================= */
-
-function agentSuccess(
-  message,
-  data = {}
-) {
-
-  return {
-
-    success:
-      true,
-
-    agent:
-      AGENT_NAME,
-
-    version:
-      AGENT_VERSION,
-
-    message,
-
-    timestamp:
-      new Date().toISOString(),
-
-    ...data,
-
-  };
-
-}
-
-
-function extractEnvironment(
-  result
-) {
-
-  if (
-    !result
-  ) {
-
-    return null;
-
-  }
-
-
-  if (
-    result.environment
-  ) {
-
-    return result.environment;
-
-  }
-
-
-  if (
-    result.data?.environment
-  ) {
-
-    return result.data.environment;
-
-  }
-
-
-  if (
-    result.data
-  ) {
-
-    return result.data;
-
-  }
-
-
-  return result;
-
-}
-
-
-function extractEnvironments(
-  result
-) {
-
-  if (
-    !result
-  ) {
-
-    return [];
-
-  }
-
-
-  if (
-    Array.isArray(
-      result.environments
-    )
-  ) {
-
-    return result.environments;
-
-  }
-
-
-  if (
-    Array.isArray(
-      result.data?.environments
-    )
-  ) {
-
-    return result.data.environments;
-
-  }
-
-
-  if (
-    Array.isArray(
-      result.data
-    )
-  ) {
-
-    return result.data;
-
-  }
-
-
-  if (
-    Array.isArray(
-      result
-    )
-  ) {
-
-    return result;
-
-  }
-
-
-  return [];
-
-}
-
-
-/* =========================================================
-   SAFE ENVIRONMENT RESULT
-========================================================= */
-
-function sanitizeEnvironmentResult(
-  environment
-) {
-
-  if (
-    !environment
-  ) {
-
-    return null;
-
-  }
-
-
-  /**
-   * Prefer the Model/Service safe representation if
-   * available.
-   */
-  if (
-    typeof environment.toSafeObject ===
-    "function"
-  ) {
-
-    return environment.toSafeObject();
-
-  }
-
-
-  const variables =
-    Array.isArray(
-      environment.variables
-    )
-      ? environment.variables.map(
-          variable => {
-
-            const isSecret =
-              variable?.isSecret ===
-              true;
-
-
-            return {
-
-              key:
-                variable?.key ||
-                null,
-
-              type:
-                variable?.type ||
-                "string",
-
-              scope:
-                variable?.scope ||
-                "runtime",
-
-              isSecret,
-
-              required:
-                variable?.required ===
-                true,
-
-              description:
-                variable?.description ||
-                "",
-
-              source:
-                variable?.source ||
-                "manual",
-
-              sourceRef:
-                variable?.sourceRef ||
-                "",
-
-              hasValue:
-                variable?.hasValue ===
-                true,
-
-              maskedValue:
-                isSecret
-                  ? "••••••••"
-                  : (
-                      variable?.hasValue
-                        ? variable?.plainValue ||
-                          ""
-                        : ""
-                    ),
-
-              validation:
-                sanitizeVariableValidation(
-                  variable?.validation
-                ),
-
-            };
-
-          }
-        )
-      : [];
-
-
-  return {
-
-    id:
-      environment.id ||
-      environment._id ||
-      null,
-
-    userId:
-      environment.userId ||
-      null,
-
-    projectId:
-      environment.projectId ||
-      null,
-
-    name:
-      environment.name ||
-      null,
-
-    displayName:
-      environment.displayName ||
-      null,
-
-    description:
-      environment.description ||
-      "",
-
-    status:
-      environment.status ||
-      "draft",
-
-    isActive:
-      environment.isActive !==
-      false,
-
-    isArchived:
-      environment.isArchived ===
-      true,
-
-    version:
-      environment.version ||
-      1,
-
-    variables,
-
-    validation:
-      sanitizeValidation(
-        environment.validation
-      ),
-
-    deployment:
-      sanitizeDeploymentMetadata(
-        environment.deployment
-      ),
-
-    source:
-      sanitizeSourceMetadata(
-        environment.source
-      ),
-
-    audit:
-      sanitizeAudit(
-        environment.audit
-      ),
-
-    configurationHash:
-      environment.configurationHash ||
-      null,
-
-    deploymentLock:
-      sanitizeDeploymentLock(
-        environment.deploymentLock
-      ),
-
-    createdAt:
-      environment.createdAt ||
-      null,
-
-    updatedAt:
-      environment.updatedAt ||
-      null,
-
-  };
-
-}
-
-
-/* =========================================================
-   VALIDATION SANITIZER
-========================================================= */
-
-function sanitizeValidation(
-  validation
-) {
-
-  if (
-    !validation
-  ) {
-
-    return {
-
-      status:
-        "unknown",
-
-      checkedAt:
-        null,
-
-      totalVariables:
-        0,
-
-      configuredVariables:
-        0,
-
-      missingRequiredVariables:
-        0,
-
-      invalidVariables:
-        0,
-
-      errors:
-        [],
-
-    };
-
-  }
-
-
-  return {
-
-    status:
-      validation.status ||
-      "unknown",
-
-    checkedAt:
-      validation.checkedAt ||
-      null,
-
-    totalVariables:
-      Number(
-        validation.totalVariables ||
-        0
-      ),
-
-    configuredVariables:
-      Number(
-        validation.configuredVariables ||
-        0
-      ),
-
-    missingRequiredVariables:
-      Number(
-        validation.missingRequiredVariables ||
-        0
-      ),
-
-    invalidVariables:
-      Number(
-        validation.invalidVariables ||
-        0
-      ),
-
-    errors:
-      Array.isArray(
-        validation.errors
-      )
-        ? validation.errors.map(
-            error => ({
-
-              key:
-                error?.key ||
-                null,
-
-              message:
-                error?.message ||
-                "Validation error.",
-
-            })
-          )
-        : [],
-
-  };
-
-}
-
-
-function sanitizeVariableValidation(
-  validation
-) {
-
-  if (
-    !validation
-  ) {
-
-    return {
-
-      status:
-        "unknown",
-
-      message:
-        "",
-
-      checkedAt:
-        null,
-
-    };
-
-  }
-
-
-  return {
-
-    status:
-      validation.status ||
-      "unknown",
-
-    message:
-      validation.message ||
-      "",
-
-    checkedAt:
-      validation.checkedAt ||
-      null,
-
-  };
-
-}
-
-
-/* =========================================================
-   DEPLOYMENT SANITIZER
-========================================================= */
-
-function sanitizeDeploymentMetadata(
-  deployment
-) {
-
-  if (
-    !deployment
-  ) {
-
-    return {
-
-      version:
-        0,
-
-      status:
-        "never",
-
-      deploymentId:
-        null,
-
-      workflowId:
-        null,
-
-      startedAt:
-        null,
-
-      completedAt:
-        null,
-
-      lastError:
-        "",
-
-      variableCount:
-        0,
-
-      configurationHash:
-        null,
-
-    };
-
-  }
-
-
-  return {
-
-    version:
-      deployment.version ||
-      0,
-
-    status:
-      deployment.status ||
-      "never",
-
-    deploymentId:
-      deployment.deploymentId ||
-      null,
-
-    workflowId:
-      deployment.workflowId ||
-      null,
-
-    startedAt:
-      deployment.startedAt ||
-      null,
-
-    completedAt:
-      deployment.completedAt ||
-      null,
-
-    lastError:
-      deployment.lastError ||
-      "",
-
-    variableCount:
-      Number(
-        deployment.variableCount ||
-        0
-      ),
-
-    configurationHash:
-      deployment.configurationHash ||
-      null,
-
-  };
-
-}
-
-
-function sanitizeDeploymentSnapshot(
-  snapshot
-) {
-
-  return sanitizeDeploymentMetadata(
-    snapshot
-  );
-
-}
-
-
-/* =========================================================
-   DEPLOYMENT READINESS SANITIZER
-========================================================= */
-
-function sanitizeDeploymentReadiness(
-  result
-) {
-
-  if (
-    !result
-  ) {
-
-    return {
-
-      ready:
-        false,
-
-      deployable:
-        false,
-
-      status:
-        "unknown",
-
-      validation:
-        null,
-
-      reason:
-        "No readiness information returned.",
-
-    };
-
-  }
-
-
-  const source =
-    result.readiness ||
-    result.data?.readiness ||
-    result;
-
-
-  return {
-
-    ready:
-      source.ready ===
-      true,
-
-    deployable:
-      source.deployable ===
-      true,
-
-    status:
-      source.status ||
-      null,
-
-    validation:
-      sanitizeValidation(
-        source.validation
-      ),
-
-    reason:
-      source.reason ||
-      source.message ||
-      null,
-
-  };
-
-}
-
-
-/* =========================================================
-   CONFIGURATION SUMMARY
-========================================================= */
-
-function sanitizeConfigurationSummary(
-  result
-) {
-
-  const source =
-    result?.summary ||
-    result?.data?.summary ||
-    result ||
-    {};
-
-
-  return {
-
-    totalVariables:
-      Number(
-        source.totalVariables ||
-        0
-      ),
-
-    configuredVariables:
-      Number(
-        source.configuredVariables ||
-        0
-      ),
-
-    secretVariables:
-      Number(
-        source.secretVariables ||
-        0
-      ),
-
-    requiredVariables:
-      Number(
-        source.requiredVariables ||
-        0
-      ),
-
-    missingRequiredVariables:
-      Number(
-        source.missingRequiredVariables ||
-        0
-      ),
-
-    invalidVariables:
-      Number(
-        source.invalidVariables ||
-        0
-      ),
-
-    validationStatus:
-      source.validationStatus ||
-      source.status ||
-      "unknown",
-
-    variables:
-      Array.isArray(
-        source.variables
-      )
-        ? source.variables.map(
-            variable => ({
-
-              key:
-                variable?.key ||
-                null,
-
-              isSecret:
-                variable?.isSecret ===
-                true,
-
-              hasValue:
-                variable?.hasValue ===
-                true,
-
-              required:
-                variable?.required ===
-                true,
-
-              type:
-                variable?.type ||
-                "string",
-
-              scope:
-                variable?.scope ||
-                "runtime",
-
-              validation:
-                variable?.validation?.status ||
-                "unknown",
-
-            })
-          )
-        : [],
-
-  };
-
-}
-
-
-/* =========================================================
-   SOURCE SANITIZER
-========================================================= */
-
-function sanitizeSourceMetadata(
-  source
-) {
-
-  if (
-    !source
-  ) {
-
-    return {
-
-      type:
-        "manual",
-
-      provider:
-        null,
-
-      repository:
-        null,
-
-      branch:
-        null,
-
-      commitSha:
-        null,
-
-      importedAt:
-        null,
-
-    };
-
-  }
-
-
-  return {
-
-    type:
-      source.type ||
-      "manual",
-
-    provider:
-      source.provider ||
-      null,
-
-    repository:
-      source.repository ||
-      null,
-
-    branch:
-      source.branch ||
-      null,
-
-    commitSha:
-      source.commitSha ||
-      null,
-
-    importedAt:
-      source.importedAt ||
-      null,
-
-  };
-
-}
-
-
-/* =========================================================
-   AUDIT SANITIZER
-========================================================= */
-
-function sanitizeAudit(
-  audit
-) {
-
-  if (
-    !audit
-  ) {
-
-    return {
-
-      createdBy:
-        null,
-
-      updatedBy:
-        null,
-
-      lastAction:
-        null,
-
-      lastActionAt:
-        null,
-
-    };
-
-  }
-
-
-  return {
-
-    createdBy:
-      audit.createdBy ||
-      null,
-
-    updatedBy:
-      audit.updatedBy ||
-      null,
-
-    lastAction:
-      audit.lastAction ||
-      null,
-
-    lastActionAt:
-      audit.lastActionAt ||
-      null,
-
-  };
-
-}
-
-
-/* =========================================================
-   DEPLOYMENT LOCK SANITIZER
-========================================================= */
-
-function sanitizeDeploymentLock(
-  lock
-) {
-
-  if (
-    !lock
-  ) {
-
-    return {
-
-      locked:
-        false,
-
-      workflowId:
-        null,
-
-      lockedAt:
-        null,
-
-    };
-
-  }
-
-
-  return {
-
-    locked:
-      lock.locked ===
-      true,
-
-    workflowId:
-      lock.workflowId ||
-      null,
-
-    lockedAt:
-      lock.lockedAt ||
-      null,
-
-  };
-
-}
-
-
-/* =========================================================
-   HEALTH SANITIZER
-========================================================= */
-
-function sanitizeHealth(
-  result
-) {
-
-  const source =
-    result?.health ||
-    result?.data ||
-    result ||
-    {};
-
-
-  return {
-
-    status:
-      source.status ||
-      "unknown",
-
-    service:
-      source.service ||
-      "environment",
-
-    version:
-      source.version ||
-      AGENT_VERSION,
-
-    encryption:
-      source.encryption
-        ? {
-
-            configured:
-              source.encryption
-                .configured ===
-              true,
-
-            version:
-              source.encryption
-                .version ||
-              null,
-
-          }
-        : undefined,
-
-  };
-
-}
-
-
-/* =========================================================
-   AGENT STATUS
+   STATUS
 ========================================================= */
 
 function getStatus() {
@@ -3720,37 +3753,27 @@ function getStatus() {
     capabilities: [
 
       "create_environment",
-
       "list_environments",
-
       "get_environment",
 
       "add_variable",
-
       "update_variable",
-
       "delete_variable",
 
       "validate_environment",
-
       "deployment_readiness",
 
       "resolve_for_deployment",
 
       "create_deployment_snapshot",
-
       "mark_deployed",
 
       "archive_environment",
-
       "unarchive_environment",
-
       "delete_environment",
-
       "copy_environment",
 
       "configuration_summary",
-
       "health_check",
 
     ],
@@ -3772,44 +3795,24 @@ function getStatus() {
       trustedContextRequired:
         true,
 
+      secretValuesLogged:
+        false,
+
+      secretValuesReturnedToClient:
+        false,
+
     },
 
     timestamp:
       new Date().toISOString(),
-
   };
-
 }
 
 
 /* =========================================================
-   MAIN AGENT DISPATCHER
+   MAIN DISPATCHER
 ========================================================= */
 
-/**
- * Main callable Agent.
- *
- * Supported actions:
- *
- * create
- * list
- * get
- * add_variable
- * update_variable
- * delete_variable
- * validate
- * deployment_readiness
- * resolve_for_deployment
- * create_deployment_snapshot
- * mark_deployed
- * archive
- * unarchive
- * delete
- * copy
- * configuration_summary
- * health
- * status
- */
 async function environmentAgent(
   input = {}
 ) {
@@ -3817,7 +3820,10 @@ async function environmentAgent(
   if (
     !input ||
     typeof input !==
-      "object"
+      "object" ||
+    Array.isArray(
+      input
+    )
   ) {
 
     throw new EnvironmentAgentError(
@@ -3825,7 +3831,6 @@ async function environmentAgent(
       "INVALID_AGENT_INPUT",
       400
     );
-
   }
 
 
@@ -3846,7 +3851,6 @@ async function environmentAgent(
       "ACTION_REQUIRED",
       400
     );
-
   }
 
 
@@ -3875,6 +3879,14 @@ async function environmentAgent(
         input.environment ||
         null,
 
+      workflowId:
+        input.workflowId ||
+        null,
+
+      deploymentId:
+        input.deploymentId ||
+        null,
+
       requestId:
         input.requestId ||
         null,
@@ -3892,7 +3904,6 @@ async function environmentAgent(
     ) {
 
       case "create":
-
       case "create_environment":
 
         result =
@@ -3904,7 +3915,6 @@ async function environmentAgent(
 
 
       case "list":
-
       case "list_environments":
 
         result =
@@ -3916,7 +3926,6 @@ async function environmentAgent(
 
 
       case "get":
-
       case "get_environment":
 
         result =
@@ -3928,7 +3937,6 @@ async function environmentAgent(
 
 
       case "add_variable":
-
       case "add":
 
         result =
@@ -3940,7 +3948,6 @@ async function environmentAgent(
 
 
       case "update_variable":
-
       case "update":
 
         result =
@@ -3952,7 +3959,6 @@ async function environmentAgent(
 
 
       case "delete_variable":
-
       case "remove_variable":
 
         result =
@@ -3964,7 +3970,6 @@ async function environmentAgent(
 
 
       case "validate":
-
       case "validate_environment":
 
         result =
@@ -3976,9 +3981,7 @@ async function environmentAgent(
 
 
       case "deployment_readiness":
-
       case "check_deployment_readiness":
-
       case "ready":
 
         result =
@@ -3990,7 +3993,6 @@ async function environmentAgent(
 
 
       case "resolve_for_deployment":
-
       case "resolve_deployment":
 
         result =
@@ -4002,7 +4004,6 @@ async function environmentAgent(
 
 
       case "create_deployment_snapshot":
-
       case "deployment_snapshot":
 
         result =
@@ -4014,7 +4015,6 @@ async function environmentAgent(
 
 
       case "mark_deployed":
-
       case "deployment_completed":
 
         result =
@@ -4026,7 +4026,6 @@ async function environmentAgent(
 
 
       case "archive":
-
       case "archive_environment":
 
         result =
@@ -4038,9 +4037,7 @@ async function environmentAgent(
 
 
       case "unarchive":
-
       case "unarchive_environment":
-
       case "restore":
 
         result =
@@ -4052,7 +4049,6 @@ async function environmentAgent(
 
 
       case "delete":
-
       case "delete_environment":
 
         result =
@@ -4064,7 +4060,6 @@ async function environmentAgent(
 
 
       case "copy":
-
       case "copy_environment":
 
         result =
@@ -4076,7 +4071,6 @@ async function environmentAgent(
 
 
       case "configuration_summary":
-
       case "summary":
 
         result =
@@ -4088,7 +4082,6 @@ async function environmentAgent(
 
 
       case "health":
-
       case "health_check":
 
         result =
@@ -4138,7 +4131,6 @@ async function environmentAgent(
             ],
           }
         );
-
     }
 
 
@@ -4161,6 +4153,14 @@ async function environmentAgent(
           input.name ||
           input.environmentName ||
           input.environment ||
+          null,
+
+        workflowId:
+          input.workflowId ||
+          null,
+
+        deploymentId:
+          input.deploymentId ||
           null,
 
         durationMs:
@@ -4207,6 +4207,14 @@ async function environmentAgent(
           input.environment ||
           null,
 
+        workflowId:
+          input.workflowId ||
+          null,
+
+        deploymentId:
+          input.deploymentId ||
+          null,
+
         requestId:
           input.requestId ||
           null,
@@ -4233,9 +4241,7 @@ async function environmentAgent(
 
 
     throw normalizedError;
-
   }
-
 }
 
 
@@ -4327,6 +4333,35 @@ environmentAgent.capabilities = [
   "configuration_summary",
   "health_check",
 ];
+
+
+/* =========================================================
+   SECURITY METADATA
+========================================================= */
+
+environmentAgent.security = {
+
+  aiProviderAccess:
+    false,
+
+  directDatabaseAccess:
+    false,
+
+  clientSecretExposure:
+    false,
+
+  deploymentSecretResolution:
+    true,
+
+  trustedContextRequired:
+    true,
+
+  secretValuesLogged:
+    false,
+
+  secretValuesReturnedToClient:
+    false,
+};
 
 
 /* =========================================================
