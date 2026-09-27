@@ -1636,7 +1636,7 @@ async function registerTaskDefinition(
   const response =
     await ecs.send(
 
-      new RegisterTaskDefinition({
+      new RegisterTaskDefinitionCommand({
 
         family:
           data.taskFamily,
@@ -2464,11 +2464,35 @@ function normalizeHealthGracePeriod(
   value
 ) {
 
+  /*
+   * IMPORTANT:
+   *
+   * JavaScript does not allow mixing
+   * ?? and || at the same precedence level
+   * without explicit parentheses.
+   *
+   * Previous broken expression:
+   *
+   * value ??
+   * process.env.AWS_ECS_HEALTH_CHECK_GRACE_PERIOD ||
+   * 60
+   *
+   * Correct expression:
+   *
+   * value ??
+   * (
+   *   process.env.AWS_ECS_HEALTH_CHECK_GRACE_PERIOD ||
+   *   60
+   * )
+   */
+
   const gracePeriod =
     Number(
       value ??
-      process.env.AWS_ECS_HEALTH_CHECK_GRACE_PERIOD ||
-      60
+      (
+        process.env.AWS_ECS_HEALTH_CHECK_GRACE_PERIOD ||
+        60
+      )
     );
 
 
