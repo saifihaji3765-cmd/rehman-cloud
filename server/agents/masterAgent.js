@@ -3,7 +3,7 @@
  * ZYRIONOS MASTER AGENT
  * =========================================================
  *
- * Version: 5.0.0
+ * Version: 5.1.0
  *
  * Central Autonomous Orchestrator / CEO Control Plane
  *
@@ -27,6 +27,14 @@
  *      ↓
  * Deployment
  *      ↓
+ * Deployment Log
+ *      ↓
+ * Auto Fix Eligibility
+ *      ↓
+ * Auto Fix Trigger
+ *      ↓
+ * Fix Agent Handoff
+ *      ↓
  * Monitoring / Scaling
  *      ↓
  * Final Verification
@@ -45,6 +53,8 @@
  * - Environment gates
  * - Build gates
  * - Deployment gates
+ * - Deployment failure logging coordination
+ * - Auto Fix trigger coordination
  * - Billing coordination
  * - Subscription coordination
  * - Failure propagation
@@ -104,6 +114,14 @@ const memoryAgent =
 
 const environmentAgent =
   require("./environmentAgent");
+
+
+/* =========================================================
+   DEPLOYMENT LOG / AUTO FIX AGENT
+========================================================= */
+
+const logAgent =
+  require("./logAgent");
 
 
 /* =========================================================
@@ -190,7 +208,7 @@ const {
 ========================================================= */
 
 const MASTER_VERSION =
-  "5.0.0";
+  "5.1.0";
 
 
 const MAX_PROMPT_LENGTH =
@@ -252,6 +270,12 @@ const agentRegistry = {
 
   environment:
     environmentAgent,
+
+
+  /* Deployment Logs / Auto Fix */
+
+  log:
+    logAgent,
 
 
   /* Deployment */
@@ -530,13 +554,6 @@ function getAgentError(
 /* =========================================================
    SAFE CONTEXT SANITIZER
 ========================================================= */
-
-/**
- * Master may pass agent results into other agents and
- * eventually into the final communication model.
- *
- * Secrets must NEVER enter that context.
- */
 
 const SECRET_KEYS =
   new Set([
@@ -1204,10 +1221,6 @@ function recordStage(
     );
 
 
-  /*
-   * Bound orchestration arrays.
-   */
-
   if (
     workflow.completedStages.length >
     MAX_WORKFLOW_STEPS
@@ -1445,10 +1458,6 @@ function determineWorkflow(
   };
 
 
-  /* =======================================================
-     PRIMARY INTENT
-  ======================================================= */
-
   switch (
     workflow.type
   ) {
@@ -1569,10 +1578,6 @@ function determineWorkflow(
   }
 
 
-  /* =======================================================
-     SECONDARY INTENTS
-  ======================================================= */
-
   if (
     secondary.includes(
       "deploy"
@@ -1684,10 +1689,6 @@ function determineWorkflow(
   }
 
 
-  /* =======================================================
-     EXPLICIT API FLAGS
-  ======================================================= */
-
   if (
     request?.autoDeploy ===
     true
@@ -1721,11 +1722,6 @@ function determineWorkflow(
 
   }
 
-
-  /*
-   * Build + Deploy = autonomous sequence,
-   * but only through gates.
-   */
 
   if (
     workflow.requiresBuild &&
@@ -1915,11 +1911,6 @@ function canDeployAfterBuild(
   buildResult
 ) {
 
-  /*
-   * Existing-project deployment does not require
-   * a new Builder result.
-   */
-
   if (
     !workflow.requiresBuild
   ) {
@@ -2002,11 +1993,6 @@ async function checkEnvironmentGate(
   workflowState
 ) {
 
-  /*
-   * Environment operations themselves don't need a
-   * deployment-readiness check.
-   */
-
   if (
     !workflow.requiresDeploy
   ) {
@@ -2031,12 +2017,6 @@ async function checkEnvironmentGate(
     request.environmentName ||
     "production";
 
-
-  /*
-   * Every deployment now has an explicit environment
-   * identity. Existing deployments default to production
-   * for backward compatibility.
-   */
 
   workflowState.environmentName =
     environmentName;
@@ -2107,13 +2087,6 @@ async function checkEnvironmentGate(
     result.data?.readiness ||
     null;
 
-
-  /*
-   * The service is authoritative.
-   *
-   * If it explicitly returns deployable=false,
-   * deployment is blocked.
-   */
 
   if (
     readiness &&
@@ -2399,10 +2372,6 @@ function canProcessSubscription(
     );
 
 
-  /*
-   * Subscription status reads do not need payment.
-   */
-
   if (
     request?.operation ===
     "status"
@@ -2420,12 +2389,6 @@ function canProcessSubscription(
 
   }
 
-
-  /*
-   * Payment confirmation is passed downstream,
-   * but Subscription Agent remains responsible
-   * for authoritative verification.
-   */
 
   if (
     payment.paymentConfirmed
@@ -2514,6 +2477,631 @@ function createAgentContext(
       )
 
   };
+
+}
+
+
+/* =========================================================
+   DEPLOYMENT ERROR EXTRACTION
+========================================================= */
+
+function getDeploymentErrorDetails(
+  deploymentResult
+) {
+
+  const source =
+    deploymentResult ||
+    {};
+
+
+  const nestedError =
+    source?.errorDetails ||
+    source?.details ||
+    source?.data?.errorDetails ||
+    source?.data?.details ||
+    null;
+
+
+  const message =
+    cleanString(
+      source?.error ||
+      source?.message ||
+      nestedError?.message ||
+      "Deployment failed.",
+      4000
+    );
+
+
+  const code =
+    cleanString(
+      source?.code ||
+      nestedError?.code ||
+      "DEPLOYMENT_FAILED",
+      200
+    );
+
+
+  const type =
+    cleanString(
+      source?.errorType ||
+      source?.type ||
+      nestedError?.type ||
+      "deployment_error",
+      200
+    );
+
+
+  return {
+
+    message,
+
+    code,
+
+    type,
+
+    stage:
+      cleanString(
+        source?.stage ||
+        nestedError?.stage ||
+        "deployment",
+        200
+      ),
+
+    details:
+      sanitizeForContext(
+        nestedError ||
+        source
+      )
+
+  };
+
+}
+
+
+/* =========================================================
+   AUTO FIX TRIGGER
+   ---------------------------------------------------------
+   Master does NOT directly repair the deployment here.
+
+   It sends the deployment failure to logAgent.
+
+   logAgent owns:
+   - error recording
+   - auto-fix eligibility
+   - auto-fix trigger state
+   - Fix Agent handoff payload
+========================================================= */
+
+async function triggerAutoFixFromDeploymentFailure(
+  workflowState,
+  request,
+  intent,
+  planningData,
+  buildResult,
+  deploymentResult
+) {
+
+  const deploymentId =
+    getDeploymentId(
+      deploymentResult,
+      workflowState.projectId
+    );
+
+
+  if (
+    !deploymentId
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      triggered:
+        false,
+
+      eligible:
+        false,
+
+      message:
+        "Auto Fix trigger skipped because deployment ID is missing.",
+
+      error:
+        "DEPLOYMENT_ID_MISSING"
+
+    };
+
+  }
+
+
+  if (
+    typeof logAgent !==
+    "function"
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      triggered:
+        false,
+
+      eligible:
+        false,
+
+      message:
+        "Auto Fix trigger unavailable because Log Agent is not callable.",
+
+      error:
+        "LOG_AGENT_UNAVAILABLE"
+
+    };
+
+  }
+
+
+  const errorDetails =
+    getDeploymentErrorDetails(
+      deploymentResult
+    );
+
+
+  /*
+   * Never send secrets or raw deployment credentials
+   * into the Auto Fix context.
+   */
+
+  const fixRequest = {
+
+    workflowId:
+      workflowState.workflowId,
+
+    requestId:
+      workflowState.requestId,
+
+    deploymentId,
+
+    projectId:
+      workflowState.projectId,
+
+    projectName:
+      workflowState.projectName ||
+      getProjectName(
+        request,
+        planningData
+      ),
+
+    userId:
+      workflowState.userId,
+
+    environmentName:
+      workflowState.environmentName,
+
+    prompt:
+      cleanString(
+        request?.prompt,
+        MAX_PROMPT_LENGTH
+      ),
+
+    error: {
+
+      message:
+        errorDetails.message,
+
+      code:
+        errorDetails.code,
+
+      type:
+        errorDetails.type,
+
+      stage:
+        errorDetails.stage,
+
+      details:
+        errorDetails.details
+
+    },
+
+    intent:
+      sanitizeForContext(
+        intent
+      ),
+
+    planning:
+      sanitizeForContext(
+        planningData
+      ),
+
+    buildResult:
+      sanitizeForContext(
+        buildResult
+      ),
+
+    deploymentResult:
+      sanitizeForContext(
+        deploymentResult
+      ),
+
+    files:
+      sanitizeForContext(
+        getProjectFiles(
+          request,
+          buildResult
+        )
+      ),
+
+    source:
+      "masterAgent",
+
+    trigger:
+      "deployment_failure"
+
+  };
+
+
+  try {
+
+    /*
+     * Step 1:
+     * Tell Log Agent to record the deployment error and
+     * evaluate whether it is eligible for Auto Fix.
+     */
+
+    const errorRecordResult =
+      await runAgent(
+
+        workflowState,
+
+        "deployment-error-log",
+
+        logAgent,
+
+        {
+
+          action:
+            "record_deployment_error",
+
+          deploymentId,
+
+          projectId:
+            workflowState.projectId,
+
+          workflowId:
+            workflowState.workflowId,
+
+          requestId:
+            workflowState.requestId,
+
+          userId:
+            workflowState.userId,
+
+          error:
+            errorDetails,
+
+          environmentName:
+            workflowState.environmentName
+
+        }
+
+      );
+
+
+    /*
+     * If logging itself fails, do not pretend Auto Fix
+     * happened. The original deployment failure remains
+     * authoritative.
+     */
+
+    if (
+      !isSuccessful(
+        errorRecordResult
+      )
+    ) {
+
+      logWarn(
+        "Deployment failure recorded unsuccessfully. Auto Fix eligibility cannot be trusted.",
+        {
+          workflowId:
+            workflowState.workflowId,
+
+          deploymentId,
+
+          error:
+            getAgentError(
+              errorRecordResult
+            )
+
+        }
+      );
+
+
+      return {
+
+        success:
+          false,
+
+        triggered:
+          false,
+
+        eligible:
+          false,
+
+        deploymentId,
+
+        message:
+          "Deployment failed and Log Agent could not establish Auto Fix eligibility.",
+
+        error:
+          getAgentError(
+            errorRecordResult
+          ),
+
+        logResult:
+          errorRecordResult
+
+      };
+
+    }
+
+
+    /*
+     * Step 2:
+     * Ask Log Agent to evaluate and trigger Auto Fix.
+     *
+     * Log Agent remains the authority for eligibility.
+     */
+
+    const autoFixResult =
+      await runAgent(
+
+        workflowState,
+
+        "auto-fix-trigger",
+
+        logAgent,
+
+        {
+
+          action:
+            "trigger_auto_fix",
+
+          deploymentId,
+
+          projectId:
+            workflowState.projectId,
+
+          workflowId:
+            workflowState.workflowId,
+
+          requestId:
+            workflowState.requestId,
+
+          userId:
+            workflowState.userId,
+
+          error:
+            errorDetails,
+
+          fixRequest,
+
+          environmentName:
+            workflowState.environmentName
+
+        }
+
+      );
+
+
+    if (
+      !isSuccessful(
+        autoFixResult
+      )
+    ) {
+
+      /*
+       * Not every deployment failure should be auto-fixed.
+       * The Log Agent may legitimately return:
+       *
+       * eligible=false
+       *
+       * That is different from an internal failure.
+       */
+
+      const eligible =
+        autoFixResult?.eligible === true ||
+        autoFixResult?.data?.eligible === true;
+
+
+      if (
+        !eligible
+      ) {
+
+        logInfo(
+          "Deployment failure is not eligible for Auto Fix.",
+          {
+            workflowId:
+              workflowState.workflowId,
+
+            deploymentId,
+
+            reason:
+              getAgentError(
+                autoFixResult
+              )
+
+          }
+        );
+
+
+        return {
+
+          success:
+            true,
+
+          triggered:
+            false,
+
+          eligible:
+            false,
+
+          deploymentId,
+
+          message:
+            "Deployment failed. Auto Fix was not triggered because the error was not eligible.",
+
+          logResult:
+            errorRecordResult,
+
+          autoFixResult
+
+        };
+
+      }
+
+
+      return {
+
+        success:
+          false,
+
+        triggered:
+          false,
+
+        eligible:
+          true,
+
+        deploymentId,
+
+        message:
+          "Deployment failure was eligible for Auto Fix, but the trigger failed.",
+
+        error:
+          getAgentError(
+            autoFixResult
+          ),
+
+        logResult:
+          errorRecordResult,
+
+        autoFixResult
+
+      };
+
+    }
+
+
+    const triggered =
+      autoFixResult?.triggered === true ||
+      autoFixResult?.data?.triggered === true ||
+      autoFixResult?.autoFixTriggered === true ||
+      autoFixResult?.data?.autoFixTriggered === true;
+
+
+    if (
+      triggered
+    ) {
+
+      logSuccess(
+        "Auto Fix Triggered",
+        {
+          workflowId:
+            workflowState.workflowId,
+
+          deploymentId
+
+        }
+      );
+
+    }
+
+    else {
+
+      logInfo(
+        "Auto Fix trigger completed without execution.",
+        {
+          workflowId:
+            workflowState.workflowId,
+
+          deploymentId
+
+        }
+      );
+
+    }
+
+
+    return {
+
+      success:
+        true,
+
+      triggered,
+
+      eligible:
+        true,
+
+      deploymentId,
+
+      message:
+        triggered
+          ? "Deployment failure recorded and Auto Fix triggered."
+          : "Deployment failure recorded but Auto Fix was not executed.",
+
+      logResult:
+        errorRecordResult,
+
+      autoFixResult
+
+    };
+
+  } catch (
+    error
+  ) {
+
+    const normalized =
+      normalizeError(
+        error
+      );
+
+
+    logError(
+      "Auto Fix Trigger Exception",
+      {
+        workflowId:
+          workflowState.workflowId,
+
+        deploymentId,
+
+        error:
+          normalized.message
+
+      }
+    );
+
+
+    return {
+
+      success:
+        false,
+
+      triggered:
+        false,
+
+      eligible:
+        false,
+
+      deploymentId,
+
+      message:
+        "Deployment failed and Auto Fix trigger encountered an exception.",
+
+      error:
+        normalized.message
+
+    };
+
+  }
 
 }
 
@@ -2769,6 +3357,9 @@ async function masterAgent(
   let subscriptionResult =
     null;
 
+  let autoFixResult =
+    null;
+
 
   try {
 
@@ -2878,10 +3469,6 @@ async function masterAgent(
 
       );
 
-
-    /*
-     * Memory failure is non-fatal.
-     */
 
     if (
       !isSuccessful(
@@ -3111,12 +3698,6 @@ async function masterAgent(
       );
 
 
-    /*
-     * If a deployment is requested but the caller didn't
-     * provide an environment, production is used for
-     * backward compatibility.
-     */
-
     if (
       workflow.requiresDeploy &&
       !workflowState.environmentName
@@ -3152,9 +3733,6 @@ async function masterAgent(
 
     /* =====================================================
        ENVIRONMENT OPERATIONS
-       -----------------------------------------------------
-       Pure environment requests are handled without
-       triggering build/deploy.
     ===================================================== */
 
     if (
@@ -3870,6 +4448,8 @@ async function masterAgent(
        3. Environment snapshot
        4. Deploy Agent
        5. Environment deployment state update
+       6. Deployment failure logging
+       7. Auto Fix eligibility / trigger
     ===================================================== */
 
     if (
@@ -4122,15 +4702,6 @@ async function masterAgent(
             environmentReady:
               true,
 
-            /*
-             * IMPORTANT:
-             *
-             * Master does NOT resolve secrets.
-             *
-             * Deploy Agent is responsible for calling the
-             * trusted environment deployment boundary.
-             */
-
             resolveEnvironment:
               true,
 
@@ -4166,6 +4737,14 @@ async function masterAgent(
         );
 
 
+      /* ===================================================
+         DEPLOYMENT FAILURE
+         ---------------------------------------------------
+         IMPORTANT:
+         Deployment failure does NOT silently disappear.
+         It enters Deployment Log + Auto Fix pipeline.
+      =================================================== */
+
       if (
         !isSuccessful(
           deploymentResult
@@ -4176,13 +4755,44 @@ async function masterAgent(
           "failed";
 
 
+        currentStage =
+          "deployment-auto-fix";
+
+
+        autoFixResult =
+          await triggerAutoFixFromDeploymentFailure(
+
+            workflowState,
+
+            normalizedRequest,
+
+            intent,
+
+            planningData,
+
+            buildResult,
+
+            deploymentResult
+
+          );
+
+
+        /*
+         * Auto Fix being triggered does NOT mean deployment
+         * succeeded. The original deployment state remains
+         * failed until Fix Agent + redeployment + verification
+         * succeeds.
+         */
+
         return {
 
           success:
             false,
 
           message:
-            "Deployment failed",
+            autoFixResult?.triggered
+              ? "Deployment failed. Auto Fix has been triggered."
+              : "Deployment failed.",
 
           error:
             getAgentError(
@@ -4190,7 +4800,7 @@ async function masterAgent(
             ),
 
           stage:
-            currentStage,
+            "deploy",
 
           workflow:
             workflowState,
@@ -4203,7 +4813,9 @@ async function masterAgent(
 
           environmentResult,
 
-          deploymentResult
+          deploymentResult,
+
+          autoFixResult
 
         };
 
@@ -4231,13 +4843,6 @@ async function masterAgent(
           environmentDeployedResult
         )
       ) {
-
-        /*
-         * Deployment itself succeeded, but environment
-         * state synchronization failed.
-         *
-         * This must NOT be represented as a clean success.
-         */
 
         workflowState.status =
           "degraded";
@@ -4570,6 +5175,11 @@ async function masterAgent(
           fileResult
         ),
 
+      autoFixResult:
+        sanitizeForContext(
+          autoFixResult
+        ),
+
       workflow:
         sanitizeForContext(
           workflow
@@ -4589,9 +5199,6 @@ async function masterAgent(
 
     /* =====================================================
        FINAL COMMUNICATION
-       -----------------------------------------------------
-       AI only explains the already-completed result.
-       It does NOT make orchestration decisions.
     ===================================================== */
 
     currentStage =
@@ -4663,16 +5270,20 @@ STRICT RULES:
 
 18. If something is unavailable, state that it is unavailable.
 
-19. Use the exact deployment URL returned by the backend.
+19. If Auto Fix was triggered, clearly state that
+    Auto Fix was triggered, but do not claim that
+    the deployment has already been repaired.
 
-20. Never construct a URL yourself.
+20. Use the exact deployment URL returned by the backend.
 
-21. Keep the response concise and useful.
+21. Never construct a URL yourself.
 
-22. Do not explain internal implementation unless
+22. Keep the response concise and useful.
+
+23. Do not explain internal implementation unless
     necessary.
 
-23. Do not claim that an agent ran when it was skipped.
+24. Do not claim that an agent ran when it was skipped.
 
 `
 
@@ -4726,6 +5337,12 @@ DEPLOYMENT RESULT:
 
 ${safeJson(
   deploymentResult
+)}
+
+AUTO FIX RESULT:
+
+${safeJson(
+  autoFixResult
 )}
 
 BILLING RESULT:
@@ -4793,11 +5410,6 @@ ${safeJson(
       finalResponseError
     ) {
 
-      /*
-       * Communication failure does NOT erase the
-       * successful orchestration.
-       */
-
       logWarn(
         "Final communication AI failed. Using deterministic response.",
         {
@@ -4852,6 +5464,10 @@ ${safeJson(
 
           workflowState.environmentName
             ? `Environment: ${workflowState.environmentName}.`
+            : "",
+
+          autoFixResult?.triggered
+            ? "Auto Fix has been triggered."
             : "",
 
           deploymentUrl
@@ -5022,6 +5638,11 @@ ${safeJson(
         fileResult:
           sanitizeForContext(
             fileResult
+          ),
+
+        autoFixResult:
+          sanitizeForContext(
+            autoFixResult
           )
 
       }
@@ -5076,6 +5697,10 @@ masterAgent.ownership = {
     "build_gates",
 
     "deployment_gates",
+
+    "deployment_failure_logging",
+
+    "auto_fix_trigger_coordination",
 
     "failure_propagation",
 
@@ -5141,6 +5766,19 @@ masterAgent.ownership = {
     "environment_secret_boundary",
 
     "deployment_environment_state"
+
+  ],
+
+
+  log: [
+
+    "deployment_logging",
+
+    "deployment_error_recording",
+
+    "auto_fix_eligibility",
+
+    "auto_fix_trigger"
 
   ],
 
@@ -5246,7 +5884,10 @@ masterAgent.security = {
     "trusted-deployment-workflow",
 
   providerArchitecture:
-    "centralized-ai-provider-service"
+    "centralized-ai-provider-service",
+
+  autoFixArchitecture:
+    "log-agent-trigger-boundary"
 
 };
 
@@ -5301,7 +5942,23 @@ masterAgent.workflowContract = {
 
     "deploy",
 
+    "deployment-error-log",
+
+    "auto-fix-trigger",
+
     "environment-deployed"
+
+  ],
+
+  deploymentFailure: [
+
+    "deploy",
+
+    "deployment-error-log",
+
+    "auto-fix-trigger",
+
+    "fix-agent-handoff"
 
   ],
 
