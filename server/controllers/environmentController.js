@@ -1,24 +1,24 @@
 /**
  * ZyrionOS - Environment Controller
- * Version: 2.0.1
+ * Version: 2.1.0
  *
- * Responsibilities:
- * - Environment CRUD API
- * - Variable management
- * - Validation
- * - Deployment readiness
- * - Deployment snapshot
- * - Deployment state
- * - Archive / unarchive
- * - Environment copy
- * - Configuration summary
- * - Safe responses
+ * Controller/service contract:
+ *
+ *   Controller                 Service
+ *   ------------------------------------------------
+ *   name                ->     environmentName
+ *   sourceRef           ->     sourceReference
+ *   currentKey          ->     key
+ *   new variable key    ->     newKey
+ *   sourceName          ->     sourceEnvironment
+ *   targetName          ->     targetEnvironment
  *
  * SECURITY:
- * - Secret values are NEVER returned to the client.
- * - Secret resolution is delegated to environmentService.
- * - Controllers never decrypt secrets directly.
- * - Client supplied deployment state is never trusted.
+ * - Secret values are NEVER returned to the browser.
+ * - Controllers never decrypt secrets.
+ * - Deployment readiness NEVER resolves plaintext secrets.
+ * - Plaintext deployment resolution requires trusted internal
+ *   deployment context and workflowId.
  */
 
 "use strict";
@@ -32,43 +32,49 @@ const logger =
 const formatResponse =
   require("../utils/formatResponse");
 
-/* -------------------------------------------------------------------------- */
-/* Constants                                                                  */
-/* -------------------------------------------------------------------------- */
 
-const SERVICE_VERSION = "2.0.1";
+/* =========================================================
+   CONSTANTS
+========================================================= */
 
-const ENVIRONMENT_NAMES = new Set([
-  "development",
-  "preview",
-  "production",
-]);
+const SERVICE_VERSION =
+  "2.1.0";
 
-const VARIABLE_TYPES = new Set([
-  "string",
-  "number",
-  "boolean",
-  "json",
-]);
+const ENVIRONMENT_NAMES =
+  new Set([
+    "development",
+    "preview",
+    "production",
+  ]);
 
-const VARIABLE_SCOPES = new Set([
-  "runtime",
-  "build",
-  "both",
-]);
+const VARIABLE_TYPES =
+  new Set([
+    "string",
+    "number",
+    "boolean",
+    "json",
+  ]);
 
-const MAX_DESCRIPTION_LENGTH = 2000;
+const VARIABLE_SCOPES =
+  new Set([
+    "runtime",
+    "build",
+    "both",
+  ]);
 
-const MAX_VARIABLE_DESCRIPTION_LENGTH =
+const MAX_DESCRIPTION_LENGTH =
   1000;
 
-const MAX_KEY_LENGTH = 256;
+const MAX_VARIABLES_PER_REQUEST =
+  500;
 
-const MAX_VARIABLES_PER_REQUEST = 500;
+const MAX_KEY_LENGTH =
+  256;
 
-/* -------------------------------------------------------------------------- */
-/* Generic Helpers                                                            */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   REQUEST HELPERS
+========================================================= */
 
 function getUserId(req) {
   return (
@@ -80,6 +86,7 @@ function getUserId(req) {
   );
 }
 
+
 function getProjectId(req) {
   return (
     req?.params?.projectId ||
@@ -89,17 +96,21 @@ function getProjectId(req) {
   );
 }
 
+
 function getEnvironmentName(req) {
   return (
     req?.params?.environmentName ||
     req?.params?.name ||
+    req?.body?.environmentName ||
     req?.body?.environment ||
     req?.body?.name ||
+    req?.query?.environmentName ||
     req?.query?.environment ||
     req?.query?.name ||
     null
   );
 }
+
 
 function getRequestId(req) {
   return (
@@ -110,50 +121,91 @@ function getRequestId(req) {
   );
 }
 
-function normalizeEnvironmentName(value) {
+
+/* =========================================================
+   NORMALIZATION
+========================================================= */
+
+function normalizeEnvironmentName(
+  value
+) {
   return String(value || "")
     .trim()
     .toLowerCase();
 }
 
-function normalizeVariableKey(value) {
-  return String(value || "").trim();
+
+function normalizeVariableKey(
+  value
+) {
+  return String(value || "")
+    .trim();
 }
 
-function normalizeVariableType(value) {
-  const type = String(value || "string")
-    .trim()
-    .toLowerCase();
 
-  return VARIABLE_TYPES.has(type)
+function normalizeVariableType(
+  value
+) {
+  const type =
+    String(
+      value || "string"
+    )
+      .trim()
+      .toLowerCase();
+
+  return VARIABLE_TYPES.has(
+    type
+  )
     ? type
     : "string";
 }
 
-function normalizeVariableScope(value) {
-  const scope = String(value || "runtime")
-    .trim()
-    .toLowerCase();
 
-  return VARIABLE_SCOPES.has(scope)
+function normalizeVariableScope(
+  value
+) {
+  const scope =
+    String(
+      value || "runtime"
+    )
+      .trim()
+      .toLowerCase();
+
+  return VARIABLE_SCOPES.has(
+    scope
+  )
     ? scope
     : "runtime";
 }
 
-function isValidEnvironmentName(value) {
+
+function isValidEnvironmentName(
+  value
+) {
   return ENVIRONMENT_NAMES.has(
-    normalizeEnvironmentName(value)
+    normalizeEnvironmentName(
+      value
+    )
   );
 }
 
-function isValidVariableKey(value) {
-  const key = normalizeVariableKey(value);
+
+function isValidVariableKey(
+  value
+) {
+  const key =
+    normalizeVariableKey(
+      value
+    );
 
   if (!key) {
     return false;
   }
 
-  if (key.length > MAX_KEY_LENGTH) {
+  if (
+    key.length >
+    MAX_KEY_LENGTH
+  ) {
     return false;
   }
 
@@ -162,9 +214,11 @@ function isValidVariableKey(value) {
   );
 }
 
+
 function sanitizeDescription(
   value,
-  maxLength
+  maxLength =
+    MAX_DESCRIPTION_LENGTH
 ) {
   if (
     value === undefined ||
@@ -178,6 +232,7 @@ function sanitizeDescription(
     .slice(0, maxLength);
 }
 
+
 function sanitizeBoolean(
   value,
   defaultValue = false
@@ -189,26 +244,34 @@ function sanitizeBoolean(
     return defaultValue;
   }
 
-  if (typeof value === "boolean") {
+  if (
+    typeof value ===
+    "boolean"
+  ) {
     return value;
   }
 
-  const normalized = String(value)
-    .trim()
-    .toLowerCase();
+  const normalized =
+    String(value)
+      .trim()
+      .toLowerCase();
 
   if (
-    normalized === "true" ||
-    normalized === "1" ||
-    normalized === "yes"
+    [
+      "true",
+      "1",
+      "yes",
+    ].includes(normalized)
   ) {
     return true;
   }
 
   if (
-    normalized === "false" ||
-    normalized === "0" ||
-    normalized === "no"
+    [
+      "false",
+      "0",
+      "no",
+    ].includes(normalized)
   ) {
     return false;
   }
@@ -216,114 +279,66 @@ function sanitizeBoolean(
   return defaultValue;
 }
 
-function sanitizeError(error) {
-  if (!error) {
-    return {
-      code: "ENVIRONMENT_ERROR",
-      message:
-        "Environment operation failed.",
-    };
+
+function normalizeVersion(
+  value
+) {
+  if (
+    value === undefined ||
+    value === null ||
+    value === ""
+  ) {
+    return undefined;
   }
 
-  return {
-    code:
-      error.code ||
-      error.name ||
-      "ENVIRONMENT_ERROR",
+  const number =
+    Number(value);
 
-    message:
-      error.publicMessage ||
-      error.message ||
-      "Environment operation failed.",
-  };
-}
-
-/* -------------------------------------------------------------------------- */
-/* Safe Logger Helpers                                                        */
-/* -------------------------------------------------------------------------- */
-
-function logError(message, metadata = {}) {
-  try {
-    const suffix =
-      metadata &&
-      Object.keys(metadata).length
-        ? ` ${safeStringify(metadata)}`
-        : "";
-
-    if (
-      logger &&
-      typeof logger.error === "function"
-    ) {
-      logger.error(
-        `${message}${suffix}`
-      );
-
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "LOGGER ERROR:",
-      error?.message || error
-    );
+  if (
+    !Number.isInteger(
+      number
+    ) ||
+    number < 1
+  ) {
+    return undefined;
   }
 
-  console.error(
-    message,
-    metadata
-  );
+  return number;
 }
 
-function logInfo(message, metadata = {}) {
-  try {
-    const suffix =
-      metadata &&
-      Object.keys(metadata).length
-        ? ` ${safeStringify(metadata)}`
-        : "";
 
-    if (
-      logger &&
-      typeof logger.info === "function"
-    ) {
-      logger.info(
-        `${message}${suffix}`
-      );
+/* =========================================================
+   SAFE LOGGING
+========================================================= */
 
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "LOGGER ERROR:",
-      error?.message || error
-    );
-  }
-
-  console.log(
-    message,
-    metadata
-  );
-}
-
-function safeStringify(value) {
+function safeStringify(
+  value
+) {
   try {
     return JSON.stringify(
       value,
       (key, currentValue) => {
-        const sensitiveKeys = [
-          "value",
-          "secret",
-          "token",
-          "accessToken",
-          "refreshToken",
-          "password",
-          "apiKey",
-          "authorization",
-          "encryptedAccessToken",
-          "encryptedRefreshToken",
-        ];
+        const sensitiveKeys =
+          new Set([
+            "value",
+            "secret",
+            "secretValue",
+            "plaintext",
+            "plainValue",
+            "encryptedValue",
+            "decryptedValue",
+            "token",
+            "accessToken",
+            "refreshToken",
+            "password",
+            "apiKey",
+            "authorization",
+            "variables",
+            "environmentVariables",
+          ]);
 
         if (
-          sensitiveKeys.includes(
+          sensitiveKeys.has(
             String(key)
           )
         ) {
@@ -338,14 +353,95 @@ function safeStringify(value) {
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Response Helpers                                                           */
-/* -------------------------------------------------------------------------- */
+
+function logError(
+  message,
+  metadata = {}
+) {
+  try {
+    const suffix =
+      metadata &&
+      Object.keys(metadata)
+        .length
+        ? ` ${safeStringify(
+            metadata
+          )}`
+        : "";
+
+    if (
+      logger &&
+      typeof logger.error ===
+        "function"
+    ) {
+      logger.error(
+        `${message}${suffix}`
+      );
+
+      return;
+    }
+  } catch (error) {
+    console.error(
+      "LOGGER ERROR:",
+      error?.message ||
+        error
+    );
+  }
+
+  console.error(
+    message,
+    metadata
+  );
+}
+
+
+function logInfo(
+  message,
+  metadata = {}
+) {
+  try {
+    const suffix =
+      metadata &&
+      Object.keys(metadata)
+        .length
+        ? ` ${safeStringify(
+            metadata
+          )}`
+        : "";
+
+    if (
+      logger &&
+      typeof logger.info ===
+        "function"
+    ) {
+      logger.info(
+        `${message}${suffix}`
+      );
+
+      return;
+    }
+  } catch (error) {
+    console.error(
+      "LOGGER ERROR:",
+      error?.message ||
+        error
+    );
+  }
+
+  console.log(
+    message,
+    metadata
+  );
+}
+
+
+/* =========================================================
+   RESPONSE HELPERS
+========================================================= */
 
 function respond(
   res,
   statusCode,
-  success,
+  successValue,
   message,
   data = null,
   meta = {}
@@ -357,15 +453,41 @@ function respond(
     ) {
       const payload =
         formatResponse({
-          success,
+          success:
+            successValue,
+
           message,
+
           data,
+
           meta,
         });
 
-      return res
-        .status(statusCode)
-        .json(payload);
+      /*
+       * Existing formatResponse versions may not preserve
+       * meta. The fallback below guarantees the controller
+       * contract remains stable.
+       */
+      if (
+        payload &&
+        typeof payload ===
+          "object"
+      ) {
+        if (
+          meta &&
+          Object.keys(meta)
+            .length &&
+          payload.meta ===
+            undefined
+        ) {
+          payload.meta =
+            meta;
+        }
+
+        return res
+          .status(statusCode)
+          .json(payload);
+      }
     }
   } catch (formatterError) {
     logError(
@@ -381,12 +503,17 @@ function respond(
   return res
     .status(statusCode)
     .json({
-      success,
+      success:
+        successValue,
+
       message,
+
       data,
+
       meta,
     });
 }
+
 
 function success(
   res,
@@ -405,11 +532,13 @@ function success(
   );
 }
 
+
 function failure(
   res,
   statusCode,
   message,
-  code = "ENVIRONMENT_ERROR",
+  code =
+    "ENVIRONMENT_ERROR",
   details = null
 ) {
   return respond(
@@ -428,46 +557,55 @@ function failure(
   );
 }
 
-function handleControllerError(
-  req,
-  res,
-  error,
-  fallbackMessage =
-    "Environment operation failed."
+
+/* =========================================================
+   ERROR HANDLING
+========================================================= */
+
+function sanitizeError(
+  error
 ) {
-  const requestId =
-    getRequestId(req);
+  if (!error) {
+    return {
+      code:
+        "ENVIRONMENT_ERROR",
 
-  const sanitized =
-    sanitizeError(error);
+      message:
+        "Environment operation failed.",
+    };
+  }
 
-  logError(
-    "Environment controller error.",
-    {
-      requestId,
-      code: sanitized.code,
-      message: sanitized.message,
-      stack:
-        process.env.NODE_ENV ===
-        "production"
-          ? undefined
-          : error?.stack,
-    }
-  );
+  const internalCodes =
+    new Set([
+      "SECRET_DECRYPTION_FAILED",
+      "INVALID_ENCRYPTED_VALUE",
+      "INVALID_ENCRYPTION_IV",
+      "INVALID_ENCRYPTION_TAG",
+      "ENVIRONMENT_ENCRYPTION_KEY_MISSING",
+      "ENVIRONMENT_ENCRYPTION_KEY_INVALID",
+    ]);
 
-  const statusCode =
-    resolveHttpStatus(error);
+  const code =
+    error.code ||
+    error.name ||
+    "ENVIRONMENT_ERROR";
 
-  return failure(
-    res,
-    statusCode,
-    sanitized.message ||
-      fallbackMessage,
-    sanitized.code
-  );
+  return {
+    code,
+
+    message:
+      internalCodes.has(code)
+        ? "Environment security operation failed."
+        : error.publicMessage ||
+          error.message ||
+          "Environment operation failed.",
+  };
 }
 
-function resolveHttpStatus(error) {
+
+function resolveHttpStatus(
+  error
+) {
   if (!error) {
     return 500;
   }
@@ -492,56 +630,152 @@ function resolveHttpStatus(error) {
     return error.status;
   }
 
-  const code = String(
-    error.code || ""
-  );
+  const code =
+    String(
+      error.code || ""
+    );
 
   const statusMap = {
-    VALIDATION_ERROR: 400,
-    INVALID_REQUEST: 400,
-    INVALID_ENVIRONMENT: 400,
-    INVALID_VARIABLE: 400,
-    INVALID_VARIABLE_KEY: 400,
+    USER_ID_REQUIRED:
+      400,
 
-    PROJECT_ID_REQUIRED: 400,
-    ENVIRONMENT_NAME_REQUIRED: 400,
-    DEPLOYMENT_ID_REQUIRED: 400,
+    PROJECT_ID_REQUIRED:
+      400,
 
-    VARIABLE_KEY_REQUIRED: 400,
-    VARIABLE_VALUE_REQUIRED: 400,
-    INVALID_VARIABLE_TYPE: 400,
-    INVALID_VARIABLE_SCOPE: 400,
-    INVALID_JSON_VARIABLE: 400,
+    ENVIRONMENT_NAME_REQUIRED:
+      400,
 
-    INVALID_SOURCE_ENVIRONMENT: 400,
-    INVALID_TARGET_ENVIRONMENT: 400,
-    SAME_SOURCE_TARGET_ENVIRONMENT: 400,
+    INVALID_ENVIRONMENT:
+      400,
 
-    PRODUCTION_DELETE_CONFIRMATION_REQUIRED: 400,
+    INVALID_VARIABLE:
+      400,
 
-    ENVIRONMENT_NOT_FOUND: 404,
-    PROJECT_NOT_FOUND: 404,
+    INVALID_VARIABLE_KEY:
+      400,
 
-    ENVIRONMENT_EXISTS: 409,
-    DUPLICATE_ENVIRONMENT: 409,
-    VERSION_CONFLICT: 409,
-    CONCURRENCY_CONFLICT: 409,
+    INVALID_ENVIRONMENT_VARIABLE_KEY:
+      400,
 
-    ENVIRONMENT_ARCHIVED: 409,
-    ENVIRONMENT_LOCKED: 409,
+    ENVIRONMENT_VARIABLE_KEY_REQUIRED:
+      400,
 
-    DEPLOYMENT_NOT_ALLOWED: 409,
-    ENVIRONMENT_NOT_READY: 409,
+    ENVIRONMENT_VARIABLE_KEY_TOO_LONG:
+      400,
 
-    FORBIDDEN: 403,
-    UNAUTHORIZED: 401,
+    VARIABLE_KEY_REQUIRED:
+      400,
 
-    TOO_MANY_VARIABLES: 413,
+    VARIABLE_VALUE_REQUIRED:
+      400,
 
-    ENCRYPTION_ERROR: 500,
-    STORAGE_ERROR: 500,
+    INVALID_VARIABLE_TYPE:
+      400,
 
-    ENVIRONMENT_SERVICE_METHOD_MISSING: 500,
+    INVALID_VARIABLE_SCOPE:
+      400,
+
+    INVALID_JSON_VARIABLE:
+      400,
+
+    INVALID_NUMBER_VARIABLE:
+      400,
+
+    INVALID_BOOLEAN_VARIABLE:
+      400,
+
+    INVALID_EXPECTED_VERSION:
+      400,
+
+    DEPLOYMENT_ID_REQUIRED:
+      400,
+
+    DEPLOYMENT_WORKFLOW_ID_REQUIRED:
+      400,
+
+    INVALID_SOURCE_ENVIRONMENT:
+      400,
+
+    INVALID_TARGET_ENVIRONMENT:
+      400,
+
+    SAME_SOURCE_TARGET_ENVIRONMENT:
+      400,
+
+    ENVIRONMENT_NOT_FOUND:
+      404,
+
+    ENVIRONMENT_VARIABLE_NOT_FOUND:
+      404,
+
+    ENVIRONMENT_ALREADY_EXISTS:
+      409,
+
+    ENVIRONMENT_VARIABLE_EXISTS:
+      409,
+
+    ENVIRONMENT_VERSION_CONFLICT:
+      409,
+
+    ENVIRONMENT_CONCURRENT_UPDATE:
+      409,
+
+    ENVIRONMENT_CONFLICT:
+      409,
+
+    ENVIRONMENT_ARCHIVED:
+      409,
+
+    ENVIRONMENT_NOT_ACTIVE:
+      409,
+
+    ENVIRONMENT_VALIDATION_FAILED:
+      409,
+
+    ENVIRONMENT_NOT_DEPLOYABLE:
+      409,
+
+    FUTURE_ENVIRONMENT_VERSION:
+      409,
+
+    PRODUCTION_ENVIRONMENT_DELETE_BLOCKED:
+      409,
+
+    PRODUCTION_DELETE_CONFIRMATION_REQUIRED:
+      400,
+
+    ENVIRONMENT_DELETE_FAILED:
+      500,
+
+    ENVIRONMENT_SERVICE_METHOD_MISSING:
+      500,
+
+    TRUSTED_DEPLOYMENT_CONTEXT_REQUIRED:
+      403,
+
+    UNAUTHORIZED:
+      401,
+
+    FORBIDDEN:
+      403,
+
+    TOO_MANY_VARIABLES:
+      413,
+
+    ENVIRONMENT_VARIABLE_VALUE_TOO_LARGE:
+      413,
+
+    ENVIRONMENT_ENCRYPTION_KEY_MISSING:
+      500,
+
+    ENVIRONMENT_ENCRYPTION_KEY_INVALID:
+      500,
+
+    SECRET_DECRYPTION_FAILED:
+      500,
+
+    INVALID_ENCRYPTED_VALUE:
+      500,
   };
 
   return (
@@ -550,7 +784,59 @@ function resolveHttpStatus(error) {
   );
 }
 
-function requireUser(req, res) {
+
+function handleControllerError(
+  req,
+  res,
+  error,
+  fallbackMessage =
+    "Environment operation failed."
+) {
+  const requestId =
+    getRequestId(req);
+
+  const sanitized =
+    sanitizeError(error);
+
+  logError(
+    "Environment controller error.",
+    {
+      requestId,
+
+      code:
+        sanitized.code,
+
+      message:
+        sanitized.message,
+
+      stack:
+        process.env.NODE_ENV ===
+        "production"
+          ? undefined
+          : error?.stack,
+    }
+  );
+
+  return failure(
+    res,
+    resolveHttpStatus(
+      error
+    ),
+    sanitized.message ||
+      fallbackMessage,
+    sanitized.code
+  );
+}
+
+
+/* =========================================================
+   REQUIRED REQUEST VALUES
+========================================================= */
+
+function requireUser(
+  req,
+  res
+) {
   const userId =
     getUserId(req);
 
@@ -567,6 +853,7 @@ function requireUser(req, res) {
 
   return String(userId);
 }
+
 
 function requireProjectId(
   req,
@@ -589,6 +876,7 @@ function requireProjectId(
   return String(projectId);
 }
 
+
 function requireEnvironmentName(
   req,
   res
@@ -610,7 +898,9 @@ function requireEnvironmentName(
   }
 
   if (
-    !isValidEnvironmentName(name)
+    !isValidEnvironmentName(
+      name
+    )
   ) {
     failure(
       res,
@@ -632,11 +922,14 @@ function requireEnvironmentName(
   return name;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Service Compatibility Helpers                                              */
-/* -------------------------------------------------------------------------- */
 
-function getServiceMethod(name) {
+/* =========================================================
+   SERVICE DISPATCH
+========================================================= */
+
+function getServiceMethod(
+  name
+) {
   const method =
     environmentService?.[name];
 
@@ -652,13 +945,15 @@ function getServiceMethod(name) {
         code:
           "ENVIRONMENT_SERVICE_METHOD_MISSING",
 
-        statusCode: 500,
+        statusCode:
+          500,
       }
     );
   }
 
   return method;
 }
+
 
 async function callService(
   methodName,
@@ -672,6 +967,11 @@ async function callService(
   return method(payload);
 }
 
+
+/* =========================================================
+   RESULT EXTRACTION
+========================================================= */
+
 function extractEnvironment(
   result
 ) {
@@ -679,8 +979,16 @@ function extractEnvironment(
     return null;
   }
 
-  if (result.environment) {
+  if (
+    result.environment
+  ) {
     return result.environment;
+  }
+
+  if (
+    result.environmentData
+  ) {
+    return result.environmentData;
   }
 
   if (
@@ -689,12 +997,15 @@ function extractEnvironment(
     return result.data.environment;
   }
 
-  if (result.data) {
+  if (
+    result.data
+  ) {
     return result.data;
   }
 
   return result;
 }
+
 
 function extractEnvironments(
   result
@@ -720,32 +1031,37 @@ function extractEnvironments(
   }
 
   if (
-    Array.isArray(result.data)
+    Array.isArray(
+      result.data
+    )
   ) {
     return result.data;
   }
 
-  if (Array.isArray(result)) {
+  if (
+    Array.isArray(result)
+  ) {
     return result;
   }
 
   return [];
 }
 
-/* -------------------------------------------------------------------------- */
-/* Create Environment                                                         */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   CREATE ENVIRONMENT
+========================================================= */
 
 async function createEnvironmentController(
   req,
   res
 ) {
-  const requestId =
-    getRequestId(req);
-
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -764,6 +1080,7 @@ async function createEnvironmentController(
     const name =
       normalizeEnvironmentName(
         req.body?.name ||
+          req.body?.environmentName ||
           req.body?.environment ||
           "development"
       );
@@ -826,12 +1143,11 @@ async function createEnvironmentController(
             )
               .trim()
               .slice(0, 200)
-          : null,
+          : "",
 
       description:
         sanitizeDescription(
-          req.body?.description,
-          MAX_DESCRIPTION_LENGTH
+          req.body?.description
         ),
 
       variables:
@@ -843,16 +1159,24 @@ async function createEnvironmentController(
         ),
 
       audit: {
-        createdBy: userId,
-        updatedBy: userId,
+        createdBy:
+          userId,
+
+        updatedBy:
+          userId,
+
         lastAction:
           "environment_created",
+
         lastActionAt:
           new Date(),
-        lastActionBy: userId,
+
+        lastActionBy:
+          userId,
       },
 
-      requestId,
+      requestId:
+        getRequestId(req),
     };
 
     const result =
@@ -884,9 +1208,10 @@ async function createEnvironmentController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* List Environments                                                          */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   LIST ENVIRONMENTS
+========================================================= */
 
 async function listEnvironmentsController(
   req,
@@ -894,7 +1219,10 @@ async function listEnvironmentsController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -936,6 +1264,7 @@ async function listEnvironmentsController(
       "Environments retrieved successfully.",
       {
         environments,
+
         count:
           environments.length,
       }
@@ -950,9 +1279,10 @@ async function listEnvironmentsController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Get Environment                                                            */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   GET ENVIRONMENT
+========================================================= */
 
 async function getEnvironmentController(
   req,
@@ -960,7 +1290,10 @@ async function getEnvironmentController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -976,13 +1309,13 @@ async function getEnvironmentController(
       return;
     }
 
-    const name =
+    const environmentName =
       requireEnvironmentName(
         req,
         res
       );
 
-    if (!name) {
+    if (!environmentName) {
       return;
     }
 
@@ -992,7 +1325,7 @@ async function getEnvironmentController(
         {
           userId,
           projectId,
-          name,
+          environmentName,
         }
       );
 
@@ -1028,9 +1361,10 @@ async function getEnvironmentController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Add Variable                                                               */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   ADD VARIABLE
+========================================================= */
 
 async function addVariableController(
   req,
@@ -1038,7 +1372,10 @@ async function addVariableController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -1054,13 +1391,13 @@ async function addVariableController(
       return;
     }
 
-    const name =
+    const environmentName =
       requireEnvironmentName(
         req,
         res
       );
 
-    if (!name) {
+    if (!environmentName) {
       return;
     }
 
@@ -1077,7 +1414,9 @@ async function addVariableController(
         }
       );
 
-    if (!validation.valid) {
+    if (
+      !validation.valid
+    ) {
       return failure(
         res,
         400,
@@ -1091,8 +1430,10 @@ async function addVariableController(
         "addVariable",
         {
           userId,
+
           projectId,
-          name,
+
+          environmentName,
 
           key:
             normalized.key,
@@ -1118,8 +1459,8 @@ async function addVariableController(
           source:
             normalized.source,
 
-          sourceRef:
-            normalized.sourceRef,
+          sourceReference:
+            normalized.sourceReference,
 
           expectedVersion:
             normalizeVersion(
@@ -1154,9 +1495,10 @@ async function addVariableController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Update Variable                                                            */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   UPDATE VARIABLE
+========================================================= */
 
 async function updateVariableController(
   req,
@@ -1164,7 +1506,10 @@ async function updateVariableController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -1190,6 +1535,11 @@ async function updateVariableController(
       return;
     }
 
+    /*
+     * `key` is the current/existing key.
+     *
+     * `newKey` is the optional replacement key.
+     */
     const currentKey =
       normalizeVariableKey(
         req.params?.key ||
@@ -1214,23 +1564,62 @@ async function updateVariableController(
       normalizeVariableInput(
         req.body,
         {
-          allowMissingValue: true,
+          allowMissingValue:
+            true,
         }
       );
+
+    /*
+     * If request explicitly supplies `newKey`, use it.
+     *
+     * Otherwise preserve current key.
+     */
+    const requestedNewKey =
+      Object.prototype
+        .hasOwnProperty.call(
+          req.body || {},
+          "newKey"
+        )
+        ? req.body.newKey
+        : undefined;
+
+    const newKey =
+      requestedNewKey ===
+        undefined ||
+      requestedNewKey ===
+        null ||
+      String(
+        requestedNewKey
+      ).trim() === ""
+        ? currentKey
+        : normalizeVariableKey(
+            requestedNewKey
+          );
+
+    if (
+      !isValidVariableKey(
+        newKey
+      )
+    ) {
+      return failure(
+        res,
+        400,
+        "Invalid new environment variable key.",
+        "INVALID_VARIABLE_KEY"
+      );
+    }
 
     const payload = {
       userId,
 
       projectId,
 
-      name:
-        environmentName,
-
-      currentKey,
+      environmentName,
 
       key:
-        normalized.key ||
         currentKey,
+
+      newKey,
 
       type:
         normalized.type,
@@ -1247,8 +1636,8 @@ async function updateVariableController(
       source:
         normalized.source,
 
-      sourceRef:
-        normalized.sourceRef,
+      sourceReference:
+        normalized.sourceReference,
 
       isSecret:
         normalized.isSecret,
@@ -1263,10 +1652,11 @@ async function updateVariableController(
     };
 
     if (
-      Object.prototype.hasOwnProperty.call(
-        req.body || {},
-        "value"
-      )
+      Object.prototype
+        .hasOwnProperty.call(
+          req.body || {},
+          "value"
+        )
     ) {
       payload.value =
         normalized.value;
@@ -1301,9 +1691,10 @@ async function updateVariableController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Delete Variable                                                            */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   DELETE VARIABLE
+========================================================= */
 
 async function deleteVariableController(
   req,
@@ -1311,7 +1702,10 @@ async function deleteVariableController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -1327,13 +1721,13 @@ async function deleteVariableController(
       return;
     }
 
-    const name =
+    const environmentName =
       requireEnvironmentName(
         req,
         res
       );
 
-    if (!name) {
+    if (!environmentName) {
       return;
     }
 
@@ -1360,8 +1754,11 @@ async function deleteVariableController(
         "deleteVariable",
         {
           userId,
+
           projectId,
-          name,
+
+          environmentName,
+
           key,
 
           expectedVersion:
@@ -1398,9 +1795,10 @@ async function deleteVariableController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Validate Environment                                                       */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   VALIDATE ENVIRONMENT
+========================================================= */
 
 async function validateEnvironmentController(
   req,
@@ -1408,7 +1806,10 @@ async function validateEnvironmentController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -1424,13 +1825,13 @@ async function validateEnvironmentController(
       return;
     }
 
-    const name =
+    const environmentName =
       requireEnvironmentName(
         req,
         res
       );
 
-    if (!name) {
+    if (!environmentName) {
       return;
     }
 
@@ -1439,8 +1840,18 @@ async function validateEnvironmentController(
         "validateEnvironment",
         {
           userId,
+
           projectId,
-          name,
+
+          environmentName,
+
+          expectedVersion:
+            normalizeVersion(
+              req.body?.expectedVersion
+            ),
+
+          updatedBy:
+            userId,
         }
       );
 
@@ -1457,8 +1868,8 @@ async function validateEnvironmentController(
         environment,
 
         validation:
-          environment?.validation ||
           result?.validation ||
+          environment?.validation ||
           null,
       }
     );
@@ -1472,9 +1883,19 @@ async function validateEnvironmentController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Deployment Readiness                                                       */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   DEPLOYMENT READINESS
+=========================================================
+
+   IMPORTANT:
+
+   This endpoint does NOT call resolveForDeployment().
+
+   Therefore no plaintext secret resolution happens through
+   this browser-facing API route.
+
+========================================================= */
 
 async function deploymentReadinessController(
   req,
@@ -1482,7 +1903,10 @@ async function deploymentReadinessController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -1498,31 +1922,26 @@ async function deploymentReadinessController(
       return;
     }
 
-    const name =
+    const environmentName =
       requireEnvironmentName(
         req,
         res
       );
 
-    if (!name) {
+    if (!environmentName) {
       return;
     }
 
     const result =
       await callService(
-        "resolveForDeployment",
+        "getDeploymentReadiness",
         {
           userId,
+
           projectId,
-          name,
 
-          metadataOnly: true,
+          environmentName,
         }
-      );
-
-    const readiness =
-      extractDeploymentReadiness(
-        result
       );
 
     return success(
@@ -1530,7 +1949,10 @@ async function deploymentReadinessController(
       200,
       "Environment deployment readiness checked.",
       {
-        readiness,
+        readiness:
+          sanitizeDeploymentReadiness(
+            result
+          ),
       }
     );
   } catch (error) {
@@ -1543,9 +1965,17 @@ async function deploymentReadinessController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Deployment Snapshot                                                        */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   DEPLOYMENT SNAPSHOT
+=========================================================
+
+   Browser/API callers receive metadata only.
+
+   Plaintext snapshot resolution requires trusted internal
+   service usage and is NOT accepted from request bodies.
+
+========================================================= */
 
 async function createDeploymentSnapshotController(
   req,
@@ -1553,7 +1983,10 @@ async function createDeploymentSnapshotController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -1569,25 +2002,19 @@ async function createDeploymentSnapshotController(
       return;
     }
 
-    const name =
+    const environmentName =
       requireEnvironmentName(
         req,
         res
       );
 
-    if (!name) {
+    if (!environmentName) {
       return;
     }
 
     const deploymentId =
       String(
         req.body?.deploymentId ||
-          ""
-      ).trim();
-
-    const workflowId =
-      String(
-        req.body?.workflowId ||
           ""
       ).trim();
 
@@ -1600,31 +2027,47 @@ async function createDeploymentSnapshotController(
       );
     }
 
+    /*
+     * Never trust:
+     *
+     * req.body.trustedContext
+     * req.body.workflowId
+     *
+     * from a browser request.
+     *
+     * This controller deliberately asks the service for a
+     * metadata-only snapshot.
+     */
     const result =
       await callService(
         "createDeploymentSnapshot",
         {
           userId,
+
           projectId,
-          name,
+
+          environmentName,
+
           deploymentId,
-          workflowId:
-            workflowId || null,
+
+          trustedContext:
+            false,
         }
       );
 
     const snapshot =
       result?.snapshot ||
-      result?.deployment ||
-      result?.data ||
       result;
 
     return success(
       res,
       200,
-      "Deployment snapshot created.",
+      "Deployment snapshot metadata created.",
       {
-        snapshot,
+        snapshot:
+          sanitizeDeploymentSnapshot(
+            snapshot
+          ),
       }
     );
   } catch (error) {
@@ -1637,9 +2080,10 @@ async function createDeploymentSnapshotController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Mark Deployed                                                              */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   MARK DEPLOYED
+========================================================= */
 
 async function markDeployedController(
   req,
@@ -1647,7 +2091,10 @@ async function markDeployedController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -1663,13 +2110,13 @@ async function markDeployedController(
       return;
     }
 
-    const name =
+    const environmentName =
       requireEnvironmentName(
         req,
         res
       );
 
-    if (!name) {
+    if (!environmentName) {
       return;
     }
 
@@ -1693,25 +2140,25 @@ async function markDeployedController(
         "markDeployed",
         {
           userId,
-          projectId,
-          name,
-          deploymentId,
 
-          workflowId:
-            req.body?.workflowId ||
-            null,
+          projectId,
+
+          environmentName,
+
+          deploymentId,
 
           version:
             normalizeVersion(
               req.body?.version
             ),
 
-          deployedAt:
-            req.body?.deployedAt
-              ? new Date(
-                  req.body.deployedAt
-                )
-              : new Date(),
+          expectedVersion:
+            normalizeVersion(
+              req.body?.expectedVersion
+            ),
+
+          updatedBy:
+            userId,
         }
       );
 
@@ -1738,9 +2185,10 @@ async function markDeployedController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Archive Environment                                                        */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   ARCHIVE ENVIRONMENT
+========================================================= */
 
 async function archiveEnvironmentController(
   req,
@@ -1748,7 +2196,10 @@ async function archiveEnvironmentController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -1764,13 +2215,13 @@ async function archiveEnvironmentController(
       return;
     }
 
-    const name =
+    const environmentName =
       requireEnvironmentName(
         req,
         res
       );
 
-    if (!name) {
+    if (!environmentName) {
       return;
     }
 
@@ -1779,8 +2230,10 @@ async function archiveEnvironmentController(
         "archiveEnvironment",
         {
           userId,
+
           projectId,
-          name,
+
+          environmentName,
 
           updatedBy:
             userId,
@@ -1815,9 +2268,10 @@ async function archiveEnvironmentController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Unarchive Environment                                                      */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   UNARCHIVE ENVIRONMENT
+========================================================= */
 
 async function unarchiveEnvironmentController(
   req,
@@ -1825,7 +2279,10 @@ async function unarchiveEnvironmentController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -1841,13 +2298,13 @@ async function unarchiveEnvironmentController(
       return;
     }
 
-    const name =
+    const environmentName =
       requireEnvironmentName(
         req,
         res
       );
 
-    if (!name) {
+    if (!environmentName) {
       return;
     }
 
@@ -1856,8 +2313,10 @@ async function unarchiveEnvironmentController(
         "unarchiveEnvironment",
         {
           userId,
+
           projectId,
-          name,
+
+          environmentName,
 
           updatedBy:
             userId,
@@ -1892,9 +2351,10 @@ async function unarchiveEnvironmentController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Delete Environment                                                         */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   DELETE ENVIRONMENT
+========================================================= */
 
 async function deleteEnvironmentController(
   req,
@@ -1902,7 +2362,10 @@ async function deleteEnvironmentController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -1918,19 +2381,21 @@ async function deleteEnvironmentController(
       return;
     }
 
-    const name =
+    const environmentName =
       requireEnvironmentName(
         req,
         res
       );
 
-    if (!name) {
+    if (!environmentName) {
       return;
     }
 
     if (
-      name === "production" &&
-      req.body?.confirm !== true
+      environmentName ===
+        "production" &&
+      req.body?.confirm !==
+        true
     ) {
       return failure(
         res,
@@ -1945,8 +2410,10 @@ async function deleteEnvironmentController(
         "deleteEnvironment",
         {
           userId,
+
           projectId,
-          name,
+
+          environmentName,
 
           updatedBy:
             userId,
@@ -1957,7 +2424,8 @@ async function deleteEnvironmentController(
             ),
 
           confirmProduction:
-            req.body?.confirm === true,
+            req.body?.confirm ===
+            true,
         }
       );
 
@@ -1966,12 +2434,17 @@ async function deleteEnvironmentController(
       200,
       "Environment deleted successfully.",
       {
-        deleted: true,
+        deleted:
+          result?.deleted ===
+          true,
 
         environment:
-          extractEnvironment(
-            result
-          ),
+          result?.environment ||
+          environmentName,
+
+        environmentId:
+          result?.environmentId ||
+          null,
       }
     );
   } catch (error) {
@@ -1984,9 +2457,10 @@ async function deleteEnvironmentController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Copy Environment                                                           */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   COPY ENVIRONMENT
+========================================================= */
 
 async function copyEnvironmentController(
   req,
@@ -1994,7 +2468,10 @@ async function copyEnvironmentController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -2010,13 +2487,13 @@ async function copyEnvironmentController(
       return;
     }
 
-    const sourceName =
+    const sourceEnvironment =
       normalizeEnvironmentName(
         req.body?.sourceEnvironment ||
           req.body?.sourceName
       );
 
-    const targetName =
+    const targetEnvironment =
       normalizeEnvironmentName(
         req.body?.targetEnvironment ||
           req.body?.targetName
@@ -2024,7 +2501,7 @@ async function copyEnvironmentController(
 
     if (
       !isValidEnvironmentName(
-        sourceName
+        sourceEnvironment
       )
     ) {
       return failure(
@@ -2037,7 +2514,7 @@ async function copyEnvironmentController(
 
     if (
       !isValidEnvironmentName(
-        targetName
+        targetEnvironment
       )
     ) {
       return failure(
@@ -2049,7 +2526,8 @@ async function copyEnvironmentController(
     }
 
     if (
-      sourceName === targetName
+      sourceEnvironment ===
+      targetEnvironment
     ) {
       return failure(
         res,
@@ -2060,22 +2538,30 @@ async function copyEnvironmentController(
     }
 
     const copySecrets =
-      req.body?.copySecrets === true;
+      req.body?.copySecrets ===
+      true;
 
     const result =
       await callService(
         "copyEnvironment",
         {
           userId,
+
           projectId,
 
-          sourceName,
-          targetName,
+          sourceEnvironment,
+
+          targetEnvironment,
 
           copySecrets,
 
           updatedBy:
             userId,
+
+          expectedVersion:
+            normalizeVersion(
+              req.body?.expectedVersion
+            ),
         }
       );
 
@@ -2105,9 +2591,10 @@ async function copyEnvironmentController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Configuration Summary                                                      */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   CONFIGURATION SUMMARY
+========================================================= */
 
 async function getConfigurationSummaryController(
   req,
@@ -2115,7 +2602,10 @@ async function getConfigurationSummaryController(
 ) {
   try {
     const userId =
-      requireUser(req, res);
+      requireUser(
+        req,
+        res
+      );
 
     if (!userId) {
       return;
@@ -2131,13 +2621,13 @@ async function getConfigurationSummaryController(
       return;
     }
 
-    const name =
+    const environmentName =
       requireEnvironmentName(
         req,
         res
       );
 
-    if (!name) {
+    if (!environmentName) {
       return;
     }
 
@@ -2146,8 +2636,10 @@ async function getConfigurationSummaryController(
         "getConfigurationSummary",
         {
           userId,
+
           projectId,
-          name,
+
+          environmentName,
         }
       );
 
@@ -2174,9 +2666,10 @@ async function getConfigurationSummaryController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Health Check                                                               */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   HEALTH
+========================================================= */
 
 async function environmentHealthController(
   req,
@@ -2216,19 +2709,20 @@ async function environmentHealthController(
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Input Normalization                                                        */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   INPUT NORMALIZATION
+========================================================= */
 
 function normalizeVariableInput(
-  body = {},
-  options = {}
+  body = {}
 ) {
   const hasValue =
-    Object.prototype.hasOwnProperty.call(
-      body,
-      "value"
-    );
+    Object.prototype
+      .hasOwnProperty.call(
+        body,
+        "value"
+      );
 
   return {
     key:
@@ -2265,8 +2759,7 @@ function normalizeVariableInput(
 
     description:
       sanitizeDescription(
-        body.description,
-        MAX_VARIABLE_DESCRIPTION_LENGTH
+        body.description
       ),
 
     source:
@@ -2274,16 +2767,25 @@ function normalizeVariableInput(
         body.source
       ),
 
-    sourceRef:
-      body.sourceRef
+    sourceReference:
+      body.sourceReference !==
+        undefined
         ? String(
-            body.sourceRef
+            body.sourceReference
           )
             .trim()
             .slice(0, 500)
-        : "",
+        : body.sourceRef !==
+            undefined
+          ? String(
+              body.sourceRef
+            )
+              .trim()
+              .slice(0, 500)
+          : "",
   };
 }
+
 
 function normalizeVariablesInput(
   variables
@@ -2296,14 +2798,16 @@ function normalizeVariablesInput(
   );
 }
 
+
 function normalizeSourceType(
   value
 ) {
-  const source = String(
-    value || "manual"
-  )
-    .trim()
-    .toLowerCase();
+  const source =
+    String(
+      value || "manual"
+    )
+      .trim()
+      .toLowerCase();
 
   const allowed =
     new Set([
@@ -2314,17 +2818,21 @@ function normalizeSourceType(
       "system",
     ]);
 
-  return allowed.has(source)
+  return allowed.has(
+    source
+  )
     ? source
     : "manual";
 }
+
 
 function normalizeSourceInput(
   source
 ) {
   if (
     !source ||
-    typeof source !== "object"
+    typeof source !==
+      "object"
   ) {
     return {
       type: "manual",
@@ -2355,6 +2863,15 @@ function normalizeSourceInput(
             .slice(0, 500)
         : null,
 
+    repositoryId:
+      source.repositoryId
+        ? String(
+            source.repositoryId
+          )
+            .trim()
+            .slice(0, 300)
+        : null,
+
     branch:
       source.branch
         ? String(
@@ -2370,38 +2887,15 @@ function normalizeSourceInput(
             source.commitSha
           )
             .trim()
-            .slice(0, 100)
+            .slice(0, 200)
         : null,
   };
 }
 
-function normalizeVersion(
-  value
-) {
-  if (
-    value === undefined ||
-    value === null ||
-    value === ""
-  ) {
-    return undefined;
-  }
 
-  const number =
-    Number(value);
-
-  if (
-    !Number.isInteger(number) ||
-    number < 1
-  ) {
-    return undefined;
-  }
-
-  return number;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Validation                                                                 */
-/* -------------------------------------------------------------------------- */
+/* =========================================================
+   VARIABLE VALIDATION
+========================================================= */
 
 function validateVariableInput(
   variable,
@@ -2412,7 +2906,10 @@ function validateVariableInput(
   if (!variable.key) {
     return {
       valid: false,
-      code: "VARIABLE_KEY_REQUIRED",
+
+      code:
+        "VARIABLE_KEY_REQUIRED",
+
       message:
         "Environment variable key is required.",
     };
@@ -2425,7 +2922,10 @@ function validateVariableInput(
   ) {
     return {
       valid: false,
-      code: "INVALID_VARIABLE_KEY",
+
+      code:
+        "INVALID_VARIABLE_KEY",
+
       message:
         "Environment variable key is invalid.",
     };
@@ -2438,7 +2938,10 @@ function validateVariableInput(
   ) {
     return {
       valid: false,
-      code: "INVALID_VARIABLE_TYPE",
+
+      code:
+        "INVALID_VARIABLE_TYPE",
+
       message:
         "Invalid environment variable type.",
     };
@@ -2451,7 +2954,10 @@ function validateVariableInput(
   ) {
     return {
       valid: false,
-      code: "INVALID_VARIABLE_SCOPE",
+
+      code:
+        "INVALID_VARIABLE_SCOPE",
+
       message:
         "Invalid environment variable scope.",
     };
@@ -2462,7 +2968,8 @@ function validateVariableInput(
     (
       variable.value ===
         undefined ||
-      variable.value === null ||
+      variable.value ===
+        null ||
       String(
         variable.value
       ).length === 0
@@ -2470,18 +2977,22 @@ function validateVariableInput(
   ) {
     return {
       valid: false,
+
       code:
         "VARIABLE_VALUE_REQUIRED",
+
       message:
         "Environment variable value is required.",
     };
   }
 
   if (
-    variable.type === "json" &&
+    variable.type ===
+      "json" &&
     variable.value !==
       undefined &&
-    variable.value !== null
+    variable.value !==
+      null
   ) {
     try {
       if (
@@ -2495,8 +3006,10 @@ function validateVariableInput(
     } catch {
       return {
         valid: false,
+
         code:
           "INVALID_JSON_VARIABLE",
+
         message:
           "Environment variable contains invalid JSON.",
       };
@@ -2508,17 +3021,22 @@ function validateVariableInput(
   };
 }
 
-/* -------------------------------------------------------------------------- */
-/* Safe Result Filters                                                        */
-/* -------------------------------------------------------------------------- */
 
-function extractDeploymentReadiness(
+/* =========================================================
+   SAFE DEPLOYMENT READINESS
+========================================================= */
+
+function sanitizeDeploymentReadiness(
   result
 ) {
   if (!result) {
     return {
       ready: false,
-      status: "unknown",
+
+      deployable: false,
+
+      status:
+        "unknown",
     };
   }
 
@@ -2529,15 +3047,52 @@ function extractDeploymentReadiness(
 
   return {
     ready:
-      source.ready === true ||
-      source.deployable === true,
+      source.ready ===
+      true,
 
     deployable:
-      source.deployable === true,
+      source.deployable ===
+      true,
 
     status:
       source.status ||
-      null,
+      "unknown",
+
+    environment:
+      source.environment
+        ? {
+            id:
+              source.environment.id ||
+              source.environment
+                ._id ||
+              null,
+
+            projectId:
+              source.environment
+                .projectId ||
+              null,
+
+            name:
+              source.environment
+                .name ||
+              null,
+
+            status:
+              source.environment
+                .status ||
+              null,
+
+            version:
+              source.environment
+                .version ||
+              null,
+
+            deployedVersion:
+              source.environment
+                .deployedVersion ||
+              null,
+          }
+        : null,
 
     validation:
       source.validation
@@ -2546,57 +3101,76 @@ function extractDeploymentReadiness(
           )
         : null,
 
-    environment:
-      source.environment
-        ? sanitizeEnvironment(
-            source.environment
-          )
-        : null,
-
     reason:
       source.reason ||
-      source.message ||
       null,
   };
 }
 
-function sanitizeEnvironment(
-  environment
+
+/* =========================================================
+   SAFE SNAPSHOT
+========================================================= */
+
+function sanitizeDeploymentSnapshot(
+  snapshot
 ) {
-  if (!environment) {
-    return null;
+  if (!snapshot) {
+    return {
+      includesSecrets:
+        false,
+    };
   }
 
   return {
-    id:
-      environment.id ||
-      environment._id ||
+    environmentId:
+      snapshot.environmentId ||
       null,
 
     projectId:
-      environment.projectId ||
+      snapshot.projectId ||
       null,
 
-    name:
-      environment.name ||
-      null,
-
-    status:
-      environment.status ||
+    environment:
+      snapshot.environment ||
       null,
 
     version:
-      environment.version ||
+      snapshot.version ||
       null,
 
-    validation:
-      environment.validation
-        ? sanitizeValidation(
-            environment.validation
-          )
+    deploymentId:
+      snapshot.deploymentId ||
+      null,
+
+    readiness:
+      snapshot.readiness
+        ? {
+            ready:
+              snapshot.readiness
+                .ready === true,
+
+            deployable:
+              snapshot.readiness
+                .deployable ===
+              true,
+
+            status:
+              snapshot.readiness
+                .status ||
+              "unknown",
+          }
         : null,
+
+    includesSecrets:
+      false,
   };
 }
+
+
+/* =========================================================
+   SAFE VALIDATION
+========================================================= */
 
 function sanitizeValidation(
   validation
@@ -2610,13 +3184,15 @@ function sanitizeValidation(
       validation.status ||
       "unknown",
 
-    checkedAt:
+    validatedAt:
+      validation.validatedAt ||
       validation.checkedAt ||
       null,
 
-    totalVariables:
+    requiredVariables:
       Number(
-        validation.totalVariables ||
+        validation.requiredVariables ||
+          validation.totalRequiredVariables ||
           0
       ),
 
@@ -2626,9 +3202,10 @@ function sanitizeValidation(
           0
       ),
 
-    missingRequiredVariables:
+    missingVariables:
       Number(
-        validation.missingRequiredVariables ||
+        validation.missingVariables ||
+          validation.missingRequiredVariables ||
           0
       ),
 
@@ -2638,24 +3215,23 @@ function sanitizeValidation(
           0
       ),
 
-    errors:
-      Array.isArray(
-        validation.errors
-      )
-        ? validation.errors.map(
-            (item) => ({
-              key:
-                item?.key ||
-                null,
+    message:
+      validation.message ||
+      null,
 
-              message:
-                item?.message ||
-                "Validation error.",
-            })
-          )
+    invalidKeys:
+      Array.isArray(
+        validation.invalidKeys
+      )
+        ? validation.invalidKeys
         : [],
   };
 }
+
+
+/* =========================================================
+   CONFIGURATION SUMMARY SANITIZATION
+========================================================= */
 
 function sanitizeConfigurationSummary(
   result
@@ -2667,86 +3243,95 @@ function sanitizeConfigurationSummary(
     {};
 
   return {
+    environmentId:
+      source.environmentId ||
+      null,
+
+    projectId:
+      source.projectId ||
+      null,
+
+    environment:
+      source.environment ||
+      null,
+
+    status:
+      source.status ||
+      "unknown",
+
+    version:
+      source.version ||
+      null,
+
+    deployedVersion:
+      source.deployedVersion ||
+      null,
+
     totalVariables:
       Number(
-        source.totalVariables ||
+        source.variableCount ||
+          source.totalVariables ||
           0
       ),
 
     configuredVariables:
       Number(
-        source.configuredVariables ||
+        source.configuredCount ||
+          source.configuredVariables ||
           0
       ),
 
     secretVariables:
       Number(
-        source.secretVariables ||
+        source.secretCount ||
+          source.secretVariables ||
           0
       ),
 
     requiredVariables:
       Number(
-        source.requiredVariables ||
+        source.requiredCount ||
+          source.requiredVariables ||
           0
       ),
 
-    missingRequiredVariables:
+    buildVariableCount:
       Number(
-        source.missingRequiredVariables ||
+        source.buildVariableCount ||
           0
       ),
 
-    invalidVariables:
+    runtimeVariableCount:
       Number(
-        source.invalidVariables ||
+        source.runtimeVariableCount ||
           0
       ),
 
-    validationStatus:
-      source.validationStatus ||
-      source.status ||
-      "unknown",
-
-    variables:
-      Array.isArray(
-        source.variables
-      )
-        ? source.variables.map(
-            (variable) => ({
-              key:
-                variable?.key ||
-                null,
-
-              isSecret:
-                variable?.isSecret ===
-                true,
-
-              hasValue:
-                variable?.hasValue ===
-                true,
-
-              required:
-                variable?.required ===
-                true,
-
-              type:
-                variable?.type ||
-                "string",
-
-              scope:
-                variable?.scope ||
-                "runtime",
-
-              validation:
-                variable?.validation
-                  ?.status ||
-                "unknown",
-            })
+    validation:
+      source.validation
+        ? sanitizeValidation(
+            source.validation
           )
-        : [],
+        : null,
+
+    deployment:
+      source.deployment ||
+      null,
+
+    lastDeploymentId:
+      source.lastDeploymentId ||
+      null,
+
+    lastDeployedAt:
+      source.lastDeployedAt ||
+      null,
   };
 }
+
+
+/* =========================================================
+   HEALTH SANITIZATION
+========================================================= */
 
 function sanitizeHealthResult(
   result
@@ -2758,13 +3343,17 @@ function sanitizeHealthResult(
     {};
 
   return {
+    success:
+      source.success !==
+      false,
+
     status:
       source.status ||
-      "unknown",
+      "healthy",
 
     service:
       source.service ||
-      "environment",
+      "environmentService",
 
     version:
       source.version ||
@@ -2773,23 +3362,38 @@ function sanitizeHealthResult(
     encryption:
       source.encryption
         ? {
-            configured:
+            algorithm:
               source.encryption
-                .configured ===
+                .algorithm ||
+              null,
+
+            currentKeyConfigured:
+              source.encryption
+                .currentKeyConfigured ===
               true,
 
-            version:
+            previousKeyConfigured:
               source.encryption
-                .version ||
-              null,
+                .previousKeyConfigured ===
+              true,
+
+            rotationSupported:
+              source.encryption
+                .rotationSupported !==
+              false,
+
+            healthy:
+              source.encryption
+                .healthy === true,
           }
-        : undefined,
+        : null,
   };
 }
 
-/* -------------------------------------------------------------------------- */
-/* Controller Metadata                                                        */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   CONTROLLER METADATA
+========================================================= */
 
 const controller = {
   version:
@@ -2844,9 +3448,10 @@ const controller = {
     environmentHealthController,
 };
 
-/* -------------------------------------------------------------------------- */
-/* Exports                                                                    */
-/* -------------------------------------------------------------------------- */
+
+/* =========================================================
+   EXPORT
+========================================================= */
 
 module.exports =
   controller;
