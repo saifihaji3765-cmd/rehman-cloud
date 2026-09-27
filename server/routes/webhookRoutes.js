@@ -1,20 +1,56 @@
 /* =========================================================
    ZyrionOS WEBHOOK ROUTES
+   Version: 4.0.0
    =========================================================
 
    Responsibilities:
    - Stripe webhook endpoint
    - Razorpay webhook endpoint
-   - WhatsApp Cloud API webhook endpoint
+   - WhatsApp Cloud API verification
+   - WhatsApp Cloud API webhook receiver
 
    IMPORTANT:
-   - Authentication middleware MUST NOT be used here.
-   - Payment/WhatsApp providers call these endpoints directly.
-   - Signature verification happens inside the respective
-     controllers/services.
-   - These routes must be mounted before the global
-     express.json() parser when the controller requires
-     the original raw request body.
+   - NO authMiddleware
+   - NO JWT authentication
+   - NO user authentication
+
+   External providers call these routes directly.
+
+   Security is handled through:
+   - Stripe webhook signature verification
+   - Razorpay webhook signature verification
+   - WhatsApp HMAC signature verification
+   - WhatsApp verification token
+
+   RAW BODY REQUIREMENT:
+
+      Stripe
+        ↓
+      raw body
+        ↓
+      signature verification
+
+      Razorpay
+        ↓
+      raw body
+        ↓
+      signature verification
+
+      WhatsApp
+        ↓
+      raw body
+        ↓
+      HMAC verification
+
+   IMPORTANT APPLICATION ORDER:
+
+      webhookRoutes
+           ↓
+      express.json()
+
+   The webhook router MUST be mounted before the global
+   express.json() middleware.
+
 ========================================================= */
 
 const express = require("express");
@@ -23,23 +59,164 @@ const router = express.Router();
 
 
 /* =========================================================
-   PAYMENT WEBHOOK CONTROLLERS
+   CONSTANTS
+========================================================= */
+
+const RAW_JSON_LIMIT =
+  process.env.WEBHOOK_RAW_BODY_LIMIT ||
+  "2mb";
+
+const WHATSAPP_RAW_BODY_LIMIT =
+  process.env.WHATSAPP_WEBHOOK_RAW_BODY_LIMIT ||
+  "1mb";
+
+
+/* =========================================================
+   CONTROLLERS
+========================================================= */
+
+const webhookController =
+  require("../controllers/webhookController");
+
+
+const whatsappWebhookController =
+  require("../controllers/whatsappWebhookController");
+
+
+/* =========================================================
+   CONTROLLER CONTRACT VALIDATION
+========================================================= */
+
+const requiredPaymentControllers = [
+
+  "razorpayWebhookController",
+
+  "stripeWebhookController"
+
+];
+
+
+for (
+  const controllerName
+  of requiredPaymentControllers
+) {
+
+  if (
+    typeof webhookController?.[
+      controllerName
+    ] !== "function"
+  ) {
+
+    throw new Error(
+      `Webhook route controller missing: ${controllerName}`
+    );
+
+  }
+
+}
+
+
+const requiredWhatsAppControllers = [
+
+  "verify",
+
+  "receive"
+
+];
+
+
+for (
+  const controllerName
+  of requiredWhatsAppControllers
+) {
+
+  if (
+    typeof whatsappWebhookController?.[
+      controllerName
+    ] !== "function"
+  ) {
+
+    throw new Error(
+      `WhatsApp webhook controller missing: ${controllerName}`
+    );
+
+  }
+
+}
+
+
+/* =========================================================
+   HANDLERS
 ========================================================= */
 
 const {
   razorpayWebhookController,
   stripeWebhookController
-} = require("../controllers/webhookController");
+} = webhookController;
+
+
+const {
+  verify:
+    whatsappWebhookVerifyController,
+
+  receive:
+    whatsappWebhookReceiveController
+
+} = whatsappWebhookController;
 
 
 /* =========================================================
-   WHATSAPP WEBHOOK CONTROLLER
+   RAW BODY OPTIONS
 ========================================================= */
 
-const {
-  verify: whatsappWebhookVerifyController,
-  receive: whatsappWebhookReceiveController
-} = require("../controllers/whatsappWebhookController");
+/*
+ * Stripe:
+ * Requires the exact raw request body for signature
+ * verification.
+ */
+
+const stripeRawBody =
+  express.raw({
+
+    type: "application/json",
+
+    limit:
+      RAW_JSON_LIMIT
+
+  });
+
+
+/*
+ * Razorpay:
+ * Signature verification also requires the original
+ * request payload.
+ */
+
+const razorpayRawBody =
+  express.raw({
+
+    type: "application/json",
+
+    limit:
+      RAW_JSON_LIMIT
+
+  });
+
+
+/*
+ * WhatsApp:
+ * HMAC verification requires the original body.
+ */
+
+const whatsappRawBody =
+  express.raw({
+
+    type: "application/json",
+
+    limit:
+      WHATSAPP_RAW_BODY_LIMIT
+
+  });
 
 
 /* =========================================================
@@ -49,20 +226,41 @@ const {
    POST
    /api/webhook/razorpay
 
-   Razorpay sends payment/subscription events here.
+   Authentication:
+   NONE
 
-   DO NOT add:
-   - authMiddleware
-   - JWT verification
-   - user authentication
+   Raw body:
+   REQUIRED
 
-   Razorpay authentication is performed through the
-   webhook signature inside the controller.
+   Signature verification:
+   webhookController
+
+   Supported events may include:
+
+   - payment.captured
+   - order.paid
+   - payment.failed
+   - subscription.activated
+   - subscription.charged
+   - subscription.halted
+   - subscription.cancelled
+   - subscription.completed
+
+   IMPORTANT:
+   Never trust a client-side payment response to activate
+   a subscription.
+
+   Provider webhook is authoritative.
 ========================================================= */
 
 router.post(
+
   "/razorpay",
+
+  razorpayRawBody,
+
   razorpayWebhookController
+
 );
 
 
@@ -73,27 +271,28 @@ router.post(
    POST
    /api/webhook/stripe
 
-   Stripe requires the original request body for
-   webhook signature verification.
+   Authentication:
+   NONE
 
-   Therefore this route receives the raw request body.
+   Raw body:
+   REQUIRED
 
-   IMPORTANT:
-   The application entry point must mount this router
-   BEFORE the global express.json() parser.
+   Signature verification:
+   stripeWebhookController
 
-   Signature verification remains inside
-   stripeWebhookController().
+   Stripe webhook events are processed only after
+   signature verification.
+
 ========================================================= */
 
 router.post(
+
   "/stripe",
 
-  express.raw({
-    type: "application/json"
-  }),
+  stripeRawBody,
 
   stripeWebhookController
+
 );
 
 
@@ -104,20 +303,26 @@ router.post(
    GET
    /api/webhook/whatsapp
 
-   Meta/WhatsApp uses this endpoint during webhook
-   verification.
+   Meta calls this endpoint when the webhook is initially
+   verified.
 
-   No authentication middleware is used.
+   Authentication:
+   NONE
 
    The controller validates:
-   - mode
-   - verify token
-   - challenge
+
+   - hub.mode
+   - hub.verify_token
+   - hub.challenge
+
 ========================================================= */
 
 router.get(
+
   "/whatsapp",
+
   whatsappWebhookVerifyController
+
 );
 
 
@@ -128,37 +333,96 @@ router.get(
    POST
    /api/webhook/whatsapp
 
-   WhatsApp Cloud API sends incoming webhook events here.
+   Authentication:
+   NONE
 
-   The original raw request body is required for
-   HMAC-SHA256 signature verification.
+   Raw body:
+   REQUIRED
 
-   IMPORTANT:
-   - No authMiddleware
-   - No JWT middleware
-   - No user authentication
-   - Signature verification happens inside the
-     WhatsApp webhook controller/service.
-   - Raw body must be available before express.json()
-     processes the request.
+   Signature verification:
+   WhatsApp webhook controller/service
 
-   Limit:
-   1 MB
+   Payload limit:
+   1 MB by default.
 
-   This matches the WhatsApp webhook service's maximum
-   accepted payload size.
 ========================================================= */
 
 router.post(
+
   "/whatsapp",
 
-  express.raw({
-    type: "application/json",
-    limit: "1mb"
-  }),
+  whatsappRawBody,
 
   whatsappWebhookReceiveController
+
 );
+
+
+/* =========================================================
+   WEBHOOK ROUTE CONTRACT
+========================================================= */
+
+router.webhookRouteContract = {
+
+  version: "4.0.0",
+
+  authenticationRequired: false,
+
+  rawBodyRequired: true,
+
+  endpoints: {
+
+    razorpay: {
+
+      method: "POST",
+
+      path: "/razorpay",
+
+      rawBody: true,
+
+      signatureVerification: true
+
+    },
+
+    stripe: {
+
+      method: "POST",
+
+      path: "/stripe",
+
+      rawBody: true,
+
+      signatureVerification: true
+
+    },
+
+    whatsappVerify: {
+
+      method: "GET",
+
+      path: "/whatsapp",
+
+      authentication: false,
+
+      verificationToken: true
+
+    },
+
+    whatsappReceive: {
+
+      method: "POST",
+
+      path: "/whatsapp",
+
+      rawBody: true,
+
+      signatureVerification: true
+
+    }
+
+  }
+
+};
 
 
 /* =========================================================
