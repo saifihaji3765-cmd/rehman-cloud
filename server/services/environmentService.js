@@ -1,6 +1,6 @@
 /* =========================================================
    ZyrionOS ENVIRONMENT SERVICE
-   Version: 2.0.0
+   Version: 2.1.0
    =========================================================
 
    Responsibilities:
@@ -11,6 +11,7 @@
    - Encryption-key rotation support
    - Required-variable validation
    - Build/runtime variable resolution
+   - Deployment readiness
    - Deployment snapshots
    - Safe UI/API responses
    - Project/user ownership enforcement
@@ -23,7 +24,7 @@
 
    SECURITY MODEL:
 
-      User
+      User/API
         ↓
       Controller
         ↓
@@ -31,7 +32,7 @@
         ↓
       Encrypted MongoDB value
         ↓
-      Deployment-only resolution
+      Trusted Deployment Workflow
         ↓
       Docker/ECS runtime
 
@@ -46,6 +47,8 @@
 
 ========================================================= */
 
+"use strict";
+
 const crypto = require("crypto");
 
 const Environment =
@@ -57,66 +60,53 @@ const Environment =
 ========================================================= */
 
 const SERVICE_VERSION =
-  "2.0.0";
-
+  "2.1.0";
 
 const ENVIRONMENT_NAMES = [
   "development",
   "preview",
-  "production"
+  "production",
 ];
-
 
 const VARIABLE_TYPES = [
   "string",
   "number",
   "boolean",
-  "json"
+  "json",
 ];
-
 
 const VARIABLE_SCOPES = [
   "runtime",
   "build",
-  "both"
+  "both",
 ];
-
 
 const MAX_VARIABLES =
   500;
 
-
 const MAX_KEY_LENGTH =
   256;
-
 
 const MAX_VALUE_LENGTH =
   100000;
 
-
 const MAX_DESCRIPTION_LENGTH =
   1000;
-
 
 const MAX_SOURCE_REFERENCE_LENGTH =
   500;
 
-
 const ENCRYPTION_ALGORITHM =
   "aes-256-gcm";
-
 
 const ENCRYPTION_VERSION =
   "v2";
 
-
 const LEGACY_ENCRYPTION_VERSION =
   "v1";
 
-
 const IV_LENGTH =
   12;
-
 
 const AUTH_TAG_LENGTH =
   16;
@@ -127,14 +117,12 @@ const AUTH_TAG_LENGTH =
 ========================================================= */
 
 class EnvironmentServiceError extends Error {
-
   constructor(
     message,
     code = "ENVIRONMENT_ERROR",
     statusCode = 400,
     details = null
   ) {
-
     super(message);
 
     this.name =
@@ -147,29 +135,11 @@ class EnvironmentServiceError extends Error {
       statusCode;
 
     this.details =
-      details;
-
-    /*
-     * Do not automatically serialize arbitrary details.
-     *
-     * Details may accidentally contain secrets if a future
-     * caller passes unsafe data.
-     */
-
-    if (
-      this.details &&
-      typeof this.details === "object"
-    ) {
-
-      this.details =
-        sanitizeErrorDetails(
-          this.details
-        );
-
-    }
-
+      details &&
+      typeof details === "object"
+        ? sanitizeErrorDetails(details)
+        : details;
   }
-
 }
 
 
@@ -177,308 +147,168 @@ class EnvironmentServiceError extends Error {
    ERROR DETAIL SANITIZATION
 ========================================================= */
 
-function sanitizeErrorDetails(
-  details
-) {
-
+function sanitizeErrorDetails(details) {
   if (
     details === null ||
     details === undefined
   ) {
-
     return null;
-
   }
 
-
-  if (
-    Array.isArray(details)
-  ) {
-
+  if (Array.isArray(details)) {
     return details.map(
-      item =>
-        sanitizeErrorDetails(
-          item
-        )
+      (item) =>
+        sanitizeErrorDetails(item)
     );
-
   }
-
 
   if (
     typeof details !== "object"
   ) {
-
     return details;
-
   }
-
 
   const blockedKeys =
     new Set([
-
       "value",
-
       "secret",
-
       "secretValue",
-
       "plaintext",
-
       "plainValue",
-
       "encryptedValue",
-
       "decryptedValue",
-
       "variables",
-
       "environmentVariables",
-
       "credentials",
-
       "token",
-
       "password",
-
       "apiKey",
-
       "accessToken",
-
       "refreshToken",
-
-      "authorization"
-
+      "authorization",
     ]);
 
-
   const safe = {};
-
 
   for (
     const [key, value]
     of Object.entries(details)
   ) {
-
     if (
       blockedKeys.has(key)
     ) {
-
       continue;
-
     }
-
 
     safe[key] =
       sanitizeErrorDetails(
         value
       );
-
   }
 
-
   return safe;
-
 }
 
 
 /* =========================================================
    ENCRYPTION KEY MANAGEMENT
-=========================================================
-
-   Supported:
-
-   ENVIRONMENT_ENCRYPTION_KEY
-
-   and optionally:
-
-   ENVIRONMENT_ENCRYPTION_KEY_PREVIOUS
-
-   Current key is used for encryption.
-
-   Previous key is used only for decrypting old secrets
-   during key rotation.
-
-   This allows:
-
-      old secret
-          ↓
-      decrypt with previous key
-          ↓
-      re-encrypt with current key
-
 ========================================================= */
 
 function decodeEncryptionKey(
   rawKey,
   variableName
 ) {
-
-  if (
-    !rawKey
-  ) {
-
+  if (!rawKey) {
     throw new EnvironmentServiceError(
-
       `${variableName} is not configured`,
-
       "ENVIRONMENT_ENCRYPTION_KEY_MISSING",
-
       500
-
     );
-
   }
 
-
   const normalized =
-    String(rawKey)
-      .trim();
-
-
-  /*
-   * Preferred format:
-   * 64 hexadecimal characters = 32 bytes.
-   */
+    String(rawKey).trim();
 
   if (
     /^[0-9a-fA-F]{64}$/.test(
       normalized
     )
   ) {
-
     return Buffer.from(
       normalized,
       "hex"
     );
-
   }
 
-
-  /*
-   * Optional base64 format.
-   */
-
   try {
-
     const decoded =
       Buffer.from(
         normalized,
         "base64"
       );
 
-
     if (
       decoded.length === 32
     ) {
-
       return decoded;
-
     }
-
-  } catch (
-    error
-  ) {
-
-    /*
-     * Fall through.
-     */
-
+  } catch {
+    // Fall through.
   }
 
-
   throw new EnvironmentServiceError(
-
     `${variableName} must be a 32-byte hexadecimal or base64 key`,
-
     "ENVIRONMENT_ENCRYPTION_KEY_INVALID",
-
     500
-
   );
-
 }
 
 
 function getCurrentEncryptionKey() {
-
   return decodeEncryptionKey(
-
-    process.env.ENVIRONMENT_ENCRYPTION_KEY,
-
+    process.env
+      .ENVIRONMENT_ENCRYPTION_KEY,
     "ENVIRONMENT_ENCRYPTION_KEY"
-
   );
-
 }
 
 
 function getPreviousEncryptionKey() {
-
   const rawKey =
     process.env
       .ENVIRONMENT_ENCRYPTION_KEY_PREVIOUS;
 
-
-  if (
-    !rawKey
-  ) {
-
+  if (!rawKey) {
     return null;
-
   }
 
-
   return decodeEncryptionKey(
-
     rawKey,
-
     "ENVIRONMENT_ENCRYPTION_KEY_PREVIOUS"
-
   );
-
 }
 
 
 /* =========================================================
    ENCRYPTION CONTEXT
-=========================================================
-
-   Authenticated Encryption Additional Data prevents an
-   encrypted value from being copied from one environment
-   variable to another without detection.
-
 ========================================================= */
 
-function createEncryptionContext(
-  {
-    userId,
-    projectId,
-    environmentName,
-    variableKey
-  }
-) {
-
+function createEncryptionContext({
+  userId,
+  projectId,
+  environmentName,
+  variableKey,
+}) {
   return [
-
-    String(
-      userId || ""
-    ),
-
-    String(
-      projectId || ""
-    ),
-
+    String(userId || ""),
+    String(projectId || ""),
     normalizeEnvironmentName(
       environmentName
     ),
-
     normalizeVariableKey(
       variableKey
-    )
-
+    ),
   ].join("|");
-
 }
 
 
@@ -490,92 +320,55 @@ function encryptSecret(
   plaintext,
   context
 ) {
-
   if (
     plaintext === null ||
     plaintext === undefined
   ) {
-
     return "";
-
   }
-
 
   const key =
     getCurrentEncryptionKey();
-
 
   const iv =
     crypto.randomBytes(
       IV_LENGTH
     );
 
-
   const cipher =
     crypto.createCipheriv(
-
       ENCRYPTION_ALGORITHM,
-
       key,
-
       iv
-
     );
 
-
-  /*
-   * Bind ciphertext to the exact environment/variable.
-   */
-
-  if (
-    context
-  ) {
-
+  if (context) {
     cipher.setAAD(
       Buffer.from(
         String(context),
         "utf8"
       )
     );
-
   }
-
 
   const encrypted =
     Buffer.concat([
-
       cipher.update(
         String(plaintext),
         "utf8"
       ),
-
-      cipher.final()
-
+      cipher.final(),
     ]);
-
 
   const authTag =
     cipher.getAuthTag();
 
-
-  /*
-   * v2:
-   *
-   * v2:iv:authTag:ciphertext
-   */
-
   return [
-
     ENCRYPTION_VERSION,
-
     iv.toString("base64"),
-
     authTag.toString("base64"),
-
-    encrypted.toString("base64")
-
+    encrypted.toString("base64"),
   ].join(":");
-
 }
 
 
@@ -587,71 +380,42 @@ function decryptSecret(
   encryptedPayload,
   context
 ) {
-
-  if (
-    !encryptedPayload
-  ) {
-
+  if (!encryptedPayload) {
     return "";
-
   }
-
 
   const parts =
     String(
       encryptedPayload
     ).split(":");
 
-
   if (
     parts.length !== 4
   ) {
-
     throw new EnvironmentServiceError(
-
       "Invalid encrypted environment value",
-
       "INVALID_ENCRYPTED_VALUE",
-
       500
-
     );
-
   }
-
 
   const [
-
     version,
-
     ivBase64,
-
     authTagBase64,
-
-    encryptedBase64
-
+    encryptedBase64,
   ] = parts;
 
-
   if (
-    version !==
-      ENCRYPTION_VERSION &&
-    version !==
-      LEGACY_ENCRYPTION_VERSION
+    version !== ENCRYPTION_VERSION &&
+    version !== LEGACY_ENCRYPTION_VERSION
   ) {
-
     throw new EnvironmentServiceError(
-
       "Unsupported environment encryption version",
-
       "UNSUPPORTED_ENCRYPTION_VERSION",
-
       500
-
     );
-
   }
-
 
   const iv =
     Buffer.from(
@@ -659,13 +423,11 @@ function decryptSecret(
       "base64"
     );
 
-
   const authTag =
     Buffer.from(
       authTagBase64,
       "base64"
     );
-
 
   const encrypted =
     Buffer.from(
@@ -673,198 +435,100 @@ function decryptSecret(
       "base64"
     );
 
-
   if (
-    iv.length !==
-    IV_LENGTH
+    iv.length !== IV_LENGTH
   ) {
-
     throw new EnvironmentServiceError(
-
       "Invalid environment encryption IV",
-
       "INVALID_ENCRYPTION_IV",
-
       500
-
     );
-
   }
-
 
   if (
-    authTag.length !==
-    AUTH_TAG_LENGTH
+    authTag.length !== AUTH_TAG_LENGTH
   ) {
-
     throw new EnvironmentServiceError(
-
       "Invalid environment encryption authentication tag",
-
       "INVALID_ENCRYPTION_TAG",
-
       500
-
     );
-
   }
-
-
-  /*
-   * v2 uses authenticated context.
-   */
 
   const keys = [];
 
-
   if (
-    version ===
-    ENCRYPTION_VERSION
+    version === ENCRYPTION_VERSION
   ) {
-
     keys.push({
-
       key:
         getCurrentEncryptionKey(),
-
-      isCurrent:
-        true
-
+      isCurrent: true,
     });
-
-
-    /*
-     * During key rotation, allow the previous key to
-     * decrypt old values if configured.
-     */
 
     const previousKey =
       getPreviousEncryptionKey();
 
-
-    if (
-      previousKey
-    ) {
-
+    if (previousKey) {
       keys.push({
-
-        key:
-          previousKey,
-
-        isCurrent:
-          false
-
+        key: previousKey,
+        isCurrent: false,
       });
-
     }
-
   } else {
-
-    /*
-     * v1 did not use authenticated context.
-     *
-     * It is retained only for migration compatibility.
-     */
-
     keys.push({
-
       key:
         getCurrentEncryptionKey(),
-
-      isCurrent:
-        true
-
+      isCurrent: true,
     });
-
 
     const previousKey =
       getPreviousEncryptionKey();
 
-
-    if (
-      previousKey
-    ) {
-
+    if (previousKey) {
       keys.push({
-
-        key:
-          previousKey,
-
-        isCurrent:
-          false
-
+        key: previousKey,
+        isCurrent: false,
       });
-
     }
-
   }
 
-
-  let lastError =
-    null;
-
-
   for (
-    const keyEntry
-    of keys
+    const keyEntry of keys
   ) {
-
     try {
-
       const decipher =
         crypto.createDecipheriv(
-
           ENCRYPTION_ALGORITHM,
-
           keyEntry.key,
-
           iv
-
         );
 
-
-      /*
-       * v2 verifies context.
-       *
-       * v1 deliberately skips AAD because legacy values
-       * did not have it.
-       */
-
       if (
-        version ===
-        ENCRYPTION_VERSION &&
+        version === ENCRYPTION_VERSION &&
         context
       ) {
-
         decipher.setAAD(
           Buffer.from(
             String(context),
             "utf8"
           )
         );
-
       }
-
 
       decipher.setAuthTag(
         authTag
       );
 
-
       const decrypted =
         Buffer.concat([
-
           decipher.update(
             encrypted
           ),
-
-          decipher.final()
-
+          decipher.final(),
         ]);
 
-
       return {
-
         value:
           decrypted.toString(
             "utf8"
@@ -873,36 +537,18 @@ function decryptSecret(
         usedCurrentKey:
           keyEntry.isCurrent,
 
-        version
-
+        version,
       };
-
-    } catch (
-      error
-    ) {
-
-      lastError =
-        error;
-
+    } catch {
+      // Try next configured key.
     }
-
   }
 
-
-  /*
-   * Never expose crypto failure details.
-   */
-
   throw new EnvironmentServiceError(
-
     "Unable to decrypt environment secret",
-
     "SECRET_DECRYPTION_FAILED",
-
     500
-
   );
-
 }
 
 
@@ -910,58 +556,35 @@ function decryptSecret(
    MASK SECRET
 ========================================================= */
 
-function maskSecret(
-  value
-) {
-
+function maskSecret(value) {
   if (
     value === null ||
     value === undefined ||
     value === ""
   ) {
-
     return "";
-
   }
-
 
   const stringValue =
     String(value);
 
-
   if (
     stringValue.length <= 4
   ) {
-
     return "••••";
-
   }
-
 
   if (
     stringValue.length <= 8
   ) {
-
     return "••••••••";
-
   }
 
-
   return (
-
-    stringValue.slice(
-      0,
-      2
-    ) +
-
+    stringValue.slice(0, 2) +
     "••••••••" +
-
-    stringValue.slice(
-      -2
-    )
-
+    stringValue.slice(-2)
   );
-
 }
 
 
@@ -972,120 +595,67 @@ function maskSecret(
 function normalizeEnvironmentName(
   value
 ) {
-
   const normalized =
-    String(
-      value || ""
-    )
+    String(value || "")
       .trim()
       .toLowerCase();
-
 
   if (
     !ENVIRONMENT_NAMES.includes(
       normalized
     )
   ) {
-
     throw new EnvironmentServiceError(
-
       `Invalid environment: ${normalized}`,
-
       "INVALID_ENVIRONMENT",
-
       400
-
     );
-
   }
 
-
   return normalized;
-
 }
 
 
-/* =========================================================
-   VARIABLE KEY
-========================================================= */
-
-function normalizeVariableKey(
-  key
-) {
-
+function normalizeVariableKey(key) {
   const normalized =
-    String(
-      key || ""
-    ).trim();
+    String(key || "").trim();
 
-
-  if (
-    !normalized
-  ) {
-
+  if (!normalized) {
     throw new EnvironmentServiceError(
-
       "Environment variable key is required",
-
       "ENVIRONMENT_VARIABLE_KEY_REQUIRED",
-
       400
-
     );
-
   }
-
 
   if (
     normalized.length >
     MAX_KEY_LENGTH
   ) {
-
     throw new EnvironmentServiceError(
-
       "Environment variable key is too long",
-
       "ENVIRONMENT_VARIABLE_KEY_TOO_LONG",
-
       400
-
     );
-
   }
-
 
   if (
     !/^[A-Za-z_][A-Za-z0-9_]*$/.test(
       normalized
     )
   ) {
-
     throw new EnvironmentServiceError(
-
       `Invalid environment variable name: ${normalized}`,
-
       "INVALID_ENVIRONMENT_VARIABLE_KEY",
-
       400
-
     );
-
   }
 
-
   return normalized;
-
 }
 
 
-/* =========================================================
-   VARIABLE TYPE
-========================================================= */
-
-function normalizeVariableType(
-  value
-) {
-
+function normalizeVariableType(value) {
   const normalized =
     String(
       value || "string"
@@ -1093,39 +663,23 @@ function normalizeVariableType(
       .trim()
       .toLowerCase();
 
-
   if (
     !VARIABLE_TYPES.includes(
       normalized
     )
   ) {
-
     throw new EnvironmentServiceError(
-
       `Invalid environment variable type: ${normalized}`,
-
       "INVALID_VARIABLE_TYPE",
-
       400
-
     );
-
   }
 
-
   return normalized;
-
 }
 
 
-/* =========================================================
-   VARIABLE SCOPE
-========================================================= */
-
-function normalizeVariableScope(
-  value
-) {
-
+function normalizeVariableScope(value) {
   const normalized =
     String(
       value || "runtime"
@@ -1133,171 +687,102 @@ function normalizeVariableScope(
       .trim()
       .toLowerCase();
 
-
   if (
     !VARIABLE_SCOPES.includes(
       normalized
     )
   ) {
-
     throw new EnvironmentServiceError(
-
       `Invalid environment variable scope: ${normalized}`,
-
       "INVALID_VARIABLE_SCOPE",
-
       400
-
     );
-
   }
 
-
   return normalized;
-
 }
 
-
-/* =========================================================
-   VARIABLE VALUE
-========================================================= */
 
 function normalizeValue(
   value,
   type
 ) {
-
   if (
     value === null ||
     value === undefined
   ) {
-
     return "";
-
   }
-
 
   const stringValue =
     String(value);
-
 
   if (
     stringValue.length >
     MAX_VALUE_LENGTH
   ) {
-
     throw new EnvironmentServiceError(
-
       "Environment variable value is too large",
-
       "ENVIRONMENT_VARIABLE_VALUE_TOO_LARGE",
-
       400
-
     );
-
   }
 
-
-  switch (
-    type
-  ) {
-
-    case "number": {
-
+  switch (type) {
+    case "number":
       if (
         stringValue.trim() === "" ||
         !Number.isFinite(
           Number(stringValue)
         )
       ) {
-
         throw new EnvironmentServiceError(
-
           "Environment variable must contain a valid number",
-
           "INVALID_NUMBER_VARIABLE",
-
           400
-
         );
-
       }
-
       break;
 
-    }
-
-
-    case "boolean": {
-
+    case "boolean":
       if (
         ![
           "true",
-          "false"
+          "false",
         ].includes(
           stringValue
             .trim()
             .toLowerCase()
         )
       ) {
-
         throw new EnvironmentServiceError(
-
           "Boolean environment variable must be true or false",
-
           "INVALID_BOOLEAN_VARIABLE",
-
           400
-
         );
-
       }
-
       break;
 
-    }
-
-
-    case "json": {
-
+    case "json":
       try {
-
         JSON.parse(
           stringValue
         );
-
-      } catch (
-        error
-      ) {
-
+      } catch {
         throw new EnvironmentServiceError(
-
           "Environment variable contains invalid JSON",
-
           "INVALID_JSON_VARIABLE",
-
           400
-
         );
-
       }
-
       break;
-
-    }
-
 
     case "string":
-
     default:
       break;
-
   }
 
-
   return stringValue;
-
 }
 
 
@@ -1308,33 +793,23 @@ function normalizeValue(
 function normalizeSource(
   source = {}
 ) {
-
   const type =
     String(
       source.type ||
-      "manual"
+        "manual"
     )
       .trim()
       .toLowerCase();
 
-
   const allowedTypes = [
-
     "manual",
-
     "github",
-
     "import",
-
     "generated",
-
-    "system"
-
+    "system",
   ];
 
-
   return {
-
     type:
       allowedTypes.includes(
         type
@@ -1358,10 +833,20 @@ function normalizeSource(
       safeLimitedString(
         source.commitSha,
         200
-      )
+      ),
 
+    provider:
+      safeLimitedString(
+        source.provider,
+        100
+      ),
+
+    repository:
+      safeLimitedString(
+        source.repository,
+        500
+      ),
   };
-
 }
 
 
@@ -1373,24 +858,16 @@ function safeLimitedString(
   value,
   maxLength
 ) {
-
   if (
     value === null ||
     value === undefined
   ) {
-
     return "";
-
   }
-
 
   return String(value)
     .trim()
-    .slice(
-      0,
-      maxLength
-    );
-
+    .slice(0, maxLength);
 }
 
 
@@ -1403,64 +880,37 @@ function createOwnershipQuery(
   projectId,
   environmentName
 ) {
-
-  if (
-    !userId
-  ) {
-
+  if (!userId) {
     throw new EnvironmentServiceError(
-
       "User ID is required",
-
       "USER_ID_REQUIRED",
-
       400
-
     );
-
   }
 
-
-  if (
-    !projectId
-  ) {
-
+  if (!projectId) {
     throw new EnvironmentServiceError(
-
       "Project ID is required",
-
       "PROJECT_ID_REQUIRED",
-
       400
-
     );
-
   }
-
 
   const query = {
-
     userId,
-
-    projectId
-
+    projectId,
   };
-
 
   if (
     environmentName
   ) {
-
     query.name =
       normalizeEnvironmentName(
         environmentName
       );
-
   }
 
-
   return query;
-
 }
 
 
@@ -1471,11 +921,9 @@ function createOwnershipQuery(
 function applySecretProjection(
   query
 ) {
-
   return query.select(
     "+variables.encryptedValue +variables.plainValue"
   );
-
 }
 
 
@@ -1483,15 +931,12 @@ function applySecretProjection(
    FIND ENVIRONMENT
 ========================================================= */
 
-async function findEnvironment(
-  {
-    userId,
-    projectId,
-    environmentName,
-    includeSecrets = false
-  }
-) {
-
+async function findEnvironment({
+  userId,
+  projectId,
+  environmentName,
+  includeSecrets = false,
+}) {
   const query =
     createOwnershipQuery(
       userId,
@@ -1499,48 +944,87 @@ async function findEnvironment(
       environmentName
     );
 
-
   let mongooseQuery =
     Environment.findOne(
       query
     );
 
-
   if (
     includeSecrets
   ) {
-
     mongooseQuery =
       applySecretProjection(
         mongooseQuery
       );
-
   }
-
 
   const environment =
     await mongooseQuery.exec();
 
-
-  if (
-    !environment
-  ) {
-
+  if (!environment) {
     throw new EnvironmentServiceError(
-
       "Environment not found",
-
       "ENVIRONMENT_NOT_FOUND",
-
       404
-
     );
-
   }
 
-
   return environment;
+}
 
+
+/* =========================================================
+   EXPECTED VERSION
+========================================================= */
+
+function assertExpectedVersion(
+  environment,
+  expectedVersion
+) {
+  if (
+    expectedVersion ===
+      undefined ||
+    expectedVersion === null ||
+    expectedVersion === ""
+  ) {
+    return;
+  }
+
+  const expected =
+    Number(
+      expectedVersion
+    );
+
+  if (
+    !Number.isInteger(expected) ||
+    expected < 1
+  ) {
+    throw new EnvironmentServiceError(
+      "Invalid expected environment version",
+      "INVALID_EXPECTED_VERSION",
+      400
+    );
+  }
+
+  const actual =
+    Number(
+      environment.version
+    );
+
+  if (
+    Number.isInteger(actual) &&
+    actual !== expected
+  ) {
+    throw new EnvironmentServiceError(
+      "Environment was modified by another request. Please retry with the latest version.",
+      "ENVIRONMENT_VERSION_CONFLICT",
+      409,
+      {
+        expectedVersion: expected,
+        currentVersion: actual,
+      }
+    );
+  }
 }
 
 
@@ -1548,110 +1032,71 @@ async function findEnvironment(
    CREATE ENVIRONMENT
 ========================================================= */
 
-async function createEnvironment(
-  {
-    userId,
-    projectId,
-    name,
-    displayName = "",
-    variables = [],
-    source = {},
-    audit = {}
-  }
-) {
-
+async function createEnvironment({
+  userId,
+  projectId,
+  name,
+  displayName = "",
+  description = "",
+  variables = [],
+  source = {},
+  audit = {},
+}) {
   const environmentName =
     normalizeEnvironmentName(
       name
     );
 
-
   if (
-    !Array.isArray(
-      variables
-    )
+    !Array.isArray(variables)
   ) {
-
     throw new EnvironmentServiceError(
-
       "Variables must be an array",
-
       "INVALID_VARIABLES",
-
       400
-
     );
-
   }
-
 
   if (
     variables.length >
     MAX_VARIABLES
   ) {
-
     throw new EnvironmentServiceError(
-
       `Maximum ${MAX_VARIABLES} environment variables are allowed`,
-
       "TOO_MANY_VARIABLES",
-
       400
-
     );
-
   }
-
 
   const existing =
     await Environment.findOne({
-
       userId,
-
       projectId,
-
       name:
-        environmentName
-
+        environmentName,
     });
 
-
-  if (
-    existing
-  ) {
-
+  if (existing) {
     throw new EnvironmentServiceError(
-
       `Environment already exists: ${environmentName}`,
-
       "ENVIRONMENT_ALREADY_EXISTS",
-
       409
-
     );
-
   }
-
 
   const normalizedVariables =
     buildVariableDocuments(
       variables,
       {
         userId,
-
         projectId,
-
-        environmentName
-
+        environmentName,
       }
     );
 
-
   const environment =
     new Environment({
-
       userId,
-
       projectId,
 
       name:
@@ -1663,6 +1108,12 @@ async function createEnvironment(
           environmentName
         ),
 
+      description:
+        safeLimitedString(
+          description,
+          MAX_DESCRIPTION_LENGTH
+        ),
+
       variables:
         normalizedVariables,
 
@@ -1672,7 +1123,6 @@ async function createEnvironment(
         ),
 
       audit: {
-
         createdBy:
           audit.createdBy ||
           userId,
@@ -1685,57 +1135,33 @@ async function createEnvironment(
           "created",
 
         lastActionAt:
-          new Date()
-
-      }
-
+          new Date(),
+      },
     });
-
 
   recalculateValidation(
     environment
   );
 
-
   try {
-
     await environment.save();
-
-  } catch (
-    error
-  ) {
-
-    /*
-     * Handles concurrent environment creation against the
-     * unique projectId + name index.
-     */
-
+  } catch (error) {
     if (
       error?.code === 11000
     ) {
-
       throw new EnvironmentServiceError(
-
         "Environment already exists",
-
         "ENVIRONMENT_ALREADY_EXISTS",
-
         409
-
       );
-
     }
 
-
     throw error;
-
   }
-
 
   return getSafeEnvironment(
     environment
   );
-
 }
 
 
@@ -1743,31 +1169,21 @@ async function createEnvironment(
    GET ENVIRONMENT
 ========================================================= */
 
-async function getEnvironment(
-  {
-    userId,
-    projectId,
-    name
-  }
-) {
-
+async function getEnvironment({
+  userId,
+  projectId,
+  environmentName,
+}) {
   const environment =
     await findEnvironment({
-
       userId,
-
       projectId,
-
-      environmentName:
-        name
-
+      environmentName,
     });
-
 
   return getSafeEnvironment(
     environment
   );
-
 }
 
 
@@ -1775,41 +1191,43 @@ async function getEnvironment(
    LIST ENVIRONMENTS
 ========================================================= */
 
-async function listEnvironments(
-  {
-    userId,
-    projectId
-  }
-) {
-
+async function listEnvironments({
+  userId,
+  projectId,
+  includeArchived = false,
+}) {
   createOwnershipQuery(
     userId,
     projectId
   );
 
+  const filter = {
+    userId,
+    projectId,
+  };
+
+  if (
+    !includeArchived
+  ) {
+    filter.status = {
+      $ne: "archived",
+    };
+  }
 
   const environments =
     await Environment
-      .find({
-
-        userId,
-
-        projectId
-
-      })
+      .find(filter)
       .sort({
-        name: 1
+        name: 1,
       })
       .exec();
 
-
   return environments.map(
-    environment =>
+    (environment) =>
       getSafeEnvironment(
         environment
       )
   );
-
 }
 
 
@@ -1817,61 +1235,54 @@ async function listEnvironments(
    ADD VARIABLE
 ========================================================= */
 
-async function addVariable(
-  {
-    userId,
-    projectId,
-    environmentName,
-    key,
-    value,
-    isSecret = false,
-    required = false,
-    type = "string",
-    scope = "runtime",
-    description = "",
-    enabled = true,
-    source = "manual",
-    sourceReference = ""
-  }
-) {
-
+async function addVariable({
+  userId,
+  projectId,
+  environmentName,
+  key,
+  value,
+  isSecret = false,
+  required = false,
+  type = "string",
+  scope = "runtime",
+  description = "",
+  enabled = true,
+  source = "manual",
+  sourceReference = "",
+  expectedVersion,
+  updatedBy,
+}) {
   const environment =
     await findEnvironment({
-
       userId,
-
       projectId,
-
       environmentName,
-
-      includeSecrets:
-        true
-
+      includeSecrets: true,
     });
 
+  assertExpectedVersion(
+    environment,
+    expectedVersion
+  );
 
   assertMutableEnvironment(
     environment
   );
-
 
   const normalizedKey =
     normalizeVariableKey(
       key
     );
 
-
   const normalizedType =
     normalizeVariableType(
       type
     );
 
-
   const normalizedScope =
     normalizeVariableScope(
       scope
     );
-
 
   const normalizedValue =
     normalizeValue(
@@ -1879,59 +1290,33 @@ async function addVariable(
       normalizedType
     );
 
-
-  const normalizedDescription =
-    safeLimitedString(
-      description,
-      MAX_DESCRIPTION_LENGTH
-    );
-
-
   if (
     environment.variables.length >=
     MAX_VARIABLES
   ) {
-
     throw new EnvironmentServiceError(
-
       `Maximum ${MAX_VARIABLES} environment variables are allowed`,
-
       "TOO_MANY_VARIABLES",
-
       400
-
     );
-
   }
-
 
   const duplicate =
     environment.variables.find(
-      variable =>
+      (variable) =>
         variable.key ===
         normalizedKey
     );
 
-
-  if (
-    duplicate
-  ) {
-
+  if (duplicate) {
     throw new EnvironmentServiceError(
-
       `Environment variable already exists: ${normalizedKey}`,
-
       "ENVIRONMENT_VARIABLE_EXISTS",
-
       409
-
     );
-
   }
 
-
   const variableDocument = {
-
     key:
       normalizedKey,
 
@@ -1948,7 +1333,10 @@ async function addVariable(
       normalizedScope,
 
     description:
-      normalizedDescription,
+      safeLimitedString(
+        description,
+        MAX_DESCRIPTION_LENGTH
+      ),
 
     validationStatus:
       "unknown",
@@ -1963,11 +1351,9 @@ async function addVariable(
       Boolean(enabled),
 
     metadata: {
-
       source:
         safeLimitedString(
-          source ||
-          "manual",
+          source || "manual",
           100
         ),
 
@@ -1975,56 +1361,43 @@ async function addVariable(
         safeLimitedString(
           sourceReference,
           MAX_SOURCE_REFERENCE_LENGTH
-        )
-
-    }
-
+        ),
+    },
   };
-
 
   writeVariableValue(
     variableDocument,
     normalizedValue,
     {
       userId,
-
       projectId,
-
       environmentName,
-
       variableKey:
-        normalizedKey
-
+        normalizedKey,
     }
   );
-
 
   environment.variables.push(
     variableDocument
   );
 
-
   touchEnvironment(
     environment,
-    userId,
+    updatedBy || userId,
     "variable_added"
   );
-
 
   recalculateValidation(
     environment
   );
 
-
   await saveWithConcurrencyProtection(
     environment
   );
 
-
   return getSafeEnvironment(
     environment
   );
-
 }
 
 
@@ -2032,131 +1405,100 @@ async function addVariable(
    UPDATE VARIABLE
 ========================================================= */
 
-async function updateVariable(
-  {
-    userId,
-    projectId,
-    environmentName,
-    key,
-    newKey,
-    value,
-    isSecret,
-    required,
-    type,
-    scope,
-    description,
-    enabled
-  }
-) {
-
+async function updateVariable({
+  userId,
+  projectId,
+  environmentName,
+  key,
+  newKey,
+  value,
+  isSecret,
+  required,
+  type,
+  scope,
+  description,
+  enabled,
+  source,
+  sourceReference,
+  expectedVersion,
+  updatedBy,
+}) {
   const environment =
     await findEnvironment({
-
       userId,
-
       projectId,
-
       environmentName,
-
-      includeSecrets:
-        true
-
+      includeSecrets: true,
     });
 
+  assertExpectedVersion(
+    environment,
+    expectedVersion
+  );
 
   assertMutableEnvironment(
     environment
   );
-
 
   const currentKey =
     normalizeVariableKey(
       key
     );
 
-
   const variable =
     environment.variables.find(
-      item =>
+      (item) =>
         item.key ===
         currentKey
     );
 
-
-  if (
-    !variable
-  ) {
-
+  if (!variable) {
     throw new EnvironmentServiceError(
-
       `Environment variable not found: ${currentKey}`,
-
       "ENVIRONMENT_VARIABLE_NOT_FOUND",
-
       404
-
     );
-
   }
-
 
   let finalKey =
     variable.key;
-
 
   if (
     newKey !== undefined &&
     newKey !== null &&
     String(newKey).trim() !== ""
   ) {
-
     finalKey =
       normalizeVariableKey(
         newKey
       );
 
-
     const duplicate =
       environment.variables.find(
-        item =>
+        (item) =>
           item !== variable &&
           item.key ===
-          finalKey
+            finalKey
       );
 
-
-    if (
-      duplicate
-    ) {
-
+    if (duplicate) {
       throw new EnvironmentServiceError(
-
         `Environment variable already exists: ${finalKey}`,
-
         "ENVIRONMENT_VARIABLE_EXISTS",
-
         409
-
       );
-
     }
-
   }
-
 
   const previousSecret =
     Boolean(
       variable.isSecret
     );
 
-
   const nextSecret =
     isSecret === undefined
       ? previousSecret
-      : Boolean(
-          isSecret
-        );
-
+      : Boolean(isSecret);
 
   const nextType =
     type === undefined
@@ -2165,7 +1507,6 @@ async function updateVariable(
           type
         );
 
-
   const nextScope =
     scope === undefined
       ? variable.scope
@@ -2173,168 +1514,149 @@ async function updateVariable(
           scope
         );
 
-
-  /*
-   * Determine the value that should survive the update.
-   *
-   * If no new value is supplied, preserve the old value.
-   */
-
-  let finalValue = null;
-
+  let finalValue = "";
 
   if (
     value !== undefined
   ) {
-
     finalValue =
       normalizeValue(
         value,
         nextType
       );
-
   } else if (
     previousSecret
   ) {
-
     const decrypted =
       decryptSecret(
-
         variable.encryptedValue,
-
         createEncryptionContext({
-
           userId,
-
           projectId,
-
           environmentName,
-
           variableKey:
-            variable.key
-
+            variable.key,
         })
-
       );
-
 
     finalValue =
       normalizeValue(
         decrypted.value,
         nextType
       );
-
   } else {
-
     finalValue =
       normalizeValue(
         variable.plainValue || "",
         nextType
       );
-
   }
 
-
+  /*
+   * If a secret is being renamed, its encrypted value
+   * MUST be re-encrypted using the new variable key.
+   */
   variable.key =
     finalKey;
-
 
   variable.type =
     nextType;
 
-
   variable.scope =
     nextScope;
 
-
   variable.isSecret =
     nextSecret;
-
 
   variable.required =
     required === undefined
       ? Boolean(
           variable.required
         )
-      : Boolean(
-          required
-        );
-
+      : Boolean(required);
 
   variable.enabled =
     enabled === undefined
       ? Boolean(
           variable.enabled
         )
-      : Boolean(
-          enabled
-        );
-
+      : Boolean(enabled);
 
   if (
     description !== undefined
   ) {
-
     variable.description =
       safeLimitedString(
         description,
         MAX_DESCRIPTION_LENGTH
       );
-
   }
 
+  if (
+    source !== undefined
+  ) {
+    variable.metadata =
+      variable.metadata || {};
+
+    variable.metadata.source =
+      safeLimitedString(
+        source,
+        100
+      );
+  }
+
+  if (
+    sourceReference !==
+    undefined
+  ) {
+    variable.metadata =
+      variable.metadata || {};
+
+    variable.metadata.sourceReference =
+      safeLimitedString(
+        sourceReference,
+        MAX_SOURCE_REFERENCE_LENGTH
+      );
+  }
 
   writeVariableValue(
     variable,
     finalValue,
     {
-
       userId,
-
       projectId,
-
       environmentName,
-
       variableKey:
-        finalKey
-
+        finalKey,
     }
   );
-
 
   variable.validationStatus =
     "unknown";
 
-
   variable.validationMessage =
     "";
-
 
   variable.lastValidatedAt =
     null;
 
-
   touchEnvironment(
     environment,
-    userId,
+    updatedBy || userId,
     "variable_updated"
   );
-
 
   recalculateValidation(
     environment
   );
 
-
   await saveWithConcurrencyProtection(
     environment
   );
 
-
   return getSafeEnvironment(
     environment
   );
-
 }
 
 
@@ -2342,89 +1664,73 @@ async function updateVariable(
    DELETE VARIABLE
 ========================================================= */
 
-async function deleteVariable(
-  {
-    userId,
-    projectId,
-    environmentName,
-    key
-  }
-) {
-
+async function deleteVariable({
+  userId,
+  projectId,
+  environmentName,
+  key,
+  expectedVersion,
+  updatedBy,
+}) {
   const environment =
     await findEnvironment({
-
       userId,
-
       projectId,
-
-      environmentName
-
+      environmentName,
     });
 
+  assertExpectedVersion(
+    environment,
+    expectedVersion
+  );
 
   assertMutableEnvironment(
     environment
   );
-
 
   const normalizedKey =
     normalizeVariableKey(
       key
     );
 
-
   const initialLength =
     environment.variables.length;
 
-
   environment.variables =
     environment.variables.filter(
-      variable =>
+      (variable) =>
         variable.key !==
         normalizedKey
     );
-
 
   if (
     environment.variables.length ===
     initialLength
   ) {
-
     throw new EnvironmentServiceError(
-
       `Environment variable not found: ${normalizedKey}`,
-
       "ENVIRONMENT_VARIABLE_NOT_FOUND",
-
       404
-
     );
-
   }
-
 
   touchEnvironment(
     environment,
-    userId,
+    updatedBy || userId,
     "variable_deleted"
   );
-
 
   recalculateValidation(
     environment
   );
 
-
   await saveWithConcurrencyProtection(
     environment
   );
 
-
   return getSafeEnvironment(
     environment
   );
-
 }
 
 
@@ -2432,49 +1738,42 @@ async function deleteVariable(
    VALIDATE ENVIRONMENT
 ========================================================= */
 
-async function validateEnvironment(
-  {
-    userId,
-    projectId,
-    environmentName
-  }
-) {
-
+async function validateEnvironment({
+  userId,
+  projectId,
+  environmentName,
+  expectedVersion,
+  updatedBy,
+}) {
   const environment =
     await findEnvironment({
-
       userId,
-
       projectId,
-
       environmentName,
-
-      includeSecrets:
-        true
-
+      includeSecrets: true,
     });
 
+  assertExpectedVersion(
+    environment,
+    expectedVersion
+  );
 
   const result =
     recalculateValidation(
       environment
     );
 
-
   touchEnvironment(
     environment,
-    userId,
+    updatedBy || userId,
     "validated"
   );
-
 
   await saveWithConcurrencyProtection(
     environment
   );
 
-
   return {
-
     environmentId:
       environment._id,
 
@@ -2484,10 +1783,99 @@ async function validateEnvironment(
     environment:
       environment.name,
 
-    ...result
+    validation:
+      result,
 
+    environmentData:
+      getSafeEnvironment(
+        environment
+      ),
   };
+}
 
+
+/* =========================================================
+   DEPLOYMENT READINESS
+=========================================================
+
+   IMPORTANT:
+
+   This method NEVER resolves or returns plaintext secrets.
+
+   It is safe for authenticated API/controller usage.
+
+========================================================= */
+
+async function getDeploymentReadiness({
+  userId,
+  projectId,
+  environmentName,
+}) {
+  const environment =
+    await findEnvironment({
+      userId,
+      projectId,
+      environmentName,
+      includeSecrets: true,
+    });
+
+  const validation =
+    recalculateValidation(
+      environment
+    );
+
+  const active =
+    environment.status ===
+    "active";
+
+  const valid =
+    validation.status ===
+    "valid";
+
+  const deployable =
+    active &&
+    valid;
+
+  return {
+    ready:
+      deployable,
+
+    deployable,
+
+    status:
+      deployable
+        ? "ready"
+        : "not_ready",
+
+    environment: {
+      id:
+        environment._id,
+
+      projectId:
+        environment.projectId,
+
+      name:
+        environment.name,
+
+      status:
+        environment.status,
+
+      version:
+        environment.version,
+
+      deployedVersion:
+        environment.deployedVersion,
+    },
+
+    validation,
+
+    reason:
+      !active
+        ? "Environment is not active"
+        : !valid
+          ? validation.message
+          : "Environment is ready for deployment",
+  };
 }
 
 
@@ -2495,106 +1883,97 @@ async function validateEnvironment(
    RESOLVE FOR DEPLOYMENT
 =========================================================
 
-   This is the controlled secret boundary.
+   THIS METHOD IS TRUSTED INTERNAL BOUNDARY ONLY.
 
-   ONLY deployment/infrastructure code should call this.
+   Required:
+
+      trustedContext === true
+      workflowId
 
    Returned variables contain plaintext secrets.
 
-   The caller MUST:
-   - never log them
-   - never persist them
-   - never send them to AI
-   - never return them to browser
-
 ========================================================= */
 
-async function resolveForDeployment(
-  {
-    userId,
-    projectId,
-    environmentName,
-    scope = "both",
-    deploymentId = ""
+async function resolveForDeployment({
+  userId,
+  projectId,
+  environmentName,
+  scope = "both",
+  deploymentId = "",
+  workflowId,
+  trustedContext = false,
+}) {
+  if (
+    trustedContext !== true
+  ) {
+    throw new EnvironmentServiceError(
+      "Deployment secret resolution requires trusted deployment context",
+      "TRUSTED_DEPLOYMENT_CONTEXT_REQUIRED",
+      403
+    );
   }
-) {
+
+  if (
+    !workflowId ||
+    String(workflowId).trim() === ""
+  ) {
+    throw new EnvironmentServiceError(
+      "Deployment workflow ID is required for secret resolution",
+      "DEPLOYMENT_WORKFLOW_ID_REQUIRED",
+      400
+    );
+  }
 
   const environment =
     await findEnvironment({
-
       userId,
-
       projectId,
-
       environmentName,
-
-      includeSecrets:
-        true
-
+      includeSecrets: true,
     });
-
 
   assertDeployableEnvironment(
     environment
   );
-
 
   const normalizedScope =
     normalizeVariableScope(
       scope
     );
 
-
   const validation =
     recalculateValidation(
       environment
     );
 
-
   if (
     validation.status !==
     "valid"
   ) {
-
     throw new EnvironmentServiceError(
-
       "Environment is not valid for deployment",
-
       "ENVIRONMENT_NOT_DEPLOYABLE",
-
       409,
-
       {
-
         environment:
           environment.name,
 
-        validation
-
+        validation,
       }
-
     );
-
   }
 
-
-  const resolved =
-    {};
-
+  const resolved = {};
 
   for (
     const variable
     of environment.variables
   ) {
-
     if (
       !variable.enabled
     ) {
-
       continue;
-
     }
-
 
     if (
       !scopeMatches(
@@ -2602,71 +1981,44 @@ async function resolveForDeployment(
         normalizedScope
       )
     ) {
-
       continue;
-
     }
-
 
     let value = "";
 
-
     const context =
       createEncryptionContext({
-
         userId,
-
         projectId,
-
         environmentName:
           environment.name,
-
         variableKey:
-          variable.key
-
+          variable.key,
       });
-
 
     if (
       variable.isSecret
     ) {
-
       const decrypted =
         decryptSecret(
           variable.encryptedValue,
           context
         );
 
-
       value =
         decrypted.value;
-
     } else {
-
       value =
         variable.plainValue ||
         "";
-
     }
-
 
     resolved[
       variable.key
-    ] =
-      value;
-
+    ] = value;
   }
 
-
-  /*
-   * Deployment access itself is not written to normal
-   * application logs.
-   *
-   * We return metadata only.
-   */
-
   return {
-
     environmentId:
       environment._id,
 
@@ -2681,46 +2033,102 @@ async function resolveForDeployment(
 
     deploymentId:
       String(
-        deploymentId ||
-        ""
+        deploymentId || ""
+      ),
+
+    workflowId:
+      String(
+        workflowId
       ),
 
     variables:
-      resolved
-
+      resolved,
   };
-
 }
 
 
 /* =========================================================
    CREATE DEPLOYMENT SNAPSHOT
+=========================================================
+
+   Trusted deployment callers receive variables.
+
+   Non-trusted callers receive metadata only.
+
 ========================================================= */
 
-async function createDeploymentSnapshot(
-  {
-    userId,
-    projectId,
-    environmentName,
-    deploymentId = ""
+async function createDeploymentSnapshot({
+  userId,
+  projectId,
+  environmentName,
+  deploymentId = "",
+  workflowId = "",
+  trustedContext = false,
+}) {
+  if (
+    trustedContext !== true
+  ) {
+    const readiness =
+      await getDeploymentReadiness({
+        userId,
+        projectId,
+        environmentName,
+      });
+
+    return {
+      snapshot: {
+        environmentId:
+          readiness.environment.id,
+
+        projectId:
+          readiness.environment.projectId,
+
+        environment:
+          readiness.environment.name,
+
+        version:
+          readiness.environment.version,
+
+        deploymentId:
+          String(
+            deploymentId || ""
+          ),
+
+        readiness: {
+          ready:
+            readiness.ready,
+
+          deployable:
+            readiness.deployable,
+
+          status:
+            readiness.status,
+        },
+
+        includesSecrets:
+          false,
+      },
+    };
   }
-) {
 
-  return resolveForDeployment({
+  const resolved =
+    await resolveForDeployment({
+      userId,
+      projectId,
+      environmentName,
+      scope: "both",
+      deploymentId,
+      workflowId,
+      trustedContext: true,
+    });
 
-    userId,
-
-    projectId,
-
-    environmentName,
-
-    scope:
-      "both",
-
-    deploymentId
-
-  });
-
+  return {
+    snapshot: {
+      ...resolved,
+      includesSecrets:
+        true,
+    },
+  };
 }
 
 
@@ -2728,34 +2136,32 @@ async function createDeploymentSnapshot(
    MARK DEPLOYED
 ========================================================= */
 
-async function markDeployed(
-  {
-    userId,
-    projectId,
-    environmentName,
-    deploymentId,
-    version
-  }
-) {
-
+async function markDeployed({
+  userId,
+  projectId,
+  environmentName,
+  deploymentId,
+  version,
+  expectedVersion,
+  updatedBy,
+}) {
   const environment =
     await findEnvironment({
-
       userId,
-
       projectId,
-
-      environmentName
-
+      environmentName,
     });
 
+  assertExpectedVersion(
+    environment,
+    expectedVersion
+  );
 
   const deploymentVersion =
     Number(
       version ||
-      environment.version
+        environment.version
     );
-
 
   if (
     !Number.isInteger(
@@ -2763,41 +2169,26 @@ async function markDeployed(
     ) ||
     deploymentVersion < 1
   ) {
-
     throw new EnvironmentServiceError(
-
       "Invalid deployment environment version",
-
       "INVALID_DEPLOYMENT_VERSION",
-
       400
-
     );
-
   }
-
 
   if (
     deploymentVersion >
     environment.version
   ) {
-
     throw new EnvironmentServiceError(
-
       "Cannot mark a future environment version as deployed",
-
       "FUTURE_ENVIRONMENT_VERSION",
-
       409
-
     );
-
   }
-
 
   environment.deployedVersion =
     deploymentVersion;
-
 
   environment.lastDeploymentId =
     safeLimitedString(
@@ -2805,36 +2196,30 @@ async function markDeployed(
       300
     );
 
-
   environment.lastDeployedAt =
     new Date();
-
 
   environment.deployment =
     environment.deployment ||
     {};
 
-
-  environment.deployment.lastInjectedVersion =
+  environment.deployment
+    .lastInjectedVersion =
     deploymentVersion;
-
 
   touchEnvironment(
     environment,
-    userId,
+    updatedBy || userId,
     "deployed"
   );
-
 
   await saveWithConcurrencyProtection(
     environment
   );
 
-
   return getSafeEnvironment(
     environment
   );
-
 }
 
 
@@ -2842,56 +2227,44 @@ async function markDeployed(
    ARCHIVE ENVIRONMENT
 ========================================================= */
 
-async function archiveEnvironment(
-  {
-    userId,
-    projectId,
-    environmentName
-  }
-) {
-
+async function archiveEnvironment({
+  userId,
+  projectId,
+  environmentName,
+  expectedVersion,
+  updatedBy,
+}) {
   const environment =
     await findEnvironment({
-
       userId,
-
       projectId,
-
-      environmentName
-
+      environmentName,
     });
 
-
-  /*
-   * Production can be archived only intentionally.
-   *
-   * This method itself is explicit, so it is allowed.
-   */
+  assertExpectedVersion(
+    environment,
+    expectedVersion
+  );
 
   environment.status =
     "archived";
 
-
   environment.archivedAt =
     new Date();
 
-
   touchEnvironment(
     environment,
-    userId,
+    updatedBy || userId,
     "archived"
   );
-
 
   await saveWithConcurrencyProtection(
     environment
   );
 
-
   return getSafeEnvironment(
     environment
   );
-
 }
 
 
@@ -2899,55 +2272,48 @@ async function archiveEnvironment(
    UNARCHIVE ENVIRONMENT
 ========================================================= */
 
-async function unarchiveEnvironment(
-  {
-    userId,
-    projectId,
-    environmentName
-  }
-) {
-
+async function unarchiveEnvironment({
+  userId,
+  projectId,
+  environmentName,
+  expectedVersion,
+  updatedBy,
+}) {
   const environment =
     await findEnvironment({
-
       userId,
-
       projectId,
-
-      environmentName
-
+      environmentName,
     });
 
+  assertExpectedVersion(
+    environment,
+    expectedVersion
+  );
 
   environment.status =
     "active";
 
-
   environment.archivedAt =
     null;
 
-
   touchEnvironment(
     environment,
-    userId,
+    updatedBy || userId,
     "unarchived"
   );
-
 
   recalculateValidation(
     environment
   );
 
-
   await saveWithConcurrencyProtection(
     environment
   );
 
-
   return getSafeEnvironment(
     environment
   );
-
 }
 
 
@@ -2955,85 +2321,58 @@ async function unarchiveEnvironment(
    DELETE ENVIRONMENT
 ========================================================= */
 
-async function deleteEnvironment(
-  {
-    userId,
-    projectId,
-    environmentName
-  }
-) {
-
+async function deleteEnvironment({
+  userId,
+  projectId,
+  environmentName,
+  expectedVersion,
+  updatedBy,
+  confirmProduction = false,
+}) {
   const environment =
     await findEnvironment({
-
       userId,
-
       projectId,
-
-      environmentName
-
+      environmentName,
     });
 
-
-  /*
-   * Production deletion is blocked.
-   *
-   * Archive it instead.
-   */
+  assertExpectedVersion(
+    environment,
+    expectedVersion
+  );
 
   if (
     environment.name ===
     "production"
   ) {
-
     throw new EnvironmentServiceError(
-
       "Production environment cannot be permanently deleted. Archive it instead.",
-
       "PRODUCTION_ENVIRONMENT_DELETE_BLOCKED",
-
       409
-
     );
-
   }
-
 
   const result =
     await Environment.deleteOne({
-
       _id:
         environment._id,
 
       userId,
-
-      projectId
-
+      projectId,
     });
 
-
   if (
-    result.deletedCount !==
-    1
+    result.deletedCount !== 1
   ) {
-
     throw new EnvironmentServiceError(
-
       "Environment could not be deleted",
-
       "ENVIRONMENT_DELETE_FAILED",
-
       500
-
     );
-
   }
 
-
   return {
-
-    success:
-      true,
+    success: true,
 
     environmentId:
       environment._id,
@@ -3041,136 +2380,71 @@ async function deleteEnvironment(
     environment:
       environment.name,
 
-    deleted:
-      true
-
+    deleted: true,
   };
-
 }
 
 
 /* =========================================================
    COPY ENVIRONMENT
-=========================================================
-
-   SECURITY DEFAULT:
-
-   Secrets are NOT copied unless:
-
-      copySecrets: true
-
-   This prevents accidental:
-
-      development secret
-             ↓
-        production
-
-   propagation.
-
 ========================================================= */
 
-async function copyEnvironment(
-  {
-    userId,
-    projectId,
-    sourceEnvironment,
-    targetEnvironment,
-    updatedBy,
-    copySecrets = false
-  }
-) {
-
+async function copyEnvironment({
+  userId,
+  projectId,
+  sourceEnvironment,
+  targetEnvironment,
+  updatedBy,
+  copySecrets = false,
+  expectedVersion,
+}) {
   const sourceName =
     normalizeEnvironmentName(
       sourceEnvironment
     );
-
 
   const targetName =
     normalizeEnvironmentName(
       targetEnvironment
     );
 
-
   if (
-    sourceName ===
-    targetName
+    sourceName === targetName
   ) {
-
     throw new EnvironmentServiceError(
-
       "Source and target environments must be different",
-
       "SAME_ENVIRONMENT_COPY",
-
       400
-
     );
-
   }
-
-
-  /*
-   * Explicitly require confirmation before copying secrets
-   * into production.
-   */
-
-  if (
-    targetName ===
-    "production" &&
-    copySecrets !== true
-  ) {
-
-    /*
-     * Non-secret variables can still be copied.
-     */
-
-  }
-
 
   const source =
     await findEnvironment({
-
       userId,
-
       projectId,
-
       environmentName:
         sourceName,
-
       includeSecrets:
-        copySecrets === true
-
+        copySecrets === true,
     });
-
 
   let target =
     await Environment
       .findOne({
-
         userId,
-
         projectId,
-
         name:
-          targetName
-
+          targetName,
       })
       .select(
         "+variables.encryptedValue +variables.plainValue"
       )
       .exec();
 
-
-  if (
-    !target
-  ) {
-
+  if (!target) {
     target =
       new Environment({
-
         userId,
-
         projectId,
 
         name:
@@ -3179,41 +2453,31 @@ async function copyEnvironment(
         displayName:
           capitalizeEnvironmentName(
             targetName
-          )
-
+          ),
       });
-
+  } else {
+    assertExpectedVersion(
+      target,
+      expectedVersion
+    );
   }
-
 
   assertMutableEnvironment(
     target
   );
 
-
   const copiedVariables =
     [];
-
 
   for (
     const variable
     of source.variables
   ) {
-
     if (
       variable.isSecret &&
       !copySecrets
     ) {
-
-      /*
-       * Preserve the key as an empty secret placeholder.
-       *
-       * This is useful when production requires the same
-       * variable but must receive its own production secret.
-       */
-
       copiedVariables.push({
-
         key:
           variable.key,
 
@@ -3251,70 +2515,47 @@ async function copyEnvironment(
           variable.enabled,
 
         metadata: {
-
           source:
             "environment_copy",
 
           sourceReference:
-            `${sourceName}->${targetName}`
-
-        }
-
+            `${sourceName}->${targetName}`,
+        },
       });
 
-
       continue;
-
     }
 
-
     let value = "";
-
 
     if (
       variable.isSecret
     ) {
-
       const context =
         createEncryptionContext({
-
           userId,
-
           projectId,
-
           environmentName:
             sourceName,
-
           variableKey:
-            variable.key
-
+            variable.key,
         });
-
 
       const decrypted =
         decryptSecret(
-
           variable.encryptedValue,
-
           context
-
         );
-
 
       value =
         decrypted.value;
-
     } else {
-
       value =
         variable.plainValue ||
         "";
-
     }
 
-
     const copied = {
-
       key:
         variable.key,
 
@@ -3346,55 +2587,40 @@ async function copyEnvironment(
         variable.enabled,
 
       metadata: {
-
         source:
           "environment_copy",
 
         sourceReference:
-          `${sourceName}->${targetName}`
-
-      }
-
+          `${sourceName}->${targetName}`,
+      },
     };
-
 
     writeVariableValue(
       copied,
       value,
       {
-
         userId,
-
         projectId,
-
         environmentName:
           targetName,
-
         variableKey:
-          variable.key
-
+          variable.key,
       }
     );
-
 
     copiedVariables.push(
       copied
     );
-
   }
-
 
   target.variables =
     copiedVariables;
 
-
   target.status =
     "active";
 
-
   target.source =
     normalizeSource({
-
       type:
         "import",
 
@@ -3405,41 +2631,32 @@ async function copyEnvironment(
         source.source?.branch,
 
       commitSha:
-        source.source?.commitSha
+        source.source?.commitSha,
 
+      provider:
+        source.source?.provider,
+
+      repository:
+        source.source?.repository,
     });
-
-
-  /*
-   * Do NOT manually increment version here.
-   *
-   * environmentModel's save hook handles configuration
-   * version changes.
-   */
-
 
   touchEnvironment(
     target,
-    updatedBy ||
-      userId,
+    updatedBy || userId,
     "copied_from_environment"
   );
-
 
   recalculateValidation(
     target
   );
 
-
   await saveWithConcurrencyProtection(
     target
   );
 
-
   return getSafeEnvironment(
     target
   );
-
 }
 
 
@@ -3447,64 +2664,40 @@ async function copyEnvironment(
    GET VARIABLE
 ========================================================= */
 
-async function getVariable(
-  {
-    userId,
-    projectId,
-    environmentName,
-    key
-  }
-) {
-
+async function getVariable({
+  userId,
+  projectId,
+  environmentName,
+  key,
+}) {
   const environment =
     await findEnvironment({
-
       userId,
-
       projectId,
-
-      environmentName
-
+      environmentName,
     });
-
 
   const normalizedKey =
     normalizeVariableKey(
       key
     );
 
-
   const variable =
     environment.variables.find(
-      item =>
+      (item) =>
         item.key ===
         normalizedKey
     );
 
-
-  if (
-    !variable
-  ) {
-
+  if (!variable) {
     throw new EnvironmentServiceError(
-
       `Environment variable not found: ${normalizedKey}`,
-
       "ENVIRONMENT_VARIABLE_NOT_FOUND",
-
       404
-
     );
-
   }
 
-
-  /*
-   * Never return a secret's actual value.
-   */
-
   return {
-
     key:
       variable.key,
 
@@ -3537,7 +2730,9 @@ async function getVariable(
 
     hasValue:
       variable.isSecret
-        ? false
+        ? Boolean(
+            variable.encryptedValue
+          )
         : Boolean(
             variable.plainValue
           ),
@@ -3545,13 +2740,9 @@ async function getVariable(
     masked:
       variable.isSecret
         ? "••••••••"
-        : (
-            variable.plainValue ||
-            ""
-          )
-
+        : variable.plainValue ||
+          "",
   };
-
 }
 
 
@@ -3559,36 +2750,25 @@ async function getVariable(
    CONFIGURATION SUMMARY
 ========================================================= */
 
-async function getConfigurationSummary(
-  {
-    userId,
-    projectId,
-    environmentName
-  }
-) {
-
+async function getConfigurationSummary({
+  userId,
+  projectId,
+  environmentName,
+}) {
   const environment =
     await findEnvironment({
-
       userId,
-
       projectId,
-
-      environmentName
-
+      environmentName,
     });
 
-
   const variables =
-    environment.variables
-      .filter(
-        variable =>
-          variable.enabled
-      );
-
+    environment.variables.filter(
+      (variable) =>
+        variable.enabled
+    );
 
   return {
-
     environmentId:
       environment._id,
 
@@ -3612,21 +2792,23 @@ async function getConfigurationSummary(
 
     secretCount:
       variables.filter(
-        variable =>
+        (variable) =>
           variable.isSecret
       ).length,
 
     requiredCount:
       variables.filter(
-        variable =>
+        (variable) =>
           variable.required
       ).length,
 
     configuredCount:
       variables.filter(
-        variable =>
+        (variable) =>
           variable.isSecret
-            ? false
+            ? Boolean(
+                variable.encryptedValue
+              )
             : Boolean(
                 variable.plainValue
               )
@@ -3634,7 +2816,7 @@ async function getConfigurationSummary(
 
     buildVariableCount:
       variables.filter(
-        variable =>
+        (variable) =>
           variable.scope ===
             "build" ||
           variable.scope ===
@@ -3643,7 +2825,7 @@ async function getConfigurationSummary(
 
     runtimeVariableCount:
       variables.filter(
-        variable =>
+        (variable) =>
           variable.scope ===
             "runtime" ||
           variable.scope ===
@@ -3660,10 +2842,8 @@ async function getConfigurationSummary(
       environment.lastDeploymentId,
 
     lastDeployedAt:
-      environment.lastDeployedAt
-
+      environment.lastDeployedAt,
   };
-
 }
 
 
@@ -3674,25 +2854,16 @@ async function getConfigurationSummary(
 function getSafeEnvironment(
   environment
 ) {
-
-  if (
-    !environment
-  ) {
-
+  if (!environment) {
     return null;
-
   }
-
 
   if (
     typeof environment.toSafeJSON ===
     "function"
   ) {
-
     return environment.toSafeJSON();
-
   }
-
 
   const plain =
     typeof environment.toObject ===
@@ -3700,9 +2871,7 @@ function getSafeEnvironment(
       ? environment.toObject()
       : environment;
 
-
   return {
-
     id:
       plain._id,
 
@@ -3718,6 +2887,9 @@ function getSafeEnvironment(
     displayName:
       plain.displayName,
 
+    description:
+      plain.description,
+
     status:
       plain.status,
 
@@ -3732,6 +2904,9 @@ function getSafeEnvironment(
 
     lastDeployedAt:
       plain.lastDeployedAt,
+
+    archivedAt:
+      plain.archivedAt,
 
     validation:
       plain.validation,
@@ -3750,8 +2925,7 @@ function getSafeEnvironment(
         plain.variables
       )
         ? plain.variables.map(
-            variable => ({
-
+            (variable) => ({
               id:
                 variable._id,
 
@@ -3798,8 +2972,7 @@ function getSafeEnvironment(
                     ),
 
               updatedAt:
-                variable.updatedAt
-
+                variable.updatedAt,
             })
           )
         : [],
@@ -3808,10 +2981,8 @@ function getSafeEnvironment(
       plain.createdAt,
 
     updatedAt:
-      plain.updatedAt
-
+      plain.updatedAt,
   };
-
 }
 
 
@@ -3823,74 +2994,49 @@ function buildVariableDocuments(
   variables,
   context
 ) {
-
   const seen =
     new Set();
 
-
   return variables.map(
-    variable => {
-
+    (variable) => {
       if (
         !variable ||
         typeof variable !==
           "object"
       ) {
-
         throw new EnvironmentServiceError(
-
           "Invalid environment variable",
-
           "INVALID_VARIABLE",
-
           400
-
         );
-
       }
-
 
       const key =
         normalizeVariableKey(
           variable.key
         );
 
-
       if (
-        seen.has(
-          key
-        )
+        seen.has(key)
       ) {
-
         throw new EnvironmentServiceError(
-
           `Duplicate environment variable: ${key}`,
-
           "ENVIRONMENT_VARIABLE_EXISTS",
-
           409
-
         );
-
       }
 
-
-      seen.add(
-        key
-      );
-
+      seen.add(key);
 
       const type =
         normalizeVariableType(
           variable.type
         );
 
-
       const scope =
         normalizeVariableScope(
           variable.scope
         );
-
 
       const value =
         normalizeValue(
@@ -3898,15 +3044,12 @@ function buildVariableDocuments(
           type
         );
 
-
       const isSecret =
         Boolean(
           variable.isSecret
         );
 
-
       const document = {
-
         key,
 
         isSecret,
@@ -3940,11 +3083,10 @@ function buildVariableDocuments(
           false,
 
         metadata: {
-
           source:
             safeLimitedString(
               variable.source ||
-              "manual",
+                "manual",
               100
             ),
 
@@ -3952,32 +3094,23 @@ function buildVariableDocuments(
             safeLimitedString(
               variable.sourceReference,
               MAX_SOURCE_REFERENCE_LENGTH
-            )
-
-        }
-
+            ),
+        },
       };
-
 
       writeVariableValue(
         document,
         value,
         {
-
           ...context,
-
           variableKey:
-            key
-
+            key,
         }
       );
 
-
       return document;
-
     }
   );
-
 }
 
 
@@ -3990,36 +3123,26 @@ function writeVariableValue(
   value,
   context
 ) {
-
   if (
     variable.isSecret
   ) {
-
     variable.encryptedValue =
       encryptSecret(
-
         value,
-
         createEncryptionContext(
           context
         )
-
       );
-
 
     variable.plainValue =
       "";
-
   } else {
-
     variable.plainValue =
       value;
 
     variable.encryptedValue =
       "";
-
   }
-
 }
 
 
@@ -4030,7 +3153,6 @@ function writeVariableValue(
 function recalculateValidation(
   environment
 ) {
-
   const variables =
     Array.isArray(
       environment.variables
@@ -4038,40 +3160,21 @@ function recalculateValidation(
       ? environment.variables
       : [];
 
+  let requiredVariables = 0;
+  let configuredVariables = 0;
+  let missingVariables = 0;
+  let invalidVariables = 0;
 
-  let requiredVariables =
-    0;
-
-
-  let configuredVariables =
-    0;
-
-
-  let missingVariables =
-    0;
-
-
-  let invalidVariables =
-    0;
-
-
-  const invalidKeys =
-    [];
-
+  const invalidKeys = [];
 
   for (
-    const variable
-    of variables
+    const variable of variables
   ) {
-
     if (
       !variable.enabled
     ) {
-
       continue;
-
     }
-
 
     const hasValue =
       variable.isSecret
@@ -4082,80 +3185,38 @@ function recalculateValidation(
             variable.plainValue
           );
 
-
-    if (
-      hasValue
-    ) {
-
-      configuredVariables +=
-        1;
-
+    if (hasValue) {
+      configuredVariables += 1;
     }
-
 
     if (
       variable.required
     ) {
+      requiredVariables += 1;
 
-      requiredVariables +=
-        1;
-
-
-      if (
-        !hasValue
-      ) {
-
-        missingVariables +=
-          1;
-
+      if (!hasValue) {
+        missingVariables += 1;
 
         invalidKeys.push(
           variable.key
         );
 
-
         continue;
-
       }
-
     }
 
-
-    if (
-      !hasValue
-    ) {
-
+    if (!hasValue) {
       continue;
-
     }
-
-
-    /*
-     * Type validation.
-     *
-     * Secret values are decrypted only in memory.
-     */
 
     try {
-
       let value = "";
-
 
       if (
         variable.isSecret
       ) {
-
-        /*
-         * Validation does not know the original encryption
-         * context here when called against an already-loaded
-         * document.
-
-         * The environment context is available, so use it.
-         */
-
         const context =
           createEncryptionContext({
-
             userId:
               environment.userId,
 
@@ -4166,93 +3227,75 @@ function recalculateValidation(
               environment.name,
 
             variableKey:
-              variable.key
-
+              variable.key,
           });
-
 
         const decrypted =
           decryptSecret(
-
             variable.encryptedValue,
-
             context
-
           );
-
 
         value =
           decrypted.value;
-
       } else {
-
         value =
           variable.plainValue ||
           "";
-
       }
-
 
       normalizeValue(
         value,
         variable.type
       );
 
-    } catch (
-      error
-    ) {
+      variable.validationStatus =
+        "valid";
 
-      invalidVariables +=
-        1;
+      variable.validationMessage =
+        "";
 
+    } catch {
+      invalidVariables += 1;
 
       invalidKeys.push(
         variable.key
       );
 
-    }
+      variable.validationStatus =
+        "invalid";
 
+      variable.validationMessage =
+        "Variable validation failed";
+    }
   }
 
-
   const status =
-    (
-      missingVariables > 0 ||
-      invalidVariables > 0
-    )
+    missingVariables > 0 ||
+    invalidVariables > 0
       ? "invalid"
       : "valid";
-
 
   let message =
     "Environment is valid";
 
-
   if (
-    status ===
-    "invalid"
+    status === "invalid"
   ) {
+    message = [
+      missingVariables > 0
+        ? `${missingVariables} required variable(s) missing`
+        : null,
 
-    message =
-      [
-
-        missingVariables > 0
-          ? `${missingVariables} required variable(s) missing`
-          : null,
-
-        invalidVariables > 0
-          ? `${invalidVariables} variable(s) invalid`
-          : null
-
-      ]
-        .filter(Boolean)
-        .join("; ");
-
+      invalidVariables > 0
+        ? `${invalidVariables} variable(s) invalid`
+        : null,
+    ]
+      .filter(Boolean)
+      .join("; ");
   }
 
-
   const result = {
-
     status,
 
     requiredVariables,
@@ -4268,13 +3311,10 @@ function recalculateValidation(
     invalidKeys,
 
     validatedAt:
-      new Date()
-
+      new Date(),
   };
 
-
   environment.validation = {
-
     status:
       result.status,
 
@@ -4294,13 +3334,10 @@ function recalculateValidation(
       result.message,
 
     validatedAt:
-      result.validatedAt
-
+      result.validatedAt,
   };
 
-
   return result;
-
 }
 
 
@@ -4311,24 +3348,16 @@ function recalculateValidation(
 function assertMutableEnvironment(
   environment
 ) {
-
   if (
     environment.status ===
     "archived"
   ) {
-
     throw new EnvironmentServiceError(
-
       "Archived environment cannot be modified",
-
       "ENVIRONMENT_ARCHIVED",
-
       409
-
     );
-
   }
-
 }
 
 
@@ -4339,44 +3368,28 @@ function assertMutableEnvironment(
 function assertDeployableEnvironment(
   environment
 ) {
-
   if (
     environment.status !==
     "active"
   ) {
-
     throw new EnvironmentServiceError(
-
       "Environment is not active",
-
       "ENVIRONMENT_NOT_ACTIVE",
-
       409
-
     );
-
   }
-
 
   if (
-    environment.validation?.status ===
-    "invalid"
+    environment.validation?.status !==
+    "valid"
   ) {
-
     throw new EnvironmentServiceError(
-
       "Environment validation failed",
-
       "ENVIRONMENT_VALIDATION_FAILED",
-
       409,
-
       environment.validation
-
     );
-
   }
-
 }
 
 
@@ -4388,27 +3401,19 @@ function scopeMatches(
   variableScope,
   requestedScope
 ) {
-
   if (
     requestedScope ===
     "both"
   ) {
-
     return true;
-
   }
 
-
   return (
-
     variableScope ===
       requestedScope ||
-
     variableScope ===
       "both"
-
   );
-
 }
 
 
@@ -4421,15 +3426,12 @@ function touchEnvironment(
   userId,
   action
 ) {
-
   environment.audit =
     environment.audit ||
     {};
 
-
   environment.audit.updatedBy =
     userId;
-
 
   environment.audit.lastAction =
     safeLimitedString(
@@ -4437,10 +3439,8 @@ function touchEnvironment(
       200
     );
 
-
   environment.audit.lastActionAt =
     new Date();
-
 }
 
 
@@ -4451,55 +3451,32 @@ function touchEnvironment(
 async function saveWithConcurrencyProtection(
   environment
 ) {
-
   try {
-
     await environment.save();
-
-  } catch (
-    error
-  ) {
-
+  } catch (error) {
     if (
       error?.name ===
       "VersionError"
     ) {
-
       throw new EnvironmentServiceError(
-
         "Environment was modified by another request. Please retry with the latest version.",
-
         "ENVIRONMENT_CONCURRENT_UPDATE",
-
         409
-
       );
-
     }
-
 
     if (
-      error?.code ===
-      11000
+      error?.code === 11000
     ) {
-
       throw new EnvironmentServiceError(
-
         "Environment configuration conflicts with an existing record",
-
         "ENVIRONMENT_CONFLICT",
-
         409
-
       );
-
     }
 
-
     throw error;
-
   }
-
 }
 
 
@@ -4510,135 +3487,96 @@ async function saveWithConcurrencyProtection(
 function formatEnvValue(
   value
 ) {
-
   const stringValue =
     String(
       value ?? ""
     );
-
 
   if (
     /[\s"'#\n\r]/.test(
       stringValue
     )
   ) {
-
     return (
-
       '"' +
-
       stringValue
-
         .replace(
           /\\/g,
           "\\\\"
         )
-
         .replace(
           /"/g,
           '\\"'
         )
-
         .replace(
           /\r/g,
           "\\r"
         )
-
         .replace(
           /\n/g,
           "\\n"
         ) +
-
       '"'
-
     );
-
   }
 
-
   return stringValue;
-
 }
 
 
 /* =========================================================
    MASKED ENV EXPORT
-=========================================================
-
-   This function NEVER returns real secret values.
 ========================================================= */
 
-async function exportMaskedEnvironment(
-  {
-    userId,
-    projectId,
-    environmentName,
-    scope = "both"
-  }
-) {
-
+async function exportMaskedEnvironment({
+  userId,
+  projectId,
+  environmentName,
+  scope = "both",
+}) {
   const environment =
     await findEnvironment({
-
       userId,
-
       projectId,
-
-      environmentName
-
+      environmentName,
     });
-
 
   const normalizedScope =
     normalizeVariableScope(
       scope
     );
 
-
   const lines =
     environment.variables
-
       .filter(
-        variable =>
+        (variable) =>
           variable.enabled
       )
-
       .filter(
-        variable =>
+        (variable) =>
           scopeMatches(
             variable.scope,
             normalizedScope
           )
       )
-
       .map(
-        variable => {
-
+        (variable) => {
           const value =
             variable.isSecret
               ? "********"
-              : (
-                  variable.plainValue ||
-                  ""
-                );
-
+              : variable.plainValue ||
+                "";
 
           return (
-
             `${variable.key}=` +
-
             formatEnvValue(
               value
             )
-
           );
-
         }
       );
 
-
   return {
-
     environment:
       environment.name,
 
@@ -4649,10 +3587,8 @@ async function exportMaskedEnvironment(
       lines.join("\n"),
 
     includesSecrets:
-      false
-
+      false,
   };
-
 }
 
 
@@ -4661,59 +3597,38 @@ async function exportMaskedEnvironment(
 ========================================================= */
 
 function healthCheck() {
-
   let currentConfigured =
     false;
-
 
   let previousConfigured =
     false;
 
-
   let encryptionHealthy =
     false;
 
-
   try {
-
     getCurrentEncryptionKey();
-
     currentConfigured =
       true;
-
-  } catch (
-    error
-  ) {
-
+  } catch {
     currentConfigured =
       false;
-
   }
 
-
   try {
-
     previousConfigured =
       Boolean(
         getPreviousEncryptionKey()
       );
-
-  } catch (
-    error
-  ) {
-
+  } catch {
     previousConfigured =
       false;
-
   }
-
 
   encryptionHealthy =
     currentConfigured;
 
-
   return {
-
     success:
       true,
 
@@ -4724,7 +3639,6 @@ function healthCheck() {
       SERVICE_VERSION,
 
     encryption: {
-
       algorithm:
         ENCRYPTION_ALGORITHM,
 
@@ -4738,27 +3652,19 @@ function healthCheck() {
         true,
 
       healthy:
-        encryptionHealthy
-
+        encryptionHealthy,
     },
 
     supportedEnvironments:
-      [
-        ...ENVIRONMENT_NAMES
-      ],
+      [...ENVIRONMENT_NAMES],
 
     supportedVariableTypes:
-      [
-        ...VARIABLE_TYPES
-      ],
+      [...VARIABLE_TYPES],
 
     supportedScopes:
-      [
-        ...VARIABLE_SCOPES
-      ],
+      [...VARIABLE_SCOPES],
 
     limits: {
-
       maxVariables:
         MAX_VARIABLES,
 
@@ -4769,12 +3675,24 @@ function healthCheck() {
         MAX_VALUE_LENGTH,
 
       maxDescriptionLength:
-        MAX_DESCRIPTION_LENGTH
-
-    }
-
+        MAX_DESCRIPTION_LENGTH,
+    },
   };
+}
 
+
+/* =========================================================
+   CAPITALIZE ENVIRONMENT NAME
+========================================================= */
+
+function capitalizeEnvironmentName(
+  name
+) {
+  return String(name)
+    .charAt(0)
+    .toUpperCase() +
+    String(name)
+      .slice(1);
 }
 
 
@@ -4783,104 +3701,60 @@ function healthCheck() {
 ========================================================= */
 
 module.exports = {
-
   /* Environment */
-
   createEnvironment,
-
   getEnvironment,
-
   listEnvironments,
-
   deleteEnvironment,
-
   archiveEnvironment,
-
   unarchiveEnvironment,
 
-
   /* Variables */
-
   addVariable,
-
   updateVariable,
-
   deleteVariable,
-
   getVariable,
 
-
   /* Validation */
-
   validateEnvironment,
-
+  getDeploymentReadiness,
   getConfigurationSummary,
-
   recalculateValidation,
 
-
   /* Deployment */
-
   resolveForDeployment,
-
   createDeploymentSnapshot,
-
   markDeployed,
 
-
   /* Environment copy */
-
   copyEnvironment,
 
-
   /* Safe export */
-
   exportMaskedEnvironment,
 
-
   /* Security helpers */
-
   maskSecret,
-
   encryptSecret,
-
   decryptSecret,
 
-
   /* Normalization */
-
   normalizeEnvironmentName,
-
   normalizeVariableKey,
-
   normalizeVariableType,
-
   normalizeVariableScope,
 
-
   /* Safe response */
-
   getSafeEnvironment,
 
-
   /* Diagnostics */
-
   healthCheck,
 
-
   /* Constants */
-
   SERVICE_VERSION,
-
   ENVIRONMENT_NAMES,
-
   VARIABLE_TYPES,
-
   VARIABLE_SCOPES,
 
-
   /* Error */
-
-  EnvironmentServiceError
-
+  EnvironmentServiceError,
 };
