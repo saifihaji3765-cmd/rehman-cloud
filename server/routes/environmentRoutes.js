@@ -43,26 +43,15 @@ const environmentController = require(
 );
 
 /* -------------------------------------------------------------------------- */
-/* Middleware                                                                  */
+/* Middleware                                                                 */
 /* -------------------------------------------------------------------------- */
 
-/*
- * authMiddleware.js exports an object containing authMiddleware.
- */
 const {
   authMiddleware,
 } = require(
   "../middleware/authMiddleware"
 );
 
-/*
- * rateLimiter.js exports:
- *
- * apiLimiter
- * authLimiter
- * aiLimiter
- * deployLimiter
- */
 const {
   apiLimiter,
 } = require(
@@ -98,101 +87,35 @@ function assertFunction(
 /* Controller Contract Validation                                             */
 /* -------------------------------------------------------------------------- */
 
-assertFunction(
-  environmentController,
+const requiredControllerMethods = [
   "createEnvironment",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "listEnvironments",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "getEnvironment",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "addVariable",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "updateVariable",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "deleteVariable",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "validateEnvironment",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "deploymentReadiness",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "createDeploymentSnapshot",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "markDeployed",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "archiveEnvironment",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "unarchiveEnvironment",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "deleteEnvironment",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "copyEnvironment",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "getConfigurationSummary",
-  "environmentController"
-);
-
-assertFunction(
-  environmentController,
   "health",
-  "environmentController"
-);
+];
+
+for (
+  const methodName
+  of requiredControllerMethods
+) {
+  assertFunction(
+    environmentController,
+    methodName,
+    "environmentController"
+  );
+}
 
 /* -------------------------------------------------------------------------- */
 /* Middleware Contract Validation                                             */
@@ -218,18 +141,6 @@ if (
 /* Common Protected Middleware                                                */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Every environment endpoint is private and rate limited.
- *
- * Environment configuration may contain:
- * - API keys
- * - infrastructure credentials
- * - deployment configuration
- * - secret metadata
- *
- * Authentication and rate limiting therefore apply consistently
- * to every environment endpoint.
- */
 const protectedMiddleware = [
   authMiddleware,
   apiLimiter,
@@ -241,8 +152,6 @@ const protectedMiddleware = [
 
 /**
  * GET /api/environments/health
- *
- * Authenticated environment service health check.
  */
 router.get(
   "/health",
@@ -256,8 +165,6 @@ router.get(
 
 /**
  * POST /api/environments
- *
- * Create environment.
  */
 router.post(
   "/",
@@ -267,8 +174,6 @@ router.post(
 
 /**
  * GET /api/environments?projectId=<id>
- *
- * List environments for a project.
  */
 router.get(
   "/",
@@ -283,7 +188,7 @@ router.get(
 /**
  * POST /api/environments/copy
  *
- * Example:
+ * Body:
  *
  * {
  *   "projectId": "...",
@@ -292,7 +197,7 @@ router.get(
  *   "copySecrets": false
  * }
  *
- * Secret copying remains controlled by the service/controller.
+ * Secret copying is restricted to trusted internal deployment context.
  */
 router.post(
   "/copy",
@@ -307,7 +212,9 @@ router.post(
 /**
  * POST /api/environments/deployment-snapshot
  *
- * Creates an immutable deployment configuration snapshot.
+ * Browser/API route returns SAFE snapshot metadata only.
+ *
+ * Plaintext deployment variables are never returned by this route.
  */
 router.post(
   "/deployment-snapshot",
@@ -317,9 +224,6 @@ router.post(
 
 /**
  * POST /api/environments/mark-deployed
- *
- * Marks an environment as deployed after trusted deployment workflow
- * completion.
  */
 router.post(
   "/mark-deployed",
@@ -333,10 +237,6 @@ router.post(
 
 /**
  * GET /api/environments/:projectId/:environmentName
- *
- * Example:
- *
- * /api/environments/PROJECT_ID/production
  */
 router.get(
   "/:projectId/:environmentName",
@@ -351,10 +251,6 @@ router.get(
 /**
  * GET
  * /api/environments/:projectId/:environmentName/summary
- *
- * Returns configuration metadata.
- *
- * Secret values must never be returned.
  */
 router.get(
   "/:projectId/:environmentName/summary",
@@ -369,8 +265,6 @@ router.get(
 /**
  * POST
  * /api/environments/:projectId/:environmentName/validate
- *
- * Validates environment configuration.
  */
 router.post(
   "/:projectId/:environmentName/validate",
@@ -386,9 +280,9 @@ router.post(
  * GET
  * /api/environments/:projectId/:environmentName/deployment-readiness
  *
- * Returns deployment readiness metadata.
+ * Metadata-only.
  *
- * Resolved deployment secrets must never be exposed through this endpoint.
+ * This route NEVER resolves plaintext deployment secrets.
  */
 router.get(
   "/:projectId/:environmentName/deployment-readiness",
@@ -403,8 +297,6 @@ router.get(
 /**
  * POST
  * /api/environments/:projectId/:environmentName/variables
- *
- * Add environment variable.
  */
 router.post(
   "/:projectId/:environmentName/variables",
@@ -415,8 +307,6 @@ router.post(
 /**
  * PATCH
  * /api/environments/:projectId/:environmentName/variables/:key
- *
- * Update environment variable.
  */
 router.patch(
   "/:projectId/:environmentName/variables/:key",
@@ -427,8 +317,6 @@ router.patch(
 /**
  * DELETE
  * /api/environments/:projectId/:environmentName/variables/:key
- *
- * Delete environment variable.
  */
 router.delete(
   "/:projectId/:environmentName/variables/:key",
@@ -467,9 +355,6 @@ router.post(
 /**
  * DELETE
  * /api/environments/:projectId/:environmentName
- *
- * Production deletion should require explicit confirmation
- * inside the controller/service layer.
  */
 router.delete(
   "/:projectId/:environmentName",
@@ -616,8 +501,11 @@ router.service = "environment";
 router.security = {
   authenticationRequired: true,
   rateLimitRequired: true,
+
   secretsExposedToClient: false,
+
   deploymentSecretResolutionExposed: false,
+
   webhookRoutesIncluded: false,
 };
 
