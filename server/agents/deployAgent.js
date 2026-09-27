@@ -2,12 +2,21 @@
    ZYRIONOS DEPLOY AGENT
    ---------------------------------------------------------
    Production Deployment Orchestrator
+   Version: 4.0.0
 
-   FLOW
+   OWNERSHIP
+   ---------------------------------------------------------
+   Deploy Agent owns deployment orchestration.
+
+   It coordinates:
 
    MASTER
       ↓
-   BILLING / SUBSCRIPTION GATE
+   ENVIRONMENT
+      ↓
+   BILLING
+      ↓
+   SUBSCRIPTION
       ↓
    DOCKER
       ↓
@@ -25,17 +34,14 @@
       ↓
    DEPLOYMENT RESULT
 
-   OWNERSHIP
-   ---------------------------------------------------------
-   Deploy Agent owns deployment orchestration.
-
-   It does NOT:
-   - generate application code
-   - call AI providers
+   Deploy Agent DOES NOT:
+   - generate application source code
+   - call AI providers directly
    - process payments
-   - invent payment success
-   - invent subscription entitlements
+   - create subscriptions
+   - invent entitlements
    - invent URLs
+   - expose secrets
    - report unverified health as healthy
    - fabricate infrastructure metrics
 
@@ -79,6 +85,9 @@ const monitoringAgent =
 const scalingAgent =
   require("./scalingAgent");
 
+const environmentAgent =
+  require("./environmentAgent");
+
 
 /* =========================================================
    SERVICES
@@ -93,7 +102,7 @@ const logger =
 ========================================================= */
 
 const DEPLOYMENT_VERSION =
-  "3.0.0";
+  "4.0.0";
 
 const MAX_PROJECT_NAME_LENGTH =
   200;
@@ -103,6 +112,9 @@ const MAX_PROMPT_LENGTH =
 
 const MAX_FILES =
   1000;
+
+const MAX_ENVIRONMENT_NAME_LENGTH =
+  50;
 
 
 /* =========================================================
@@ -128,7 +140,7 @@ function cleanString(
 
 
 /* =========================================================
-   OBJECT HELPERS
+   SAFE OBJECT
 ========================================================= */
 
 function safeObject(
@@ -162,7 +174,7 @@ function isSuccessful(
 
 
 /* =========================================================
-   ERROR
+   ERROR MESSAGE
 ========================================================= */
 
 function getErrorMessage(
@@ -191,6 +203,216 @@ function getUserId(
     data?.user?.userId ||
     null
   );
+}
+
+
+/* =========================================================
+   ENVIRONMENT
+========================================================= */
+
+function normalizeEnvironmentName(
+  value
+) {
+  const normalized =
+    cleanString(
+      value,
+      MAX_ENVIRONMENT_NAME_LENGTH
+    ).toLowerCase();
+
+  if (
+    normalized ===
+      "development" ||
+    normalized ===
+      "dev"
+  ) {
+    return "development";
+  }
+
+  if (
+    normalized ===
+      "preview" ||
+    normalized ===
+      "staging"
+  ) {
+    return "preview";
+  }
+
+  if (
+    normalized ===
+      "production" ||
+    normalized ===
+      "prod"
+  ) {
+    return "production";
+  }
+
+  /*
+   * Production remains the backward-compatible
+   * default for old deployment requests.
+   */
+
+  return "production";
+}
+
+
+/* =========================================================
+   SECRET KEY DETECTION
+========================================================= */
+
+function looksSensitiveKey(
+  key
+) {
+  const normalized =
+    cleanString(
+      key,
+      300
+    ).toLowerCase();
+
+  return [
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "access_key",
+    "accesskey",
+    "private_key",
+    "privatekey",
+    "client_secret",
+    "clientsecret",
+    "authorization",
+    "cookie",
+    "session",
+    "credential",
+    "credentials",
+  ].some(
+    (fragment) =>
+      normalized.includes(
+        fragment
+      )
+  );
+}
+
+
+/* =========================================================
+   REDACT ENVIRONMENT
+   ---------------------------------------------------------
+   Deployment Agent may internally receive real environment
+   values from Environment Agent.
+
+   Those values must NEVER appear in the final deployment
+   response or logs.
+========================================================= */
+
+function sanitizeEnvironment(
+  environment
+) {
+  if (
+    !environment ||
+    typeof environment !==
+      "object"
+  ) {
+    return null;
+  }
+
+  const result = {};
+
+
+  for (
+    const [key, value]
+    of Object.entries(
+      environment
+    )
+  ) {
+    if (
+      looksSensitiveKey(
+        key
+      )
+    ) {
+      result[key] =
+        "[REDACTED]";
+
+      continue;
+    }
+
+    if (
+      typeof value ===
+      "object" &&
+      value !== null
+    ) {
+      result[key] =
+        sanitizeEnvironment(
+          value
+        );
+
+      continue;
+    }
+
+    result[key] =
+      typeof value ===
+        "string"
+        ? value.length > 500
+          ? `${value.slice(
+              0,
+              100
+            )}...[REDACTED]`
+          : value
+        : value;
+  }
+
+  return result;
+}
+
+
+/* =========================================================
+   ENVIRONMENT SUMMARY
+========================================================= */
+
+function createEnvironmentSummary(
+  result,
+  environmentName
+) {
+  const environment =
+    result?.environment ||
+    result?.data?.environment ||
+    result?.data ||
+    {};
+
+  return {
+    name:
+      environment.name ||
+      environmentName,
+
+    id:
+      environment.id ||
+      environment._id ||
+      null,
+
+    status:
+      environment.status ||
+      "unknown",
+
+    ready:
+      environment.ready === true ||
+      result?.ready === true,
+
+    variableCount:
+      Number(
+        environment.variableCount ||
+        environment.variablesCount ||
+        0
+      ),
+
+    configured:
+      environment.configured !==
+        false,
+
+    deploymentSnapshotId:
+      result?.deploymentSnapshotId ||
+      environment.deploymentSnapshotId ||
+      null,
+  };
 }
 
 
@@ -285,7 +507,8 @@ function normalizeFiles(
     .filter(
       (file) =>
         file &&
-        typeof file === "object"
+        typeof file ===
+          "object"
     )
     .slice(
       0,
@@ -331,7 +554,9 @@ function validateProjectData(
 
   return {
     valid: true,
+
     projectName,
+
     files:
       normalizeFiles(
         projectData.files
@@ -377,9 +602,7 @@ function extractBilling(
 
 
 /* =========================================================
-   SUBSCRIPTION RESOURCE NORMALIZATION
-   ---------------------------------------------------------
-   Supports the new Subscription Agent contract.
+   SUBSCRIPTION INFRASTRUCTURE
 ========================================================= */
 
 function getSubscriptionInfrastructure(
@@ -415,7 +638,7 @@ function getSubscriptionInfrastructure(
 
 
 /* =========================================================
-   DEPLOYMENT LIMIT
+   DEPLOYMENT USAGE
 ========================================================= */
 
 function getDeploymentUsage(
@@ -429,6 +652,10 @@ function getDeploymentUsage(
   );
 }
 
+
+/* =========================================================
+   DEPLOYMENT LIMIT
+========================================================= */
 
 function getDeploymentLimit(
   subscription
@@ -447,7 +674,9 @@ function getDeploymentLimit(
   const number =
     Number(limit);
 
-  return Number.isFinite(number)
+  return Number.isFinite(
+    number
+  )
     ? number
     : 0;
 }
@@ -465,6 +694,7 @@ function validateSubscriptionEntitlement(
   ) {
     return {
       valid: false,
+
       reason:
         getErrorMessage(
           result,
@@ -481,6 +711,7 @@ function validateSubscriptionEntitlement(
   if (!subscription) {
     return {
       valid: false,
+
       reason:
         "Subscription result did not contain subscription data.",
     };
@@ -492,6 +723,7 @@ function validateSubscriptionEntitlement(
   ) {
     return {
       valid: false,
+
       reason:
         `Subscription is not active: ${
           subscription.status ||
@@ -508,6 +740,7 @@ function validateSubscriptionEntitlement(
   ) {
     return {
       valid: false,
+
       reason:
         "Subscription payment has not been confirmed.",
     };
@@ -519,6 +752,7 @@ function validateSubscriptionEntitlement(
   ) {
     return {
       valid: false,
+
       reason:
         "Current subscription does not allow deployment.",
     };
@@ -530,6 +764,7 @@ function validateSubscriptionEntitlement(
   ) {
     return {
       valid: false,
+
       reason:
         "Deployment access is disabled.",
     };
@@ -551,8 +786,10 @@ function validateSubscriptionEntitlement(
   ) {
     return {
       valid: false,
+
       reason:
         "Deployment limit reached.",
+
       code:
         "DEPLOYMENT_LIMIT_REACHED",
     };
@@ -560,10 +797,14 @@ function validateSubscriptionEntitlement(
 
   return {
     valid: true,
+
     subscription,
+
     deploymentUsage: {
       used,
+
       limit,
+
       remaining:
         limit === -1
           ? -1
@@ -578,30 +819,21 @@ function validateSubscriptionEntitlement(
 
 /* =========================================================
    BILLING VALIDATION
-   ---------------------------------------------------------
-   Billing is only a payment-state gate here.
-
-   Deploy Agent NEVER charges.
 ========================================================= */
 
 function validateBillingResult(
   result,
   projectData
 ) {
-  /*
-   * Explicit free/trial/internal workflow.
-   *
-   * This must be intentionally supplied by
-   * the trusted orchestration layer.
-   */
-
   if (
     projectData.paymentRequired ===
     false
   ) {
     return {
       valid: true,
+
       bypassed: true,
+
       reason:
         "Payment was explicitly marked as not required.",
     };
@@ -610,6 +842,7 @@ function validateBillingResult(
   if (!result) {
     return {
       valid: false,
+
       reason:
         "No authoritative billing result supplied.",
     };
@@ -620,6 +853,7 @@ function validateBillingResult(
   ) {
     return {
       valid: false,
+
       reason:
         getErrorMessage(
           result,
@@ -633,11 +867,6 @@ function validateBillingResult(
       result
     );
 
-  /*
-   * If billing says payment is required,
-   * deployment must have authoritative confirmation.
-   */
-
   const paymentRequired =
     billing?.paymentRequired ??
     projectData.paymentRequired ??
@@ -647,14 +876,19 @@ function validateBillingResult(
     paymentRequired !== false
   ) {
     const confirmed =
-      billing?.paymentConfirmed === true ||
-      projectData.paymentConfirmed === true ||
-      billing?.paymentStatus === "paid" ||
-      billing?.status === "paid";
+      billing?.paymentConfirmed ===
+        true ||
+      projectData.paymentConfirmed ===
+        true ||
+      billing?.paymentStatus ===
+        "paid" ||
+      billing?.status ===
+        "paid";
 
     if (!confirmed) {
       return {
         valid: false,
+
         reason:
           "Payment has not been authoritatively confirmed.",
       };
@@ -663,6 +897,7 @@ function validateBillingResult(
 
   return {
     valid: true,
+
     billing,
   };
 }
@@ -676,24 +911,17 @@ async function resolveBilling(
   projectData,
   deploymentId
 ) {
-  /*
-   * Master result has highest priority.
-   */
-
   if (
     projectData.billingResult
   ) {
     return {
       result:
         projectData.billingResult,
+
       source:
         "master",
     };
   }
-
-  /*
-   * Existing billing state.
-   */
 
   if (
     projectData.billing
@@ -701,17 +929,15 @@ async function resolveBilling(
     return {
       result: {
         success: true,
+
         billing:
           projectData.billing,
       },
+
       source:
         "request",
     };
   }
-
-  /*
-   * Explicitly payment-free workflow.
-   */
 
   if (
     projectData.paymentRequired ===
@@ -720,23 +946,20 @@ async function resolveBilling(
     return {
       result: {
         success: true,
+
         billing: {
           paymentRequired:
             false,
+
           paymentConfirmed:
             true,
         },
       },
+
       source:
         "not-required",
     };
   }
-
-  /*
-   * Validate existing payment state.
-   *
-   * Do NOT create a new subscription/payment.
-   */
 
   try {
     const result =
@@ -794,6 +1017,7 @@ async function resolveBilling(
 
     return {
       result,
+
       source:
         "billingAgent",
     };
@@ -801,10 +1025,12 @@ async function resolveBilling(
     return {
       result: {
         success: false,
+
         error:
           error?.message ||
           "Billing validation failed.",
       },
+
       source:
         "billingAgent",
     };
@@ -820,24 +1046,17 @@ async function resolveSubscription(
   projectData,
   deploymentId
 ) {
-  /*
-   * Master-provided result.
-   */
-
   if (
     projectData.subscriptionResult
   ) {
     return {
       result:
         projectData.subscriptionResult,
+
       source:
         "master",
     };
   }
-
-  /*
-   * Direct subscription.
-   */
 
   if (
     projectData.subscription
@@ -845,17 +1064,15 @@ async function resolveSubscription(
     return {
       result: {
         success: true,
+
         subscription:
           projectData.subscription,
       },
+
       source:
         "request",
     };
   }
-
-  /*
-   * Read/validation operation only.
-   */
 
   try {
     const result =
@@ -905,6 +1122,7 @@ async function resolveSubscription(
 
     return {
       result,
+
       source:
         "subscriptionAgent",
     };
@@ -912,14 +1130,360 @@ async function resolveSubscription(
     return {
       result: {
         success: false,
+
         error:
           error?.message ||
           "Subscription validation failed.",
       },
+
       source:
         "subscriptionAgent",
     };
   }
+}
+
+
+/* =========================================================
+   ENVIRONMENT RESOLUTION
+   ---------------------------------------------------------
+   Environment Agent is authoritative for project
+   environment configuration.
+
+   Deploy Agent never exposes resolved secret values.
+========================================================= */
+
+async function resolveDeploymentEnvironment(
+  projectData,
+  deploymentId
+) {
+  const environmentName =
+    normalizeEnvironmentName(
+      projectData.environmentName ||
+      projectData.environment ||
+      projectData.deployEnvironment ||
+      "production"
+    );
+
+
+  /*
+   * Master may already have performed readiness validation.
+   * Deploy Agent still validates again because deployment
+   * is a security boundary.
+   */
+
+  let readiness;
+
+  try {
+    readiness =
+      await environmentAgent({
+        action:
+          "deployment_readiness",
+
+        operation:
+          "deployment_readiness",
+
+        userId:
+          getUserId(
+            projectData
+          ),
+
+        projectId:
+          projectData.projectId ||
+          null,
+
+        name:
+          environmentName,
+
+        environmentName,
+
+        deploymentId,
+
+        workflowId:
+          projectData.workflowId ||
+          null,
+
+        requestId:
+          projectData.requestId ||
+          null,
+      });
+  } catch (error) {
+    return {
+      success: false,
+
+      error:
+        error?.message ||
+        "Environment readiness validation failed.",
+
+      environmentName,
+    };
+  }
+
+
+  if (
+    !isSuccessful(
+      readiness
+    )
+  ) {
+    return {
+      success: false,
+
+      error:
+        getErrorMessage(
+          readiness,
+          "Environment is not ready for deployment."
+        ),
+
+      environmentName,
+
+      readiness,
+    };
+  }
+
+
+  const readinessData =
+    readiness?.environment ||
+    readiness?.data?.environment ||
+    readiness?.data ||
+    {};
+
+
+  const ready =
+    readiness?.ready === true ||
+    readinessData?.ready === true ||
+    readinessData?.configured !== false;
+
+
+  if (!ready) {
+    return {
+      success: false,
+
+      error:
+        readiness?.error ||
+        "Deployment environment is not ready.",
+
+      environmentName,
+
+      readiness,
+    };
+  }
+
+
+  /*
+   * Create immutable deployment snapshot.
+   */
+
+  let snapshot;
+
+  try {
+    snapshot =
+      await environmentAgent({
+        action:
+          "create_deployment_snapshot",
+
+        operation:
+          "create_deployment_snapshot",
+
+        userId:
+          getUserId(
+            projectData
+          ),
+
+        projectId:
+          projectData.projectId ||
+          null,
+
+        name:
+          environmentName,
+
+        environmentName,
+
+        deploymentId,
+
+        workflowId:
+          projectData.workflowId ||
+          null,
+
+        requestId:
+          projectData.requestId ||
+          null,
+      });
+  } catch (error) {
+    return {
+      success: false,
+
+      error:
+        error?.message ||
+        "Environment deployment snapshot failed.",
+
+      environmentName,
+    };
+  }
+
+
+  if (
+    !isSuccessful(
+      snapshot
+    )
+  ) {
+    return {
+      success: false,
+
+      error:
+        getErrorMessage(
+          snapshot,
+          "Environment deployment snapshot failed."
+        ),
+
+      environmentName,
+
+      readiness,
+
+      snapshot,
+    };
+  }
+
+
+  /*
+   * Resolve actual environment values internally.
+   *
+   * IMPORTANT:
+   * These values remain inside Deploy Agent.
+   */
+
+  let resolved;
+
+  try {
+    resolved =
+      await environmentAgent({
+        action:
+          "resolve_for_deployment",
+
+        operation:
+          "resolve_for_deployment",
+
+        userId:
+          getUserId(
+            projectData
+          ),
+
+        projectId:
+          projectData.projectId ||
+          null,
+
+        name:
+          environmentName,
+
+        environmentName,
+
+        deploymentId,
+
+        workflowId:
+          projectData.workflowId ||
+          null,
+
+        requestId:
+          projectData.requestId ||
+          null,
+
+        deploymentSnapshotId:
+          snapshot?.deploymentSnapshotId ||
+          snapshot?.data
+            ?.deploymentSnapshotId ||
+          null,
+      });
+  } catch (error) {
+    return {
+      success: false,
+
+      error:
+        error?.message ||
+        "Environment resolution failed.",
+
+      environmentName,
+
+      readiness,
+
+      snapshot,
+    };
+  }
+
+
+  if (
+    !isSuccessful(
+      resolved
+    )
+  ) {
+    return {
+      success: false,
+
+      error:
+        getErrorMessage(
+          resolved,
+          "Environment resolution failed."
+        ),
+
+      environmentName,
+
+      readiness,
+
+      snapshot,
+    };
+  }
+
+
+  /*
+   * Accept several compatibility response shapes.
+   */
+
+  const values =
+    resolved.variables ||
+    resolved.environmentVariables ||
+    resolved.env ||
+    resolved.data?.variables ||
+    resolved.data?.environmentVariables ||
+    resolved.data?.env ||
+    {};
+
+
+  return {
+    success: true,
+
+    environmentName,
+
+    environmentId:
+      resolved.environmentId ||
+      resolved.environment?.id ||
+      resolved.environment?._id ||
+      resolved.data?.environmentId ||
+      null,
+
+    deploymentSnapshotId:
+      resolved.deploymentSnapshotId ||
+      snapshot?.deploymentSnapshotId ||
+      snapshot?.data
+        ?.deploymentSnapshotId ||
+      null,
+
+    values,
+
+    summary:
+      createEnvironmentSummary(
+        {
+          ...resolved,
+
+          environment:
+            resolved.environment ||
+            readiness?.environment ||
+            readiness?.data?.environment,
+        },
+
+        environmentName
+      ),
+
+    readiness,
+
+    snapshot,
+  };
 }
 
 
@@ -935,6 +1499,7 @@ function validateDockerResult(
   ) {
     return {
       valid: false,
+
       reason:
         getErrorMessage(
           result,
@@ -952,6 +1517,7 @@ function validateDockerResult(
   if (!docker) {
     return {
       valid: false,
+
       reason:
         "Docker Agent succeeded but returned no Docker artifact.",
     };
@@ -959,6 +1525,7 @@ function validateDockerResult(
 
   return {
     valid: true,
+
     docker,
   };
 }
@@ -976,6 +1543,7 @@ function validateAwsResult(
   ) {
     return {
       valid: false,
+
       reason:
         getErrorMessage(
           result,
@@ -993,6 +1561,7 @@ function validateAwsResult(
   if (!aws) {
     return {
       valid: false,
+
       reason:
         "AWS Agent succeeded but returned no deployment information.",
     };
@@ -1000,6 +1569,7 @@ function validateAwsResult(
 
   return {
     valid: true,
+
     aws,
   };
 }
@@ -1017,6 +1587,7 @@ function validateDomainResult(
   ) {
     return {
       valid: false,
+
       reason:
         getErrorMessage(
           result,
@@ -1034,6 +1605,7 @@ function validateDomainResult(
   if (!domain) {
     return {
       valid: false,
+
       reason:
         "Domain Agent succeeded but returned no domain information.",
     };
@@ -1041,6 +1613,7 @@ function validateDomainResult(
 
   return {
     valid: true,
+
     domain,
   };
 }
@@ -1058,6 +1631,7 @@ function validateSslResult(
   ) {
     return {
       valid: false,
+
       reason:
         getErrorMessage(
           result,
@@ -1075,20 +1649,45 @@ function validateSslResult(
   if (!ssl) {
     return {
       valid: false,
+
       reason:
         "SSL Agent succeeded but returned no SSL information.",
     };
   }
 
+  /*
+   * SSL Agent success alone is not enough.
+   *
+   * HTTPS must actually be active.
+   */
+
+  const httpsReady =
+    ssl.httpsReady === true ||
+    ssl.sslReady === true ||
+    ssl.status === "active";
+
+
+  if (!httpsReady) {
+    return {
+      valid: false,
+
+      reason:
+        "SSL Agent returned success but HTTPS readiness could not be verified.",
+
+      ssl,
+    };
+  }
+
   return {
     valid: true,
+
     ssl,
   };
 }
 
 
 /* =========================================================
-   MONITORING
+   MONITORING HEALTH
 ========================================================= */
 
 function resolveHealth(
@@ -1100,6 +1699,7 @@ function resolveHealth(
     return {
       status:
         "unknown",
+
       verified:
         false,
     };
@@ -1124,6 +1724,7 @@ function resolveHealth(
     return {
       status:
         "unknown",
+
       verified:
         false,
     };
@@ -1147,6 +1748,7 @@ function resolveHealth(
     return {
       status:
         "healthy",
+
       verified:
         true,
     };
@@ -1165,6 +1767,7 @@ function resolveHealth(
     return {
       status:
         "unhealthy",
+
       verified:
         true,
     };
@@ -1173,6 +1776,7 @@ function resolveHealth(
   return {
     status:
       "unknown",
+
     verified:
       false,
   };
@@ -1215,10 +1819,18 @@ async function runMonitoring(
       workflowId:
         projectData.workflowId ||
         null,
+
+      environmentName:
+        normalizeEnvironmentName(
+          projectData.environmentName ||
+          projectData.environment ||
+          "production"
+        ),
     });
   } catch (error) {
     return {
       success: false,
+
       error:
         error?.message ||
         "Monitoring failed.",
@@ -1228,7 +1840,7 @@ async function runMonitoring(
 
 
 /* =========================================================
-   SCALING
+   SCALING EXECUTION
 ========================================================= */
 
 async function runScaling(
@@ -1267,6 +1879,13 @@ async function runScaling(
 
       aws,
 
+      environmentName:
+        normalizeEnvironmentName(
+          projectData.environmentName ||
+          projectData.environment ||
+          "production"
+        ),
+
       autoScaling:
         subscription?.featureFlags
           ?.autoScaling === true ||
@@ -1278,6 +1897,7 @@ async function runScaling(
   } catch (error) {
     return {
       success: false,
+
       error:
         error?.message ||
         "Scaling failed.",
@@ -1295,31 +1915,68 @@ function resolveLiveUrl(
   domain,
   aws
 ) {
-  const sslUrl =
-    ssl?.securedUrl ||
-    ssl?.httpsUrl ||
-    ssl?.liveUrl;
+  /*
+   * Only accept URLs from verified SSL.
+   */
+
+  const sslVerified =
+    ssl?.httpsReady === true ||
+    ssl?.sslReady === true ||
+    ssl?.status === "active";
+
 
   if (
-    typeof sslUrl ===
-      "string" &&
-    sslUrl.trim()
+    sslVerified
   ) {
-    return sslUrl.trim();
+    const sslUrl =
+      ssl?.securedUrl ||
+      ssl?.httpsUrl ||
+      ssl?.liveUrl;
+
+    if (
+      typeof sslUrl ===
+        "string" &&
+      sslUrl.trim()
+    ) {
+      return sslUrl.trim();
+    }
   }
 
-  const domainUrl =
-    domain?.fullDomain ||
-    domain?.httpsUrl ||
-    domain?.url;
+
+  /*
+   * Domain Agent may have a DNS URL, but that is
+   * not necessarily HTTPS-ready.
+   *
+   * Only accept explicit verified HTTPS.
+   */
+
+  const domainHttpsReady =
+    domain?.httpsReady === true ||
+    domain?.sslReady === true;
+
 
   if (
-    typeof domainUrl ===
-      "string" &&
-    domainUrl.trim()
+    domainHttpsReady
   ) {
-    return domainUrl.trim();
+    const domainUrl =
+      domain?.httpsUrl ||
+      domain?.secureUrl ||
+      domain?.fullDomain;
+
+    if (
+      typeof domainUrl ===
+        "string" &&
+      domainUrl.trim()
+    ) {
+      return domainUrl.trim();
+    }
   }
+
+
+  /*
+   * AWS provider URL is useful as fallback, but it
+   * must be explicitly supplied by AWS Agent.
+   */
 
   const providerUrl =
     aws?.publicUrl ||
@@ -1361,10 +2018,20 @@ function createDeploymentState(
     projectName:
       projectData.projectName,
 
+    environmentName:
+      normalizeEnvironmentName(
+        projectData.environmentName ||
+        projectData.environment ||
+        "production"
+      ),
+
     status:
       "initializing",
 
     stages: {
+      environment:
+        "pending",
+
       billing:
         "pending",
 
@@ -1392,6 +2059,48 @@ function createDeploymentState(
 
     startedAt:
       new Date(),
+  };
+}
+
+
+/* =========================================================
+   FINAL SAFE ENVIRONMENT DATA
+========================================================= */
+
+function getSafeEnvironmentResult(
+  environmentResult
+) {
+  if (
+    !environmentResult
+  ) {
+    return null;
+  }
+
+  return {
+    environment:
+      environmentResult.summary ||
+      null,
+
+    environmentName:
+      environmentResult.environmentName ||
+      null,
+
+    environmentId:
+      environmentResult.environmentId ||
+      null,
+
+    deploymentSnapshotId:
+      environmentResult.deploymentSnapshotId ||
+      null,
+
+    /*
+     * Never return:
+     *
+     * environmentResult.values
+     */
+
+    ready:
+      environmentResult.success === true,
   };
 }
 
@@ -1468,19 +2177,30 @@ async function deployAgent(
         projectData
       );
 
+    const environmentName =
+      normalizeEnvironmentName(
+        projectData.environmentName ||
+        projectData.environment ||
+        projectData.deployEnvironment ||
+        "production"
+      );
+
 
     state =
       createDeploymentState(
         deploymentId,
         {
           ...projectData,
+
           projectName,
+
+          environmentName,
         }
       );
 
 
     /* =====================================================
-       CONTEXT
+       DEPLOYMENT CONTEXT
     ===================================================== */
 
     const deploymentContext = {
@@ -1488,6 +2208,10 @@ async function deployAgent(
 
       workflowId:
         projectData.workflowId ||
+        null,
+
+      requestId:
+        projectData.requestId ||
         null,
 
       projectId:
@@ -1501,6 +2225,8 @@ async function deployAgent(
       framework,
 
       plan,
+
+      environmentName,
 
       paymentId:
         projectData.paymentId ||
@@ -1522,6 +2248,80 @@ async function deployAgent(
         projectData.providerSubscriptionId ||
         null,
     };
+
+
+    /* =====================================================
+       ENVIRONMENT GATE
+    ===================================================== */
+
+    state.stages.environment =
+      "running";
+
+
+    const environmentResult =
+      await resolveDeploymentEnvironment(
+        {
+          ...projectData,
+
+          projectName,
+
+          environmentName,
+        },
+
+        deploymentId
+      );
+
+
+    if (
+      !environmentResult.success
+    ) {
+      state.status =
+        "blocked";
+
+      state.stages.environment =
+        "failed";
+
+      return {
+        success: false,
+
+        message:
+          "Deployment blocked by environment validation",
+
+        error:
+          environmentResult.error,
+
+        stage:
+          "environment",
+
+        deployment: {
+          deploymentId,
+
+          projectId:
+            projectData.projectId ||
+            null,
+
+          projectName,
+
+          environmentName,
+
+          status:
+            "blocked",
+        },
+
+        environment:
+          getSafeEnvironmentResult(
+            environmentResult
+          ),
+      };
+    }
+
+
+    state.stages.environment =
+      "validated";
+
+
+    const deploymentEnvironment =
+      environmentResult.values;
 
 
     /* =====================================================
@@ -1569,7 +2369,11 @@ async function deployAgent(
 
         deployment: {
           deploymentId,
+
           projectName,
+
+          environmentName,
+
           status:
             "blocked",
         },
@@ -1577,6 +2381,11 @@ async function deployAgent(
         billing:
           billingResolution.result ||
           null,
+
+        environment:
+          getSafeEnvironmentResult(
+            environmentResult
+          ),
       };
     }
 
@@ -1629,7 +2438,11 @@ async function deployAgent(
 
         deployment: {
           deploymentId,
+
           projectName,
+
+          environmentName,
+
           status:
             "blocked",
         },
@@ -1637,6 +2450,11 @@ async function deployAgent(
         subscription:
           subscriptionResolution.result ||
           null,
+
+        environment:
+          getSafeEnvironmentResult(
+            environmentResult
+          ),
       };
     }
 
@@ -1658,6 +2476,9 @@ async function deployAgent(
     /* =====================================================
        DOCKER
     ===================================================== */
+
+    state.status =
+      "building";
 
     state.stages.docker =
       "running";
@@ -1694,10 +2515,32 @@ async function deployAgent(
           subscription,
 
           infrastructure,
+
+          /*
+           * Environment values are passed only
+           * to the trusted Docker Agent.
+           *
+           * They are NEVER returned from Deploy Agent.
+           */
+
+          environment:
+            deploymentEnvironment,
+
+          environmentName,
+
+          environmentId:
+            environmentResult.environmentId,
+
+          deploymentSnapshotId:
+            environmentResult.deploymentSnapshotId,
+
+          resolveEnvironment:
+            false,
         });
     } catch (error) {
       docker = {
         success: false,
+
         error:
           error?.message ||
           "Docker Agent failed.",
@@ -1734,10 +2577,19 @@ async function deployAgent(
 
         deployment: {
           deploymentId,
+
           projectName,
+
+          environmentName,
+
           status:
             "failed",
         },
+
+        environment:
+          getSafeEnvironmentResult(
+            environmentResult
+          ),
 
         docker,
       };
@@ -1751,6 +2603,9 @@ async function deployAgent(
     /* =====================================================
        AWS
     ===================================================== */
+
+    state.status =
+      "provisioning";
 
     state.stages.aws =
       "running";
@@ -1790,10 +2645,30 @@ async function deployAgent(
             projectData.region ||
             process.env.AWS_REGION ||
             null,
+
+          /*
+           * Runtime environment for the deployed
+           * workload.
+           */
+
+          environment:
+            deploymentEnvironment,
+
+          environmentName,
+
+          environmentId:
+            environmentResult.environmentId,
+
+          deploymentSnapshotId:
+            environmentResult.deploymentSnapshotId,
+
+          resolveEnvironment:
+            false,
         });
     } catch (error) {
       aws = {
         success: false,
+
         error:
           error?.message ||
           "AWS Agent failed.",
@@ -1830,12 +2705,22 @@ async function deployAgent(
 
         deployment: {
           deploymentId,
+
           projectName,
+
+          environmentName,
+
           status:
             "failed",
         },
 
+        environment:
+          getSafeEnvironmentResult(
+            environmentResult
+          ),
+
         docker,
+
         aws,
       };
     }
@@ -1848,6 +2733,9 @@ async function deployAgent(
     /* =====================================================
        DOMAIN
     ===================================================== */
+
+    state.status =
+      "securing";
 
     state.stages.domain =
       "running";
@@ -1877,10 +2765,13 @@ async function deployAgent(
             null,
 
           subscription,
+
+          environmentName,
         });
     } catch (error) {
       domain = {
         success: false,
+
         error:
           error?.message ||
           "Domain Agent failed.",
@@ -1917,7 +2808,11 @@ async function deployAgent(
 
         deployment: {
           deploymentId,
+
           projectName,
+
+          environmentName,
+
           status:
             "failed",
 
@@ -1927,8 +2822,15 @@ async function deployAgent(
             null,
         },
 
+        environment:
+          getSafeEnvironmentResult(
+            environmentResult
+          ),
+
         docker,
+
         aws,
+
         domain,
       };
     }
@@ -1964,10 +2866,13 @@ async function deployAgent(
             awsValidation.aws,
 
           subscription,
+
+          environmentName,
         });
     } catch (error) {
       ssl = {
         success: false,
+
         error:
           error?.message ||
           "SSL Agent failed.",
@@ -1991,12 +2896,6 @@ async function deployAgent(
         "failed";
 
 
-      /*
-       * Infrastructure may already exist.
-       * Do NOT falsely call entire deployment
-       * destroyed.
-       */
-
       return {
         success: false,
 
@@ -2014,6 +2913,8 @@ async function deployAgent(
 
           projectName,
 
+          environmentName,
+
           status:
             "deployed_without_verified_ssl",
 
@@ -2026,9 +2927,17 @@ async function deployAgent(
             domainValidation.domain,
         },
 
+        environment:
+          getSafeEnvironmentResult(
+            environmentResult
+          ),
+
         docker,
+
         aws,
+
         domain,
+
         ssl,
       };
     }
@@ -2042,6 +2951,9 @@ async function deployAgent(
        MONITORING
     ===================================================== */
 
+    state.status =
+      "verifying";
+
     state.stages.monitoring =
       "running";
 
@@ -2050,7 +2962,10 @@ async function deployAgent(
       await runMonitoring(
         {
           ...projectData,
+
           projectName,
+
+          environmentName,
         },
 
         deploymentId,
@@ -2112,7 +3027,10 @@ async function deployAgent(
         await runScaling(
           {
             ...projectData,
+
             projectName,
+
+            environmentName,
           },
 
           deploymentId,
@@ -2187,6 +3105,89 @@ async function deployAgent(
 
 
     /* =====================================================
+       ENVIRONMENT DEPLOYMENT MARK
+       -----------------------------------------------------
+       Do not put secret values here.
+    ===================================================== */
+
+    let environmentDeploymentState =
+      null;
+
+
+    try {
+      environmentDeploymentState =
+        await environmentAgent({
+          action:
+            "mark_deployed",
+
+          operation:
+            "mark_deployed",
+
+          userId,
+
+          projectId:
+            projectData.projectId ||
+            null,
+
+          name:
+            environmentName,
+
+          environmentName,
+
+          deploymentId,
+
+          workflowId:
+            projectData.workflowId ||
+            null,
+
+          requestId:
+            projectData.requestId ||
+            null,
+
+          deploymentSnapshotId:
+            environmentResult.deploymentSnapshotId ||
+            null,
+
+          status:
+            state.status,
+
+          liveUrl:
+            liveUrl || null,
+        });
+    } catch (error) {
+      environmentDeploymentState = {
+        success: false,
+
+        error:
+          error?.message ||
+          "Environment deployment state update failed.",
+      };
+    }
+
+
+    /*
+     * Environment bookkeeping failure should not
+     * turn an already verified infrastructure
+     * deployment into a fabricated failure.
+     *
+     * It is explicitly reported as degraded metadata.
+     */
+
+    if (
+      !isSuccessful(
+        environmentDeploymentState
+      )
+    ) {
+      logger.warning(
+        `Environment deployment state could not be recorded: ${getErrorMessage(
+          environmentDeploymentState,
+          "Unknown environment state error"
+        )}`
+      );
+    }
+
+
+    /* =====================================================
        FINAL DEPLOYMENT OBJECT
     ===================================================== */
 
@@ -2195,6 +3196,10 @@ async function deployAgent(
 
       workflowId:
         projectData.workflowId ||
+        null,
+
+      requestId:
+        projectData.requestId ||
         null,
 
       projectId:
@@ -2206,6 +3211,30 @@ async function deployAgent(
       framework,
 
       plan,
+
+      environment: {
+        name:
+          environmentName,
+
+        id:
+          environmentResult.environmentId ||
+          null,
+
+        deploymentSnapshotId:
+          environmentResult.deploymentSnapshotId ||
+          null,
+
+        ready:
+          true,
+
+        configured:
+          environmentResult.summary
+            ?.configured !== false,
+
+        /*
+         * No secret values.
+         */
+      },
 
       status:
         state.status,
@@ -2272,8 +3301,7 @@ async function deployAgent(
 
       metadata: {
         environment:
-          process.env.NODE_ENV ||
-          "production",
+          environmentName,
 
         region:
           projectData.region ||
@@ -2289,6 +3317,11 @@ async function deployAgent(
         durationMs:
           Date.now() -
           startedAt,
+
+        environmentStateRecorded:
+          isSuccessful(
+            environmentDeploymentState
+          ),
       },
 
       deployedAt:
@@ -2297,13 +3330,20 @@ async function deployAgent(
 
 
     /* =====================================================
-       SUCCESS
+       SUCCESS LOG
     ===================================================== */
 
     logger.success(
-      `Deployment Completed | project=${projectName} | deploymentId=${deploymentId} | status=${state.status}`
+      `Deployment Completed | project=${projectName} | deploymentId=${deploymentId} | environment=${environmentName} | status=${state.status}`
     );
 
+
+    /* =====================================================
+       FINAL RESPONSE
+       -----------------------------------------------------
+       IMPORTANT:
+       deploymentEnvironment is NEVER returned.
+    ===================================================== */
 
     return {
       success: true,
@@ -2314,6 +3354,11 @@ async function deployAgent(
           : "Deployment completed but no authoritative live URL was returned.",
 
       deployment,
+
+      environment:
+        getSafeEnvironmentResult(
+          environmentResult
+        ),
 
       billing:
         billingResolution.result,
@@ -2345,6 +3390,8 @@ async function deployAgent(
         workflowId:
           projectData.workflowId ||
           null,
+
+        environmentName,
 
         durationMs:
           Date.now() -
@@ -2388,8 +3435,14 @@ async function deployAgent(
               deploymentId:
                 state.deploymentId,
 
+              projectId:
+                state.projectId,
+
               projectName:
                 state.projectName,
+
+              environmentName:
+                state.environmentName,
 
               status:
                 "failed",
@@ -2420,8 +3473,13 @@ deployAgent.version =
   DEPLOYMENT_VERSION;
 
 
+deployAgent.agentName =
+  "deployAgent";
+
+
 deployAgent.owns = [
   "deployment",
+  "environment-deployment-orchestration",
   "docker-orchestration",
   "aws-orchestration",
   "domain-orchestration",
@@ -2433,6 +3491,7 @@ deployAgent.owns = [
 
 
 deployAgent.dependencies = [
+  "environmentAgent",
   "dockerAgent",
   "awsAgent",
   "domainAgent",
@@ -2442,6 +3501,79 @@ deployAgent.dependencies = [
   "monitoringAgent",
   "scalingAgent",
 ];
+
+
+deployAgent.security = {
+  doesNotProcessPayments:
+    true,
+
+  doesNotGenerateSourceCode:
+    true,
+
+  doesNotCallAIProvidersDirectly:
+    true,
+
+  doesNotExposeEnvironmentSecrets:
+    true,
+
+  doesNotInventUrls:
+    true,
+
+  doesNotInventEntitlements:
+    true,
+
+  requiresVerifiedHealth:
+    true,
+
+  requiresEnvironmentReadiness:
+    true,
+
+  requiresBillingValidation:
+    true,
+
+  requiresSubscriptionValidation:
+    true,
+};
+
+
+deployAgent.workflowContract = {
+  version:
+    "4.0.0",
+
+  stages: [
+    "environment",
+    "billing",
+    "subscription",
+    "docker",
+    "aws",
+    "domain",
+    "ssl",
+    "monitoring",
+    "scaling",
+    "final-verification",
+  ],
+
+  environmentOwnership:
+    "environmentAgent",
+
+  infrastructureOwnership:
+    "deployAgent",
+
+  paymentOwnership:
+    "billingAgent",
+
+  subscriptionOwnership:
+    "subscriptionAgent",
+
+  sourceCodeOwnership:
+    "builderAgent",
+
+  healthOwnership:
+    "monitoringAgent",
+
+  scalingOwnership:
+    "scalingAgent",
+};
 
 
 /* =========================================================
