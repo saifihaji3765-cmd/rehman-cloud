@@ -29,9 +29,8 @@ const environmentService =
 const logger =
   require("../services/loggerService");
 
-const {
-  formatResponse,
-} = require("../utils/responseFormatter");
+const formatResponse =
+  require("../utils/formatResponse");
 
 /* -------------------------------------------------------------------------- */
 /* Constants                                                                  */
