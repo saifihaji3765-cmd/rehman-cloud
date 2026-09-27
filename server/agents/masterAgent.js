@@ -1,60 +1,83 @@
-/* =========================================================
-   ZYRIONOS MASTER AGENT
-   ---------------------------------------------------------
-   Central Autonomous Orchestrator / CEO Control Plane
+/**
+ * =========================================================
+ * ZYRIONOS MASTER AGENT
+ * =========================================================
+ *
+ * Version: 5.0.0
+ *
+ * Central Autonomous Orchestrator / CEO Control Plane
+ *
+ * CORE PIPELINE
+ *
+ * User Request
+ *      ↓
+ * Master Agent
+ *      ↓
+ * Memory
+ *      ↓
+ * Intent
+ *      ↓
+ * Workflow Decision
+ *      ↓
+ * Planning
+ *      ↓
+ * Environment / Build / Fix / File
+ *      ↓
+ * Validation Gates
+ *      ↓
+ * Deployment
+ *      ↓
+ * Monitoring / Scaling
+ *      ↓
+ * Final Verification
+ *      ↓
+ * Master Response
+ *
+ *
+ * MASTER OWNS
+ *
+ * - Request normalization
+ * - Memory context
+ * - Intent classification
+ * - Workflow selection
+ * - Agent sequencing
+ * - Dependency enforcement
+ * - Environment gates
+ * - Build gates
+ * - Deployment gates
+ * - Billing coordination
+ * - Subscription coordination
+ * - Failure propagation
+ * - Final result aggregation
+ *
+ *
+ * MASTER DOES NOT
+ *
+ * - Generate source code itself
+ * - Modify files itself
+ * - Deploy infrastructure itself
+ * - Execute Docker itself
+ * - Configure AWS itself
+ * - Configure DNS itself
+ * - Configure SSL itself
+ * - Process payments itself
+ * - Directly access MongoDB
+ * - Resolve deployment secrets for itself
+ *
+ *
+ * AI PROVIDER RULE
+ *
+ * Master does not directly instantiate or configure
+ * Gemini/OpenAI/etc.
+ *
+ * All AI generation remains behind:
+ *
+ * services/ai/aiProviderService.js
+ *
+ * =========================================================
+ */
 
-   CORE RESPONSIBILITY:
-
-   User Request
-        ↓
-   Master Agent
-        ↓
-   Intent
-        ↓
-   Workflow Decision
-        ↓
-   Specialized Agents
-        ↓
-   Validation Gates
-        ↓
-   Final Result
-        ↓
-   Master Response
-
-   MASTER IS RESPONSIBLE FOR:
-
-   - Request normalization
-   - Memory context
-   - Intent classification
-   - Workflow selection
-   - Agent sequencing
-   - Dependency enforcement
-   - Failure propagation
-   - Execution gates
-   - Build → Deploy protection
-   - Billing → Subscription coordination
-   - Infrastructure ownership
-   - Large-project orchestration
-   - Final result aggregation
-
-   MASTER DOES NOT:
-
-   - Generate source code itself
-   - Deploy infrastructure itself
-   - Process payments itself
-   - Modify files itself
-   - Directly call an AI provider
-   - Invent successful results
-
-   AI PROVIDERS:
-
-   Master never calls Gemini/OpenAI/etc directly.
-
-   All AI calls go through:
-
-       services/ai/aiProviderService.js
-
-========================================================= */
+"use strict";
 
 
 /* =========================================================
@@ -78,6 +101,9 @@ const fileAgent =
 
 const memoryAgent =
   require("./memoryAgent");
+
+const environmentAgent =
+  require("./environmentAgent");
 
 
 /* =========================================================
@@ -163,6 +189,10 @@ const {
    CONSTANTS
 ========================================================= */
 
+const MASTER_VERSION =
+  "5.0.0";
+
+
 const MAX_PROMPT_LENGTH =
   12000;
 
@@ -173,35 +203,34 @@ const MAX_CONTEXT_LENGTH =
   18000;
 
 const MAX_WORKFLOW_STEPS =
-  20;
+  30;
 
 const MAX_AGENT_RESULTS =
-  30;
+  40;
+
+const MAX_FINAL_RESPONSE_TOKENS =
+  1800;
+
+
+/* =========================================================
+   ENVIRONMENT NAMES
+========================================================= */
+
+const VALID_ENVIRONMENTS =
+  new Set([
+    "development",
+    "preview",
+    "production"
+  ]);
 
 
 /* =========================================================
    AGENT REGISTRY
-   ---------------------------------------------------------
-   Registry describes ownership.
-
-   IMPORTANT:
-
-   Master owns workflow orchestration.
-
-   Deploy Agent owns deployment internals.
-
-   Therefore Master does NOT independently execute:
-
-       dockerAgent
-       awsAgent
-       domainAgent
-       sslAgent
-
-   during a deploy workflow unless a future
-   explicit architecture requires it.
 ========================================================= */
 
 const agentRegistry = {
+
+  /* Core */
 
   intent:
     intentAgent,
@@ -221,14 +250,17 @@ const agentRegistry = {
   memory:
     memoryAgent,
 
+  environment:
+    environmentAgent,
+
+
+  /* Deployment */
+
   deploy:
     deployAgent,
 
-  billing:
-    billingAgent,
 
-  subscription:
-    subscriptionAgent,
+  /* Infrastructure */
 
   docker:
     dockerAgent,
@@ -247,6 +279,18 @@ const agentRegistry = {
 
   scaling:
     scalingAgent,
+
+
+  /* Business */
+
+  billing:
+    billingAgent,
+
+  subscription:
+    subscriptionAgent,
+
+
+  /* Financial */
 
   financialControl:
     financialControlAgent,
@@ -286,7 +330,9 @@ function safeJson(
   try {
 
     return JSON.stringify(
-      value ?? null
+      sanitizeForContext(
+        value
+      )
     );
 
   } catch (
@@ -294,10 +340,8 @@ function safeJson(
   ) {
 
     return JSON.stringify({
-
       error:
         "Unable to serialize value"
-
     });
 
   }
@@ -362,6 +406,29 @@ function getUserId(
 
 
 /* =========================================================
+   PROJECT ID
+========================================================= */
+
+function getProjectId(
+  request
+) {
+
+  return (
+
+    request?.projectId ||
+
+    request?.project?._id ||
+
+    request?.project?.id ||
+
+    null
+
+  );
+
+}
+
+
+/* =========================================================
    SUCCESS CHECK
 ========================================================= */
 
@@ -370,11 +437,8 @@ function isSuccessful(
 ) {
 
   return Boolean(
-
     result &&
-
     result.success === true
-
   );
 
 }
@@ -388,9 +452,7 @@ function normalizeError(
   error
 ) {
 
-  if (
-    !error
-  ) {
+  if (!error) {
 
     return {
 
@@ -443,9 +505,7 @@ function getAgentError(
   result
 ) {
 
-  if (
-    !result
-  ) {
+  if (!result) {
 
     return "Agent returned no result.";
 
@@ -458,6 +518,8 @@ function getAgentError(
 
     result.message ||
 
+    result.details?.message ||
+
     "Agent returned an unsuccessful result."
 
   );
@@ -466,80 +528,345 @@ function getAgentError(
 
 
 /* =========================================================
-   GET PLANNING DATA
+   SAFE CONTEXT SANITIZER
 ========================================================= */
 
-function getPlanningData(
-  planning
+/**
+ * Master may pass agent results into other agents and
+ * eventually into the final communication model.
+ *
+ * Secrets must NEVER enter that context.
+ */
+
+const SECRET_KEYS =
+  new Set([
+
+    "password",
+
+    "passwd",
+
+    "secret",
+
+    "token",
+
+    "accessToken",
+
+    "refreshToken",
+
+    "apiKey",
+
+    "api_key",
+
+    "authorization",
+
+    "cookie",
+
+    "privateKey",
+
+    "private_key",
+
+    "encryptedValue",
+
+    "plainValue",
+
+    "credentials",
+
+    "clientSecret",
+
+    "client_secret",
+
+    "webhookSecret",
+
+    "webhook_secret",
+
+    "secretValue",
+
+    "secret_value"
+
+  ]);
+
+
+function sanitizeForContext(
+  value,
+  depth = 0
 ) {
 
-  return (
+  if (
+    depth >
+    7
+  ) {
 
-    planning?.data ||
+    return "[truncated]";
 
-    planning ||
+  }
 
-    null
 
-  );
+  if (
+    value === null ||
+    value === undefined
+  ) {
+
+    return value;
+
+  }
+
+
+  if (
+    typeof value ===
+      "string" ||
+    typeof value ===
+      "number" ||
+    typeof value ===
+      "boolean"
+  ) {
+
+    return value;
+
+  }
+
+
+  if (
+    Array.isArray(
+      value
+    )
+  ) {
+
+    return value
+      .slice(
+        0,
+        100
+      )
+      .map(
+        item =>
+          sanitizeForContext(
+            item,
+            depth + 1
+          )
+      );
+
+  }
+
+
+  if (
+    typeof value ===
+    "object"
+  ) {
+
+    const output = {};
+
+
+    for (
+      const [
+        key,
+        item
+      ] of Object.entries(
+        value
+      )
+    ) {
+
+      if (
+        SECRET_KEYS.has(
+          key
+        )
+      ) {
+
+        output[key] =
+          "[REDACTED]";
+
+        continue;
+
+      }
+
+
+      output[key] =
+        sanitizeForContext(
+          item,
+          depth + 1
+        );
+
+    }
+
+
+    return output;
+
+  }
+
+
+  return "[unsupported]";
 
 }
 
 
 /* =========================================================
-   GET DEPLOYMENT ID
+   LOGGER HELPERS
 ========================================================= */
 
-function getDeploymentId(
-  deploymentResult,
-  projectId
+function logInfo(
+  message,
+  metadata = {}
 ) {
 
-  return (
+  const safe =
+    sanitizeForContext(
+      metadata
+    );
 
-    deploymentResult
-      ?.deployment
-      ?.deploymentId ||
 
-    deploymentResult
-      ?.data
-      ?.deploymentId ||
+  try {
 
-    deploymentResult
-      ?.deploymentId ||
+    if (
+      typeof logger?.info ===
+      "function"
+    ) {
 
-    deploymentResult
-      ?.data
-      ?.id ||
+      logger.info(
+        message,
+        safe
+      );
 
-    projectId ||
+      return;
 
-    null
+    }
 
+  } catch (
+    error
+  ) {}
+
+  console.log(
+    `[MASTER] ${message}`,
+    safe
   );
 
 }
 
 
-/* =========================================================
-   PROJECT NAME
-========================================================= */
-
-function getProjectName(
-  request,
-  planningData
+function logSuccess(
+  message,
+  metadata = {}
 ) {
 
-  return (
+  const safe =
+    sanitizeForContext(
+      metadata
+    );
 
-    planningData?.projectName ||
 
-    request?.projectName ||
+  try {
 
-    request?.name ||
+    if (
+      typeof logger?.success ===
+      "function"
+    ) {
 
-    null
+      logger.success(
+        message,
+        safe
+      );
 
+      return;
+
+    }
+
+  } catch (
+    error
+  ) {}
+
+  console.log(
+    `[MASTER] ${message}`,
+    safe
+  );
+
+}
+
+
+function logWarn(
+  message,
+  metadata = {}
+) {
+
+  const safe =
+    sanitizeForContext(
+      metadata
+    );
+
+
+  try {
+
+    if (
+      typeof logger?.warn ===
+      "function"
+    ) {
+
+      logger.warn(
+        message,
+        safe
+      );
+
+      return;
+
+    }
+
+
+    if (
+      typeof logger?.warning ===
+      "function"
+    ) {
+
+      logger.warning(
+        message,
+        safe
+      );
+
+      return;
+
+    }
+
+  } catch (
+    error
+  ) {}
+
+  console.warn(
+    `[MASTER] ${message}`,
+    safe
+  );
+
+}
+
+
+function logError(
+  message,
+  metadata = {}
+) {
+
+  const safe =
+    sanitizeForContext(
+      metadata
+    );
+
+
+  try {
+
+    if (
+      typeof logger?.error ===
+      "function"
+    ) {
+
+      logger.error(
+        message,
+        safe
+      );
+
+      return;
+
+    }
+
+  } catch (
+    error
+  ) {}
+
+  console.error(
+    `[MASTER] ${message}`,
+    safe
   );
 
 }
@@ -574,7 +901,7 @@ function normalizeRequest(
   else if (
     request &&
     typeof request ===
-      "object"
+    "object"
   ) {
 
     normalized = {
@@ -622,10 +949,92 @@ function normalizeRequest(
     );
 
 
+  normalized.environmentName =
+    normalizeEnvironmentName(
+      normalized.environmentName ||
+      normalized.environment ||
+      normalized.deployEnvironment,
+      {
+        allowEmpty:
+          true
+      }
+    );
+
+
   normalized.user =
     normalized.user ||
     fallbackUser ||
     {};
+
+
+  normalized.workflowId =
+    cleanString(
+      normalized.workflowId,
+      200
+    );
+
+
+  normalized.requestId =
+    cleanString(
+      normalized.requestId,
+      200
+    );
+
+
+  return normalized;
+
+}
+
+
+/* =========================================================
+   ENVIRONMENT NORMALIZATION
+========================================================= */
+
+function normalizeEnvironmentName(
+  value,
+  options = {}
+) {
+
+  if (
+    value ===
+      undefined ||
+    value ===
+      null ||
+    value ===
+      ""
+  ) {
+
+    if (
+      options.allowEmpty
+    ) {
+
+      return null;
+
+    }
+
+    return "production";
+
+  }
+
+
+  const normalized =
+    String(value)
+      .trim()
+      .toLowerCase();
+
+
+  if (
+    !VALID_ENVIRONMENTS.has(
+      normalized
+    )
+  ) {
+
+    throw new Error(
+      `Invalid environment '${normalized}'. ` +
+      `Allowed values: development, preview, production.`
+    );
+
+  }
 
 
   return normalized;
@@ -652,17 +1061,28 @@ function createWorkflowState(
         .toString(36)
         .slice(2, 10)}`,
 
+    requestId:
+      request.requestId ||
+      null,
+
     startedAt:
       new Date(),
 
     userId:
-      userId || null,
+      userId ||
+      null,
 
     projectId:
-      request.projectId || null,
+      request.projectId ||
+      null,
 
     projectName:
-      request.projectName || null,
+      request.projectName ||
+      null,
+
+    environmentName:
+      request.environmentName ||
+      null,
 
     primaryIntent:
       null,
@@ -689,7 +1109,20 @@ function createWorkflowState(
       "running",
 
     agentResults:
-      {}
+      {},
+
+    metrics: {
+
+      startedAt:
+        new Date(),
+
+      completedAt:
+        null,
+
+      durationMs:
+        null
+
+    }
 
   };
 
@@ -707,11 +1140,9 @@ function recordStage(
   status = "completed"
 ) {
 
-  if (
-    !workflow
-  ) {
+  if (!workflow) {
 
-    return;
+    return null;
 
   }
 
@@ -768,11 +1199,13 @@ function recordStage(
   workflow.agentResults[
     stage
   ] =
-    result || null;
+    sanitizeForContext(
+      result
+    );
 
 
   /*
-   * Keep orchestration state bounded.
+   * Bound orchestration arrays.
    */
 
   if (
@@ -788,13 +1221,70 @@ function recordStage(
   }
 
 
+  if (
+    workflow.failedStages.length >
+    MAX_WORKFLOW_STEPS
+  ) {
+
+    workflow.failedStages =
+      workflow.failedStages.slice(
+        -MAX_WORKFLOW_STEPS
+      );
+
+  }
+
+
+  if (
+    workflow.skippedStages.length >
+    MAX_WORKFLOW_STEPS
+  ) {
+
+    workflow.skippedStages =
+      workflow.skippedStages.slice(
+        -MAX_WORKFLOW_STEPS
+      );
+
+  }
+
+
+  const keys =
+    Object.keys(
+      workflow.agentResults
+    );
+
+
+  if (
+    keys.length >
+    MAX_AGENT_RESULTS
+  ) {
+
+    const removeCount =
+      keys.length -
+      MAX_AGENT_RESULTS;
+
+
+    for (
+      let i = 0;
+      i < removeCount;
+      i++
+    ) {
+
+      delete workflow.agentResults[
+        keys[i]
+      ];
+
+    }
+
+  }
+
+
   return entry;
 
 }
 
 
 /* =========================================================
-   ROUTE NORMALIZATION
+   INTENT HELPERS
 ========================================================= */
 
 function getIntentData(
@@ -804,7 +1294,7 @@ function getIntentData(
   if (
     intent?.data &&
     typeof intent.data ===
-      "object"
+    "object"
   ) {
 
     return intent.data;
@@ -815,7 +1305,7 @@ function getIntentData(
   if (
     intent &&
     typeof intent ===
-      "object"
+    "object"
   ) {
 
     return intent;
@@ -832,10 +1322,6 @@ function getIntentData(
 
 }
 
-
-/* =========================================================
-   SECONDARY INTENTS
-========================================================= */
 
 function getSecondaryIntents(
   intent
@@ -863,24 +1349,17 @@ function getSecondaryIntents(
     ...new Set(
 
       data.secondaryIntents
-
         .filter(
-          (
-            item
-          ) =>
+          item =>
             typeof item ===
             "string"
         )
-
         .map(
-          (
-            item
-          ) =>
+          item =>
             item
               .trim()
               .toLowerCase()
         )
-
         .filter(Boolean)
 
     )
@@ -892,12 +1371,6 @@ function getSecondaryIntents(
 
 /* =========================================================
    WORKFLOW CLASSIFICATION
-   ---------------------------------------------------------
-   Master converts Intent output into an explicit
-   execution workflow.
-
-   This prevents every agent from making its own
-   interpretation of the request.
 ========================================================= */
 
 function determineWorkflow(
@@ -928,11 +1401,18 @@ function determineWorkflow(
   const workflow = {
 
     type:
-      type || "chat",
+      type ||
+      "chat",
 
     secondary,
 
+    requiresMemory:
+      true,
+
     requiresPlanning:
+      false,
+
+    requiresEnvironment:
       false,
 
     requiresBuild:
@@ -965,15 +1445,19 @@ function determineWorkflow(
   };
 
 
-  /*
-   * PRIMARY ROUTES
-   */
+  /* =======================================================
+     PRIMARY INTENT
+  ======================================================= */
 
   switch (
     workflow.type
   ) {
 
     case "build":
+
+    case "create":
+
+    case "code":
 
       workflow.requiresPlanning =
         true;
@@ -986,8 +1470,7 @@ function determineWorkflow(
 
     case "fix":
 
-      workflow.requiresPlanning =
-        true;
+    case "debug":
 
       workflow.requiresFix =
         true;
@@ -998,6 +1481,18 @@ function determineWorkflow(
     case "deploy":
 
       workflow.requiresDeploy =
+        true;
+
+      break;
+
+
+    case "environment":
+
+    case "env":
+
+    case "configuration":
+
+      workflow.requiresEnvironment =
         true;
 
       break;
@@ -1021,6 +1516,8 @@ function determineWorkflow(
 
     case "monitor":
 
+    case "monitoring":
+
       workflow.requiresMonitoring =
         true;
 
@@ -1028,6 +1525,8 @@ function determineWorkflow(
 
 
     case "scale":
+
+    case "scaling":
 
       workflow.requiresScaling =
         true;
@@ -1070,12 +1569,9 @@ function determineWorkflow(
   }
 
 
-  /*
-   * EXPLICIT SECONDARY OPERATIONS
-   *
-   * Only explicit secondary intents can
-   * expand the workflow.
-   */
+  /* =======================================================
+     SECONDARY INTENTS
+  ======================================================= */
 
   if (
     secondary.includes(
@@ -1084,6 +1580,51 @@ function determineWorkflow(
   ) {
 
     workflow.requiresDeploy =
+      true;
+
+  }
+
+
+  if (
+    secondary.includes(
+      "environment"
+    ) ||
+    secondary.includes(
+      "env"
+    ) ||
+    secondary.includes(
+      "configuration"
+    )
+  ) {
+
+    workflow.requiresEnvironment =
+      true;
+
+  }
+
+
+  if (
+    secondary.includes(
+      "build"
+    )
+  ) {
+
+    workflow.requiresBuild =
+      true;
+
+    workflow.requiresPlanning =
+      true;
+
+  }
+
+
+  if (
+    secondary.includes(
+      "fix"
+    )
+  ) {
+
+    workflow.requiresFix =
       true;
 
   }
@@ -1116,6 +1657,9 @@ function determineWorkflow(
   if (
     secondary.includes(
       "monitor"
+    ) ||
+    secondary.includes(
+      "monitoring"
     )
   ) {
 
@@ -1128,6 +1672,9 @@ function determineWorkflow(
   if (
     secondary.includes(
       "scale"
+    ) ||
+    secondary.includes(
+      "scaling"
     )
   ) {
 
@@ -1137,9 +1684,9 @@ function determineWorkflow(
   }
 
 
-  /*
-   * Explicit request flags.
-   */
+  /* =======================================================
+     EXPLICIT API FLAGS
+  ======================================================= */
 
   if (
     request?.autoDeploy ===
@@ -1163,10 +1710,21 @@ function determineWorkflow(
   }
 
 
+  if (
+    request?.environmentName ||
+    request?.environment ||
+    request?.deployEnvironment
+  ) {
+
+    workflow.requiresEnvironment =
+      true;
+
+  }
+
+
   /*
-   * A build + deploy workflow is autonomous,
-   * but deployment is only allowed after
-   * successful build validation.
+   * Build + Deploy = autonomous sequence,
+   * but only through gates.
    */
 
   if (
@@ -1186,233 +1744,87 @@ function determineWorkflow(
 
 
 /* =========================================================
-   CONTEXT BUILDER
+   PROJECT NAME
 ========================================================= */
 
-function createAgentContext(
-  base
+function getProjectName(
+  request,
+  planningData
 ) {
 
-  const context = {
+  return (
 
-    workflowId:
-      base.workflow.workflowId,
+    planningData?.projectName ||
 
-    userId:
-      base.userId,
+    request?.projectName ||
 
-    projectId:
-      base.request.projectId,
+    request?.name ||
 
-    projectName:
-      base.projectName,
+    null
 
-    prompt:
-      base.request.prompt,
-
-    user:
-      base.request.user,
-
-    framework:
-      base.request.framework,
-
-    intent:
-      base.intent,
-
-    planning:
-      base.planningData,
-
-    memoryContext:
-      base.memoryContext,
-
-    workflow:
-      base.workflow,
-
-    previousResults:
-      base.workflow.agentResults,
-
-    operationState: {
-
-      currentStage:
-        base.workflow.currentStage,
-
-      completedStages:
-        base.workflow.completedStages,
-
-      failedStages:
-        base.workflow.failedStages,
-
-      status:
-        base.workflow.status
-
-    }
-
-  };
-
-
-  /*
-   * Keep large context bounded.
-   *
-   * Individual agent results remain available
-   * in workflow state, but the serialized context
-   * sent to an agent should not become infinite.
-   */
-
-  return context;
+  );
 
 }
 
 
 /* =========================================================
-   RUN AGENT SAFELY
+   PLANNING DATA
 ========================================================= */
 
-async function runAgent(
-  workflow,
-  stage,
-  agent,
-  payload
+function getPlanningData(
+  planning
 ) {
 
-  workflow.currentStage =
-    stage;
+  return (
 
+    planning?.data ||
 
-  if (
-    typeof agent !==
-    "function"
-  ) {
+    planning ||
 
-    const failure = {
+    null
 
-      success:
-        false,
-
-      message:
-        `${stage} agent is unavailable`,
-
-      error:
-        `No callable agent registered for ${stage}`
-
-    };
-
-
-    recordStage(
-      workflow,
-      stage,
-      failure,
-      "failed"
-    );
-
-
-    return failure;
-
-  }
-
-
-  try {
-
-    logger.info(
-      `Master → ${stage} Agent`
-    );
-
-
-    const result =
-      await agent(
-        payload
-      );
-
-
-    if (
-      isSuccessful(
-        result
-      )
-    ) {
-
-      recordStage(
-        workflow,
-        stage,
-        result,
-        "completed"
-      );
-
-
-      logger.success(
-        `Master ← ${stage} Agent Completed`
-      );
-
-    }
-
-    else {
-
-      recordStage(
-        workflow,
-        stage,
-        result,
-        "failed"
-      );
-
-
-      logger.error(
-        `Master ← ${stage} Agent Failed: ${getAgentError(result)}`
-      );
-
-    }
-
-
-    return result;
-
-  }
-
-  catch (
-    error
-  ) {
-
-    const normalized =
-      normalizeError(
-        error
-      );
-
-
-    const result = {
-
-      success:
-        false,
-
-      message:
-        `${stage} Agent Failed`,
-
-      error:
-        normalized.message,
-
-      details:
-        normalized
-
-    };
-
-
-    recordStage(
-      workflow,
-      stage,
-      result,
-      "failed"
-    );
-
-
-    logger.error(
-      `Master ← ${stage} Agent Exception: ${normalized.message}`
-    );
-
-
-    return result;
-
-  }
+  );
 
 }
 
 
 /* =========================================================
-   BUILD OUTPUT VALIDATION
+   DEPLOYMENT ID
+========================================================= */
+
+function getDeploymentId(
+  deploymentResult,
+  projectId
+) {
+
+  return (
+
+    deploymentResult
+      ?.deployment
+      ?.deploymentId ||
+
+    deploymentResult
+      ?.data
+      ?.deploymentId ||
+
+    deploymentResult
+      ?.deploymentId ||
+
+    deploymentResult
+      ?.data
+      ?.id ||
+
+    projectId ||
+
+    null
+
+  );
+
+}
+
+
+/* =========================================================
+   BUILD RESULT VALIDATION
 ========================================================= */
 
 function validateBuildResult(
@@ -1441,9 +1853,8 @@ function validateBuildResult(
 
 
   const files =
-    result
-      ?.data
-      ?.files;
+    result?.data?.files ||
+    result?.files;
 
 
   if (
@@ -1496,19 +1907,17 @@ function validateBuildResult(
 
 
 /* =========================================================
-   DEPLOYMENT GATE
-   ---------------------------------------------------------
-   Deployment MUST NEVER happen after a failed build.
+   BUILD GATE
 ========================================================= */
 
-function canDeploy(
+function canDeployAfterBuild(
   workflow,
   buildResult
 ) {
 
   /*
-   * Direct deployment of an already-existing
-   * project is allowed when no build was requested.
+   * Existing-project deployment does not require
+   * a new Builder result.
    */
 
   if (
@@ -1521,16 +1930,12 @@ function canDeploy(
         true,
 
       reason:
-        "Existing project deployment workflow."
+        "Deployment does not require a new build."
 
     };
 
   }
 
-
-  /*
-   * Build was required.
-   */
 
   if (
     !isSuccessful(
@@ -1544,7 +1949,7 @@ function canDeploy(
         false,
 
       reason:
-        "Deployment blocked because build did not succeed."
+        "Deployment blocked because build failed."
 
     };
 
@@ -1580,7 +1985,7 @@ function canDeploy(
       true,
 
     reason:
-      "Build completed and returned project files."
+      "Build gate passed."
 
   };
 
@@ -1588,15 +1993,356 @@ function canDeploy(
 
 
 /* =========================================================
-   FINANCIAL GATE
-   ---------------------------------------------------------
-   Master never invents payment success.
+   ENVIRONMENT GATE
+========================================================= */
 
-   Subscription Agent remains responsible for
-   entitlement state.
+async function checkEnvironmentGate(
+  workflow,
+  request,
+  workflowState
+) {
 
-   Billing Agent remains responsible for billing
-   operations/status.
+  /*
+   * Environment operations themselves don't need a
+   * deployment-readiness check.
+   */
+
+  if (
+    !workflow.requiresDeploy
+  ) {
+
+    return {
+
+      allowed:
+        true,
+
+      environment:
+        null,
+
+      reason:
+        "No deployment requested."
+
+    };
+
+  }
+
+
+  const environmentName =
+    request.environmentName ||
+    "production";
+
+
+  /*
+   * Every deployment now has an explicit environment
+   * identity. Existing deployments default to production
+   * for backward compatibility.
+   */
+
+  workflowState.environmentName =
+    environmentName;
+
+
+  const result =
+    await runAgent(
+
+      workflowState,
+
+      "environment-readiness",
+
+      environmentAgent,
+
+      {
+
+        action:
+          "deployment_readiness",
+
+        userId:
+          workflowState.userId,
+
+        projectId:
+          workflowState.projectId,
+
+        name:
+          environmentName,
+
+        workflowId:
+          workflowState.workflowId,
+
+        requestId:
+          workflowState.requestId
+
+      }
+
+    );
+
+
+  if (
+    !isSuccessful(
+      result
+    )
+  ) {
+
+    return {
+
+      allowed:
+        false,
+
+      environment:
+        environmentName,
+
+      reason:
+        getAgentError(
+          result
+        ),
+
+      result
+
+    };
+
+  }
+
+
+  const readiness =
+    result.readiness ||
+    result.data?.readiness ||
+    null;
+
+
+  /*
+   * The service is authoritative.
+   *
+   * If it explicitly returns deployable=false,
+   * deployment is blocked.
+   */
+
+  if (
+    readiness &&
+    readiness.deployable ===
+    false
+  ) {
+
+    return {
+
+      allowed:
+        false,
+
+      environment:
+        environmentName,
+
+      reason:
+        readiness.reason ||
+        "Environment is not deployable.",
+
+      result
+
+    };
+
+  }
+
+
+  return {
+
+    allowed:
+      true,
+
+    environment:
+      environmentName,
+
+    reason:
+      "Environment readiness gate passed.",
+
+    result
+
+  };
+
+}
+
+
+/* =========================================================
+   DEPLOYMENT SNAPSHOT
+========================================================= */
+
+async function createEnvironmentSnapshot(
+  request,
+  workflowState,
+  environmentName
+) {
+
+  if (
+    !environmentName
+  ) {
+
+    return {
+
+      success:
+        true,
+
+      skipped:
+        true,
+
+      reason:
+        "No environment selected."
+
+    };
+
+  }
+
+
+  return await runAgent(
+
+    workflowState,
+
+    "environment-snapshot",
+
+    environmentAgent,
+
+    {
+
+      action:
+        "create_deployment_snapshot",
+
+      userId:
+        workflowState.userId,
+
+      projectId:
+        workflowState.projectId,
+
+      name:
+        environmentName,
+
+      deploymentId:
+        workflowState.workflowId,
+
+      workflowId:
+        workflowState.workflowId,
+
+      requestId:
+        workflowState.requestId
+
+    }
+
+  );
+
+}
+
+
+/* =========================================================
+   MARK ENVIRONMENT DEPLOYED
+========================================================= */
+
+async function markEnvironmentDeployed(
+  workflowState,
+  environmentName,
+  deploymentResult
+) {
+
+  if (
+    !environmentName
+  ) {
+
+    return {
+
+      success:
+        true,
+
+      skipped:
+        true
+
+    };
+
+  }
+
+
+  const deploymentId =
+    getDeploymentId(
+      deploymentResult,
+      workflowState.projectId
+    );
+
+
+  if (
+    !deploymentId
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      message:
+        "Cannot mark environment deployed without deployment ID.",
+
+      error:
+        "DEPLOYMENT_ID_MISSING"
+
+    };
+
+  }
+
+
+  return await runAgent(
+
+    workflowState,
+
+    "environment-deployed",
+
+    environmentAgent,
+
+    {
+
+      action:
+        "mark_deployed",
+
+      userId:
+        workflowState.userId,
+
+      projectId:
+        workflowState.projectId,
+
+      name:
+        environmentName,
+
+      deploymentId,
+
+      workflowId:
+        workflowState.workflowId,
+
+      requestId:
+        workflowState.requestId
+
+    }
+
+  );
+
+}
+
+
+/* =========================================================
+   PROJECT FILES
+========================================================= */
+
+function getProjectFiles(
+  request,
+  buildResult
+) {
+
+  return (
+
+    buildResult?.data?.files ||
+
+    buildResult?.files ||
+
+    request?.files ||
+
+    []
+
+  );
+
+}
+
+
+/* =========================================================
+   PAYMENT CONTEXT
 ========================================================= */
 
 function getPaymentContext(
@@ -1654,8 +2400,7 @@ function canProcessSubscription(
 
 
   /*
-   * Subscription status checks do not necessarily
-   * require a payment.
+   * Subscription status reads do not need payment.
    */
 
   if (
@@ -1677,12 +2422,9 @@ function canProcessSubscription(
 
 
   /*
-   * If the request explicitly says payment has
-   * been confirmed, pass the authoritative payment
-   * identifiers downstream.
-
-   * The Subscription Agent must still verify
-   * authoritative payment state before entitlement.
+   * Payment confirmation is passed downstream,
+   * but Subscription Agent remains responsible
+   * for authoritative verification.
    */
 
   if (
@@ -1695,17 +2437,12 @@ function canProcessSubscription(
         true,
 
       reason:
-        "Payment confirmation supplied; downstream subscription agent must verify authoritative state."
+        "Payment confirmation supplied; Subscription Agent must verify authoritative state."
 
     };
 
   }
 
-
-  /*
-   * Never manufacture an entitlement from a
-   * missing payment confirmation.
-   */
 
   return {
 
@@ -1713,7 +2450,7 @@ function canProcessSubscription(
       true,
 
     reason:
-      "Subscription agent may inspect current entitlement/payment state."
+      "Subscription Agent may inspect authoritative entitlement/payment state."
 
   };
 
@@ -1721,25 +2458,248 @@ function canProcessSubscription(
 
 
 /* =========================================================
-   PROJECT FILES
+   AGENT CONTEXT
 ========================================================= */
 
-function getProjectFiles(
+function createAgentContext(
+  workflowState,
   request,
-  buildResult
+  intent,
+  planningData,
+  memoryContext
 ) {
 
-  return (
+  return {
 
-    buildResult
-      ?.data
-      ?.files ||
+    workflowId:
+      workflowState.workflowId,
 
-    request?.files ||
+    requestId:
+      workflowState.requestId,
 
-    []
+    userId:
+      workflowState.userId,
 
-  );
+    projectId:
+      workflowState.projectId,
+
+    projectName:
+      workflowState.projectName,
+
+    environmentName:
+      workflowState.environmentName,
+
+    prompt:
+      request.prompt,
+
+    user:
+      request.user,
+
+    framework:
+      request.framework,
+
+    intent,
+
+    planning:
+      planningData,
+
+    memoryContext,
+
+    workflow:
+      workflowState,
+
+    previousResults:
+      sanitizeForContext(
+        workflowState.agentResults
+      )
+
+  };
+
+}
+
+
+/* =========================================================
+   RUN AGENT
+========================================================= */
+
+async function runAgent(
+  workflow,
+  stage,
+  agent,
+  payload
+) {
+
+  workflow.currentStage =
+    stage;
+
+
+  if (
+    typeof agent !==
+    "function"
+  ) {
+
+    const failure = {
+
+      success:
+        false,
+
+      message:
+        `${stage} Agent is unavailable.`,
+
+      error:
+        `No callable agent registered for ${stage}.`
+
+    };
+
+
+    recordStage(
+      workflow,
+      stage,
+      failure,
+      "failed"
+    );
+
+
+    return failure;
+
+  }
+
+
+  try {
+
+    logInfo(
+      `Master → ${stage} Agent`,
+      {
+        workflowId:
+          workflow.workflowId,
+
+        requestId:
+          workflow.requestId,
+
+        projectId:
+          workflow.projectId
+
+      }
+    );
+
+
+    const result =
+      await agent(
+        payload
+      );
+
+
+    if (
+      isSuccessful(
+        result
+      )
+    ) {
+
+      recordStage(
+        workflow,
+        stage,
+        result,
+        "completed"
+      );
+
+
+      logSuccess(
+        `Master ← ${stage} Agent Completed`,
+        {
+          workflowId:
+            workflow.workflowId,
+
+          stage
+
+        }
+      );
+
+    }
+
+    else {
+
+      recordStage(
+        workflow,
+        stage,
+        result,
+        "failed"
+      );
+
+
+      logError(
+        `Master ← ${stage} Agent Failed`,
+        {
+          workflowId:
+            workflow.workflowId,
+
+          stage,
+
+          error:
+            getAgentError(
+              result
+            )
+
+        }
+      );
+
+    }
+
+
+    return result;
+
+  } catch (
+    error
+  ) {
+
+    const normalized =
+      normalizeError(
+        error
+      );
+
+
+    const result = {
+
+      success:
+        false,
+
+      message:
+        `${stage} Agent Failed.`,
+
+      error:
+        normalized.message,
+
+      details:
+        normalized
+
+    };
+
+
+    recordStage(
+      workflow,
+      stage,
+      result,
+      "failed"
+    );
+
+
+    logError(
+      `Master ← ${stage} Agent Exception`,
+      {
+        workflowId:
+          workflow.workflowId,
+
+        stage,
+
+        error:
+          normalized.message
+
+      }
+    );
+
+
+    return result;
+
+  }
 
 }
 
@@ -1764,6 +2724,9 @@ async function masterAgent(
   let normalizedRequest =
     null;
 
+  let workflowState =
+    null;
+
   let workflow =
     null;
 
@@ -1782,6 +2745,15 @@ async function masterAgent(
   let buildResult =
     null;
 
+  let fixResult =
+    null;
+
+  let fileResult =
+    null;
+
+  let environmentResult =
+    null;
+
   let deploymentResult =
     null;
 
@@ -1797,17 +2769,11 @@ async function masterAgent(
   let subscriptionResult =
     null;
 
-  let fixResult =
-    null;
-
-  let fileResult =
-    null;
-
 
   try {
 
-    logger.info(
-      "⚡ ZyrionOS Master Agent Started"
+    logInfo(
+      "ZyrionOS Master Agent Started"
     );
 
 
@@ -1857,11 +2823,16 @@ async function masterAgent(
 
 
     const projectId =
-      normalizedRequest.projectId ||
-      null;
+      getProjectId(
+        normalizedRequest
+      );
 
 
-    const workflowState =
+    normalizedRequest.projectId =
+      projectId;
+
+
+    workflowState =
       createWorkflowState(
         normalizedRequest,
         userId
@@ -1873,7 +2844,7 @@ async function masterAgent(
     ===================================================== */
 
     currentStage =
-      "memory-agent";
+      "memory";
 
 
     memoryContext =
@@ -1898,7 +2869,10 @@ async function masterAgent(
           projectId,
 
           workflowId:
-            workflowState.workflowId
+            workflowState.workflowId,
+
+          requestId:
+            workflowState.requestId
 
         }
 
@@ -1907,8 +2881,6 @@ async function masterAgent(
 
     /*
      * Memory failure is non-fatal.
-     *
-     * Memory must never block a normal request.
      */
 
     if (
@@ -1917,8 +2889,12 @@ async function masterAgent(
       )
     ) {
 
-      logger.warning(
-        "Memory unavailable. Continuing without memory."
+      logWarn(
+        "Memory unavailable. Continuing without memory.",
+        {
+          workflowId:
+            workflowState.workflowId
+        }
       );
 
     }
@@ -1929,7 +2905,7 @@ async function masterAgent(
     ===================================================== */
 
     currentStage =
-      "intent-agent";
+      "intent";
 
 
     intent =
@@ -1956,20 +2932,15 @@ async function masterAgent(
           projectId,
 
           workflowId:
-            workflowState.workflowId
+            workflowState.workflowId,
+
+          requestId:
+            workflowState.requestId
 
         }
 
       );
 
-
-    /*
-     * Intent failure is NOT silently converted into
-     * a successful arbitrary workflow.
-     *
-     * The Intent Agent itself has a deterministic
-     * fallback in the replacement provided earlier.
-     */
 
     if (
       !isSuccessful(
@@ -1979,6 +2950,13 @@ async function masterAgent(
 
       workflowState.status =
         "failed";
+
+      workflowState.metrics.completedAt =
+        new Date();
+
+      workflowState.metrics.durationMs =
+        Date.now() -
+        startedAt;
 
 
       return {
@@ -2006,10 +2984,7 @@ async function masterAgent(
 
 
     /* =====================================================
-       REQUEST TYPE OVERRIDE
-       -----------------------------------------------------
-       Explicit API-level request type has priority
-       over AI classification.
+       EXPLICIT TYPE OVERRIDES
     ===================================================== */
 
     if (
@@ -2023,9 +2998,6 @@ async function masterAgent(
 
         success:
           true,
-
-        type:
-          "build",
 
         data: {
 
@@ -2055,9 +3027,6 @@ async function masterAgent(
         success:
           true,
 
-        type:
-          "deploy",
-
         data: {
 
           ...getIntentData(
@@ -2066,6 +3035,34 @@ async function masterAgent(
 
           type:
             "deploy"
+
+        }
+
+      };
+
+    }
+
+
+    if (
+      normalizedRequest.type ===
+      "environment"
+    ) {
+
+      intent = {
+
+        ...intent,
+
+        success:
+          true,
+
+        data: {
+
+          ...getIntentData(
+            intent
+          ),
+
+          type:
+            "environment"
 
         }
 
@@ -2107,23 +3104,148 @@ async function masterAgent(
       null;
 
 
-    logger.info(
+    workflowState.projectName =
+      getProjectName(
+        normalizedRequest,
+        null
+      );
 
-      `Master Workflow: ${workflow.type}` +
-      ` | Planning=${workflow.requiresPlanning}` +
-      ` | Build=${workflow.requiresBuild}` +
-      ` | Deploy=${workflow.requiresDeploy}` +
-      ` | Billing=${workflow.requiresBilling}` +
-      ` | Subscription=${workflow.requiresSubscription}`
 
+    /*
+     * If a deployment is requested but the caller didn't
+     * provide an environment, production is used for
+     * backward compatibility.
+     */
+
+    if (
+      workflow.requiresDeploy &&
+      !workflowState.environmentName
+    ) {
+
+      workflowState.environmentName =
+        "production";
+
+    }
+
+
+    logInfo(
+      "Master workflow selected",
+      {
+        workflowId:
+          workflowState.workflowId,
+
+        type:
+          workflow.type,
+
+        build:
+          workflow.requiresBuild,
+
+        deploy:
+          workflow.requiresDeploy,
+
+        environment:
+          workflowState.environmentName
+
+      }
     );
 
 
     /* =====================================================
-       PLANNING
+       ENVIRONMENT OPERATIONS
        -----------------------------------------------------
-       Planning is only executed when the workflow
-       actually needs planning.
+       Pure environment requests are handled without
+       triggering build/deploy.
+    ===================================================== */
+
+    if (
+      workflow.requiresEnvironment &&
+      !workflow.requiresBuild &&
+      !workflow.requiresDeploy
+    ) {
+
+      currentStage =
+        "environment-agent";
+
+
+      environmentResult =
+        await runAgent(
+
+          workflowState,
+
+          "environment",
+
+          environmentAgent,
+
+          {
+
+            ...normalizedRequest,
+
+            action:
+              normalizedRequest.action ||
+              normalizedRequest.operation ||
+              getIntentData(
+                intent
+              ).environmentAction ||
+              "get",
+
+            user:
+              normalizedUser,
+
+            userId,
+
+            projectId,
+
+            workflowId:
+              workflowState.workflowId,
+
+            requestId:
+              workflowState.requestId
+
+          }
+
+        );
+
+
+      if (
+        !isSuccessful(
+          environmentResult
+        )
+      ) {
+
+        workflowState.status =
+          "failed";
+
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "Environment operation failed",
+
+          error:
+            getAgentError(
+              environmentResult
+            ),
+
+          stage:
+            currentStage,
+
+          workflow:
+            workflowState,
+
+          environmentResult
+
+        };
+
+      }
+
+    }
+
+
+    /* =====================================================
+       PLANNING
     ===================================================== */
 
     if (
@@ -2131,7 +3253,7 @@ async function masterAgent(
     ) {
 
       currentStage =
-        "planning-agent";
+        "planning";
 
 
       planning =
@@ -2160,7 +3282,10 @@ async function masterAgent(
             projectId,
 
             workflowId:
-              workflowState.workflowId
+              workflowState.workflowId,
+
+            requestId:
+              workflowState.requestId
 
           }
 
@@ -2215,8 +3340,6 @@ async function masterAgent(
 
     /* =====================================================
        BUILD
-       -----------------------------------------------------
-       Builder can only run after successful planning.
     ===================================================== */
 
     if (
@@ -2242,7 +3365,7 @@ async function masterAgent(
             "Build blocked",
 
           error:
-            "Builder requires a successful Planning Agent result.",
+            "Builder requires successful planning.",
 
           stage:
             "build-gate",
@@ -2258,7 +3381,7 @@ async function masterAgent(
 
 
       currentStage =
-        "builder-agent";
+        "builder";
 
 
       buildResult =
@@ -2281,9 +3404,7 @@ async function masterAgent(
             framework:
               normalizedRequest.framework ||
               planningData?.framework ||
-              planningData
-                ?.frontend
-                ?.framework ||
+              planningData?.frontend?.framework ||
               "React",
 
             user:
@@ -2298,7 +3419,10 @@ async function masterAgent(
             projectId,
 
             workflowId:
-              workflowState.workflowId
+              workflowState.workflowId,
+
+            requestId:
+              workflowState.requestId
 
           }
 
@@ -2347,11 +3471,16 @@ async function masterAgent(
       }
 
 
-      logger.success(
+      logSuccess(
+        "Build Gate Passed",
+        {
+          workflowId:
+            workflowState.workflowId,
 
-        `Master Build Gate Passed: ` +
-        `${buildValidation.files.length} files`
+          fileCount:
+            buildValidation.files.length
 
+        }
       );
 
     }
@@ -2359,9 +3488,6 @@ async function masterAgent(
 
     /* =====================================================
        FIX
-       -----------------------------------------------------
-       Fix is independent unless the request also
-       explicitly requires another workflow.
     ===================================================== */
 
     if (
@@ -2369,7 +3495,7 @@ async function masterAgent(
     ) {
 
       currentStage =
-        "fix-agent";
+        "fix";
 
 
       fixResult =
@@ -2402,6 +3528,9 @@ async function masterAgent(
 
             workflowId:
               workflowState.workflowId,
+
+            requestId:
+              workflowState.requestId,
 
             files:
               getProjectFiles(
@@ -2461,7 +3590,7 @@ async function masterAgent(
     ) {
 
       currentStage =
-        "file-agent";
+        "file";
 
 
       fileResult =
@@ -2494,6 +3623,9 @@ async function masterAgent(
 
             workflowId:
               workflowState.workflowId,
+
+            requestId:
+              workflowState.requestId,
 
             files:
               getProjectFiles(
@@ -2546,8 +3678,6 @@ async function masterAgent(
 
     /* =====================================================
        BILLING
-       -----------------------------------------------------
-       Billing does not automatically mean entitlement.
     ===================================================== */
 
     if (
@@ -2555,7 +3685,13 @@ async function masterAgent(
     ) {
 
       currentStage =
-        "billing-agent";
+        "billing";
+
+
+      const payment =
+        getPaymentContext(
+          normalizedRequest
+        );
 
 
       billingResult =
@@ -2580,32 +3716,28 @@ async function masterAgent(
             projectId,
 
             plan:
-              normalizedRequest.plan ||
-              normalizedRequest.subscriptionPlan ||
-              planningData?.plan ||
-              planningData?.subscriptionPlan ||
-              null,
+              payment.plan,
 
             billingCycle:
-              normalizedRequest.billingCycle,
+              payment.billingCycle,
 
             paymentProvider:
-              normalizedRequest.paymentProvider,
+              payment.paymentProvider,
 
             paymentId:
-              normalizedRequest.paymentId,
+              payment.paymentId,
 
             providerCustomerId:
-              normalizedRequest.providerCustomerId,
+              payment.providerCustomerId,
 
             providerSubscriptionId:
-              normalizedRequest.providerSubscriptionId,
+              payment.providerSubscriptionId,
 
             workflowId:
               workflowState.workflowId,
 
-            user:
-              normalizedUser,
+            requestId:
+              workflowState.requestId,
 
             planning:
               planningData
@@ -2619,8 +3751,6 @@ async function masterAgent(
 
     /* =====================================================
        SUBSCRIPTION
-       -----------------------------------------------------
-       Subscription agent owns entitlement state.
     ===================================================== */
 
     if (
@@ -2664,7 +3794,13 @@ async function masterAgent(
 
 
       currentStage =
-        "subscription-agent";
+        "subscription";
+
+
+      const payment =
+        getPaymentContext(
+          normalizedRequest
+        );
 
 
       subscriptionResult =
@@ -2689,31 +3825,31 @@ async function masterAgent(
             projectId,
 
             plan:
-              normalizedRequest.plan ||
-              normalizedRequest.subscriptionPlan ||
-              null,
+              payment.plan,
 
             billingCycle:
-              normalizedRequest.billingCycle,
+              payment.billingCycle,
 
             paymentProvider:
-              normalizedRequest.paymentProvider,
+              payment.paymentProvider,
 
             paymentConfirmed:
-              normalizedRequest.paymentConfirmed ===
-              true,
+              payment.paymentConfirmed,
 
             paymentId:
-              normalizedRequest.paymentId,
+              payment.paymentId,
 
             providerCustomerId:
-              normalizedRequest.providerCustomerId,
+              payment.providerCustomerId,
 
             providerSubscriptionId:
-              normalizedRequest.providerSubscriptionId,
+              payment.providerSubscriptionId,
 
             workflowId:
               workflowState.workflowId,
+
+            requestId:
+              workflowState.requestId,
 
             planning:
               planningData
@@ -2728,36 +3864,47 @@ async function masterAgent(
     /* =====================================================
        DEPLOYMENT
        -----------------------------------------------------
-       CRITICAL GATE:
-       If build was requested, build MUST succeed
-       before deployment.
+       FULL DEPLOYMENT GATE:
+       1. Build gate
+       2. Environment readiness
+       3. Environment snapshot
+       4. Deploy Agent
+       5. Environment deployment state update
     ===================================================== */
 
     if (
       workflow.requiresDeploy
     ) {
 
+      /* ===================================================
+         BUILD GATE
+      =================================================== */
+
       currentStage =
-        "deployment-gate";
+        "deployment-build-gate";
 
 
-      const deploymentGate =
-        canDeploy(
+      const buildGate =
+        canDeployAfterBuild(
           workflow,
           buildResult
         );
 
 
       if (
-        !deploymentGate.allowed
+        !buildGate.allowed
       ) {
 
         workflowState.status =
           "failed";
 
 
-        logger.error(
-          `Deployment blocked: ${deploymentGate.reason}`
+        logError(
+          "Deployment blocked by build gate",
+          {
+            reason:
+              buildGate.reason
+          }
         );
 
 
@@ -2770,7 +3917,7 @@ async function masterAgent(
             "Deployment blocked",
 
           error:
-            deploymentGate.reason,
+            buildGate.reason,
 
           stage:
             currentStage,
@@ -2778,13 +3925,61 @@ async function masterAgent(
           workflow:
             workflowState,
 
-          intent,
+          buildResult
 
-          planning,
+        };
+
+      }
+
+
+      /* ===================================================
+         ENVIRONMENT READINESS
+      =================================================== */
+
+      currentStage =
+        "deployment-environment-gate";
+
+
+      const environmentGate =
+        await checkEnvironmentGate(
+          workflow,
+          normalizedRequest,
+          workflowState
+        );
+
+
+      if (
+        !environmentGate.allowed
+      ) {
+
+        workflowState.status =
+          "failed";
+
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "Deployment blocked by environment gate",
+
+          error:
+            environmentGate.reason,
+
+          stage:
+            currentStage,
+
+          environment:
+            environmentGate.environment,
+
+          workflow:
+            workflowState,
 
           buildResult,
 
-          deploymentResult:
+          environmentResult:
+            environmentGate.result ||
             null
 
         };
@@ -2792,8 +3987,72 @@ async function masterAgent(
       }
 
 
+      environmentResult =
+        environmentGate.result ||
+        null;
+
+
+      /* ===================================================
+         DEPLOYMENT SNAPSHOT
+      =================================================== */
+
       currentStage =
-        "deploy-agent";
+        "deployment-environment-snapshot";
+
+
+      const snapshotResult =
+        await createEnvironmentSnapshot(
+          normalizedRequest,
+          workflowState,
+          environmentGate.environment
+        );
+
+
+      if (
+        !isSuccessful(
+          snapshotResult
+        )
+      ) {
+
+        workflowState.status =
+          "failed";
+
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "Deployment blocked because environment snapshot failed",
+
+          error:
+            getAgentError(
+              snapshotResult
+            ),
+
+          stage:
+            currentStage,
+
+          workflow:
+            workflowState,
+
+          environmentResult:
+            environmentResult,
+
+          snapshotResult
+
+        };
+
+      }
+
+
+      /* ===================================================
+         DEPLOY AGENT
+      =================================================== */
+
+      currentStage =
+        "deploy";
 
 
       deploymentResult =
@@ -2826,9 +4085,7 @@ async function masterAgent(
             framework:
               normalizedRequest.framework ||
               planningData?.framework ||
-              planningData
-                ?.frontend
-                ?.framework,
+              planningData?.frontend?.framework,
 
             plan:
               planningData,
@@ -2847,37 +4104,59 @@ async function masterAgent(
             workflowId:
               workflowState.workflowId,
 
+            requestId:
+              workflowState.requestId,
+
+            environmentName:
+              environmentGate.environment,
+
+            environmentId:
+              environmentResult
+                ?.environment
+                ?.id ||
+              environmentResult
+                ?.environment
+                ?._id ||
+              null,
+
+            environmentReady:
+              true,
+
+            /*
+             * IMPORTANT:
+             *
+             * Master does NOT resolve secrets.
+             *
+             * Deploy Agent is responsible for calling the
+             * trusted environment deployment boundary.
+             */
+
+            resolveEnvironment:
+              true,
+
             paymentId:
-              normalizedRequest.paymentId,
+              normalizedRequest.paymentId ||
+              null,
 
             paymentConfirmed:
               normalizedRequest.paymentConfirmed ===
               true,
 
             paymentProvider:
-              normalizedRequest.paymentProvider,
+              normalizedRequest.paymentProvider ||
+              null,
 
             providerCustomerId:
-              normalizedRequest.providerCustomerId,
+              normalizedRequest.providerCustomerId ||
+              null,
 
             providerSubscriptionId:
-              normalizedRequest.providerSubscriptionId,
+              normalizedRequest.providerSubscriptionId ||
+              null,
 
             billingCycle:
-              normalizedRequest.billingCycle,
-
-            /*
-             * Deploy Agent owns:
-             *
-             * Docker
-             * AWS
-             * Domain
-             * SSL
-             * deployment URL
-             *
-             * Master must not execute those agents
-             * a second time.
-             */
+              normalizedRequest.billingCycle ||
+              null,
 
             infrastructureOwnership:
               "deployAgent"
@@ -2922,6 +4201,8 @@ async function masterAgent(
 
           buildResult,
 
+          environmentResult,
+
           deploymentResult
 
         };
@@ -2929,10 +4210,55 @@ async function masterAgent(
       }
 
 
-      /*
-       * A deployment result must contain some
-       * authoritative deployment identity.
-       */
+      /* ===================================================
+         ENVIRONMENT DEPLOYMENT STATE
+      =================================================== */
+
+      currentStage =
+        "environment-deployed";
+
+
+      const environmentDeployedResult =
+        await markEnvironmentDeployed(
+          workflowState,
+          environmentGate.environment,
+          deploymentResult
+        );
+
+
+      if (
+        !isSuccessful(
+          environmentDeployedResult
+        )
+      ) {
+
+        /*
+         * Deployment itself succeeded, but environment
+         * state synchronization failed.
+         *
+         * This must NOT be represented as a clean success.
+         */
+
+        workflowState.status =
+          "degraded";
+
+
+        logWarn(
+          "Deployment succeeded but environment state synchronization failed.",
+          {
+            workflowId:
+              workflowState.workflowId,
+
+            error:
+              getAgentError(
+                environmentDeployedResult
+              )
+
+          }
+        );
+
+      }
+
 
       const deploymentId =
         getDeploymentId(
@@ -2941,11 +4267,15 @@ async function masterAgent(
         );
 
 
-      logger.success(
+      logSuccess(
+        "Deployment Gate Passed",
+        {
+          deploymentId,
 
-        `Deployment Gate Passed` +
-        ` | deploymentId=${deploymentId || "unknown"}`
+          environment:
+            environmentGate.environment
 
+        }
       );
 
     }
@@ -2953,9 +4283,6 @@ async function masterAgent(
 
     /* =====================================================
        MONITORING
-       -----------------------------------------------------
-       Monitoring is allowed after deployment or for
-       an existing project.
     ===================================================== */
 
     if (
@@ -2963,7 +4290,7 @@ async function masterAgent(
     ) {
 
       currentStage =
-        "monitoring-agent";
+        "monitoring";
 
 
       const deploymentId =
@@ -2986,7 +4313,7 @@ async function masterAgent(
             "Deployment or project ID required for monitoring",
 
           error:
-            "No deployment identifier was available."
+            "DEPLOYMENT_ID_MISSING"
 
         };
 
@@ -3038,7 +4365,10 @@ async function masterAgent(
                 planningData,
 
               workflowId:
-                workflowState.workflowId
+                workflowState.workflowId,
+
+              requestId:
+                workflowState.requestId
 
             }
 
@@ -3051,9 +4381,6 @@ async function masterAgent(
 
     /* =====================================================
        SCALING
-       -----------------------------------------------------
-       Scaling only receives a known deployment/project
-       identity.
     ===================================================== */
 
     if (
@@ -3061,7 +4388,7 @@ async function masterAgent(
     ) {
 
       currentStage =
-        "scaling-agent";
+        "scaling";
 
 
       const deploymentId =
@@ -3084,7 +4411,7 @@ async function masterAgent(
             "Deployment or project ID required for scaling",
 
           error:
-            "No deployment identifier was available."
+            "DEPLOYMENT_ID_MISSING"
 
         };
 
@@ -3136,7 +4463,10 @@ async function masterAgent(
                 planningData,
 
               workflowId:
-                workflowState.workflowId
+                workflowState.workflowId,
+
+              requestId:
+                workflowState.requestId
 
             }
 
@@ -3151,12 +4481,23 @@ async function masterAgent(
        WORKFLOW COMPLETION
     ===================================================== */
 
-    workflowState.status =
-      "completed";
-
-
     workflowState.currentStage =
       "completed";
+
+
+    workflowState.status =
+      workflowState.status ===
+        "degraded"
+        ? "degraded"
+        : "completed";
+
+
+    workflowState.metrics.completedAt =
+      new Date();
+
+    workflowState.metrics.durationMs =
+      Date.now() -
+      startedAt;
 
 
     /* =====================================================
@@ -3168,32 +4509,71 @@ async function masterAgent(
       workflowId:
         workflowState.workflowId,
 
+      requestId:
+        workflowState.requestId,
+
       status:
         workflowState.status,
 
-      intent,
+      intent:
+        sanitizeForContext(
+          intent
+        ),
 
-      planning,
+      planning:
+        sanitizeForContext(
+          planning
+        ),
 
-      memoryContext,
+      environment:
+        sanitizeForContext(
+          environmentResult
+        ),
 
-      buildResult,
+      buildResult:
+        sanitizeForContext(
+          buildResult
+        ),
 
-      deploymentResult,
+      deploymentResult:
+        sanitizeForContext(
+          deploymentResult
+        ),
 
-      monitoringResult,
+      monitoringResult:
+        sanitizeForContext(
+          monitoringResult
+        ),
 
-      scalingResult,
+      scalingResult:
+        sanitizeForContext(
+          scalingResult
+        ),
 
-      billingResult,
+      billingResult:
+        sanitizeForContext(
+          billingResult
+        ),
 
-      subscriptionResult,
+      subscriptionResult:
+        sanitizeForContext(
+          subscriptionResult
+        ),
 
-      fixResult,
+      fixResult:
+        sanitizeForContext(
+          fixResult
+        ),
 
-      fileResult,
+      fileResult:
+        sanitizeForContext(
+          fileResult
+        ),
 
-      workflow,
+      workflow:
+        sanitizeForContext(
+          workflow
+        ),
 
       completedStages:
         workflowState.completedStages,
@@ -3202,86 +4582,45 @@ async function masterAgent(
         workflowState.failedStages,
 
       skippedStages:
-        workflowState.skippedStages,
-
-      infrastructureOwnership: {
-
-        deployAgentOwns:
-
-          [
-
-            "docker",
-
-            "aws",
-
-            "domain",
-
-            "ssl"
-
-          ]
-
-      },
-
-      financialOwnership: {
-
-        billingAgentOwns:
-
-          [
-
-            "billing_operations",
-
-            "payment_information"
-
-          ],
-
-        subscriptionAgentOwns:
-
-          [
-
-            "subscription_state",
-
-            "entitlements",
-
-            "plan_access"
-
-          ]
-
-      }
+        workflowState.skippedStages
 
     };
 
 
     /* =====================================================
-       FINAL AI COMMUNICATION
+       FINAL COMMUNICATION
        -----------------------------------------------------
-       This AI call is ONLY for communication.
-
-       It does NOT decide what already happened.
-
-       Backend results are authoritative.
+       AI only explains the already-completed result.
+       It does NOT make orchestration decisions.
     ===================================================== */
 
     currentStage =
-      "master-final-response";
+      "final-response";
 
 
-    const completion =
-      await generateText({
+    let reply =
+      "";
 
-        messages: [
 
-          {
+    try {
 
-            role:
-              "system",
+      const completion =
+        await generateText({
 
-            content: `
+          messages: [
+
+            {
+
+              role:
+                "system",
+
+              content: `
 
 You are the final communication layer of ZyrionOS.
 
-The Master Agent has already completed orchestration.
+The Master Agent has already executed the workflow.
 
-Your job is ONLY to explain the actual backend results.
+Your ONLY job is to explain the actual backend results.
 
 The backend is the source of truth.
 
@@ -3291,71 +4630,72 @@ STRICT RULES:
 
 2. Never invent a deployment URL.
 
-3. Never invent a payment success.
+3. Never invent payment success.
 
-4. Never invent a subscription entitlement.
+4. Never invent subscription entitlement.
 
-5. Never invent AWS infrastructure.
+5. Never invent AWS resources.
 
 6. Never invent Docker results.
 
-7. Never invent monitoring metrics.
+7. Never invent monitoring results.
 
 8. Never invent scaling results.
 
-9. Never claim a build succeeded unless
-   buildResult.success === true.
+9. Never expose secrets.
 
-10. Never claim deployment succeeded unless
-    deploymentResult.success === true.
+10. Never expose API keys.
 
-11. Never claim payment succeeded unless
-    billingResult explicitly reports success.
+11. Never expose tokens.
 
-12. Never claim features are unlocked unless
-    subscriptionResult explicitly reports
-    the entitlement/access state.
+12. Never expose passwords.
 
-13. Never expose secrets, tokens, passwords,
-    API keys, cookies or credentials.
+13. Never expose environment variable values.
 
-14. If something failed, state that it failed.
+14. Never claim build success unless buildResult.success=true.
 
-15. If something is unavailable, state that it
-    is unavailable.
+15. Never claim deployment success unless deploymentResult.success=true.
 
-16. If deployment URL is present in the backend
-    result, report that exact URL.
+16. Never claim environment readiness unless the
+    environment gate passed.
 
-17. Do not fabricate a branded URL from a
-    provider URL.
+17. If something failed, clearly state that it failed.
 
-18. Do not say an agent ran if the orchestration
-    record shows it was skipped.
+18. If something is unavailable, state that it is unavailable.
 
-19. Keep the response concise but informative.
+19. Use the exact deployment URL returned by the backend.
 
-20. Never override backend truth with assumptions.
+20. Never construct a URL yourself.
+
+21. Keep the response concise and useful.
+
+22. Do not explain internal implementation unless
+    necessary.
+
+23. Do not claim that an agent ran when it was skipped.
 
 `
 
-          },
+            },
 
-          {
+            {
 
-            role:
-              "user",
+              role:
+                "user",
 
-            content: `
+              content: `
 
 USER REQUEST:
 
-${normalizedRequest.prompt}
+${cleanString(
+  normalizedRequest.prompt,
+  MAX_PROMPT_LENGTH
+)}
 
-WORKFLOW:
+FINAL WORKFLOW STATE:
 
 ${safeJson(
-  workflow
+  workflowState
 )}
 
 INTENT:
@@ -3368,6 +4708,12 @@ PLANNING:
 
 ${safeJson(
   planning
+)}
+
+ENVIRONMENT:
+
+${safeJson(
+  environmentResult
 )}
 
 BUILD RESULT:
@@ -3418,73 +4764,77 @@ ${safeJson(
   fileResult
 )}
 
-WORKFLOW STATE:
-
-${safeJson(
-  workflowState
-)}
-
 `
 
-          }
+            }
 
-        ],
+          ],
 
-        maxTokens:
-          1800
+          maxTokens:
+            MAX_FINAL_RESPONSE_TOKENS
 
-      });
-
-
-    /* =====================================================
-       FINAL AI FAILURE
-       -----------------------------------------------------
-       The actual orchestration already happened.
-       Therefore a communication-provider failure
-       must NOT erase successful backend results.
-    ===================================================== */
-
-    let reply =
-      "";
+        });
 
 
-    if (
-      completion &&
-      completion.success ===
-      true
+      if (
+        completion?.success ===
+        true
+      ) {
+
+        reply =
+          cleanString(
+            completion.text,
+            12000
+          );
+
+      }
+
+    } catch (
+      finalResponseError
     ) {
 
-      reply =
-        cleanString(
-          completion.text,
-          12000
-        );
+      /*
+       * Communication failure does NOT erase the
+       * successful orchestration.
+       */
+
+      logWarn(
+        "Final communication AI failed. Using deterministic response.",
+        {
+          error:
+            finalResponseError.message
+        }
+      );
 
     }
 
+
+    /* =====================================================
+       DETERMINISTIC FALLBACK
+    ===================================================== */
 
     if (
       !reply
     ) {
 
-      /*
-       * Deterministic fallback response.
-       */
-
-      const successfulStages =
-        workflowState
-          .completedStages
+      const completed =
+        workflowState.completedStages
           .join(
             ", "
           );
 
 
-      const failedStages =
-        workflowState
-          .failedStages
+      const failed =
+        workflowState.failedStages
           .join(
             ", "
           );
+
+
+      const deploymentUrl =
+        deploymentResult?.deployment?.url ||
+        deploymentResult?.data?.url ||
+        null;
 
 
       reply =
@@ -3492,20 +4842,20 @@ ${safeJson(
 
           `Workflow ${workflowState.status}.`,
 
-          successfulStages
-            ? `Completed: ${successfulStages}.`
+          completed
+            ? `Completed: ${completed}.`
             : "",
 
-          failedStages
-            ? `Failed: ${failedStages}.`
+          failed
+            ? `Failed: ${failed}.`
             : "",
 
-          deploymentResult?.deployment?.url
-            ? `Deployment URL: ${deploymentResult.deployment.url}`
+          workflowState.environmentName
+            ? `Environment: ${workflowState.environmentName}.`
             : "",
 
-          deploymentResult?.data?.url
-            ? `Deployment URL: ${deploymentResult.data.url}`
+          deploymentUrl
+            ? `Deployment URL: ${deploymentUrl}`
             : ""
 
         ]
@@ -3516,22 +4866,25 @@ ${safeJson(
 
 
     /* =====================================================
-       SUCCESS LOG
+       FINAL SUCCESS
     ===================================================== */
 
-    logger.success(
+    logSuccess(
+      "Master Agent Completed",
+      {
+        workflowId:
+          workflowState.workflowId,
 
-      `Master Agent Completed` +
-      ` | Workflow=${workflow.type}` +
-      ` | Status=${workflowState.status}` +
-      ` | Duration=${Date.now() - startedAt}ms`
+        status:
+          workflowState.status,
 
+        durationMs:
+          Date.now() -
+          startedAt
+
+      }
     );
 
-
-    /* =====================================================
-       FINAL RESPONSE
-    ===================================================== */
 
     return {
 
@@ -3547,9 +4900,7 @@ ${safeJson(
 
     };
 
-  }
-
-  catch (
+  } catch (
     error
   ) {
 
@@ -3560,23 +4911,39 @@ ${safeJson(
 
 
     if (
-      workflow
+      workflowState
     ) {
 
-      workflow.status =
+      workflowState.status =
         "failed";
 
-      workflow.currentStage =
+      workflowState.currentStage =
         currentStage;
+
+      workflowState.metrics.completedAt =
+        new Date();
+
+      workflowState.metrics.durationMs =
+        Date.now() -
+        startedAt;
 
     }
 
 
-    logger.error(
+    logError(
+      "Master Agent Failed",
+      {
+        workflowId:
+          workflowState?.workflowId ||
+          null,
 
-      `Master Agent Failed at ${currentStage}: ` +
-      `${normalized.message}`
+        stage:
+          currentStage,
 
+        error:
+          normalized.message
+
+      }
     );
 
 
@@ -3591,32 +4958,71 @@ ${safeJson(
       error:
         normalized.message,
 
+      code:
+        normalized.code,
+
       stage:
         currentStage,
 
-      workflow,
+      workflow:
+        workflowState,
 
       orchestration: {
 
-        intent,
+        intent:
+          sanitizeForContext(
+            intent
+          ),
 
-        planning,
+        planning:
+          sanitizeForContext(
+            planning
+          ),
 
-        buildResult,
+        environment:
+          sanitizeForContext(
+            environmentResult
+          ),
 
-        deploymentResult,
+        buildResult:
+          sanitizeForContext(
+            buildResult
+          ),
 
-        monitoringResult,
+        deploymentResult:
+          sanitizeForContext(
+            deploymentResult
+          ),
 
-        scalingResult,
+        monitoringResult:
+          sanitizeForContext(
+            monitoringResult
+          ),
 
-        billingResult,
+        scalingResult:
+          sanitizeForContext(
+            scalingResult
+          ),
 
-        subscriptionResult,
+        billingResult:
+          sanitizeForContext(
+            billingResult
+          ),
 
-        fixResult,
+        subscriptionResult:
+          sanitizeForContext(
+            subscriptionResult
+          ),
 
-        fileResult
+        fixResult:
+          sanitizeForContext(
+            fixResult
+          ),
+
+        fileResult:
+          sanitizeForContext(
+            fileResult
+          )
 
       }
 
@@ -3628,8 +5034,16 @@ ${safeJson(
 
 
 /* =========================================================
-   MASTER AGENT METADATA
+   MASTER METADATA
 ========================================================= */
+
+masterAgent.version =
+  MASTER_VERSION;
+
+
+masterAgent.agentName =
+  "masterAgent";
+
 
 masterAgent.agents =
   agentRegistry;
@@ -3642,36 +5056,58 @@ masterAgent.agentCount =
 
 
 /* =========================================================
-   WORKFLOW OWNERSHIP
+   OWNERSHIP
 ========================================================= */
 
 masterAgent.ownership = {
 
   master: [
 
-    "routing",
+    "request_normalization",
+
+    "intent_routing",
 
     "workflow_orchestration",
 
-    "execution_gates",
+    "dependency_enforcement",
+
+    "environment_gates",
+
+    "build_gates",
+
+    "deployment_gates",
 
     "failure_propagation",
 
-    "agent_sequencing"
+    "final_result_aggregation"
 
   ],
+
+
+  memory: [
+
+    "context_memory"
+
+  ],
+
+
+  intent: [
+
+    "intent_classification"
+
+  ],
+
 
   planning: [
 
-    "implementation_blueprint",
-
-    "module_decomposition",
+    "implementation_planning",
 
     "dependency_planning",
 
-    "implementation_phases"
+    "project_decomposition"
 
   ],
+
 
   builder: [
 
@@ -3679,11 +5115,15 @@ masterAgent.ownership = {
 
   ],
 
+
   fix: [
+
+    "bug_analysis",
 
     "bug_repair"
 
   ],
+
 
   file: [
 
@@ -3691,59 +5131,217 @@ masterAgent.ownership = {
 
   ],
 
+
+  environment: [
+
+    "environment_configuration",
+
+    "environment_validation",
+
+    "environment_secret_boundary",
+
+    "deployment_environment_state"
+
+  ],
+
+
   deploy: [
 
     "deployment_orchestration",
 
-    "docker",
+    "deployment_lifecycle",
 
-    "aws",
-
-    "domain",
-
-    "ssl",
-
-    "deployment_url"
+    "deployment_result"
 
   ],
+
+
+  docker: [
+
+    "docker_operations"
+
+  ],
+
+
+  aws: [
+
+    "aws_infrastructure"
+
+  ],
+
+
+  domain: [
+
+    "dns_operations"
+
+  ],
+
+
+  ssl: [
+
+    "certificate_operations"
+
+  ],
+
+
+  monitoring: [
+
+    "runtime_monitoring"
+
+  ],
+
+
+  scaling: [
+
+    "capacity_scaling"
+
+  ],
+
 
   billing: [
 
     "billing_operations",
 
-    "payment_information"
+    "payment_state"
 
   ],
+
 
   subscription: [
 
     "subscription_state",
 
-    "entitlements",
+    "entitlements"
 
-    "plan_access"
+  ]
+
+};
+
+
+/* =========================================================
+   SECURITY CONTRACT
+========================================================= */
+
+masterAgent.security = {
+
+  directDatabaseAccess:
+    false,
+
+  directProviderAccess:
+    false,
+
+  directInfrastructureAccess:
+    false,
+
+  directPaymentProcessing:
+    false,
+
+  directSecretResolution:
+    false,
+
+  environmentSecretsExposedToMaster:
+    false,
+
+  deploymentSecretsResolvedBy:
+    "trusted-deployment-workflow",
+
+  providerArchitecture:
+    "centralized-ai-provider-service"
+
+};
+
+
+/* =========================================================
+   WORKFLOW CONTRACT
+========================================================= */
+
+masterAgent.workflowContract = {
+
+  build: [
+
+    "memory",
+
+    "intent",
+
+    "planning",
+
+    "builder"
 
   ],
 
-  monitoring: [
+  buildAndDeploy: [
 
-    "runtime_monitoring",
+    "memory",
 
-    "health"
+    "intent",
+
+    "planning",
+
+    "builder",
+
+    "environment-readiness",
+
+    "environment-snapshot",
+
+    "deploy",
+
+    "environment-deployed"
 
   ],
 
-  scaling: [
+  deploy: [
 
-    "capacity_changes",
+    "memory",
 
-    "scaling_operations"
+    "intent",
+
+    "environment-readiness",
+
+    "environment-snapshot",
+
+    "deploy",
+
+    "environment-deployed"
 
   ],
 
-  memory: [
+  environment: [
 
-    "context_memory"
+    "memory",
+
+    "intent",
+
+    "environment"
+
+  ],
+
+  fix: [
+
+    "memory",
+
+    "intent",
+
+    "fix"
+
+  ],
+
+  subscription: [
+
+    "memory",
+
+    "intent",
+
+    "subscription"
+
+  ],
+
+  billing: [
+
+    "memory",
+
+    "intent",
+
+    "billing"
 
   ]
 
