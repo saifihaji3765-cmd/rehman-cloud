@@ -1,6 +1,6 @@
 /**
  * ZyrionOS - Environment Routes
- * Version: 2.0.0
+ * Version: 2.1.0
  *
  * Environment API
  *
@@ -24,9 +24,9 @@
  *
  * SECURITY:
  * - All environment routes require authentication.
- * - Environment secrets are never returned by routes.
- * - Deployment secret resolution is NOT exposed as a public
- *   endpoint.
+ * - All environment routes are rate limited.
+ * - Environment secrets are never intentionally returned by routes.
+ * - Deployment secret resolution is NOT exposed as a public endpoint.
  * - Webhooks are NOT handled here.
  */
 
@@ -34,17 +34,44 @@
 
 const express = require("express");
 
+/* -------------------------------------------------------------------------- */
+/* Controllers                                                                */
+/* -------------------------------------------------------------------------- */
+
 const environmentController = require(
   "../controllers/environmentController"
 );
 
-const authMiddleware = require(
+/* -------------------------------------------------------------------------- */
+/* Middleware                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * authMiddleware.js exports an object containing authMiddleware.
+ */
+const {
+  authMiddleware,
+} = require(
   "../middleware/authMiddleware"
 );
 
-const apiLimiter = require(
-  "../middleware/apiLimiter"
+/*
+ * rateLimiter.js exports:
+ *
+ * apiLimiter
+ * authLimiter
+ * aiLimiter
+ * deployLimiter
+ */
+const {
+  apiLimiter,
+} = require(
+  "../middleware/rateLimiter"
 );
+
+/* -------------------------------------------------------------------------- */
+/* Router                                                                     */
+/* -------------------------------------------------------------------------- */
 
 const router = express.Router();
 
@@ -66,6 +93,10 @@ function assertFunction(
     );
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* Controller Contract Validation                                             */
+/* -------------------------------------------------------------------------- */
 
 assertFunction(
   environmentController,
@@ -163,46 +194,55 @@ assertFunction(
   "environmentController"
 );
 
-if (typeof authMiddleware !== "function") {
+/* -------------------------------------------------------------------------- */
+/* Middleware Contract Validation                                             */
+/* -------------------------------------------------------------------------- */
+
+if (
+  typeof authMiddleware !== "function"
+) {
   throw new Error(
     "authMiddleware must be a function."
   );
 }
 
-if (typeof apiLimiter !== "function") {
+if (
+  typeof apiLimiter !== "function"
+) {
   throw new Error(
     "apiLimiter must be a function."
   );
 }
 
 /* -------------------------------------------------------------------------- */
-/* Common Middleware                                                          */
+/* Common Protected Middleware                                                */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Every environment endpoint is private.
+ * Every environment endpoint is private and rate limited.
  *
- * Environment configuration can contain infrastructure secrets,
- * API keys and deployment credentials. Public access here would
- * be spectacularly bad engineering.
+ * Environment configuration may contain:
+ * - API keys
+ * - infrastructure credentials
+ * - deployment configuration
+ * - secret metadata
+ *
+ * Authentication and rate limiting therefore apply consistently
+ * to every environment endpoint.
  */
 const protectedMiddleware = [
   authMiddleware,
   apiLimiter,
 ];
 
-/* -------------------------------------------------------------------------- */
-/* Health                                                                    */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* HEALTH                                                                     */
+/* ========================================================================== */
 
 /**
  * GET /api/environments/health
  *
- * Authenticated service health check.
- *
- * We intentionally keep this behind authentication because the
- * environment service contains information about encryption
- * configuration and deployment infrastructure.
+ * Authenticated environment service health check.
  */
 router.get(
   "/health",
@@ -210,17 +250,14 @@ router.get(
   environmentController.health
 );
 
-/* -------------------------------------------------------------------------- */
-/* Environment Collection                                                     */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* ENVIRONMENT COLLECTION                                                     */
+/* ========================================================================== */
 
 /**
  * POST /api/environments
  *
- * Create:
- * development
- * preview
- * production
+ * Create environment.
  */
 router.post(
   "/",
@@ -231,7 +268,7 @@ router.post(
 /**
  * GET /api/environments?projectId=<id>
  *
- * List project environments.
+ * List environments for a project.
  */
 router.get(
   "/",
@@ -239,14 +276,14 @@ router.get(
   environmentController.listEnvironments
 );
 
-/* -------------------------------------------------------------------------- */
-/* Copy Environment                                                           */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* COPY ENVIRONMENT                                                           */
+/* ========================================================================== */
 
 /**
  * POST /api/environments/copy
  *
- * Example body:
+ * Example:
  *
  * {
  *   "projectId": "...",
@@ -255,7 +292,7 @@ router.get(
  *   "copySecrets": false
  * }
  *
- * copySecrets defaults to false inside the controller/service.
+ * Secret copying remains controlled by the service/controller.
  */
 router.post(
   "/copy",
@@ -263,24 +300,14 @@ router.post(
   environmentController.copyEnvironment
 );
 
-/* -------------------------------------------------------------------------- */
-/* Deployment Operations                                                      */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* DEPLOYMENT OPERATIONS                                                      */
+/* ========================================================================== */
 
 /**
  * POST /api/environments/deployment-snapshot
  *
  * Creates an immutable deployment configuration snapshot.
- *
- * This is useful for the deployment pipeline:
- *
- * Environment
- *      ↓
- * Snapshot
- *      ↓
- * Docker
- *      ↓
- * AWS
  */
 router.post(
   "/deployment-snapshot",
@@ -291,7 +318,8 @@ router.post(
 /**
  * POST /api/environments/mark-deployed
  *
- * Called by trusted deployment workflow after deployment succeeds.
+ * Marks an environment as deployed after trusted deployment workflow
+ * completion.
  */
 router.post(
   "/mark-deployed",
@@ -299,9 +327,9 @@ router.post(
   environmentController.markDeployed
 );
 
-/* -------------------------------------------------------------------------- */
-/* Project Environment                                                        */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* PROJECT ENVIRONMENT                                                        */
+/* ========================================================================== */
 
 /**
  * GET /api/environments/:projectId/:environmentName
@@ -316,17 +344,17 @@ router.get(
   environmentController.getEnvironment
 );
 
-/* -------------------------------------------------------------------------- */
-/* Configuration Summary                                                      */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* CONFIGURATION SUMMARY                                                      */
+/* ========================================================================== */
 
 /**
  * GET
  * /api/environments/:projectId/:environmentName/summary
  *
- * Returns metadata only.
+ * Returns configuration metadata.
  *
- * NEVER returns actual secret values.
+ * Secret values must never be returned.
  */
 router.get(
   "/:projectId/:environmentName/summary",
@@ -334,15 +362,15 @@ router.get(
   environmentController.getConfigurationSummary
 );
 
-/* -------------------------------------------------------------------------- */
-/* Validation                                                                 */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* VALIDATION                                                                 */
+/* ========================================================================== */
 
 /**
  * POST
  * /api/environments/:projectId/:environmentName/validate
  *
- * Runs environment validation.
+ * Validates environment configuration.
  */
 router.post(
   "/:projectId/:environmentName/validate",
@@ -350,18 +378,17 @@ router.post(
   environmentController.validateEnvironment
 );
 
-/* -------------------------------------------------------------------------- */
-/* Deployment Readiness                                                       */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* DEPLOYMENT READINESS                                                       */
+/* ========================================================================== */
 
 /**
  * GET
  * /api/environments/:projectId/:environmentName/deployment-readiness
  *
- * Returns whether the environment is ready for deployment.
+ * Returns deployment readiness metadata.
  *
- * IMPORTANT:
- * This endpoint must NEVER expose resolved secrets.
+ * Resolved deployment secrets must never be exposed through this endpoint.
  */
 router.get(
   "/:projectId/:environmentName/deployment-readiness",
@@ -369,9 +396,9 @@ router.get(
   environmentController.deploymentReadiness
 );
 
-/* -------------------------------------------------------------------------- */
-/* Variable Operations                                                        */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* ENVIRONMENT VARIABLES                                                      */
+/* ========================================================================== */
 
 /**
  * POST
@@ -389,15 +416,7 @@ router.post(
  * PATCH
  * /api/environments/:projectId/:environmentName/variables/:key
  *
- * Update variable.
- *
- * Supports:
- * - value
- * - type
- * - scope
- * - required
- * - description
- * - secret status
+ * Update environment variable.
  */
 router.patch(
   "/:projectId/:environmentName/variables/:key",
@@ -409,7 +428,7 @@ router.patch(
  * DELETE
  * /api/environments/:projectId/:environmentName/variables/:key
  *
- * Delete variable.
+ * Delete environment variable.
  */
 router.delete(
   "/:projectId/:environmentName/variables/:key",
@@ -417,9 +436,9 @@ router.delete(
   environmentController.deleteVariable
 );
 
-/* -------------------------------------------------------------------------- */
-/* Archive / Restore                                                          */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* ARCHIVE / RESTORE                                                          */
+/* ========================================================================== */
 
 /**
  * POST
@@ -441,19 +460,16 @@ router.post(
   environmentController.unarchiveEnvironment
 );
 
-/* -------------------------------------------------------------------------- */
-/* Delete Environment                                                         */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* DELETE                                                                     */
+/* ========================================================================== */
 
 /**
  * DELETE
  * /api/environments/:projectId/:environmentName
  *
- * Production deletion requires:
- *
- * {
- *   "confirm": true
- * }
+ * Production deletion should require explicit confirmation
+ * inside the controller/service layer.
  */
 router.delete(
   "/:projectId/:environmentName",
@@ -461,12 +477,12 @@ router.delete(
   environmentController.deleteEnvironment
 );
 
-/* -------------------------------------------------------------------------- */
-/* Route Contract                                                             */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* ROUTE CONTRACT                                                             */
+/* ========================================================================== */
 
 router.environmentRouteContract = {
-  version: "2.0.0",
+  version: "2.1.0",
 
   basePath: "/api/environments",
 
@@ -589,11 +605,11 @@ router.environmentRouteContract = {
   ],
 };
 
-/* -------------------------------------------------------------------------- */
-/* Router Metadata                                                            */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* ROUTER METADATA                                                            */
+/* ========================================================================== */
 
-router.version = "2.0.0";
+router.version = "2.1.0";
 
 router.service = "environment";
 
@@ -605,8 +621,8 @@ router.security = {
   webhookRoutesIncluded: false,
 };
 
-/* -------------------------------------------------------------------------- */
-/* Export                                                                     */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* EXPORT                                                                     */
+/* ========================================================================== */
 
 module.exports = router;
