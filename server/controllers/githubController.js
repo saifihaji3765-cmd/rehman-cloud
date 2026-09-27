@@ -3,20 +3,23 @@
 /*
 =========================================================
  ZYRION OS — GITHUB CONTROLLER
- Version: 1.0.0
+ Version: 2.0.0
 
  Responsibility:
  - HTTP request/response handling
  - Authenticated user extraction
  - Input validation
  - GitHub Agent orchestration
+ - GitHub Deployment Agent orchestration
  - Safe response formatting
 
  IMPORTANT:
  - Controller does NOT call GitHub API directly
  - Controller does NOT decrypt GitHub tokens
  - Controller does NOT call AI providers
- - Business logic stays inside githubAgent/githubService
+ - Controller does NOT execute Docker
+ - Controller does NOT execute AWS
+ - Business logic stays inside Agents/Services
 =========================================================
 */
 
@@ -24,6 +27,9 @@ const mongoose = require("mongoose");
 
 const githubAgent =
   require("../agents/githubAgent");
+
+const githubDeploymentAgent =
+  require("../agents/githubDeploymentAgent");
 
 
 /* =========================================================
@@ -104,17 +110,74 @@ function sendError(
         ? error.status
         : 500;
 
+  const safeStatus =
+    status >= 400 &&
+    status <= 599
+      ? status
+      : 500;
+
   const message =
     error?.message ||
     fallbackMessage;
 
-  return res.status(status).json({
+  return res.status(safeStatus).json({
     success: false,
     message,
     errorCode:
       error?.code ||
       "GITHUB_CONTROLLER_ERROR"
   });
+}
+
+
+function requireAuthenticatedUser(
+  req,
+  res
+) {
+  const userId =
+    getUserId(req);
+
+  if (!userId) {
+    sendError(
+      res,
+      {
+        statusCode: 401,
+        message:
+          "Authentication required",
+        code:
+          "AUTH_REQUIRED"
+      }
+    );
+
+    return null;
+  }
+
+  return userId;
+}
+
+
+function getRepositoryInput(
+  req
+) {
+  return {
+    owner:
+      cleanString(
+        req.params?.owner ||
+        req.query?.owner ||
+        req.body?.owner,
+        100
+      ),
+
+    repository:
+      cleanString(
+        req.params?.repository ||
+        req.params?.repo ||
+        req.query?.repository ||
+        req.query?.repo ||
+        req.body?.repository,
+        200
+      )
+  };
 }
 
 
@@ -128,17 +191,13 @@ async function createConnection(
 ) {
   try {
     const userId =
-      getUserId(req);
+      requireAuthenticatedUser(
+        req,
+        res
+      );
 
     if (!userId) {
-      return sendError(
-        res,
-        {
-          statusCode: 401,
-          message: "Authentication required",
-          code: "AUTH_REQUIRED"
-        }
-      );
+      return;
     }
 
     const {
@@ -163,8 +222,10 @@ async function createConnection(
         res,
         {
           statusCode: 400,
-          message: "Invalid projectId",
-          code: "INVALID_PROJECT_ID"
+          message:
+            "Invalid projectId",
+          code:
+            "INVALID_PROJECT_ID"
         }
       );
     }
@@ -174,8 +235,10 @@ async function createConnection(
         res,
         {
           statusCode: 400,
-          message: "GitHub access token is required",
-          code: "GITHUB_ACCESS_TOKEN_REQUIRED"
+          message:
+            "GitHub access token is required",
+          code:
+            "GITHUB_ACCESS_TOKEN_REQUIRED"
         }
       );
     }
@@ -183,27 +246,39 @@ async function createConnection(
     const result =
       await githubAgent.createConnection({
         userId,
+
         projectId:
           projectId || null,
+
         connectionType:
-          connectionType || "oauth",
+          connectionType ||
+          "oauth",
+
         accessToken,
+
         refreshToken:
           refreshToken || null,
+
         githubUser:
           githubUser || {},
+
         scopes:
           Array.isArray(scopes)
             ? scopes
             : [],
+
         expiresAt:
           expiresAt || null,
+
         installation:
           installation || {},
+
         metadata:
           metadata || {},
+
         permissions:
           permissions || {},
+
         defaultRepository:
           defaultRepository || {}
       });
@@ -238,17 +313,13 @@ async function listConnections(
 ) {
   try {
     const userId =
-      getUserId(req);
+      requireAuthenticatedUser(
+        req,
+        res
+      );
 
     if (!userId) {
-      return sendError(
-        res,
-        {
-          statusCode: 401,
-          message: "Authentication required",
-          code: "AUTH_REQUIRED"
-        }
-      );
+      return;
     }
 
     const projectId =
@@ -262,8 +333,10 @@ async function listConnections(
         res,
         {
           statusCode: 400,
-          message: "Invalid projectId",
-          code: "INVALID_PROJECT_ID"
+          message:
+            "Invalid projectId",
+          code:
+            "INVALID_PROJECT_ID"
         }
       );
     }
@@ -271,6 +344,7 @@ async function listConnections(
     const result =
       await githubAgent.listConnections({
         userId,
+
         projectId:
           projectId || null
       });
@@ -305,29 +379,27 @@ async function getConnection(
 ) {
   try {
     const userId =
-      getUserId(req);
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
 
     const connectionId =
       getConnectionId(req);
-
-    if (!userId) {
-      return sendError(
-        res,
-        {
-          statusCode: 401,
-          message: "Authentication required",
-          code: "AUTH_REQUIRED"
-        }
-      );
-    }
 
     if (!connectionId) {
       return sendError(
         res,
         {
           statusCode: 400,
-          message: "Connection ID is required",
-          code: "CONNECTION_ID_REQUIRED"
+          message:
+            "Connection ID is required",
+          code:
+            "CONNECTION_ID_REQUIRED"
         }
       );
     }
@@ -367,29 +439,27 @@ async function validateConnection(
 ) {
   try {
     const userId =
-      getUserId(req);
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
 
     const connectionId =
       getConnectionId(req);
-
-    if (!userId) {
-      return sendError(
-        res,
-        {
-          statusCode: 401,
-          message: "Authentication required",
-          code: "AUTH_REQUIRED"
-        }
-      );
-    }
 
     if (!connectionId) {
       return sendError(
         res,
         {
           statusCode: 400,
-          message: "Connection ID is required",
-          code: "CONNECTION_ID_REQUIRED"
+          message:
+            "Connection ID is required",
+          code:
+            "CONNECTION_ID_REQUIRED"
         }
       );
     }
@@ -429,29 +499,27 @@ async function disconnectConnection(
 ) {
   try {
     const userId =
-      getUserId(req);
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
 
     const connectionId =
       getConnectionId(req);
-
-    if (!userId) {
-      return sendError(
-        res,
-        {
-          statusCode: 401,
-          message: "Authentication required",
-          code: "AUTH_REQUIRED"
-        }
-      );
-    }
 
     if (!connectionId) {
       return sendError(
         res,
         {
           statusCode: 400,
-          message: "Connection ID is required",
-          code: "CONNECTION_ID_REQUIRED"
+          message:
+            "Connection ID is required",
+          code:
+            "CONNECTION_ID_REQUIRED"
         }
       );
     }
@@ -490,29 +558,27 @@ async function listRepositories(
 ) {
   try {
     const userId =
-      getUserId(req);
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
 
     const connectionId =
       getConnectionId(req);
-
-    if (!userId) {
-      return sendError(
-        res,
-        {
-          statusCode: 401,
-          message: "Authentication required",
-          code: "AUTH_REQUIRED"
-        }
-      );
-    }
 
     if (!connectionId) {
       return sendError(
         res,
         {
           statusCode: 400,
-          message: "Connection ID is required",
-          code: "CONNECTION_ID_REQUIRED"
+          message:
+            "Connection ID is required",
+          code:
+            "CONNECTION_ID_REQUIRED"
         }
       );
     }
@@ -520,12 +586,18 @@ async function listRepositories(
     const result =
       await githubAgent.listRepositories({
         userId,
+
         connectionId,
+
         page:
           Math.max(
-            parseInt(req.query.page, 10) || 1,
+            parseInt(
+              req.query.page,
+              10
+            ) || 1,
             1
           ),
+
         perPage:
           Math.min(
             Math.max(
@@ -537,21 +609,25 @@ async function listRepositories(
             ),
             100
           ),
+
         visibility:
           cleanString(
             req.query.visibility,
             50
           ) || undefined,
+
         affiliation:
           cleanString(
             req.query.affiliation,
             200
           ) || undefined,
+
         sort:
           cleanString(
             req.query.sort,
             50
           ) || undefined,
+
         direction:
           cleanString(
             req.query.direction,
@@ -566,6 +642,7 @@ async function listRepositories(
           result?.repositories ||
           result ||
           [],
+
         pagination:
           result?.pagination ||
           null
@@ -592,45 +669,33 @@ async function getRepository(
 ) {
   try {
     const userId =
-      getUserId(req);
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
 
     const connectionId =
       getConnectionId(req);
 
-    const owner =
-      cleanString(
-        req.params.owner ||
-        req.query.owner,
-        100
-      );
-
-    const repository =
-      cleanString(
-        req.params.repository ||
-        req.params.repo ||
-        req.query.repository ||
-        req.query.repo,
-        200
-      );
-
-    if (!userId) {
-      return sendError(
-        res,
-        {
-          statusCode: 401,
-          message: "Authentication required",
-          code: "AUTH_REQUIRED"
-        }
-      );
-    }
+    const {
+      owner,
+      repository
+    } =
+      getRepositoryInput(req);
 
     if (!connectionId) {
       return sendError(
         res,
         {
           statusCode: 400,
-          message: "Connection ID is required",
-          code: "CONNECTION_ID_REQUIRED"
+          message:
+            "Connection ID is required",
+          code:
+            "CONNECTION_ID_REQUIRED"
         }
       );
     }
@@ -642,7 +707,8 @@ async function getRepository(
           statusCode: 400,
           message:
             "Repository owner and name are required",
-          code: "REPOSITORY_REQUIRED"
+          code:
+            "REPOSITORY_REQUIRED"
         }
       );
     }
@@ -650,8 +716,11 @@ async function getRepository(
     const result =
       await githubAgent.getRepository({
         userId,
+
         connectionId,
+
         owner,
+
         repository
       });
 
@@ -684,45 +753,33 @@ async function listBranches(
 ) {
   try {
     const userId =
-      getUserId(req);
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
 
     const connectionId =
       getConnectionId(req);
 
-    const owner =
-      cleanString(
-        req.params.owner ||
-        req.query.owner,
-        100
-      );
-
-    const repository =
-      cleanString(
-        req.params.repository ||
-        req.params.repo ||
-        req.query.repository ||
-        req.query.repo,
-        200
-      );
-
-    if (!userId) {
-      return sendError(
-        res,
-        {
-          statusCode: 401,
-          message: "Authentication required",
-          code: "AUTH_REQUIRED"
-        }
-      );
-    }
+    const {
+      owner,
+      repository
+    } =
+      getRepositoryInput(req);
 
     if (!connectionId) {
       return sendError(
         res,
         {
           statusCode: 400,
-          message: "Connection ID is required",
-          code: "CONNECTION_ID_REQUIRED"
+          message:
+            "Connection ID is required",
+          code:
+            "CONNECTION_ID_REQUIRED"
         }
       );
     }
@@ -734,7 +791,8 @@ async function listBranches(
           statusCode: 400,
           message:
             "Repository owner and name are required",
-          code: "REPOSITORY_REQUIRED"
+          code:
+            "REPOSITORY_REQUIRED"
         }
       );
     }
@@ -742,14 +800,22 @@ async function listBranches(
     const result =
       await githubAgent.listBranches({
         userId,
+
         connectionId,
+
         owner,
+
         repository,
+
         page:
           Math.max(
-            parseInt(req.query.page, 10) || 1,
+            parseInt(
+              req.query.page,
+              10
+            ) || 1,
             1
           ),
+
         perPage:
           Math.min(
             Math.max(
@@ -770,6 +836,7 @@ async function listBranches(
           result?.branches ||
           result ||
           [],
+
         pagination:
           result?.pagination ||
           null
@@ -796,26 +863,23 @@ async function listContents(
 ) {
   try {
     const userId =
-      getUserId(req);
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
 
     const connectionId =
       getConnectionId(req);
 
-    const owner =
-      cleanString(
-        req.params.owner ||
-        req.query.owner,
-        100
-      );
-
-    const repository =
-      cleanString(
-        req.params.repository ||
-        req.params.repo ||
-        req.query.repository ||
-        req.query.repo,
-        200
-      );
+    const {
+      owner,
+      repository
+    } =
+      getRepositoryInput(req);
 
     const path =
       cleanString(
@@ -833,24 +897,15 @@ async function listContents(
         200
       );
 
-    if (!userId) {
-      return sendError(
-        res,
-        {
-          statusCode: 401,
-          message: "Authentication required",
-          code: "AUTH_REQUIRED"
-        }
-      );
-    }
-
     if (!connectionId) {
       return sendError(
         res,
         {
           statusCode: 400,
-          message: "Connection ID is required",
-          code: "CONNECTION_ID_REQUIRED"
+          message:
+            "Connection ID is required",
+          code:
+            "CONNECTION_ID_REQUIRED"
         }
       );
     }
@@ -862,7 +917,8 @@ async function listContents(
           statusCode: 400,
           message:
             "Repository owner and name are required",
-          code: "REPOSITORY_REQUIRED"
+          code:
+            "REPOSITORY_REQUIRED"
         }
       );
     }
@@ -870,10 +926,15 @@ async function listContents(
     const result =
       await githubAgent.listContents({
         userId,
+
         connectionId,
+
         owner,
+
         repository,
+
         path,
+
         ref:
           ref || undefined
       });
@@ -908,26 +969,23 @@ async function getFile(
 ) {
   try {
     const userId =
-      getUserId(req);
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
 
     const connectionId =
       getConnectionId(req);
 
-    const owner =
-      cleanString(
-        req.params.owner ||
-        req.query.owner,
-        100
-      );
-
-    const repository =
-      cleanString(
-        req.params.repository ||
-        req.params.repo ||
-        req.query.repository ||
-        req.query.repo,
-        200
-      );
+    const {
+      owner,
+      repository
+    } =
+      getRepositoryInput(req);
 
     const path =
       cleanString(
@@ -946,24 +1004,15 @@ async function getFile(
         200
       );
 
-    if (!userId) {
-      return sendError(
-        res,
-        {
-          statusCode: 401,
-          message: "Authentication required",
-          code: "AUTH_REQUIRED"
-        }
-      );
-    }
-
     if (!connectionId) {
       return sendError(
         res,
         {
           statusCode: 400,
-          message: "Connection ID is required",
-          code: "CONNECTION_ID_REQUIRED"
+          message:
+            "Connection ID is required",
+          code:
+            "CONNECTION_ID_REQUIRED"
         }
       );
     }
@@ -975,7 +1024,8 @@ async function getFile(
           statusCode: 400,
           message:
             "Repository owner, name and file path are required",
-          code: "FILE_PATH_REQUIRED"
+          code:
+            "FILE_PATH_REQUIRED"
         }
       );
     }
@@ -983,10 +1033,15 @@ async function getFile(
     const result =
       await githubAgent.getFile({
         userId,
+
         connectionId,
+
         owner,
+
         repository,
+
         path,
+
         ref:
           ref || undefined
       });
@@ -1020,45 +1075,33 @@ async function getDefaultBranch(
 ) {
   try {
     const userId =
-      getUserId(req);
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
 
     const connectionId =
       getConnectionId(req);
 
-    const owner =
-      cleanString(
-        req.params.owner ||
-        req.query.owner,
-        100
-      );
-
-    const repository =
-      cleanString(
-        req.params.repository ||
-        req.params.repo ||
-        req.query.repository ||
-        req.query.repo,
-        200
-      );
-
-    if (!userId) {
-      return sendError(
-        res,
-        {
-          statusCode: 401,
-          message: "Authentication required",
-          code: "AUTH_REQUIRED"
-        }
-      );
-    }
+    const {
+      owner,
+      repository
+    } =
+      getRepositoryInput(req);
 
     if (!connectionId) {
       return sendError(
         res,
         {
           statusCode: 400,
-          message: "Connection ID is required",
-          code: "CONNECTION_ID_REQUIRED"
+          message:
+            "Connection ID is required",
+          code:
+            "CONNECTION_ID_REQUIRED"
         }
       );
     }
@@ -1070,7 +1113,8 @@ async function getDefaultBranch(
           statusCode: 400,
           message:
             "Repository owner and name are required",
-          code: "REPOSITORY_REQUIRED"
+          code:
+            "REPOSITORY_REQUIRED"
         }
       );
     }
@@ -1078,8 +1122,11 @@ async function getDefaultBranch(
     const result =
       await githubAgent.getDefaultBranch({
         userId,
+
         connectionId,
+
         owner,
+
         repository
       });
 
@@ -1103,7 +1150,627 @@ async function getDefaultBranch(
 
 
 /* =========================================================
-   HEALTH
+   REPOSITORY ANALYSIS
+========================================================= */
+
+async function analyzeRepository(
+  req,
+  res
+) {
+  try {
+    const userId =
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
+
+    const {
+      files,
+      contents,
+      repository
+    } =
+      req.body || {};
+
+    if (
+      !Array.isArray(files) ||
+      files.length === 0
+    ) {
+      return sendError(
+        res,
+        {
+          statusCode: 400,
+          message:
+            "Repository files are required for analysis",
+          code:
+            "ANALYSIS_FILES_REQUIRED"
+        }
+      );
+    }
+
+    const result =
+      await githubAgent.analyzeRepository({
+        userId,
+
+        files,
+
+        contents:
+          contents || {},
+
+        repository:
+          repository || {}
+      });
+
+    return sendSuccess(
+      res,
+      {
+        analysis:
+          result?.analysis ||
+          result
+      }
+    );
+
+  } catch (error) {
+    return sendError(
+      res,
+      error,
+      "GitHub repository analysis failed"
+    );
+  }
+}
+
+
+/* =========================================================
+   DEPLOYMENT CONTRACT
+========================================================= */
+
+/*
+POST /api/github/deployment-contract
+
+Purpose:
+Convert GitHub Analyzer output into
+a normalized deployment contract.
+
+This controller only orchestrates.
+Actual logic stays inside
+githubDeploymentAgent.
+*/
+
+async function createDeploymentContract(
+  req,
+  res
+) {
+  try {
+    const userId =
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
+
+    const {
+      analysis,
+      files,
+      repository
+    } =
+      req.body || {};
+
+    if (
+      !analysis ||
+      typeof analysis !==
+        "object"
+    ) {
+      return sendError(
+        res,
+        {
+          statusCode: 400,
+          message:
+            "Repository analysis is required",
+          code:
+            "ANALYSIS_REQUIRED"
+        }
+      );
+    }
+
+    if (
+      !Array.isArray(files) ||
+      files.length === 0
+    ) {
+      return sendError(
+        res,
+        {
+          statusCode: 400,
+          message:
+            "Repository files are required",
+          code:
+            "FILES_REQUIRED"
+        }
+      );
+    }
+
+    const result =
+      await githubDeploymentAgent
+        .createDeploymentContract({
+          userId,
+
+          analysis,
+
+          files,
+
+          repository:
+            repository || {}
+        });
+
+    return sendSuccess(
+      res,
+      {
+        deploymentContract:
+          result
+      }
+    );
+
+  } catch (error) {
+    return sendError(
+      res,
+      error,
+      "Failed to create GitHub deployment contract"
+    );
+  }
+}
+
+
+/* =========================================================
+   DEPLOYMENT READINESS
+========================================================= */
+
+/*
+POST /api/github/deployment-readiness
+*/
+
+async function deploymentReadiness(
+  req,
+  res
+) {
+  try {
+    const userId =
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
+
+    const {
+      analysis,
+      files
+    } =
+      req.body || {};
+
+    if (
+      !analysis ||
+      typeof analysis !==
+        "object"
+    ) {
+      return sendError(
+        res,
+        {
+          statusCode: 400,
+          message:
+            "Repository analysis is required",
+          code:
+            "ANALYSIS_REQUIRED"
+        }
+      );
+    }
+
+    if (
+      !Array.isArray(files) ||
+      files.length === 0
+    ) {
+      return sendError(
+        res,
+        {
+          statusCode: 400,
+          message:
+            "Repository files are required",
+          code:
+            "FILES_REQUIRED"
+        }
+      );
+    }
+
+    const result =
+      await githubDeploymentAgent
+        .checkDeploymentReadiness({
+          userId,
+
+          analysis,
+
+          files
+        });
+
+    return sendSuccess(
+      res,
+      {
+        readiness:
+          result
+      }
+    );
+
+  } catch (error) {
+    return sendError(
+      res,
+      error,
+      "Failed to determine deployment readiness"
+    );
+  }
+}
+
+
+/* =========================================================
+   PREPARE DEPLOYMENT
+========================================================= */
+
+/*
+POST /api/github/prepare-deployment
+
+This creates the complete deployment
+package for the next agents.
+
+GitHub
+  ↓
+Analyzer
+  ↓
+Deployment Agent
+  ↓
+Docker Handoff
+  ↓
+AWS Handoff
+*/
+
+async function prepareDeployment(
+  req,
+  res
+) {
+  try {
+    const userId =
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
+
+    const {
+      analysis,
+      files,
+      repository
+    } =
+      req.body || {};
+
+    if (
+      !analysis ||
+      typeof analysis !==
+        "object"
+    ) {
+      return sendError(
+        res,
+        {
+          statusCode: 400,
+          message:
+            "Repository analysis is required",
+          code:
+            "ANALYSIS_REQUIRED"
+        }
+      );
+    }
+
+    if (
+      !Array.isArray(files) ||
+      files.length === 0
+    ) {
+      return sendError(
+        res,
+        {
+          statusCode: 400,
+          message:
+            "Repository files are required",
+          code:
+            "FILES_REQUIRED"
+        }
+      );
+    }
+
+    const result =
+      await githubDeploymentAgent
+        .prepareDeployment({
+          userId,
+
+          analysis,
+
+          files,
+
+          repository:
+            repository || {}
+        });
+
+    return sendSuccess(
+      res,
+      {
+        deployment:
+          result
+      }
+    );
+
+  } catch (error) {
+    return sendError(
+      res,
+      error,
+      "Failed to prepare GitHub deployment"
+    );
+  }
+}
+
+
+/* =========================================================
+   DOCKER HANDOFF
+========================================================= */
+
+/*
+POST /api/github/docker-handoff
+*/
+
+async function dockerHandoff(
+  req,
+  res
+) {
+  try {
+    const userId =
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
+
+    const {
+      contract
+    } =
+      req.body || {};
+
+    if (
+      !contract ||
+      typeof contract !==
+        "object"
+    ) {
+      return sendError(
+        res,
+        {
+          statusCode: 400,
+          message:
+            "Deployment contract is required",
+          code:
+            "DEPLOYMENT_CONTRACT_REQUIRED"
+        }
+      );
+    }
+
+    const result =
+      await githubDeploymentAgent
+        .prepareDockerHandoff({
+          userId,
+
+          contract
+        });
+
+    return sendSuccess(
+      res,
+      {
+        dockerHandoff:
+          result
+      }
+    );
+
+  } catch (error) {
+    return sendError(
+      res,
+      error,
+      "Failed to prepare Docker handoff"
+    );
+  }
+}
+
+
+/* =========================================================
+   AWS HANDOFF
+========================================================= */
+
+/*
+POST /api/github/aws-handoff
+*/
+
+async function awsHandoff(
+  req,
+  res
+) {
+  try {
+    const userId =
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
+
+    const {
+      contract
+    } =
+      req.body || {};
+
+    if (
+      !contract ||
+      typeof contract !==
+        "object"
+    ) {
+      return sendError(
+        res,
+        {
+          statusCode: 400,
+          message:
+            "Deployment contract is required",
+          code:
+            "DEPLOYMENT_CONTRACT_REQUIRED"
+        }
+      );
+    }
+
+    const result =
+      await githubDeploymentAgent
+        .prepareAwsHandoff({
+          userId,
+
+          contract
+        });
+
+    return sendSuccess(
+      res,
+      {
+        awsHandoff:
+          result
+      }
+    );
+
+  } catch (error) {
+    return sendError(
+      res,
+      error,
+      "Failed to prepare AWS handoff"
+    );
+  }
+}
+
+
+/* =========================================================
+   SANITIZE DEPLOYMENT CONTRACT
+========================================================= */
+
+/*
+POST /api/github/sanitize-contract
+
+Useful before passing deployment
+information between agents.
+*/
+
+async function sanitizeDeploymentContract(
+  req,
+  res
+) {
+  try {
+    const userId =
+      requireAuthenticatedUser(
+        req,
+        res
+      );
+
+    if (!userId) {
+      return;
+    }
+
+    const {
+      contract
+    } =
+      req.body || {};
+
+    if (
+      !contract ||
+      typeof contract !==
+        "object"
+    ) {
+      return sendError(
+        res,
+        {
+          statusCode: 400,
+          message:
+            "Deployment contract is required",
+          code:
+            "DEPLOYMENT_CONTRACT_REQUIRED"
+        }
+      );
+    }
+
+    const result =
+      await githubDeploymentAgent
+        .sanitizeContract({
+          userId,
+
+          contract
+        });
+
+    return sendSuccess(
+      res,
+      {
+        contract:
+          result
+      }
+    );
+
+  } catch (error) {
+    return sendError(
+      res,
+      error,
+      "Failed to sanitize deployment contract"
+    );
+  }
+}
+
+
+/* =========================================================
+   GITHUB DEPLOYMENT AGENT HEALTH
+========================================================= */
+
+async function deploymentHealth(
+  req,
+  res
+) {
+  try {
+    const result =
+      await githubDeploymentAgent
+        .health();
+
+    return sendSuccess(
+      res,
+      {
+        githubDeployment:
+          result
+      }
+    );
+
+  } catch (error) {
+    return sendError(
+      res,
+      error,
+      "GitHub deployment agent health check failed"
+    );
+  }
+}
+
+
+/* =========================================================
+   GITHUB CONTROLLER HEALTH
 ========================================================= */
 
 async function health(
@@ -1137,16 +1804,34 @@ async function health(
 ========================================================= */
 
 module.exports = {
+
+  /* Connections */
   createConnection,
   listConnections,
   getConnection,
   validateConnection,
   disconnectConnection,
+
+  /* Repository */
   listRepositories,
   getRepository,
   listBranches,
   listContents,
   getFile,
   getDefaultBranch,
-  health
+
+  /* Analyzer */
+  analyzeRepository,
+
+  /* Deployment */
+  createDeploymentContract,
+  deploymentReadiness,
+  prepareDeployment,
+  dockerHandoff,
+  awsHandoff,
+  sanitizeDeploymentContract,
+
+  /* Health */
+  health,
+  deploymentHealth
 };
