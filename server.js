@@ -1,40 +1,35 @@
-require("dotenv").config();
+/**
+ * ZyrionOS SERVER
+ * Version: 5.0.0
+ *
+ * Responsibilities:
+ * - Application bootstrap
+ * - Environment validation
+ * - Security middleware
+ * - CORS
+ * - Webhook raw-body isolation
+ * - Body parsing
+ * - Authentication initialization
+ * - API route mounting
+ * - Environment management
+ * - Health/readiness endpoints
+ * - Global error handling
+ * - MongoDB startup
+ * - Redis startup
+ * - Graceful shutdown
+ *
+ * IMPORTANT:
+ *
+ * webhookRoutes MUST be mounted before:
+ *
+ *   express.json()
+ *   express.urlencoded()
+ *
+ * because payment/webhook signature verification may require
+ * the original raw request body.
+ */
 
-/* =========================================================
-   ZyrionOS SERVER
-   Version: 4.0.0
-   =========================================================
-
-   Responsibilities:
-   - Application bootstrap
-   - Environment validation
-   - Security middleware
-   - CORS
-   - Webhook raw-body isolation
-   - Body parsing
-   - Authentication initialization
-   - API route mounting
-   - Health/readiness endpoints
-   - Global error handling
-   - Database startup
-   - Redis startup
-   - Graceful shutdown
-
-   IMPORTANT WEBHOOK ARCHITECTURE:
-
-      webhookRoutes
-           ↓
-      RAW BODY
-           ↓
-      Signature verification
-           ↓
-      Webhook controller
-
-   webhookRoutes MUST be mounted before:
-      express.json()
-      express.urlencoded()
-
-========================================================= */
+"use strict";
 
 
 /* =========================================================
@@ -73,7 +68,7 @@ const mongoose =
 
 
 /* =========================================================
-   CONFIG
+   CONFIGURATION
 ========================================================= */
 
 require("./server/config/passport");
@@ -93,7 +88,7 @@ const connectMongo =
   require("./server/database/mongo");
 
 const {
-  connectRedis
+  connectRedis,
 } =
   require("./server/database/redis");
 
@@ -126,6 +121,24 @@ const projectRoutes =
 const financialRoutes =
   require("./server/routes/financialRoutes");
 
+/**
+ * Environment System
+ *
+ * Environment flow:
+ *
+ * Routes
+ *   ↓
+ * Controller
+ *   ↓
+ * Service
+ *   ↓
+ * Model
+ *   ↓
+ * MongoDB
+ */
+const environmentRoutes =
+  require("./server/routes/environmentRoutes");
+
 
 /* =========================================================
    SERVICES
@@ -136,7 +149,7 @@ const logger =
 
 
 /* =========================================================
-   APP
+   APPLICATION
 ========================================================= */
 
 const app =
@@ -153,11 +166,13 @@ const applicationState = {
     new Date(),
 
   redis:
-
     "unknown",
 
   shuttingDown:
-    false
+    false,
+
+  ready:
+    false,
 
 };
 
@@ -198,12 +213,12 @@ const allowedOrigins = [
 
   "https://zyrionos.com",
 
-  "https://www.zyrionos.com"
+  "https://www.zyrionos.com",
 
 ]
   .filter(Boolean)
   .map(
-    origin =>
+    (origin) =>
       String(origin)
         .trim()
         .replace(/\/+$/, "")
@@ -220,13 +235,14 @@ app.use(
       ) {
 
         /*
-         * Requests without Origin are allowed.
+         * Requests without an Origin header are allowed.
          *
-         * Examples:
+         * Typical examples:
+         *
          * - server-to-server requests
-         * - provider webhooks
+         * - CLI requests
          * - health checks
-         * - command-line requests
+         * - provider callbacks
          */
 
         if (!origin) {
@@ -259,10 +275,22 @@ app.use(
         }
 
 
-        console.error(
-          "CORS blocked origin:",
-          normalizedOrigin
-        );
+        try {
+
+          logger.warn(
+            `CORS blocked origin: ${normalizedOrigin}`
+          );
+
+        } catch (
+          loggerError
+        ) {
+
+          console.error(
+            "CORS logger error:",
+            loggerError.message
+          );
+
+        }
 
 
         return callback(
@@ -288,7 +316,7 @@ app.use(
 
       "DELETE",
 
-      "OPTIONS"
+      "OPTIONS",
 
     ],
 
@@ -300,11 +328,87 @@ app.use(
 
       "Accept",
 
-      "X-Requested-With"
+      "X-Requested-With",
 
-    ]
+      "X-Request-ID",
+
+      "X-Correlation-ID",
+
+    ],
+
+    exposedHeaders: [
+
+      "X-Request-ID",
+
+      "X-Correlation-ID",
+
+    ],
 
   })
+);
+
+
+/* =========================================================
+   REQUEST ID
+=========================================================
+
+   The frontend can send:
+
+      X-Request-ID
+
+   Otherwise the existing request ID is preserved if present.
+
+   This becomes important later for:
+
+      GitHub
+      Deployment Logs
+      Auto-Fix
+      AI Agents
+      AWS deployments
+
+========================================================= */
+
+app.use(
+  (req, res, next) => {
+
+    const incomingRequestId =
+      req.headers[
+        "x-request-id"
+      ];
+
+    const incomingCorrelationId =
+      req.headers[
+        "x-correlation-id"
+      ];
+
+
+    const requestId =
+      incomingRequestId ||
+      incomingCorrelationId ||
+      `${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 12)}`;
+
+
+    req.requestId =
+      String(requestId);
+
+
+    res.setHeader(
+      "X-Request-ID",
+      req.requestId
+    );
+
+
+    res.setHeader(
+      "X-Correlation-ID",
+      req.requestId
+    );
+
+
+    next();
+
+  }
 );
 
 
@@ -312,16 +416,16 @@ app.use(
    HTTP LOGGER
 =========================================================
 
-   IMPORTANT:
-
-   Morgan is intentionally mounted BEFORE API routes.
-
-   If it is mounted after routes, requests that terminate
-   inside route handlers may never reach Morgan.
+   Morgan must be mounted before API routes.
 ========================================================= */
 
 app.use(
-  morgan("combined")
+  morgan(
+    process.env.NODE_ENV ===
+      "production"
+      ? "combined"
+      : "dev"
+  )
 );
 
 
@@ -329,13 +433,19 @@ app.use(
    WEBHOOK ROUTES
 =========================================================
 
-   CRITICAL:
+   CRITICAL ORDER:
 
-   These routes MUST come before express.json().
+   webhookRoutes
+        ↓
+   raw-body handling
+        ↓
+   signature verification
+        ↓
+   webhook controller
+        ↓
+   normal body parsers
 
-   Stripe/Razorpay/WhatsApp signature verification may
-   require the original raw request body.
-
+   DO NOT MOVE express.json() ABOVE THIS.
 ========================================================= */
 
 app.use(
@@ -346,11 +456,6 @@ app.use(
 
 /* =========================================================
    BODY PARSERS
-=========================================================
-
-   Webhooks have already consumed their own raw body.
-
-   All normal API routes use these parsers.
 ========================================================= */
 
 app.use(
@@ -358,7 +463,7 @@ app.use(
 
     limit:
       process.env.API_JSON_BODY_LIMIT ||
-      "10mb"
+      "10mb",
 
   })
 );
@@ -372,7 +477,7 @@ app.use(
 
     limit:
       process.env.API_URLENCODED_BODY_LIMIT ||
-      "10mb"
+      "10mb",
 
   })
 );
@@ -427,11 +532,15 @@ app.use(
    API ROUTES
 ========================================================= */
 
+/* ----------------------------- AUTH ---------------------- */
+
 app.use(
   "/api/auth",
   authRoutes
 );
 
+
+/* ------------------------------ AI ----------------------- */
 
 app.use(
   "/api/ai",
@@ -439,11 +548,15 @@ app.use(
 );
 
 
+/* ---------------------------- DEPLOY --------------------- */
+
 app.use(
   "/api/deploy",
   deployRoutes
 );
 
+
+/* --------------------------- PAYMENT --------------------- */
 
 app.use(
   "/api/payment",
@@ -451,11 +564,15 @@ app.use(
 );
 
 
+/* ------------------------ SUBSCRIPTION ------------------- */
+
 app.use(
   "/api/subscription",
   subscriptionRoutes
 );
 
+
+/* --------------------------- PROJECTS --------------------- */
 
 app.use(
   "/api/projects",
@@ -463,13 +580,39 @@ app.use(
 );
 
 
-/* =========================================================
-   FINANCIAL CONTROL PLANE
-========================================================= */
+/* -------------------------- FINANCIAL --------------------- */
 
 app.use(
   "/api/financial",
   financialRoutes
+);
+
+
+/* ------------------------- ENVIRONMENT -------------------- */
+
+/**
+ * Environment Management API
+ *
+ * Examples:
+ *
+ * GET
+ * /api/environments?projectId=PROJECT_ID
+ *
+ * GET
+ * /api/environments/PROJECT_ID/production
+ *
+ * POST
+ * /api/environments/PROJECT_ID/production/variables
+ *
+ * PATCH
+ * /api/environments/PROJECT_ID/production/variables/API_KEY
+ *
+ * DELETE
+ * /api/environments/PROJECT_ID/production/variables/API_KEY
+ */
+app.use(
+  "/api/environments",
+  environmentRoutes
 );
 
 
@@ -492,10 +635,18 @@ app.get(
           "ZyrionOS",
 
         status:
-          "online",
+          applicationState.shuttingDown
+            ? "shutting_down"
+            : "online",
 
         version:
-          "4.0.0"
+          "5.0.0",
+
+        requestId:
+          req.requestId,
+
+        timestamp:
+          new Date().toISOString(),
 
       });
 
@@ -511,7 +662,7 @@ app.get(
 
       "Is the Node process alive?"
 
-   It intentionally does NOT require MongoDB or Redis.
+   It intentionally does not require MongoDB or Redis.
 ========================================================= */
 
 app.get(
@@ -526,7 +677,9 @@ app.get(
           true,
 
         status:
-          "healthy",
+          applicationState.shuttingDown
+            ? "shutting_down"
+            : "healthy",
 
         server:
           "running",
@@ -535,14 +688,23 @@ app.get(
           process.env.NODE_ENV ||
           "development",
 
+        version:
+          "5.0.0",
+
         uptime:
           process.uptime(),
 
         startedAt:
           applicationState.startedAt,
 
+        shuttingDown:
+          applicationState.shuttingDown,
+
+        requestId:
+          req.requestId,
+
         timestamp:
-          new Date().toISOString()
+          new Date().toISOString(),
 
       });
 
@@ -558,11 +720,12 @@ app.get(
 
       "Can this instance actually serve the application?"
 
-   MongoDB is considered mandatory.
+   MongoDB:
+      mandatory
 
-   Redis is considered degraded rather than fatal because
-   the current architecture intentionally allows the
-   application to continue when Redis is unavailable.
+   Redis:
+      degraded but non-fatal under current architecture
+
 ========================================================= */
 
 app.get(
@@ -579,7 +742,18 @@ app.get(
 
 
     const ready =
-      mongoReady;
+      mongoReady &&
+      !applicationState.shuttingDown;
+
+
+    const status =
+      ready
+        ? (
+            redisReady
+              ? "ready"
+              : "degraded"
+          )
+        : "not_ready";
 
 
     return res
@@ -593,14 +767,20 @@ app.get(
         success:
           ready,
 
-        status:
-          ready
-            ? (
-                redisReady
-                  ? "ready"
-                  : "degraded"
-              )
-            : "not_ready",
+        status,
+
+        server: {
+
+          running:
+            true,
+
+          shuttingDown:
+            applicationState.shuttingDown,
+
+          uptime:
+            process.uptime(),
+
+        },
 
         dependencies: {
 
@@ -612,17 +792,36 @@ app.get(
           redis:
             redisReady
               ? "connected"
-              : applicationState.redis
+              : applicationState.redis,
 
         },
 
+        requestId:
+          req.requestId,
+
         timestamp:
-          new Date().toISOString()
+          new Date().toISOString(),
 
       });
 
   }
 );
+
+
+/* =========================================================
+   ENVIRONMENT SYSTEM HEALTH
+=========================================================
+
+   This is separate from application readiness.
+
+   Environment service itself exposes:
+
+      /api/environments/health
+
+   so authentication and environment-service health can
+   remain separated from infrastructure liveness.
+
+========================================================= */
 
 
 /* =========================================================
@@ -643,7 +842,13 @@ app.use(
           "Route not found",
 
         path:
-          req.originalUrl
+          req.originalUrl,
+
+        method:
+          req.method,
+
+        requestId:
+          req.requestId,
 
       });
 
@@ -664,8 +869,8 @@ app.use(
   ) => {
 
     /*
-     * Express requires the fourth argument for an
-     * error-handling middleware.
+     * Express identifies error middleware through the
+     * four-argument signature.
      *
      * next is intentionally unused.
      */
@@ -683,17 +888,23 @@ app.use(
 
 
     const requestId =
+      req.requestId ||
       req.headers[
         "x-request-id"
       ] ||
       null;
 
 
-    console.error(
-      "GLOBAL ERROR:",
-      err
-    );
+    const isProduction =
+      (
+        process.env.NODE_ENV ||
+        "development"
+      ) === "production";
 
+
+    /* =====================================================
+       LOG ERROR
+    ===================================================== */
 
     try {
 
@@ -716,7 +927,7 @@ app.use(
           requestId,
 
           stack:
-            err?.stack
+            err?.stack,
 
         })
       );
@@ -750,7 +961,9 @@ app.use(
             false,
 
           message:
-            "CORS origin not allowed"
+            "CORS origin not allowed",
+
+          requestId,
 
         });
 
@@ -779,7 +992,9 @@ app.use(
             false,
 
           message:
-            "Invalid JSON request body"
+            "Invalid JSON request body",
+
+          requestId,
 
         });
 
@@ -792,7 +1007,7 @@ app.use(
 
     if (
       err?.type ===
-      "entity.too.large" ||
+        "entity.too.large" ||
       statusCode === 413
     ) {
 
@@ -804,7 +1019,37 @@ app.use(
             false,
 
           message:
-            "Request payload is too large"
+            "Request payload is too large",
+
+          requestId,
+
+        });
+
+    }
+
+
+    /* =====================================================
+       CLIENT ABORT / REQUEST CLOSED
+    ===================================================== */
+
+    if (
+      err?.code ===
+        "ECONNABORTED" ||
+      err?.code ===
+        "ECONNRESET"
+    ) {
+
+      return res
+        .status(499)
+        .json({
+
+          success:
+            false,
+
+          message:
+            "Request was terminated by the client",
+
+          requestId,
 
         });
 
@@ -815,44 +1060,50 @@ app.use(
        DEFAULT ERROR
     ===================================================== */
 
-    const isDevelopment =
-      (
-        process.env.NODE_ENV ||
-        "development"
-      ) === "development";
+    const safeStatus =
+      statusCode >= 400 &&
+      statusCode < 600
+        ? statusCode
+        : 500;
+
+
+    const response = {
+
+      success:
+        false,
+
+      message:
+        safeStatus >= 500
+          ? "Internal Server Error"
+          : (
+              err?.message ||
+              "Request failed"
+            ),
+
+      requestId,
+
+    };
+
+
+    /*
+     * Never expose stack traces or internal details in
+     * production.
+     */
+
+    if (!isProduction) {
+
+      response.error =
+        err?.message;
+
+      response.stack =
+        err?.stack;
+
+    }
 
 
     return res
-      .status(
-        statusCode >= 400 &&
-        statusCode < 600
-          ? statusCode
-          : 500
-      )
-      .json({
-
-        success:
-          false,
-
-        message:
-          statusCode === 500
-            ? "Internal Server Error"
-            : (
-                err?.message ||
-                "Request failed"
-              ),
-
-        ...(isDevelopment
-          ? {
-              error:
-                err?.message,
-
-              stack:
-                err?.stack
-            }
-          : {})
-
-      });
+      .status(safeStatus)
+      .json(response);
 
   }
 );
@@ -864,17 +1115,26 @@ app.use(
 
 async function startServer() {
 
-  let server = null;
+  let server =
+    null;
 
 
   try {
 
     /* =====================================================
-       ENVIRONMENT
+       VALIDATION
     ===================================================== */
 
     logger.info(
       "Starting ZyrionOS..."
+    );
+
+
+    logger.info(
+      `Environment: ${
+        process.env.NODE_ENV ||
+        "development"
+      }`
     );
 
 
@@ -883,6 +1143,7 @@ async function startServer() {
     ===================================================== */
 
     await connectMongo();
+
 
     logger.success(
       "MongoDB Connected"
@@ -896,6 +1157,7 @@ async function startServer() {
     try {
 
       await connectRedis();
+
 
       applicationState.redis =
         "connected";
@@ -914,15 +1176,19 @@ async function startServer() {
 
 
       logger.error(
-        "Redis Failed: " +
-        redisError.message
+        `Redis Failed: ${redisError.message}`
       );
 
+
       /*
-       * Current architecture allows the application to
-       * continue without Redis.
+       * Redis is currently non-fatal.
        *
-       * Readiness will report degraded state.
+       * /api/health/ready will report:
+       *
+       * status = degraded
+       *
+       * instead of marking the application completely
+       * unavailable.
        */
 
     }
@@ -937,13 +1203,17 @@ async function startServer() {
         env.PORT,
         () => {
 
+          applicationState.ready =
+            true;
+
+
           console.log(
             `🚀 ZyrionOS running on port ${env.PORT}`
           );
 
 
           logger.success(
-            "ZyrionOS Server Started"
+            `ZyrionOS Server Started on port ${env.PORT}`
           );
 
         }
@@ -956,7 +1226,11 @@ async function startServer() {
 
     server.on(
       "error",
-      error => {
+      (error) => {
+
+        applicationState.ready =
+          false;
+
 
         console.error(
           "HTTP SERVER ERROR:",
@@ -997,7 +1271,9 @@ async function startServer() {
 
 
     const shutdown =
-      async signal => {
+      async (
+        signal
+      ) => {
 
         if (
           shutdownStarted
@@ -1016,22 +1292,52 @@ async function startServer() {
           true;
 
 
+        applicationState.ready =
+          false;
+
+
         console.log(
           `${signal} received. Shutting down...`
         );
 
 
-        /*
-         * Stop accepting new HTTP requests.
-         */
+        try {
+
+          logger.info(
+            `${signal} received. Graceful shutdown started.`
+          );
+
+        } catch (
+          loggerError
+        ) {
+
+          console.error(
+            "Logger shutdown error:",
+            loggerError
+          );
+
+        }
+
+
+        /* =================================================
+           STOP HTTP SERVER
+        ================================================= */
 
         if (server) {
 
-          server.close(
-            () => {
+          await new Promise(
+            (resolve) => {
 
-              console.log(
-                "HTTP server closed."
+              server.close(
+                () => {
+
+                  console.log(
+                    "HTTP server closed."
+                  );
+
+                  resolve();
+
+                }
               );
 
             }
@@ -1040,9 +1346,9 @@ async function startServer() {
         }
 
 
-        /*
-         * Close MongoDB connection when possible.
-         */
+        /* =================================================
+           CLOSE MONGODB
+        ================================================= */
 
         try {
 
@@ -1054,6 +1360,7 @@ async function startServer() {
             await mongoose.connection.close(
               false
             );
+
 
             console.log(
               "MongoDB connection closed."
@@ -1073,59 +1380,158 @@ async function startServer() {
         }
 
 
-        /*
-         * Give in-flight work a short period to finish.
-         */
+        /* =================================================
+           FINAL SHUTDOWN
+        ================================================= */
 
-        setTimeout(
-          () => {
+        try {
 
-            console.error(
-              "Forced shutdown after timeout."
-            );
+          logger.info(
+            "ZyrionOS shutdown completed."
+          );
 
-            process.exit(1);
+        } catch (
+          loggerError
+        ) {
 
-          },
-          10000
-        ).unref();
+          console.error(
+            "Final logger error:",
+            loggerError
+          );
+
+        }
 
 
-        /*
-         * Exit successfully after MongoDB closes.
-         *
-         * The Redis module may own its own lifecycle,
-         * therefore this server does not invent a Redis
-         * disconnect API that may not exist.
-         */
-
-        setTimeout(
-          () => {
-
-            process.exit(0);
-
-          },
-          500
-        ).unref();
+        process.exit(0);
 
       };
 
 
+    /* =====================================================
+       PROCESS SIGNALS
+    ===================================================== */
+
     process.once(
       "SIGTERM",
-      () => shutdown("SIGTERM")
+      () =>
+        shutdown("SIGTERM")
     );
 
 
     process.once(
       "SIGINT",
-      () => shutdown("SIGINT")
+      () =>
+        shutdown("SIGINT")
     );
 
+
+    /* =====================================================
+       UNHANDLED REJECTION
+    ===================================================== */
+
+    process.on(
+      "unhandledRejection",
+      (reason) => {
+
+        console.error(
+          "UNHANDLED REJECTION:",
+          reason
+        );
+
+
+        try {
+
+          logger.error(
+            `Unhandled rejection: ${
+              reason?.message ||
+              String(reason)
+            }`
+          );
+
+        } catch (
+          loggerError
+        ) {
+
+          console.error(
+            "Logger error:",
+            loggerError
+          );
+
+        }
+
+      }
+    );
+
+
+    /* =====================================================
+       UNCAUGHT EXCEPTION
+    ===================================================== */
+
+    process.on(
+      "uncaughtException",
+      async (error) => {
+
+        console.error(
+          "UNCAUGHT EXCEPTION:",
+          error
+        );
+
+
+        try {
+
+          logger.error(
+            error.stack ||
+            error.message
+          );
+
+        } catch (
+          loggerError
+        ) {
+
+          console.error(
+            "Logger error:",
+            loggerError
+          );
+
+        }
+
+
+        /*
+         * An uncaught exception can leave the Node process
+         * in an unsafe state.
+         *
+         * Try graceful shutdown, then exit.
+         */
+
+        try {
+
+          await shutdown(
+            "UNCAUGHT_EXCEPTION"
+          );
+
+        } catch (
+          shutdownError
+        ) {
+
+          console.error(
+            "Emergency shutdown failed:",
+            shutdownError
+          );
+
+          process.exit(1);
+
+        }
+
+      }
+    );
 
   } catch (
     error
   ) {
+
+    applicationState.ready =
+      false;
+
 
     console.error(
       "SERVER START ERROR:",
@@ -1136,6 +1542,7 @@ async function startServer() {
     try {
 
       logger.error(
+        error.stack ||
         error.message
       );
 
@@ -1151,10 +1558,9 @@ async function startServer() {
     }
 
 
-    /*
-     * Attempt MongoDB cleanup if startup failed after
-     * establishing a connection.
-     */
+    /* =====================================================
+       STARTUP CLEANUP
+    ===================================================== */
 
     try {
 
@@ -1174,7 +1580,7 @@ async function startServer() {
     ) {
 
       console.error(
-        "Startup cleanup error:",
+        "Startup MongoDB cleanup error:",
         cleanupError.message
       );
 
@@ -1189,22 +1595,20 @@ async function startServer() {
 
 
 /* =========================================================
-   BOOT SERVER
+   BOOT
 ========================================================= */
 
 startServer();
 
 
 /* =========================================================
-   EXPORT APP
+   EXPORT
 =========================================================
 
-   Exporting the app makes it possible to use this entry
-   point with integration/smoke tests without starting
-   another HTTP server manually.
+   Exporting app allows integration/smoke tests to import
+   the application without needing to construct another
+   Express instance.
 
-   The actual production process still starts through
-   startServer() above.
 ========================================================= */
 
 module.exports = app;
