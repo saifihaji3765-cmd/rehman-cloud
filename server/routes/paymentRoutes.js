@@ -1,33 +1,108 @@
 /* =========================================================
    ZyrionOS PAYMENT ROUTES
+   Version: 4.0.0
    =========================================================
 
    Responsibilities:
    - Authenticated payment endpoints
+   - Payment/order creation
    - Payment verification
+   - Subscription request
    - Billing history
-   - User credits
+   - Credits
 
    IMPORTANT:
    Stripe/Razorpay webhooks are NOT mounted here.
 
-   Webhooks have their own:
+   Webhooks MUST use:
       /routes/webhookRoutes.js
 
-   This prevents duplicate webhook endpoints and keeps
-   raw-body webhook handling isolated from normal JSON APIs.
+   Reason:
+   Stripe signature verification requires the original
+   raw request body before express.json() modifies it.
+
+   Architecture:
+
+      Client
+        ↓
+      Auth Middleware
+        ↓
+      Rate Limiter
+        ↓
+      Payment Controller
+        ↓
+      Billing Agent
+        ↓
+      Stripe / Razorpay Service
+
+
+   Webhook architecture is separate:
+
+      Stripe/Razorpay
+        ↓
+      Webhook Route
+        ↓
+      Raw Body
+        ↓
+      Signature Verification
+        ↓
+      Webhook Controller
+        ↓
+      Subscription Model
 ========================================================= */
 
-const express =
-  require("express");
+const express = require("express");
 
-
-const router =
-  express.Router();
+const router = express.Router();
 
 
 /* =========================================================
    CONTROLLERS
+========================================================= */
+
+const paymentController =
+  require("../controllers/paymentController");
+
+
+/* =========================================================
+   CONTROLLER VALIDATION
+========================================================= */
+
+/*
+ * Fail early if the controller contract is broken.
+ *
+ * This is preferable to silently mounting undefined
+ * handlers and discovering the problem only when the
+ * first customer attempts payment.
+ */
+
+const requiredControllers = [
+  "createPaymentController",
+  "verifyPaymentController",
+  "createSubscriptionController",
+  "billingHistoryController",
+  "creditsController"
+];
+
+
+for (const controllerName of requiredControllers) {
+
+  if (
+    typeof paymentController?.[controllerName] !==
+    "function"
+  ) {
+
+    throw new Error(
+      `Payment route controller missing: ${controllerName}`
+    );
+
+  }
+
+}
+
+
+/* =========================================================
+   CONTROLLER HANDLERS
 ========================================================= */
 
 const {
@@ -36,10 +111,7 @@ const {
   createSubscriptionController,
   billingHistoryController,
   creditsController
-} =
-  require(
-    "../controllers/paymentController"
-  );
+} = paymentController;
 
 
 /* =========================================================
@@ -49,17 +121,61 @@ const {
 const {
   authMiddleware
 } =
-  require(
-    "../middleware/authMiddleware"
-  );
+  require("../middleware/authMiddleware");
 
 
 const {
   apiLimiter
 } =
-  require(
-    "../middleware/rateLimiter"
+  require("../middleware/rateLimiter");
+
+
+/* =========================================================
+   MIDDLEWARE VALIDATION
+========================================================= */
+
+if (
+  typeof authMiddleware !==
+  "function"
+) {
+
+  throw new Error(
+    "Payment routes: authMiddleware is not available"
   );
+
+}
+
+
+if (
+  typeof apiLimiter !==
+  "function"
+) {
+
+  throw new Error(
+    "Payment routes: apiLimiter is not available"
+  );
+
+}
+
+
+/* =========================================================
+   ROUTE HELPER
+========================================================= */
+
+/*
+ * Payment endpoints all require:
+ *
+ * 1. Authentication
+ * 2. API rate limiting
+ *
+ * Keeping this consistent prevents accidentally adding
+ * an unprotected payment endpoint later.
+ */
+
+const protectedPaymentMiddleware = [
+  authMiddleware,
+  apiLimiter
+];
 
 
 /* =========================================================
@@ -72,23 +188,21 @@ const {
    Authentication:
    REQUIRED
 
-   Provider:
-   stripe / razorpay
+   Supported providers:
+   - stripe
+   - razorpay
 
-   Pricing is validated server-side by the controller
-   and payment services.
+   IMPORTANT:
+   Client-supplied price is NOT authoritative.
+
+   Controller → Billing Agent → Payment Service
+   determines the actual amount/currency.
 ========================================================= */
 
 router.post(
-
   "/create-order",
-
-  authMiddleware,
-
-  apiLimiter,
-
+  ...protectedPaymentMiddleware,
   createPaymentController
-
 );
 
 
@@ -102,23 +216,19 @@ router.post(
    Authentication:
    REQUIRED
 
-   Used for provider-side payment verification where
-   applicable.
+   Used for provider-side verification where applicable.
 
-   Webhook confirmation remains authoritative for
-   subscription state.
+   IMPORTANT:
+   Successful client-side verification does NOT itself
+   activate a subscription.
+
+   Webhook confirmation remains authoritative.
 ========================================================= */
 
 router.post(
-
   "/verify-payment",
-
-  authMiddleware,
-
-  apiLimiter,
-
+  ...protectedPaymentMiddleware,
   verifyPaymentController
-
 );
 
 
@@ -132,23 +242,16 @@ router.post(
    Authentication:
    REQUIRED
 
-   This endpoint remains available for the existing
-   controller contract.
+   This preserves the existing controller contract.
 
-   Actual payment/subscription state must be confirmed
+   Payment and subscription activation must still pass
    through the provider/webhook flow.
 ========================================================= */
 
 router.post(
-
   "/subscription",
-
-  authMiddleware,
-
-  apiLimiter,
-
+  ...protectedPaymentMiddleware,
   createSubscriptionController
-
 );
 
 
@@ -161,18 +264,15 @@ router.post(
 
    Authentication:
    REQUIRED
+
+   Returns the authenticated user's billing/subscription
+   history only.
 ========================================================= */
 
 router.get(
-
   "/billing-history",
-
-  authMiddleware,
-
-  apiLimiter,
-
+  ...protectedPaymentMiddleware,
   billingHistoryController
-
 );
 
 
@@ -185,39 +285,86 @@ router.get(
 
    Authentication:
    REQUIRED
+
+   Returns the authenticated user's current credit/usage
+   information.
 ========================================================= */
 
 router.get(
-
   "/credits",
-
-  authMiddleware,
-
-  apiLimiter,
-
+  ...protectedPaymentMiddleware,
   creditsController
-
 );
 
 
 /* =========================================================
-   WEBHOOKS
+   WEBHOOK PROTECTION
 =========================================================
 
-   DO NOT ADD STRIPE OR RAZORPAY WEBHOOKS HERE.
+   DO NOT ADD:
 
-   Dedicated webhook routes:
+      POST /stripe-webhook
+      POST /razorpay-webhook
 
-      /routes/webhookRoutes.js
+   HERE.
 
-   This separation is important because Stripe requires
-   the original raw request body for signature verification.
+   Webhooks require special raw-body handling and must stay
+   isolated from normal authenticated JSON APIs.
+
+   Dedicated route:
+
+      server/routes/webhookRoutes.js
 ========================================================= */
+
+
+/* =========================================================
+   ROUTE CONTRACT
+========================================================= */
+
+router.paymentRouteContract = {
+
+  version: "4.0.0",
+
+  authenticationRequired: true,
+
+  rateLimitRequired: true,
+
+  webhookRoutesIncluded: false,
+
+  endpoints: {
+
+    createOrder: {
+      method: "POST",
+      path: "/create-order"
+    },
+
+    verifyPayment: {
+      method: "POST",
+      path: "/verify-payment"
+    },
+
+    createSubscription: {
+      method: "POST",
+      path: "/subscription"
+    },
+
+    billingHistory: {
+      method: "GET",
+      path: "/billing-history"
+    },
+
+    credits: {
+      method: "GET",
+      path: "/credits"
+    }
+
+  }
+
+};
 
 
 /* =========================================================
    EXPORT
 ========================================================= */
 
-module.exports =
-  router;
+module.exports = router;
