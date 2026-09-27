@@ -1,1501 +1,1155 @@
-/* =========================================================
-   ZyrionOS ENVIRONMENT MODEL
-   Version: 1.0.0
-   =========================================================
-
-   Responsibilities:
-   - Store project environments
-   - Development / Preview / Production separation
-   - Store environment variables
-   - Support encrypted secret values
-   - Track required/optional variables
-   - Track public/non-secret variables
-   - Environment versioning
-   - Deployment/runtime metadata
-   - Environment validation state
-   - Audit information
-   - Safe lookup by user + project + environment
-
-   IMPORTANT SECURITY RULES:
-
-   1. Secret values MUST NOT be stored as plaintext.
-   2. Encryption/decryption belongs to Environment Service.
-   3. This model stores encrypted values only.
-   4. Secret values must NEVER be returned by normal queries.
-   5. Environment variables are NOT project source files.
-   6. AI agents must not automatically receive secret values.
-   7. Deployment services may explicitly request resolved
-      runtime variables through the Environment Service.
-
-========================================================= */
+/**
+ * ZyrionOS - Environment Model
+ * Version: 2.0.0
+ *
+ * Responsibilities:
+ * - Store project environments
+ * - Store encrypted/non-secret variables
+ * - Track validation state
+ * - Track deployment state
+ * - Track source metadata
+ * - Support optimistic concurrency
+ * - Keep secret values excluded by default
+ * - Maintain audit metadata
+ */
 
 const mongoose = require("mongoose");
 
+const { Schema } = mongoose;
 
-/* =========================================================
-   ENUMS
-========================================================= */
+/* -------------------------------------------------------------------------- */
+/* Constants                                                                  */
+/* -------------------------------------------------------------------------- */
 
 const ENVIRONMENT_NAMES = [
   "development",
   "preview",
-  "production"
+  "production",
 ];
-
-
-const ENVIRONMENT_STATUSES = [
-  "active",
-  "inactive",
-  "validating",
-  "invalid",
-  "archived"
-];
-
 
 const VARIABLE_TYPES = [
   "string",
   "number",
   "boolean",
-  "json"
+  "json",
 ];
-
 
 const VARIABLE_SCOPES = [
   "runtime",
   "build",
-  "both"
+  "both",
 ];
 
+const VARIABLE_SOURCES = [
+  "manual",
+  "github",
+  "import",
+  "generated",
+  "system",
+];
+
+const ENVIRONMENT_STATUSES = [
+  "draft",
+  "ready",
+  "invalid",
+  "deploying",
+  "deployed",
+  "archived",
+];
+
+const DEPLOYMENT_STATUSES = [
+  "never",
+  "pending",
+  "deploying",
+  "deployed",
+  "failed",
+];
 
 const VALIDATION_STATUSES = [
   "unknown",
   "valid",
   "invalid",
-  "pending"
 ];
 
-
-/* =========================================================
-   ENVIRONMENT VARIABLE SCHEMA
-========================================================= */
-
-const environmentVariableSchema =
-  new mongoose.Schema(
-    {
-
-      /* =====================================================
-         VARIABLE KEY
-      ===================================================== */
-
-      key: {
-
-        type: String,
-
-        required: true,
-
-        trim: true,
-
-        uppercase: false,
-
-        maxlength: 256
-
-      },
-
-
-      /* =====================================================
-         VALUE STORAGE
-      =====================================================
-
-         Plaintext values MUST NOT be stored for secrets.
-
-         The actual encrypted value is written by the
-         Environment Service.
-      ===================================================== */
-
-      encryptedValue: {
-
-        type: String,
-
-        default: "",
-
-        select: false
-
-      },
-
-
-      /*
-       * Non-secret values may optionally be stored in a
-       * separate field.
-
-       * This allows normal public configuration to be
-       * returned without decrypting anything.
-       */
-
-      plainValue: {
-
-        type: String,
-
-        default: "",
-
-        select: false
-
-      },
-
-
-      /* =====================================================
-         SECRET FLAG
-      ===================================================== */
-
-      isSecret: {
-
-        type: Boolean,
-
-        default: false,
-
-        required: true
-
-      },
-
-
-      /* =====================================================
-         REQUIRED VARIABLE
-      ===================================================== */
-
-      required: {
-
-        type: Boolean,
-
-        default: false
-
-      },
-
-
-      /* =====================================================
-         VARIABLE TYPE
-      ===================================================== */
-
-      type: {
-
-        type: String,
-
-        enum: VARIABLE_TYPES,
-
-        default: "string"
-
-      },
-
-
-      /* =====================================================
-         VARIABLE SCOPE
-      =====================================================
-
-         runtime:
-           Needed only when application is running.
-
-         build:
-           Needed while building.
-
-         both:
-           Needed during build and runtime.
-      ===================================================== */
-
-      scope: {
-
-        type: String,
-
-        enum: VARIABLE_SCOPES,
-
-        default: "runtime"
-
-      },
-
-
-      /* =====================================================
-         DESCRIPTION
-      ===================================================== */
-
-      description: {
-
-        type: String,
-
-        default: "",
-
-        trim: true,
-
-        maxlength: 1000
-
-      },
-
-
-      /* =====================================================
-         VALIDATION
-      ===================================================== */
-
-      validationStatus: {
-
-        type: String,
-
-        enum: VALIDATION_STATUSES,
-
-        default: "unknown"
-
-      },
-
-
-      validationMessage: {
-
-        type: String,
-
-        default: "",
-
-        trim: true,
-
-        maxlength: 2000
-
-      },
-
-
-      lastValidatedAt: {
-
-        type: Date,
-
-        default: null
-
-      },
-
-
-      /* =====================================================
-         ENABLED STATE
-      ===================================================== */
-
-      enabled: {
-
-        type: Boolean,
-
-        default: true
-
-      },
-
-
-      /* =====================================================
-         METADATA
-      ===================================================== */
-
-      metadata: {
-
-        source: {
-
-          type: String,
-
-          default: "manual",
-
-          trim: true,
-
-          maxlength: 100
-
-        },
-
-        sourceReference: {
-
-          type: String,
-
-          default: "",
-
-          trim: true,
-
-          maxlength: 500
-
-        }
-
-      }
-
-    },
-
-    {
-
-      _id: true,
-
-      timestamps: true
-
-    }
-
-  );
-
-
-/* =========================================================
-   ENVIRONMENT SCHEMA
-========================================================= */
-
-const environmentSchema =
-  new mongoose.Schema(
-    {
-
-      /* =====================================================
-         USER OWNERSHIP
-      ===================================================== */
-
-      userId: {
-
-        type:
-          mongoose.Schema.Types.ObjectId,
-
-        ref:
-          "User",
-
-        required:
-          true,
-
-        index:
-          true
-
-      },
-
-
-      /* =====================================================
-         PROJECT OWNERSHIP
-      ===================================================== */
-
-      projectId: {
-
-        type:
-          mongoose.Schema.Types.ObjectId,
-
-        ref:
-          "Project",
-
-        required:
-          true,
-
-        index:
-          true
-
-      },
-
-
-      /* =====================================================
-         ENVIRONMENT NAME
-      ===================================================== */
-
-      name: {
-
-        type: String,
-
-        enum: ENVIRONMENT_NAMES,
-
-        required: true,
-
-        index: true
-
-      },
-
-
-      /* =====================================================
-         DISPLAY NAME
-      ===================================================== */
-
-      displayName: {
-
-        type: String,
-
-        default: "",
-
-        trim: true,
-
-        maxlength: 200
-
-      },
-
-
-      /* =====================================================
-         STATUS
-      ===================================================== */
-
-      status: {
-
-        type: String,
-
-        enum: ENVIRONMENT_STATUSES,
-
-        default: "active",
-
-        index: true
-
-      },
-
-
-      /* =====================================================
-         ENVIRONMENT VARIABLES
-      ===================================================== */
-
-      variables: {
-
-        type:
-          [environmentVariableSchema],
-
-        default:
-          []
-
-      },
-
-
-      /* =====================================================
-         ENVIRONMENT VERSION
-      =====================================================
-
-         Incremented whenever environment configuration
-         changes.
-
-         Useful for:
-         - deployment tracking
-         - cache invalidation
-         - rollback
-         - audit
-      ===================================================== */
-
-      version: {
-
-        type: Number,
-
-        default: 1,
-
-        min: 1
-
-      },
-
-
-      /* =====================================================
-         LAST DEPLOYMENT VERSION
-      ===================================================== */
-
-      deployedVersion: {
-
-        type: Number,
-
-        default: 0,
-
-        min: 0
-
-      },
-
-
-      /* =====================================================
-         LAST DEPLOYMENT
-      ===================================================== */
-
-      lastDeploymentId: {
-
-        type: String,
-
-        default: "",
-
-        trim: true,
-
-        maxlength: 300
-
-      },
-
-
-      lastDeployedAt: {
-
-        type: Date,
-
-        default: null
-
-      },
-
-
-      /* =====================================================
-         VALIDATION SUMMARY
-      ===================================================== */
-
-      validation: {
-
-        status: {
-
-          type: String,
-
-          enum: VALIDATION_STATUSES,
-
-          default: "unknown"
-
-        },
-
-        requiredVariables:
-
-          {
-
-            type: Number,
-
-            default: 0,
-
-            min: 0
-
-          },
-
-        configuredVariables:
-
-          {
-
-            type: Number,
-
-            default: 0,
-
-            min: 0
-
-          },
-
-        missingVariables:
-
-          {
-
-            type: Number,
-
-            default: 0,
-
-            min: 0
-
-          },
-
-        invalidVariables:
-
-          {
-
-            type: Number,
-
-            default: 0,
-
-            min: 0
-
-          },
-
-        message: {
-
-          type: String,
-
-          default: "",
-
-          trim: true,
-
-          maxlength: 3000
-
-        },
-
-        validatedAt: {
-
-          type: Date,
-
-          default: null
-
-        }
-
-      },
-
-
-      /* =====================================================
-         DEPLOYMENT SETTINGS
-      ===================================================== */
-
-      deployment: {
-
-        autoInject: {
-
-          type: Boolean,
-
-          default: true
-
-        },
-
-        allowBuildVariables: {
-
-          type: Boolean,
-
-          default: true
-
-        },
-
-        allowRuntimeVariables: {
-
-          type: Boolean,
-
-          default: true
-
-        },
-
-        lastInjectedVersion: {
-
-          type: Number,
-
-          default: 0,
-
-          min: 0
-
-        }
-
-      },
-
-
-      /* =====================================================
-         RUNTIME CONFIGURATION
-      ===================================================== */
-
-      runtime: {
-
-        framework: {
-
-          type: String,
-
-          default: "",
-
-          trim: true,
-
-          maxlength: 100
-
-        },
-
-        runtime: {
-
-          type: String,
-
-          default: "",
-
-          trim: true,
-
-          maxlength: 100
-
-        },
-
-        nodeVersion: {
-
-          type: String,
-
-          default: "",
-
-          trim: true,
-
-          maxlength: 50
-
-        },
-
-        port: {
-
-          type: Number,
-
-          default: null,
-
-          min: 1,
-
-          max: 65535
-
-        }
-
-      },
-
-
-      /* =====================================================
-         SOURCE
-      ===================================================== */
-
-      source: {
-
-        type: {
-
-          type: String,
-
-          enum: [
-
-            "manual",
-
-            "github",
-
-            "import",
-
-            "generated",
-
-            "system"
-
-          ],
-
-          default: "manual"
-
-        },
-
-        repositoryId: {
-
-          type: String,
-
-          default: "",
-
-          trim: true,
-
-          maxlength: 300
-
-        },
-
-        branch: {
-
-          type: String,
-
-          default: "",
-
-          trim: true,
-
-          maxlength: 300
-
-        },
-
-        commitSha: {
-
-          type: String,
-
-          default: "",
-
-          trim: true,
-
-          maxlength: 200
-
-        }
-
-      },
-
-
-      /* =====================================================
-         AUDIT
-      ===================================================== */
-
-      audit: {
-
-        createdBy: {
-
-          type:
-            mongoose.Schema.Types.ObjectId,
-
-          ref:
-            "User",
-
-          default:
-            null
-
-        },
-
-        updatedBy: {
-
-          type:
-            mongoose.Schema.Types.ObjectId,
-
-          ref:
-            "User",
-
-          default:
-            null
-
-        },
-
-        lastAction: {
-
-          type: String,
-
-          default: "created",
-
-          trim: true,
-
-          maxlength: 200
-
-        },
-
-        lastActionAt: {
-
-          type: Date,
-
-          default: Date.now
-
-        }
-
-      },
-
-
-      /* =====================================================
-         ARCHIVE
-      ===================================================== */
-
-      archivedAt: {
-
-        type: Date,
-
-        default: null
-
-      }
-
-    },
-
-    {
-
-      timestamps: true,
-
-      strict: true
-
-    }
-
-  );
-
-
-/* =========================================================
-   INDEXES
-========================================================= */
-
-
-/*
- * One environment of each type per project.
- *
- * Example:
- *
- * project A:
- *   development
- *   preview
- *   production
- *
- * project B:
- *   development
- *   preview
- *   production
- */
-environmentSchema.index(
+const VARIABLE_VALIDATION_STATUSES = [
+  "unknown",
+  "valid",
+  "invalid",
+];
+
+/* -------------------------------------------------------------------------- */
+/* Variable Schema                                                            */
+/* -------------------------------------------------------------------------- */
+
+const environmentVariableSchema = new Schema(
   {
-    projectId: 1,
-    name: 1
+    key: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 256,
+    },
+
+    /**
+     * Actual secret value.
+     *
+     * IMPORTANT:
+     * This is encrypted by environmentService.js.
+     * It is excluded from normal Mongo queries.
+     */
+    encryptedValue: {
+      type: String,
+      default: null,
+      select: false,
+    },
+
+    /**
+     * Non-secret value.
+     *
+     * This field intentionally remains available for normal reads.
+     */
+    plainValue: {
+      type: String,
+      default: null,
+    },
+
+    /**
+     * Whether this variable should be treated as secret.
+     */
+    isSecret: {
+      type: Boolean,
+      default: false,
+    },
+
+    type: {
+      type: String,
+      enum: VARIABLE_TYPES,
+      default: "string",
+    },
+
+    scope: {
+      type: String,
+      enum: VARIABLE_SCOPES,
+      default: "runtime",
+    },
+
+    required: {
+      type: Boolean,
+      default: false,
+    },
+
+    description: {
+      type: String,
+      default: "",
+      maxlength: 1000,
+      trim: true,
+    },
+
+    source: {
+      type: String,
+      enum: VARIABLE_SOURCES,
+      default: "manual",
+    },
+
+    sourceRef: {
+      type: String,
+      default: "",
+      maxlength: 500,
+      trim: true,
+    },
+
+    validation: {
+      status: {
+        type: String,
+        enum: VARIABLE_VALIDATION_STATUSES,
+        default: "unknown",
+      },
+
+      message: {
+        type: String,
+        default: "",
+        maxlength: 1000,
+      },
+
+      checkedAt: {
+        type: Date,
+        default: null,
+      },
+    },
+
+    /**
+     * Indicates that the variable has a configured value.
+     *
+     * This avoids exposing the actual secret while still allowing
+     * the frontend to know whether configuration exists.
+     */
+    hasValue: {
+      type: Boolean,
+      default: false,
+    },
+
+    /**
+     * Tracks whether the value is encrypted using the current
+     * environment encryption version.
+     */
+    encryptionVersion: {
+      type: String,
+      default: null,
+    },
+
+    lastUpdatedAt: {
+      type: Date,
+      default: Date.now,
+    },
+
+    lastUpdatedBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
   },
   {
-    unique: true
+    _id: false,
   }
 );
 
+/* -------------------------------------------------------------------------- */
+/* Deployment Snapshot Schema                                                 */
+/* -------------------------------------------------------------------------- */
 
-/*
- * Fast user + project lookup.
+const deploymentSnapshotSchema = new Schema(
+  {
+    version: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    status: {
+      type: String,
+      enum: DEPLOYMENT_STATUSES,
+      default: "never",
+    },
+
+    deploymentId: {
+      type: String,
+      default: null,
+      maxlength: 200,
+    },
+
+    workflowId: {
+      type: String,
+      default: null,
+      maxlength: 200,
+    },
+
+    startedAt: {
+      type: Date,
+      default: null,
+    },
+
+    completedAt: {
+      type: Date,
+      default: null,
+    },
+
+    lastError: {
+      type: String,
+      default: "",
+      maxlength: 2000,
+    },
+
+    variableCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    /**
+     * Hash of the environment configuration.
+     *
+     * This is NOT the secret value.
+     * It can be used to determine whether the environment
+     * changed between deployments.
+     */
+    configurationHash: {
+      type: String,
+      default: null,
+      maxlength: 256,
+    },
+  },
+  {
+    _id: false,
+  }
+);
+
+/* -------------------------------------------------------------------------- */
+/* Validation Schema                                                          */
+/* -------------------------------------------------------------------------- */
+
+const validationSchema = new Schema(
+  {
+    status: {
+      type: String,
+      enum: VALIDATION_STATUSES,
+      default: "unknown",
+    },
+
+    checkedAt: {
+      type: Date,
+      default: null,
+    },
+
+    totalVariables: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    configuredVariables: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    missingRequiredVariables: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    invalidVariables: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    errors: {
+      type: [
+        {
+          key: {
+            type: String,
+            maxlength: 256,
+          },
+
+          message: {
+            type: String,
+            maxlength: 1000,
+          },
+        },
+      ],
+      default: [],
+    },
+  },
+  {
+    _id: false,
+  }
+);
+
+/* -------------------------------------------------------------------------- */
+/* Source Schema                                                              */
+/* -------------------------------------------------------------------------- */
+
+const sourceSchema = new Schema(
+  {
+    type: {
+      type: String,
+      enum: VARIABLE_SOURCES,
+      default: "manual",
+    },
+
+    provider: {
+      type: String,
+      default: null,
+      maxlength: 100,
+    },
+
+    repository: {
+      type: String,
+      default: null,
+      maxlength: 500,
+    },
+
+    branch: {
+      type: String,
+      default: null,
+      maxlength: 300,
+    },
+
+    commitSha: {
+      type: String,
+      default: null,
+      maxlength: 100,
+    },
+
+    importedAt: {
+      type: Date,
+      default: null,
+    },
+
+    importedBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+  },
+  {
+    _id: false,
+  }
+);
+
+/* -------------------------------------------------------------------------- */
+/* Audit Schema                                                               */
+/* -------------------------------------------------------------------------- */
+
+const auditSchema = new Schema(
+  {
+    createdBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+
+    updatedBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+
+    lastAction: {
+      type: String,
+      default: null,
+      maxlength: 200,
+    },
+
+    lastActionAt: {
+      type: Date,
+      default: null,
+    },
+
+    lastActionBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+  },
+  {
+    _id: false,
+  }
+);
+
+/* -------------------------------------------------------------------------- */
+/* Main Environment Schema                                                    */
+/* -------------------------------------------------------------------------- */
+
+const environmentSchema = new Schema(
+  {
+    /* ----------------------------- Ownership ----------------------------- */
+
+    userId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+
+    projectId: {
+      type: Schema.Types.ObjectId,
+      ref: "Project",
+      required: true,
+      index: true,
+    },
+
+    /* ----------------------------- Identity ------------------------------ */
+
+    name: {
+      type: String,
+      required: true,
+      enum: ENVIRONMENT_NAMES,
+      lowercase: true,
+      trim: true,
+    },
+
+    displayName: {
+      type: String,
+      default: null,
+      maxlength: 200,
+      trim: true,
+    },
+
+    description: {
+      type: String,
+      default: "",
+      maxlength: 2000,
+      trim: true,
+    },
+
+    /* ------------------------------ State -------------------------------- */
+
+    status: {
+      type: String,
+      enum: ENVIRONMENT_STATUSES,
+      default: "draft",
+      index: true,
+    },
+
+    isActive: {
+      type: Boolean,
+      default: true,
+      index: true,
+    },
+
+    isArchived: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    /* --------------------------- Variables ------------------------------- */
+
+    variables: {
+      type: [environmentVariableSchema],
+      default: [],
+    },
+
+    /* --------------------------- Validation ------------------------------- */
+
+    validation: {
+      type: validationSchema,
+      default: () => ({}),
+    },
+
+    /* --------------------------- Deployment ------------------------------- */
+
+    deployment: {
+      type: deploymentSnapshotSchema,
+      default: () => ({}),
+    },
+
+    /* ------------------------------ Source -------------------------------- */
+
+    source: {
+      type: sourceSchema,
+      default: () => ({}),
+    },
+
+    /* -------------------------------- Audit ------------------------------- */
+
+    audit: {
+      type: auditSchema,
+      default: () => ({}),
+    },
+
+    /* -------------------------- Configuration ---------------------------- */
+
+    /**
+     * Incremented whenever the environment configuration changes.
+     *
+     * environmentService.js uses this for optimistic concurrency.
+     */
+    version: {
+      type: Number,
+      default: 1,
+      min: 1,
+    },
+
+    /**
+     * Hash of the current configuration.
+     * Useful for deployment comparison and cache invalidation.
+     */
+    configurationHash: {
+      type: String,
+      default: null,
+      maxlength: 256,
+      index: true,
+    },
+
+    /**
+     * Optional deployment lock.
+     *
+     * Prevents multiple deployment workflows from mutating
+     * the same environment simultaneously.
+     */
+    deploymentLock: {
+      locked: {
+        type: Boolean,
+        default: false,
+      },
+
+      workflowId: {
+        type: String,
+        default: null,
+        maxlength: 200,
+      },
+
+      lockedAt: {
+        type: Date,
+        default: null,
+      },
+
+      lockedBy: {
+        type: Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+    },
+  },
+  {
+    timestamps: true,
+
+    /**
+     * Do not allow Mongoose to silently add an `__v` field.
+     * We use our explicit `version` field for concurrency control.
+     */
+    versionKey: false,
+
+    minimize: false,
+  }
+);
+
+/* -------------------------------------------------------------------------- */
+/* Indexes                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One development/preview/production environment per project/user.
  */
 environmentSchema.index(
   {
     userId: 1,
-    projectId: 1
-  }
-);
-
-
-/*
- * Deployment lookup.
- */
-environmentSchema.index(
-  {
-    projectId: 1,
-    status: 1,
-    updatedAt: -1
-  }
-);
-
-
-/*
- * Deployment version lookup.
- */
-environmentSchema.index(
-  {
     projectId: 1,
     name: 1,
-    version: -1
-  }
-);
-
-
-/* =========================================================
-   VARIABLE KEY VALIDATION
-========================================================= */
-
-/*
- * Standard environment variable names:
- *
- * DATABASE_URL
- * API_KEY
- * NODE_ENV
- * NEXT_PUBLIC_API_URL
- *
- * We allow letters, numbers and underscore.
- *
- * The first character must be a letter or underscore.
- */
-
-environmentVariableSchema.path("key").validate(
-  function (value) {
-
-    if (!value) {
-
-      return false;
-
-    }
-
-    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(
-      value
-    );
-
   },
-  "Invalid environment variable name"
-);
-
-
-/* =========================================================
-   ENVIRONMENT NORMALIZATION
-========================================================= */
-
-environmentSchema.pre(
-  "validate",
-  function (next) {
-
-    try {
-
-      if (
-        this.name
-      ) {
-
-        this.name =
-          String(
-            this.name
-          )
-            .trim()
-            .toLowerCase();
-
-      }
-
-
-      /*
-       * Automatically generate a display name when absent.
-       */
-
-      if (
-        !this.displayName &&
-        this.name
-      ) {
-
-        const names = {
-
-          development:
-            "Development",
-
-          preview:
-            "Preview",
-
-          production:
-            "Production"
-
-        };
-
-        this.displayName =
-          names[this.name] ||
-          this.name;
-
-      }
-
-
-      /*
-       * Ensure variable keys are unique inside an
-       * environment.
-       */
-
-      if (
-        Array.isArray(
-          this.variables
-        )
-      ) {
-
-        const seen =
-          new Set();
-
-
-        for (
-          const variable
-          of this.variables
-        ) {
-
-          if (
-            !variable?.key
-          ) {
-
-            continue;
-
-          }
-
-
-          const normalizedKey =
-            String(
-              variable.key
-            ).trim();
-
-
-          variable.key =
-            normalizedKey;
-
-
-          const duplicate =
-            seen.has(
-              normalizedKey
-            );
-
-
-          if (
-            duplicate
-          ) {
-
-            return next(
-              new Error(
-                `Duplicate environment variable: ${normalizedKey}`
-              )
-            );
-
-          }
-
-
-          seen.add(
-            normalizedKey
-          );
-
-
-          /*
-           * Secret variables must not retain plaintext.
-           */
-
-          if (
-            variable.isSecret
-          ) {
-
-            variable.plainValue =
-              "";
-
-          }
-
-        }
-
-      }
-
-
-      next();
-
-    } catch (
-      error
-    ) {
-
-      next(error);
-
-    }
-
+  {
+    unique: true,
+    name: "unique_user_project_environment",
   }
 );
 
-
-/* =========================================================
-   VERSION MANAGEMENT
-========================================================= */
-
-/*
- * Increment environment version whenever variables or
- * deployment configuration change.
- *
- * The service layer can explicitly control version changes,
- * therefore this hook only handles direct document saves
- * where modified paths indicate configuration changes.
+/**
+ * Fast lookup of active environments.
  */
+environmentSchema.index(
+  {
+    projectId: 1,
+    isActive: 1,
+    isArchived: 1,
+  },
+  {
+    name: "project_active_environments",
+  }
+);
+
+/**
+ * Deployment-related queries.
+ */
+environmentSchema.index(
+  {
+    projectId: 1,
+    "deployment.status": 1,
+  },
+  {
+    name: "project_deployment_status",
+  }
+);
+
+/**
+ * Validation-related queries.
+ */
+environmentSchema.index(
+  {
+    projectId: 1,
+    "validation.status": 1,
+  },
+  {
+    name: "project_validation_status",
+  }
+);
+
+/* -------------------------------------------------------------------------- */
+/* Normalization Helpers                                                      */
+/* -------------------------------------------------------------------------- */
+
+function normalizeEnvironmentName(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeVariableKey(value) {
+  return String(value || "").trim();
+}
+
+function normalizeVariableType(value) {
+  const normalized = String(value || "string")
+    .trim()
+    .toLowerCase();
+
+  return VARIABLE_TYPES.includes(normalized)
+    ? normalized
+    : "string";
+}
+
+function normalizeVariableScope(value) {
+  const normalized = String(value || "runtime")
+    .trim()
+    .toLowerCase();
+
+  return VARIABLE_SCOPES.includes(normalized)
+    ? normalized
+    : "runtime";
+}
+
+/* -------------------------------------------------------------------------- */
+/* Instance Methods                                                           */
+/* -------------------------------------------------------------------------- */
+
+environmentSchema.methods.getVariable = function getVariable(key) {
+  const normalizedKey = normalizeVariableKey(key);
+
+  return (
+    this.variables.find(
+      (variable) => variable.key === normalizedKey
+    ) || null
+  );
+};
+
+environmentSchema.methods.hasVariable = function hasVariable(key) {
+  return Boolean(this.getVariable(key));
+};
+
+environmentSchema.methods.hasConfiguredVariable =
+  function hasConfiguredVariable(key) {
+    const variable = this.getVariable(key);
+
+    return Boolean(variable && variable.hasValue);
+  };
+
+environmentSchema.methods.getVariableCount =
+  function getVariableCount() {
+    return this.variables.length;
+  };
+
+environmentSchema.methods.getRequiredVariables =
+  function getRequiredVariables() {
+    return this.variables.filter(
+      (variable) => variable.required === true
+    );
+  };
+
+environmentSchema.methods.getMissingRequiredVariables =
+  function getMissingRequiredVariables() {
+    return this.variables.filter(
+      (variable) =>
+        variable.required === true &&
+        variable.hasValue !== true
+    );
+  };
+
+environmentSchema.methods.getInvalidVariables =
+  function getInvalidVariables() {
+    return this.variables.filter(
+      (variable) =>
+        variable.validation?.status === "invalid"
+    );
+  };
+
+environmentSchema.methods.isValidForDeployment =
+  function isValidForDeployment() {
+    return (
+      this.isArchived !== true &&
+      this.isActive !== false &&
+      this.validation?.status === "valid" &&
+      this.getMissingRequiredVariables().length === 0 &&
+      this.getInvalidVariables().length === 0
+    );
+  };
+
+environmentSchema.methods.isDeploying =
+  function isDeploying() {
+    return (
+      this.status === "deploying" ||
+      this.deployment?.status === "deploying"
+    );
+  };
+
+environmentSchema.methods.isDeployed =
+  function isDeployed() {
+    return (
+      this.status === "deployed" &&
+      this.deployment?.status === "deployed"
+    );
+  };
+
+environmentSchema.methods.isLocked =
+  function isLocked() {
+    return this.deploymentLock?.locked === true;
+  };
+
+environmentSchema.methods.lockDeployment =
+  function lockDeployment({
+    workflowId,
+    userId,
+  } = {}) {
+    if (this.deploymentLock?.locked) {
+      return false;
+    }
+
+    this.deploymentLock = {
+      locked: true,
+      workflowId: workflowId || null,
+      lockedAt: new Date(),
+      lockedBy: userId || null,
+    };
+
+    return true;
+  };
+
+environmentSchema.methods.unlockDeployment =
+  function unlockDeployment() {
+    this.deploymentLock = {
+      locked: false,
+      workflowId: null,
+      lockedAt: null,
+      lockedBy: null,
+    };
+
+    return true;
+  };
+
+/* -------------------------------------------------------------------------- */
+/* Safe Serialization                                                         */
+/* -------------------------------------------------------------------------- */
+
+environmentSchema.methods.toSafeObject =
+  function toSafeObject() {
+    return {
+      id: String(this._id),
+      userId: this.userId ? String(this.userId) : null,
+      projectId: this.projectId
+        ? String(this.projectId)
+        : null,
+
+      name: this.name,
+      displayName: this.displayName,
+      description: this.description,
+
+      status: this.status,
+      isActive: this.isActive,
+      isArchived: this.isArchived,
+
+      version: this.version,
+
+      variables: this.variables.map((variable) => ({
+        key: variable.key,
+        type: variable.type,
+        scope: variable.scope,
+        isSecret: variable.isSecret,
+        required: variable.required,
+        description: variable.description,
+        source: variable.source,
+        sourceRef: variable.sourceRef,
+
+        /**
+         * Never expose encryptedValue/plainValue here.
+         */
+        hasValue:
+          variable.hasValue === true,
+
+        maskedValue: variable.isSecret
+          ? "••••••••"
+          : variable.hasValue
+            ? variable.plainValue
+            : "",
+
+        validation: {
+          status:
+            variable.validation?.status ||
+            "unknown",
+
+          message:
+            variable.validation?.message ||
+            "",
+
+          checkedAt:
+            variable.validation?.checkedAt ||
+            null,
+        },
+
+        lastUpdatedAt:
+          variable.lastUpdatedAt || null,
+      })),
+
+      validation: {
+        status:
+          this.validation?.status ||
+          "unknown",
+
+        checkedAt:
+          this.validation?.checkedAt ||
+          null,
+
+        totalVariables:
+          this.validation?.totalVariables || 0,
+
+        configuredVariables:
+          this.validation?.configuredVariables || 0,
+
+        missingRequiredVariables:
+          this.validation?.missingRequiredVariables || 0,
+
+        invalidVariables:
+          this.validation?.invalidVariables || 0,
+
+        errors:
+          this.validation?.errors || [],
+      },
+
+      deployment: {
+        version:
+          this.deployment?.version || 0,
+
+        status:
+          this.deployment?.status || "never",
+
+        deploymentId:
+          this.deployment?.deploymentId || null,
+
+        workflowId:
+          this.deployment?.workflowId || null,
+
+        startedAt:
+          this.deployment?.startedAt || null,
+
+        completedAt:
+          this.deployment?.completedAt || null,
+
+        lastError:
+          this.deployment?.lastError || "",
+
+        variableCount:
+          this.deployment?.variableCount || 0,
+
+        configurationHash:
+          this.deployment?.configurationHash ||
+          null,
+      },
+
+      source: {
+        type:
+          this.source?.type || "manual",
+
+        provider:
+          this.source?.provider || null,
+
+        repository:
+          this.source?.repository || null,
+
+        branch:
+          this.source?.branch || null,
+
+        commitSha:
+          this.source?.commitSha || null,
+
+        importedAt:
+          this.source?.importedAt || null,
+      },
+
+      audit: {
+        createdBy:
+          this.audit?.createdBy
+            ? String(this.audit.createdBy)
+            : null,
+
+        updatedBy:
+          this.audit?.updatedBy
+            ? String(this.audit.updatedBy)
+            : null,
+
+        lastAction:
+          this.audit?.lastAction || null,
+
+        lastActionAt:
+          this.audit?.lastActionAt || null,
+      },
+
+      configurationHash:
+        this.configurationHash || null,
+
+      deploymentLock: {
+        locked:
+          this.deploymentLock?.locked === true,
+
+        workflowId:
+          this.deploymentLock?.workflowId || null,
+
+        lockedAt:
+          this.deploymentLock?.lockedAt || null,
+      },
+
+      createdAt: this.createdAt,
+      updatedAt: this.updatedAt,
+    };
+  };
+
+/* -------------------------------------------------------------------------- */
+/* Query Helpers                                                              */
+/* -------------------------------------------------------------------------- */
+
+environmentSchema.statics.findForProject =
+  function findForProject(projectId, userId) {
+    return this.find({
+      projectId,
+      userId,
+      isArchived: false,
+    }).sort({
+      name: 1,
+    });
+  };
+
+environmentSchema.statics.findEnvironment =
+  function findEnvironment({
+    projectId,
+    userId,
+    name,
+    includeSecrets = false,
+  } = {}) {
+    const query = this.findOne({
+      projectId,
+      userId,
+      name: normalizeEnvironmentName(name),
+      isArchived: false,
+    });
+
+    if (includeSecrets) {
+      query.select(
+        "+variables.encryptedValue +variables.plainValue"
+      );
+    }
+
+    return query;
+  };
+
+/* -------------------------------------------------------------------------- */
+/* Validation                                                                 */
+/* -------------------------------------------------------------------------- */
+
+environmentSchema.pre("validate", function environmentValidate(next) {
+  this.name = normalizeEnvironmentName(this.name);
+
+  if (this.displayName) {
+    this.displayName = String(
+      this.displayName
+    ).trim();
+  }
+
+  if (Array.isArray(this.variables)) {
+    const seen = new Set();
+
+    for (const variable of this.variables) {
+      variable.key = normalizeVariableKey(
+        variable.key
+      );
+
+      variable.type =
+        normalizeVariableType(
+          variable.type
+        );
+
+      variable.scope =
+        normalizeVariableScope(
+          variable.scope
+        );
+
+      if (seen.has(variable.key)) {
+        return next(
+          new Error(
+            `Duplicate environment variable key: ${variable.key}`
+          )
+        );
+      }
+
+      seen.add(variable.key);
+
+      /**
+       * Keep hasValue synchronized with the actual
+       * stored representation.
+       */
+      if (variable.isSecret) {
+        variable.hasValue = Boolean(
+          variable.encryptedValue
+        );
+      } else {
+        variable.hasValue =
+          variable.plainValue !== null &&
+          variable.plainValue !== undefined &&
+          String(variable.plainValue).length > 0;
+      }
+
+      if (!variable.lastUpdatedAt) {
+        variable.lastUpdatedAt = new Date();
+      }
+    }
+  }
+
+  next();
+});
+
+/* -------------------------------------------------------------------------- */
+/* Update Hooks                                                               */
+/* -------------------------------------------------------------------------- */
 
 environmentSchema.pre(
   "save",
-  function (next) {
+  function environmentBeforeSave(next) {
+    /**
+     * Do not manually increment `version` here.
+     *
+     * environmentService.js controls configuration versioning
+     * so service-level concurrency checks remain deterministic.
+     */
 
-    try {
-
-      if (
-        !this.isNew &&
-        (
-          this.isModified("variables") ||
-          this.isModified("deployment") ||
-          this.isModified("runtime")
-        )
-      ) {
-
-        this.version =
-          Math.max(
-            1,
-            Number(
-              this.version || 1
-            ) + 1
-          );
-
-      }
-
-
-      if (
-        this.isModified("status") &&
-        this.status === "archived"
-      ) {
-
-        if (
-          !this.archivedAt
-        ) {
-
-          this.archivedAt =
-            new Date();
-
-        }
-
-      }
-
-
-      if (
-        this.isModified("status") &&
-        this.status !== "archived"
-      ) {
-
-        this.archivedAt =
-          null;
-
-      }
-
-
-      this.audit =
-        this.audit ||
-        {};
-
-
-      this.audit.lastActionAt =
-        new Date();
-
-
-      next();
-
-    } catch (
-      error
-    ) {
-
-      next(error);
-
+    if (!this.audit) {
+      this.audit = {};
     }
 
+    if (this.isModified()) {
+      this.audit.lastActionAt =
+        new Date();
+    }
+
+    next();
   }
 );
 
+/* -------------------------------------------------------------------------- */
+/* Static Constants                                                           */
+/* -------------------------------------------------------------------------- */
 
-/* =========================================================
-   INSTANCE METHOD
-   ========================================================= */
+environmentSchema.statics.ENVIRONMENT_NAMES =
+  ENVIRONMENT_NAMES;
 
-/*
- * Check whether environment can be used for deployment.
- *
- * This does NOT decrypt secrets.
- */
-environmentSchema.methods.isDeployable =
-  function () {
+environmentSchema.statics.VARIABLE_TYPES =
+  VARIABLE_TYPES;
 
-    if (
-      this.status !== "active"
-    ) {
+environmentSchema.statics.VARIABLE_SCOPES =
+  VARIABLE_SCOPES;
 
-      return false;
+environmentSchema.statics.VARIABLE_SOURCES =
+  VARIABLE_SOURCES;
 
-    }
+environmentSchema.statics.ENVIRONMENT_STATUSES =
+  ENVIRONMENT_STATUSES;
 
+environmentSchema.statics.DEPLOYMENT_STATUSES =
+  DEPLOYMENT_STATUSES;
 
-    if (
-      this.validation?.status ===
-      "invalid"
-    ) {
+environmentSchema.statics.VALIDATION_STATUSES =
+  VALIDATION_STATUSES;
 
-      return false;
-
-    }
-
-
-    if (
-      this.validation?.missingVariables >
-      0
-    ) {
-
-      return false;
-
-    }
-
-
-    if (
-      this.validation?.invalidVariables >
-      0
-    ) {
-
-      return false;
-
-    }
-
-
-    return true;
-
-  };
-
-
-/*
- * Return only safe environment metadata.
- *
- * Secret values are intentionally excluded.
- */
-environmentSchema.methods.toSafeJSON =
-  function () {
-
-    const variables =
-      Array.isArray(
-        this.variables
-      )
-        ? this.variables.map(
-            variable => ({
-
-              id:
-                variable._id,
-
-              key:
-                variable.key,
-
-              isSecret:
-                Boolean(
-                  variable.isSecret
-                ),
-
-              required:
-                Boolean(
-                  variable.required
-                ),
-
-              type:
-                variable.type,
-
-              scope:
-                variable.scope,
-
-              enabled:
-                Boolean(
-                  variable.enabled
-                ),
-
-              description:
-                variable.description,
-
-              validationStatus:
-                variable.validationStatus,
-
-              validationMessage:
-                variable.validationMessage,
-
-              hasValue:
-                Boolean(
-                  variable.isSecret
-                    ? variable.encryptedValue
-                    : variable.plainValue
-                ),
-
-              updatedAt:
-                variable.updatedAt
-
-            })
-          )
-        : [];
-
-
-    return {
-
-      id:
-        this._id,
-
-      userId:
-        this.userId,
-
-      projectId:
-        this.projectId,
-
-      name:
-        this.name,
-
-      displayName:
-        this.displayName,
-
-      status:
-        this.status,
-
-      version:
-        this.version,
-
-      deployedVersion:
-        this.deployedVersion,
-
-      lastDeploymentId:
-        this.lastDeploymentId,
-
-      lastDeployedAt:
-        this.lastDeployedAt,
-
-      validation:
-        this.validation,
-
-      deployment:
-        this.deployment,
-
-      runtime:
-        this.runtime,
-
-      source:
-        this.source,
-
-      variables,
-
-      createdAt:
-        this.createdAt,
-
-      updatedAt:
-        this.updatedAt
-
-    };
-
-  };
-
-
-/* =========================================================
-   STATIC METHODS
-========================================================= */
-
-
-/*
- * Find environment owned by a specific user/project.
- */
-environmentSchema.statics.findForProject =
-  function (
-    userId,
-    projectId,
-    environmentName
-  ) {
-
-    const query = {
-
-      userId,
-
-      projectId
-
-    };
-
-
-    if (
-      environmentName
-    ) {
-
-      query.name =
-        String(
-          environmentName
-        )
-          .trim()
-          .toLowerCase();
-
-    }
-
-
-    return this.findOne(
-      query
-    );
-
-  };
-
-
-/*
- * Find all environments for a project.
- */
-environmentSchema.statics.findProjectEnvironments =
-  function (
-    userId,
-    projectId
-  ) {
-
-    return this.find({
-
-      userId,
-
-      projectId
-
-    })
-      .sort({
-        name: 1
-      });
-
-  };
-
-
-/*
- * Find production environment.
- */
-environmentSchema.statics.findProduction =
-  function (
-    userId,
-    projectId
-  ) {
-
-    return this.findOne({
-
-      userId,
-
-      projectId,
-
-      name:
-        "production"
-
-    });
-
-  };
-
-
-/*
- * Find development environment.
- */
-environmentSchema.statics.findDevelopment =
-  function (
-    userId,
-    projectId
-  ) {
-
-    return this.findOne({
-
-      userId,
-
-      projectId,
-
-      name:
-        "development"
-
-    });
-
-  };
-
-
-/*
- * Find preview environment.
- */
-environmentSchema.statics.findPreview =
-  function (
-    userId,
-    projectId
-  ) {
-
-    return this.findOne({
-
-      userId,
-
-      projectId,
-
-      name:
-        "preview"
-
-    });
-
-  };
-
-
-/* =========================================================
-   MODEL
-========================================================= */
+/* -------------------------------------------------------------------------- */
+/* Model Export                                                               */
+/* -------------------------------------------------------------------------- */
 
 const Environment =
   mongoose.models.Environment ||
@@ -1504,34 +1158,4 @@ const Environment =
     environmentSchema
   );
 
-
-/* =========================================================
-   EXPORT MODEL
-========================================================= */
-
-module.exports =
-  Environment;
-
-
-/* =========================================================
-   EXPORT ENUMS
-========================================================= */
-
-module.exports.ENVIRONMENT_NAMES =
-  ENVIRONMENT_NAMES;
-
-
-module.exports.ENVIRONMENT_STATUSES =
-  ENVIRONMENT_STATUSES;
-
-
-module.exports.VARIABLE_TYPES =
-  VARIABLE_TYPES;
-
-
-module.exports.VARIABLE_SCOPES =
-  VARIABLE_SCOPES;
-
-
-module.exports.VALIDATION_STATUSES =
-  VALIDATION_STATUSES;
+module.exports = Environment;
