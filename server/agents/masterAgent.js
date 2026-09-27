@@ -3,7 +3,7 @@
  * ZYRIONOS MASTER AGENT
  * =========================================================
  *
- * Version: 5.1.0
+ * Version: 5.2.0
  *
  * Central Autonomous Orchestrator / CEO Control Plane
  *
@@ -21,7 +21,7 @@
  *      ↓
  * Planning
  *      ↓
- * Environment / Build / Fix / File
+ * GitHub / Build / Fix / File / Environment
  *      ↓
  * Validation Gates
  *      ↓
@@ -52,6 +52,7 @@
  * - Dependency enforcement
  * - Environment gates
  * - Build gates
+ * - GitHub workflow coordination
  * - Deployment gates
  * - Deployment failure logging coordination
  * - Auto Fix trigger coordination
@@ -65,7 +66,6 @@
  *
  * - Generate source code itself
  * - Modify files itself
- * - Deploy infrastructure itself
  * - Execute Docker itself
  * - Configure AWS itself
  * - Configure DNS itself
@@ -73,6 +73,7 @@
  * - Process payments itself
  * - Directly access MongoDB
  * - Resolve deployment secrets for itself
+ * - Directly call GitHub API
  *
  *
  * AI PROVIDER RULE
@@ -122,6 +123,40 @@ const environmentAgent =
 
 const logAgent =
   require("./logAgent");
+
+
+/* =========================================================
+   GITHUB AGENTS
+========================================================= */
+
+/*
+ * GitHub Agent owns:
+ *
+ * - GitHub connection
+ * - Repository access
+ * - Repository browser
+ * - Branches
+ * - Contents
+ * - Repository analysis orchestration
+ */
+
+const githubAgent =
+  require("./githubAgent");
+
+
+/*
+ * GitHub Deployment Agent owns:
+ *
+ * - Deployment contract
+ * - Deployment readiness
+ * - Deployment preparation
+ * - Docker handoff preparation
+ * - AWS handoff preparation
+ * - Contract sanitization
+ */
+
+const githubDeploymentAgent =
+  require("./githubDeploymentAgent");
 
 
 /* =========================================================
@@ -208,7 +243,7 @@ const {
 ========================================================= */
 
 const MASTER_VERSION =
-  "5.1.0";
+  "5.2.0";
 
 
 const MAX_PROMPT_LENGTH =
@@ -224,7 +259,7 @@ const MAX_WORKFLOW_STEPS =
   30;
 
 const MAX_AGENT_RESULTS =
-  40;
+  50;
 
 const MAX_FINAL_RESPONSE_TOKENS =
   1800;
@@ -276,6 +311,15 @@ const agentRegistry = {
 
   log:
     logAgent,
+
+
+  /* GitHub */
+
+  github:
+    githubAgent,
+
+  githubDeployment:
+    githubDeploymentAgent,
 
 
   /* Deployment */
@@ -1452,6 +1496,12 @@ function determineWorkflow(
     requiresFile:
       false,
 
+    requiresGithub:
+      false,
+
+    requiresGithubDeployment:
+      false,
+
     autonomousSequence:
       false
 
@@ -1502,6 +1552,46 @@ function determineWorkflow(
     case "configuration":
 
       workflow.requiresEnvironment =
+        true;
+
+      break;
+
+
+    case "github":
+
+    case "repository":
+
+    case "repo":
+
+    case "github-import":
+
+    case "github_import":
+
+    case "repository-import":
+
+      workflow.requiresGithub =
+        true;
+
+      break;
+
+
+    case "github-deploy":
+
+    case "github_deploy":
+
+    case "repository-deploy":
+
+    case "repository_deploy":
+
+    case "repo-deploy":
+
+      workflow.requiresGithub =
+        true;
+
+      workflow.requiresGithubDeployment =
+        true;
+
+      workflow.requiresDeploy =
         true;
 
       break;
@@ -1574,6 +1664,51 @@ function determineWorkflow(
     default:
 
       break;
+
+  }
+
+
+  if (
+    secondary.includes(
+      "github"
+    ) ||
+    secondary.includes(
+      "repository"
+    ) ||
+    secondary.includes(
+      "repo"
+    )
+  ) {
+
+    workflow.requiresGithub =
+      true;
+
+  }
+
+
+  if (
+    secondary.includes(
+      "github-deploy"
+    ) ||
+    secondary.includes(
+      "github_deploy"
+    ) ||
+    secondary.includes(
+      "repository-deploy"
+    ) ||
+    secondary.includes(
+      "repository_deploy"
+    )
+  ) {
+
+    workflow.requiresGithub =
+      true;
+
+    workflow.requiresGithubDeployment =
+      true;
+
+    workflow.requiresDeploy =
+      true;
 
   }
 
@@ -1726,6 +1861,16 @@ function determineWorkflow(
   if (
     workflow.requiresBuild &&
     workflow.requiresDeploy
+  ) {
+
+    workflow.autonomousSequence =
+      true;
+
+  }
+
+
+  if (
+    workflow.requiresGithubDeployment
   ) {
 
     workflow.autonomousSequence =
@@ -2482,6 +2627,220 @@ function createAgentContext(
 
 
 /* =========================================================
+   GITHUB CONTEXT
+========================================================= */
+
+function getGithubContext(
+  request,
+  workflowState,
+  intent,
+  planningData,
+  memoryContext,
+  buildResult
+) {
+
+  return {
+
+    action:
+      request?.action ||
+      request?.githubAction ||
+      request?.operation ||
+      "repositories-list",
+
+    workflowId:
+      workflowState.workflowId,
+
+    requestId:
+      workflowState.requestId,
+
+    userId:
+      workflowState.userId,
+
+    projectId:
+      workflowState.projectId,
+
+    projectName:
+      workflowState.projectName ||
+      getProjectName(
+        request,
+        planningData
+      ),
+
+    connectionId:
+      request?.connectionId ||
+      request?.githubConnectionId ||
+      null,
+
+    owner:
+      request?.owner ||
+      request?.githubOwner ||
+      null,
+
+    repository:
+      request?.repository ||
+      request?.repo ||
+      request?.githubRepository ||
+      null,
+
+    branch:
+      request?.branch ||
+      request?.ref ||
+      null,
+
+    path:
+      request?.path ||
+      null,
+
+    prompt:
+      cleanString(
+        request?.prompt,
+        MAX_PROMPT_LENGTH
+      ),
+
+    intent:
+      sanitizeForContext(
+        intent
+      ),
+
+    planning:
+      sanitizeForContext(
+        planningData
+      ),
+
+    memoryContext:
+      sanitizeForContext(
+        memoryContext
+      ),
+
+    buildResult:
+      sanitizeForContext(
+        buildResult
+      ),
+
+    user:
+      sanitizeForContext(
+        request?.user
+      )
+
+  };
+
+}
+
+
+/* =========================================================
+   GITHUB DEPLOYMENT CONTEXT
+========================================================= */
+
+function getGithubDeploymentContext(
+  request,
+  workflowState,
+  intent,
+  planningData,
+  githubResult,
+  buildResult
+) {
+
+  return {
+
+    action:
+      request?.githubDeploymentAction ||
+      request?.deploymentAction ||
+      request?.operation ||
+      "prepare-deployment",
+
+    workflowId:
+      workflowState.workflowId,
+
+    requestId:
+      workflowState.requestId,
+
+    userId:
+      workflowState.userId,
+
+    projectId:
+      workflowState.projectId,
+
+    projectName:
+      workflowState.projectName ||
+      getProjectName(
+        request,
+        planningData
+      ),
+
+    connectionId:
+      request?.connectionId ||
+      request?.githubConnectionId ||
+      null,
+
+    owner:
+      request?.owner ||
+      request?.githubOwner ||
+      githubResult?.repository?.owner ||
+      githubResult?.data?.repository?.owner ||
+      null,
+
+    repository:
+      request?.repository ||
+      request?.repo ||
+      request?.githubRepository ||
+      githubResult?.repository?.name ||
+      githubResult?.data?.repository?.name ||
+      null,
+
+    branch:
+      request?.branch ||
+      request?.ref ||
+      githubResult?.repository?.defaultBranch ||
+      githubResult?.data?.repository?.defaultBranch ||
+      null,
+
+    environmentName:
+      workflowState.environmentName ||
+      request?.environmentName ||
+      "production",
+
+    analysis:
+      sanitizeForContext(
+        request?.analysis ||
+        githubResult?.analysis ||
+        githubResult?.data?.analysis ||
+        null
+      ),
+
+    files:
+      sanitizeForContext(
+        request?.files ||
+        githubResult?.files ||
+        githubResult?.data?.files ||
+        []
+      ),
+
+    githubResult:
+      sanitizeForContext(
+        githubResult
+      ),
+
+    buildResult:
+      sanitizeForContext(
+        buildResult
+      ),
+
+    intent:
+      sanitizeForContext(
+        intent
+      ),
+
+    planning:
+      sanitizeForContext(
+        planningData
+      )
+
+  };
+
+}
+
+
+/* =========================================================
    DEPLOYMENT ERROR EXTRACTION
 ========================================================= */
 
@@ -2560,16 +2919,6 @@ function getDeploymentErrorDetails(
 
 /* =========================================================
    AUTO FIX TRIGGER
-   ---------------------------------------------------------
-   Master does NOT directly repair the deployment here.
-
-   It sends the deployment failure to logAgent.
-
-   logAgent owns:
-   - error recording
-   - auto-fix eligibility
-   - auto-fix trigger state
-   - Fix Agent handoff payload
 ========================================================= */
 
 async function triggerAutoFixFromDeploymentFailure(
@@ -2646,11 +2995,6 @@ async function triggerAutoFixFromDeploymentFailure(
       deploymentResult
     );
 
-
-  /*
-   * Never send secrets or raw deployment credentials
-   * into the Auto Fix context.
-   */
 
   const fixRequest = {
 
@@ -2742,12 +3086,6 @@ async function triggerAutoFixFromDeploymentFailure(
 
   try {
 
-    /*
-     * Step 1:
-     * Tell Log Agent to record the deployment error and
-     * evaluate whether it is eligible for Auto Fix.
-     */
-
     const errorRecordResult =
       await runAgent(
 
@@ -2786,12 +3124,6 @@ async function triggerAutoFixFromDeploymentFailure(
 
       );
 
-
-    /*
-     * If logging itself fails, do not pretend Auto Fix
-     * happened. The original deployment failure remains
-     * authoritative.
-     */
 
     if (
       !isSuccessful(
@@ -2845,13 +3177,6 @@ async function triggerAutoFixFromDeploymentFailure(
     }
 
 
-    /*
-     * Step 2:
-     * Ask Log Agent to evaluate and trigger Auto Fix.
-     *
-     * Log Agent remains the authority for eligibility.
-     */
-
     const autoFixResult =
       await runAgent(
 
@@ -2899,15 +3224,6 @@ async function triggerAutoFixFromDeploymentFailure(
       )
     ) {
 
-      /*
-       * Not every deployment failure should be auto-fixed.
-       * The Log Agent may legitimately return:
-       *
-       * eligible=false
-       *
-       * That is different from an internal failure.
-       */
-
       const eligible =
         autoFixResult?.eligible === true ||
         autoFixResult?.data?.eligible === true;
@@ -2916,23 +3232,6 @@ async function triggerAutoFixFromDeploymentFailure(
       if (
         !eligible
       ) {
-
-        logInfo(
-          "Deployment failure is not eligible for Auto Fix.",
-          {
-            workflowId:
-              workflowState.workflowId,
-
-            deploymentId,
-
-            reason:
-              getAgentError(
-                autoFixResult
-              )
-
-          }
-        );
-
 
         return {
 
@@ -3009,22 +3308,6 @@ async function triggerAutoFixFromDeploymentFailure(
             workflowState.workflowId,
 
           deploymentId
-
-        }
-      );
-
-    }
-
-    else {
-
-      logInfo(
-        "Auto Fix trigger completed without execution.",
-        {
-          workflowId:
-            workflowState.workflowId,
-
-          deploymentId
-
         }
       );
 
@@ -3340,6 +3623,12 @@ async function masterAgent(
     null;
 
   let environmentResult =
+    null;
+
+  let githubResult =
+    null;
+
+  let githubDeploymentResult =
     null;
 
   let deploymentResult =
@@ -3718,6 +4007,12 @@ async function masterAgent(
         type:
           workflow.type,
 
+        github:
+          workflow.requiresGithub,
+
+        githubDeployment:
+          workflow.requiresGithubDeployment,
+
         build:
           workflow.requiresBuild,
 
@@ -3823,6 +4118,93 @@ async function masterAgent(
 
 
     /* =====================================================
+       GITHUB
+       -----------------------------------------------------
+       GitHub Agent is responsible for GitHub operations.
+       Master only orchestrates it.
+    ===================================================== */
+
+    if (
+      workflow.requiresGithub
+    ) {
+
+      currentStage =
+        "github";
+
+
+      const githubPayload =
+        getGithubContext(
+
+          normalizedRequest,
+
+          workflowState,
+
+          intent,
+
+          planningData,
+
+          memoryContext,
+
+          buildResult
+
+        );
+
+
+      githubResult =
+        await runAgent(
+
+          workflowState,
+
+          "github",
+
+          githubAgent,
+
+          githubPayload
+
+        );
+
+
+      if (
+        !isSuccessful(
+          githubResult
+        )
+      ) {
+
+        workflowState.status =
+          "failed";
+
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "GitHub operation failed",
+
+          error:
+            getAgentError(
+              githubResult
+            ),
+
+          stage:
+            currentStage,
+
+          workflow:
+            workflowState,
+
+          intent,
+
+          githubResult
+
+        };
+
+      }
+
+    }
+
+
+    /* =====================================================
        PLANNING
     ===================================================== */
 
@@ -3912,6 +4294,88 @@ async function masterAgent(
         getPlanningData(
           planning
         );
+
+    }
+
+
+    /* =====================================================
+       GITHUB DEPLOYMENT CONTRACT / PREPARATION
+    ===================================================== */
+
+    if (
+      workflow.requiresGithubDeployment
+    ) {
+
+      currentStage =
+        "github-deployment";
+
+
+      githubDeploymentResult =
+        await runAgent(
+
+          workflowState,
+
+          "github-deployment",
+
+          githubDeploymentAgent,
+
+          getGithubDeploymentContext(
+
+            normalizedRequest,
+
+            workflowState,
+
+            intent,
+
+            planningData,
+
+            githubResult,
+
+            buildResult
+
+          )
+
+        );
+
+
+      if (
+        !isSuccessful(
+          githubDeploymentResult
+        )
+      ) {
+
+        workflowState.status =
+          "failed";
+
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "GitHub Deployment preparation failed",
+
+          error:
+            getAgentError(
+              githubDeploymentResult
+            ),
+
+          stage:
+            currentStage,
+
+          workflow:
+            workflowState,
+
+          intent,
+
+          githubResult,
+
+          githubDeploymentResult
+
+        };
+
+      }
 
     }
 
@@ -4447,7 +4911,7 @@ async function masterAgent(
        2. Environment readiness
        3. Environment snapshot
        4. Deploy Agent
-       5. Environment deployment state update
+       5. Environment deployment state
        6. Deployment failure logging
        7. Auto Fix eligibility / trigger
     ===================================================== */
@@ -4455,10 +4919,6 @@ async function masterAgent(
     if (
       workflow.requiresDeploy
     ) {
-
-      /* ===================================================
-         BUILD GATE
-      =================================================== */
 
       currentStage =
         "deployment-build-gate";
@@ -4511,10 +4971,6 @@ async function masterAgent(
 
       }
 
-
-      /* ===================================================
-         ENVIRONMENT READINESS
-      =================================================== */
 
       currentStage =
         "deployment-environment-gate";
@@ -4572,10 +5028,6 @@ async function masterAgent(
         null;
 
 
-      /* ===================================================
-         DEPLOYMENT SNAPSHOT
-      =================================================== */
-
       currentStage =
         "deployment-environment-snapshot";
 
@@ -4617,8 +5069,7 @@ async function masterAgent(
           workflow:
             workflowState,
 
-          environmentResult:
-            environmentResult,
+          environmentResult,
 
           snapshotResult
 
@@ -4626,10 +5077,6 @@ async function masterAgent(
 
       }
 
-
-      /* ===================================================
-         DEPLOY AGENT
-      =================================================== */
 
       currentStage =
         "deploy";
@@ -4680,6 +5127,16 @@ async function masterAgent(
               ),
 
             intent,
+
+            githubResult:
+              sanitizeForContext(
+                githubResult
+              ),
+
+            githubDeploymentResult:
+              sanitizeForContext(
+                githubDeploymentResult
+              ),
 
             workflowId:
               workflowState.workflowId,
@@ -4739,10 +5196,6 @@ async function masterAgent(
 
       /* ===================================================
          DEPLOYMENT FAILURE
-         ---------------------------------------------------
-         IMPORTANT:
-         Deployment failure does NOT silently disappear.
-         It enters Deployment Log + Auto Fix pipeline.
       =================================================== */
 
       if (
@@ -4777,13 +5230,6 @@ async function masterAgent(
           );
 
 
-        /*
-         * Auto Fix being triggered does NOT mean deployment
-         * succeeded. The original deployment state remains
-         * failed until Fix Agent + redeployment + verification
-         * succeeds.
-         */
-
         return {
 
           success:
@@ -4808,6 +5254,10 @@ async function masterAgent(
           intent,
 
           planning,
+
+          githubResult,
+
+          githubDeploymentResult,
 
           buildResult,
 
@@ -5130,6 +5580,16 @@ async function masterAgent(
           planning
         ),
 
+      githubResult:
+        sanitizeForContext(
+          githubResult
+        ),
+
+      githubDeploymentResult:
+        sanitizeForContext(
+          githubDeploymentResult
+        ),
+
       environment:
         sanitizeForContext(
           environmentResult
@@ -5266,24 +5726,30 @@ STRICT RULES:
 16. Never claim environment readiness unless the
     environment gate passed.
 
-17. If something failed, clearly state that it failed.
+17. Never claim GitHub operation success unless
+    githubResult.success=true.
 
-18. If something is unavailable, state that it is unavailable.
+18. Never claim GitHub deployment preparation
+    success unless githubDeploymentResult.success=true.
 
-19. If Auto Fix was triggered, clearly state that
+19. If something failed, clearly state that it failed.
+
+20. If something is unavailable, state that it is unavailable.
+
+21. If Auto Fix was triggered, clearly state that
     Auto Fix was triggered, but do not claim that
     the deployment has already been repaired.
 
-20. Use the exact deployment URL returned by the backend.
+22. Use the exact deployment URL returned by the backend.
 
-21. Never construct a URL yourself.
+23. Never construct a URL yourself.
 
-22. Keep the response concise and useful.
+24. Keep the response concise and useful.
 
-23. Do not explain internal implementation unless
+25. Do not explain internal implementation unless
     necessary.
 
-24. Do not claim that an agent ran when it was skipped.
+26. Do not claim that an agent ran when it was skipped.
 
 `
 
@@ -5319,6 +5785,18 @@ PLANNING:
 
 ${safeJson(
   planning
+)}
+
+GITHUB RESULT:
+
+${safeJson(
+  githubResult
+)}
+
+GITHUB DEPLOYMENT RESULT:
+
+${safeJson(
+  githubDeploymentResult
 )}
 
 ENVIRONMENT:
@@ -5462,6 +5940,14 @@ ${safeJson(
             ? `Failed: ${failed}.`
             : "",
 
+          githubResult?.success
+            ? "GitHub operation completed."
+            : "",
+
+          githubDeploymentResult?.success
+            ? "GitHub deployment preparation completed."
+            : "",
+
           workflowState.environmentName
             ? `Environment: ${workflowState.environmentName}.`
             : "",
@@ -5595,6 +6081,16 @@ ${safeJson(
             planning
           ),
 
+        githubResult:
+          sanitizeForContext(
+            githubResult
+          ),
+
+        githubDeploymentResult:
+          sanitizeForContext(
+            githubDeploymentResult
+          ),
+
         environment:
           sanitizeForContext(
             environmentResult
@@ -5696,6 +6192,10 @@ masterAgent.ownership = {
 
     "build_gates",
 
+    "github_workflow_coordination",
+
+    "github_deployment_coordination",
+
     "deployment_gates",
 
     "deployment_failure_logging",
@@ -5779,6 +6279,38 @@ masterAgent.ownership = {
     "auto_fix_eligibility",
 
     "auto_fix_trigger"
+
+  ],
+
+
+  github: [
+
+    "github_connection_operations",
+
+    "repository_operations",
+
+    "branch_operations",
+
+    "repository_contents",
+
+    "repository_analysis"
+
+  ],
+
+
+  githubDeployment: [
+
+    "github_deployment_contract",
+
+    "github_deployment_readiness",
+
+    "github_deployment_preparation",
+
+    "docker_handoff_preparation",
+
+    "aws_handoff_preparation",
+
+    "deployment_contract_sanitization"
 
   ],
 
@@ -5877,7 +6409,13 @@ masterAgent.security = {
   directSecretResolution:
     false,
 
+  directGithubApiAccess:
+    false,
+
   environmentSecretsExposedToMaster:
+    false,
+
+  githubTokensExposedToMaster:
     false,
 
   deploymentSecretsResolvedBy:
@@ -5885,6 +6423,9 @@ masterAgent.security = {
 
   providerArchitecture:
     "centralized-ai-provider-service",
+
+  githubArchitecture:
+    "github-agent-service-boundary",
 
   autoFixArchitecture:
     "log-agent-trigger-boundary"
@@ -5910,6 +6451,7 @@ masterAgent.workflowContract = {
 
   ],
 
+
   buildAndDeploy: [
 
     "memory",
@@ -5929,6 +6471,7 @@ masterAgent.workflowContract = {
     "environment-deployed"
 
   ],
+
 
   deploy: [
 
@@ -5950,6 +6493,39 @@ masterAgent.workflowContract = {
 
   ],
 
+
+  github: [
+
+    "memory",
+
+    "intent",
+
+    "github"
+
+  ],
+
+
+  githubDeployment: [
+
+    "memory",
+
+    "intent",
+
+    "github",
+
+    "github-deployment",
+
+    "environment-readiness",
+
+    "environment-snapshot",
+
+    "deploy",
+
+    "environment-deployed"
+
+  ],
+
+
   deploymentFailure: [
 
     "deploy",
@@ -5962,6 +6538,7 @@ masterAgent.workflowContract = {
 
   ],
 
+
   environment: [
 
     "memory",
@@ -5971,6 +6548,7 @@ masterAgent.workflowContract = {
     "environment"
 
   ],
+
 
   fix: [
 
@@ -5982,6 +6560,7 @@ masterAgent.workflowContract = {
 
   ],
 
+
   subscription: [
 
     "memory",
@@ -5991,6 +6570,7 @@ masterAgent.workflowContract = {
     "subscription"
 
   ],
+
 
   billing: [
 
