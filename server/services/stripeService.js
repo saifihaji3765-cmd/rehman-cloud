@@ -1,29 +1,69 @@
-const Stripe = require("stripe");
-const logger = require("./loggerService");
-
-
 /* =========================================================
-   ZyrionOS STRIPE SERVICE
+   ZyrionOS STRIPE SERVICE v4.0.0
    =========================================================
 
    Responsibilities:
-   - Stripe configuration
+   - Stripe client configuration
    - Recurring Checkout Sessions
    - PaymentIntent support for legacy integrations
-   - Server-side plan validation
+   - Billing Agent plan resolution
+   - Server-side amount validation
+   - Currency validation
    - User / plan / billing metadata
    - Monthly / yearly billing
+   - Checkout Session retrieval
+   - Subscription retrieval
+   - PaymentIntent retrieval
    - No client-controlled pricing
-   - Webhook-compatible metadata
+   - No invented currency conversion
+   - No subscription activation
 
-   PUBLIC PRICING
+   ARCHITECTURE:
 
-   Starter     $19 / month
-   Pro         $99 / month
-   Business    $199 / month
-   Scale       $299 / month
-   Enterprise  $499 / month
+   Controller
+       ↓
+   Stripe Service
+       ↓
+   Billing Agent
+       ↓
+   Stripe API
+
+   Subscription activation:
+
+   Stripe
+       ↓
+   Verified Webhook
+       ↓
+   Webhook Controller
+       ↓
+   Subscription state
+
+   IMPORTANT:
+   ---------------------------------------------------------
+   Billing Agent is authoritative for:
+
+   - plan
+   - amount
+   - currency
+   - billing cycle
+   - entitlements
+
+   Stripe Service NEVER activates subscriptions.
 ========================================================= */
+
+
+/* =========================================================
+   PACKAGES
+========================================================= */
+
+const Stripe =
+  require("stripe");
+
+const logger =
+  require("./loggerService");
+
+const billingAgent =
+  require("../agents/billingAgent");
 
 
 /* =========================================================
@@ -32,95 +72,107 @@ const logger = require("./loggerService");
 
 let stripe = null;
 
+
+const stripeSecretKey =
+  String(
+    process.env.STRIPE_SECRET_KEY ||
+    ""
+  ).trim();
+
+
 if (
-  process.env.STRIPE_SECRET_KEY &&
-  process.env.STRIPE_SECRET_KEY.trim() !== ""
+  stripeSecretKey
 ) {
-  stripe = new Stripe(
-    process.env.STRIPE_SECRET_KEY.trim()
-  );
+
+  stripe =
+    new Stripe(
+      stripeSecretKey
+    );
+
 }
-
-
-/* =========================================================
-   PLAN CATALOG
-========================================================= */
-
-const PLANS = Object.freeze({
-
-  Starter: Object.freeze({
-    monthly: 19,
-    yearly: 190
-  }),
-
-  Pro: Object.freeze({
-    monthly: 99,
-    yearly: 990
-  }),
-
-  Business: Object.freeze({
-    monthly: 199,
-    yearly: 1990
-  }),
-
-  Scale: Object.freeze({
-    monthly: 299,
-    yearly: 2990
-  }),
-
-  Enterprise: Object.freeze({
-    monthly: 499,
-    yearly: 4990
-  })
-
-});
 
 
 /* =========================================================
    CONSTANTS
 ========================================================= */
 
-const SUPPORTED_CURRENCY = "USD";
+const PROVIDER =
+  "stripe";
 
-const STRIPE_API_CURRENCY = "usd";
+
+const DEFAULT_CURRENCY =
+  "USD";
+
+
+const STRIPE_API_CURRENCY =
+  "usd";
+
 
 const DEFAULT_FRONTEND_URL =
   "https://zyrionos.com";
+
+
+const SERVICE_VERSION =
+  "4.0.0";
+
+
+const PLATFORM_NAME =
+  "ZyrionOS";
 
 
 /* =========================================================
    PLAN NORMALIZATION
 ========================================================= */
 
-function normalizePlan(plan) {
+function normalizePlan(
+  plan
+) {
 
-  if (!plan) {
+  if (
+    plan ===
+      null ||
+    plan ===
+      undefined
+  ) {
+
     return null;
+
   }
 
+
   const value =
-    String(plan)
+    String(
+      plan
+    )
       .trim()
       .toLowerCase();
 
+
   const map = {
 
-    starter: "Starter",
+    starter:
+      "Starter",
 
-    pro: "Pro",
+    pro:
+      "Pro",
 
-    business: "Business",
+    business:
+      "Business",
 
-    scale: "Scale",
+    scale:
+      "Scale",
 
-    enterprise: "Enterprise"
+    enterprise:
+      "Enterprise"
 
   };
+
 
   return (
     map[value] ||
     null
   );
+
 }
 
 
@@ -134,68 +186,589 @@ function normalizeBillingCycle(
 
   if (
     cycle ===
-    undefined ||
+      undefined ||
     cycle ===
-    null ||
-    cycle === ""
+      null ||
+    cycle ===
+      ""
   ) {
+
     return "monthly";
+
   }
 
+
   const value =
-    String(cycle)
+    String(
+      cycle
+    )
       .trim()
       .toLowerCase();
+
 
   if (
     value ===
     "monthly"
   ) {
+
     return "monthly";
+
   }
+
 
   if (
     value ===
     "yearly"
   ) {
+
     return "yearly";
+
   }
 
+
   return null;
+
 }
 
 
 /* =========================================================
-   PLAN PRICE
+   CURRENCY NORMALIZATION
 ========================================================= */
 
-function getPlanPrice(
-  plan,
-  billingCycle
+function normalizeCurrency(
+  currency
 ) {
 
-  const normalizedPlan =
-    normalizePlan(plan);
+  if (
+    currency ===
+      null ||
+    currency ===
+      undefined
+  ) {
 
-  if (!normalizedPlan) {
     return null;
+
   }
 
-  const cycle =
+
+  const normalized =
+    String(
+      currency
+    )
+      .trim()
+      .toUpperCase();
+
+
+  if (
+    !/^[A-Z]{3}$/.test(
+      normalized
+    )
+  ) {
+
+    return null;
+
+  }
+
+
+  return normalized;
+
+}
+
+
+/* =========================================================
+   USER ID NORMALIZATION
+========================================================= */
+
+function normalizeUserId(
+  userId
+) {
+
+  if (
+    userId ===
+      null ||
+    userId ===
+      undefined
+  ) {
+
+    return null;
+
+  }
+
+
+  if (
+    typeof userId ===
+    "string"
+  ) {
+
+    return (
+      userId.trim() ||
+      null
+    );
+
+  }
+
+
+  if (
+    typeof userId ===
+    "number"
+  ) {
+
+    return String(
+      userId
+    );
+
+  }
+
+
+  if (
+    typeof userId ===
+      "object" &&
+    typeof userId.toString ===
+      "function"
+  ) {
+
+    const value =
+      userId.toString();
+
+
+    if (
+      value &&
+      value !==
+        "[object Object]"
+    ) {
+
+      return value;
+
+    }
+
+  }
+
+
+  return null;
+
+}
+
+
+/* =========================================================
+   ENSURE STRIPE
+========================================================= */
+
+function ensureStripe() {
+
+  if (
+    !stripe
+  ) {
+
+    const error =
+      new Error(
+        "STRIPE_SECRET_KEY is not configured"
+      );
+
+
+    error.code =
+      "STRIPE_NOT_CONFIGURED";
+
+
+    throw error;
+
+  }
+
+}
+
+
+/* =========================================================
+   FRONTEND URL
+========================================================= */
+
+function getFrontendUrl() {
+
+  const configured =
+    String(
+      process.env.FRONTEND_URL ||
+      ""
+    ).trim();
+
+
+  if (
+    configured
+  ) {
+
+    return configured.replace(
+      /\/+$/,
+      ""
+    );
+
+  }
+
+
+  return DEFAULT_FRONTEND_URL;
+
+}
+
+
+/* =========================================================
+   BILLING AGENT PLAN RESOLUTION
+========================================================= */
+
+async function resolveBillingPlan({
+  userId,
+  plan,
+  billingCycle
+} = {}) {
+
+  const normalizedUserId =
+    normalizeUserId(
+      userId
+    );
+
+
+  const normalizedPlan =
+    normalizePlan(
+      plan
+    );
+
+
+  const normalizedCycle =
     normalizeBillingCycle(
       billingCycle
     );
 
-  if (!cycle) {
-    return null;
+
+  if (
+    !normalizedUserId
+  ) {
+
+    const error =
+      new Error(
+        "User ID is required"
+      );
+
+
+    error.code =
+      "USER_ID_REQUIRED";
+
+
+    throw error;
+
   }
 
-  return (
-    PLANS[
+
+  if (
+    !normalizedPlan
+  ) {
+
+    const error =
+      new Error(
+        "Invalid Stripe plan"
+      );
+
+
+    error.code =
+      "INVALID_PLAN";
+
+
+    throw error;
+
+  }
+
+
+  if (
+    !normalizedCycle
+  ) {
+
+    const error =
+      new Error(
+        "Invalid billing cycle"
+      );
+
+
+    error.code =
+      "INVALID_BILLING_CYCLE";
+
+
+    throw error;
+
+  }
+
+
+  if (
+    !billingAgent ||
+    typeof billingAgent !==
+      "function"
+  ) {
+
+    const error =
+      new Error(
+        "Billing Agent is unavailable"
+      );
+
+
+    error.code =
+      "BILLING_AGENT_UNAVAILABLE";
+
+
+    throw error;
+
+  }
+
+
+  /*
+   * Billing Agent is authoritative.
+   */
+
+  const result =
+    await billingAgent({
+
+      userId:
+        normalizedUserId,
+
+      plan:
+        normalizedPlan,
+
+      billingCycle:
+        normalizedCycle,
+
+      paymentProvider:
+        PROVIDER
+
+    });
+
+
+  if (
+    !result ||
+    result.success !==
+      true
+  ) {
+
+    const error =
+      new Error(
+
+        result?.error ||
+        result?.message ||
+        "Billing Agent failed to resolve Stripe plan"
+
+      );
+
+
+    error.code =
+      "BILLING_PLAN_RESOLUTION_FAILED";
+
+
+    throw error;
+
+  }
+
+
+  const billing =
+    result.billing ||
+    {};
+
+
+  const selectedPlan =
+    billing.selectedPlan;
+
+
+  if (
+    !selectedPlan
+  ) {
+
+    const error =
+      new Error(
+        "Billing Agent returned no selected plan"
+      );
+
+
+    error.code =
+      "BILLING_PLAN_MISSING";
+
+
+    throw error;
+
+  }
+
+
+  const resolvedPlan =
+    normalizePlan(
+
+      selectedPlan.name ||
+      selectedPlan.planName ||
       normalizedPlan
-    ]?.[cycle] ??
-    null
-  );
+
+    );
+
+
+  if (
+    resolvedPlan !==
+    normalizedPlan
+  ) {
+
+    const error =
+      new Error(
+        "Billing Agent plan mismatch"
+      );
+
+
+    error.code =
+      "BILLING_PLAN_MISMATCH";
+
+
+    throw error;
+
+  }
+
+
+  const amount =
+    Number(
+
+      billing.amount ??
+      selectedPlan.amount
+
+    );
+
+
+  if (
+    !Number.isFinite(
+      amount
+    ) ||
+    amount <= 0
+  ) {
+
+    const error =
+      new Error(
+        "Billing Agent returned an invalid amount"
+      );
+
+
+    error.code =
+      "INVALID_BILLING_AMOUNT";
+
+
+    throw error;
+
+  }
+
+
+  const currency =
+    normalizeCurrency(
+
+      selectedPlan.currency ||
+      billing.currency ||
+      DEFAULT_CURRENCY
+
+    );
+
+
+  if (
+    !currency
+  ) {
+
+    const error =
+      new Error(
+        "Billing Agent returned an invalid currency"
+      );
+
+
+    error.code =
+      "INVALID_BILLING_CURRENCY";
+
+
+    throw error;
+
+  }
+
+
+  return {
+
+    billing,
+
+    selectedPlan,
+
+    plan:
+      normalizedPlan,
+
+    billingCycle:
+      normalizedCycle,
+
+    amount,
+
+    currency
+
+  };
+
+}
+
+
+/* =========================================================
+   CURRENCY VALIDATION
+========================================================= */
+
+function validateCurrency(
+  currency
+) {
+
+  const normalized =
+    normalizeCurrency(
+      currency
+    );
+
+
+  if (
+    !normalized
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      currency:
+        null,
+
+      reason:
+        "Invalid currency"
+
+    };
+
+  }
+
+
+  /*
+   * Current Stripe catalog is configured for USD.
+   *
+   * No automatic FX conversion.
+   */
+
+  if (
+    normalized !==
+    DEFAULT_CURRENCY
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      currency:
+        normalized,
+
+      reason:
+        "ZyrionOS Stripe catalog currently uses USD"
+
+    };
+
+  }
+
+
+  return {
+
+    valid:
+      true,
+
+    currency:
+      normalized
+
+  };
+
 }
 
 
@@ -204,20 +777,21 @@ function getPlanPrice(
 ========================================================= */
 
 function validateAmount({
-  plan,
-  billingCycle,
-  amount
+  expectedAmount,
+  receivedAmount
 } = {}) {
 
   const expected =
-    getPlanPrice(
-      plan,
-      billingCycle
+    Number(
+      expectedAmount
     );
 
+
   if (
-    expected ===
-    null
+    !Number.isFinite(
+      expected
+    ) ||
+    expected <= 0
   ) {
 
     return {
@@ -226,28 +800,30 @@ function validateAmount({
         false,
 
       reason:
-        "Invalid Stripe plan or billing cycle"
+        "Invalid server billing amount"
 
     };
 
   }
 
+
   /*
-   * Amount is optional for internal server calls.
-   *
-   * When supplied, it MUST exactly match the
-   * server-side catalog.
+   * Client supplied amount is never authoritative.
+   * It is only a consistency check.
    */
 
   if (
-    amount !==
+    receivedAmount !==
       undefined &&
-    amount !==
+    receivedAmount !==
       null
   ) {
 
     const received =
-      Number(amount);
+      Number(
+        receivedAmount
+      );
+
 
     if (
       !Number.isFinite(
@@ -261,7 +837,7 @@ function validateAmount({
           false,
 
         reason:
-          "Invalid Stripe amount",
+          "Invalid supplied amount",
 
         expected,
 
@@ -271,9 +847,24 @@ function validateAmount({
 
     }
 
+
+    const expectedMinor =
+      Math.round(
+        expected *
+        100
+      );
+
+
+    const receivedMinor =
+      Math.round(
+        received *
+        100
+      );
+
+
     if (
-      received !==
-      expected
+      expectedMinor !==
+      receivedMinor
     ) {
 
       return {
@@ -282,7 +873,7 @@ function validateAmount({
           false,
 
         reason:
-          "Stripe amount does not match server plan price",
+          "Supplied amount does not match Billing Agent amount",
 
         expected,
 
@@ -293,6 +884,7 @@ function validateAmount({
     }
 
   }
+
 
   return {
 
@@ -303,54 +895,77 @@ function validateAmount({
       expected
 
   };
+
 }
 
 
 /* =========================================================
-   STRIPE CONFIGURATION CHECK
+   PROVIDER AMOUNT
 ========================================================= */
 
-function ensureStripe() {
+function toStripeAmount(
+  amount
+) {
 
-  if (!stripe) {
+  const numeric =
+    Number(
+      amount
+    );
+
+
+  if (
+    !Number.isFinite(
+      numeric
+    ) ||
+    numeric <= 0
+  ) {
 
     const error =
       new Error(
-        "STRIPE_SECRET_KEY is not configured"
+        "Invalid Stripe payment amount"
       );
+
 
     error.code =
-      "STRIPE_NOT_CONFIGURED";
+      "INVALID_STRIPE_AMOUNT";
+
 
     throw error;
+
   }
-}
 
 
-/* =========================================================
-   FRONTEND URL
-========================================================= */
+  const minor =
+    Math.round(
+      numeric *
+      100
+    );
 
-function getFrontendUrl() {
-
-  const configured =
-    process.env.FRONTEND_URL;
 
   if (
-    configured &&
-    configured.trim() !== ""
+    !Number.isSafeInteger(
+      minor
+    ) ||
+    minor <= 0
   ) {
 
-    return configured
-      .trim()
-      .replace(
-        /\/+$/,
-        ""
+    const error =
+      new Error(
+        "Stripe payment amount exceeds safe limits"
       );
+
+
+    error.code =
+      "UNSAFE_STRIPE_AMOUNT";
+
+
+    throw error;
 
   }
 
-  return DEFAULT_FRONTEND_URL;
+
+  return minor;
+
 }
 
 
@@ -362,33 +977,117 @@ function buildMetadata({
   userId,
   plan,
   billingCycle,
-  amount
-}) {
+  amount,
+  currency,
+  billingId
+} = {}) {
 
-  return {
+  const metadata = {
 
     userId:
-      String(userId),
+      String(
+        userId
+      ),
 
     plan:
-      String(plan),
+      String(
+        plan
+      ),
 
     billingCycle:
-      String(billingCycle),
+      String(
+        billingCycle
+      ),
 
     amount:
-      String(amount),
+      String(
+        amount
+      ),
 
     currency:
-      SUPPORTED_CURRENCY,
+      String(
+        currency
+      ),
 
     platform:
-      "ZyrionOS",
+      PLATFORM_NAME,
 
     version:
-      "3.0.0"
+      SERVICE_VERSION
 
   };
+
+
+  if (
+    billingId
+  ) {
+
+    metadata.billingId =
+      String(
+        billingId
+      );
+
+  }
+
+
+  return metadata;
+
+}
+
+
+/* =========================================================
+   CUSTOMER EMAIL
+========================================================= */
+
+function normalizeEmail(
+  email
+) {
+
+  if (
+    email ===
+      null ||
+    email ===
+      undefined
+  ) {
+
+    return null;
+
+  }
+
+
+  const value =
+    String(
+      email
+    ).trim();
+
+
+  if (
+    !value
+  ) {
+
+    return null;
+
+  }
+
+
+  /*
+   * Basic validation only.
+   * Stripe performs final validation.
+   */
+
+  if (
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
+      value
+    )
+  ) {
+
+    return null;
+
+  }
+
+
+  return value;
+
 }
 
 
@@ -402,7 +1101,8 @@ async function createCheckoutSession({
   userId,
   customerEmail,
   billingCycle = "monthly",
-  amount
+  amount,
+  billingId
 } = {}) {
 
   try {
@@ -410,80 +1110,14 @@ async function createCheckoutSession({
     ensureStripe();
 
 
-    /* -----------------------------------------------------
-       PLAN
-    ----------------------------------------------------- */
-
-    const selectedPlan =
-      normalizePlan(
-        planName ||
-        plan
+    const normalizedUserId =
+      normalizeUserId(
+        userId
       );
 
-    if (!selectedPlan) {
-
-      return {
-
-        success:
-          false,
-
-        message:
-          "Invalid Stripe plan",
-
-        error:
-          "Supported plans: Starter, Pro, Business, Scale, Enterprise"
-
-      };
-
-    }
-
-
-    /* -----------------------------------------------------
-       BILLING CYCLE
-    ----------------------------------------------------- */
-
-    const cycle =
-      normalizeBillingCycle(
-        billingCycle
-      );
-
-    if (!cycle) {
-
-      return {
-
-        success:
-          false,
-
-        message:
-          "Invalid billing cycle",
-
-        error:
-          "Supported billing cycles: monthly, yearly"
-
-      };
-
-    }
-
-
-    /* -----------------------------------------------------
-       PRICE
-    ----------------------------------------------------- */
-
-    const validation =
-      validateAmount({
-
-        plan:
-          selectedPlan,
-
-        billingCycle:
-          cycle,
-
-        amount
-
-      });
 
     if (
-      !validation.valid
+      !normalizedUserId
     ) {
 
       return {
@@ -491,30 +1125,8 @@ async function createCheckoutSession({
         success:
           false,
 
-        message:
-          validation.reason,
-
-        expected:
-          validation.expected,
-
-        received:
-          validation.received
-
-      };
-
-    }
-
-
-    /* -----------------------------------------------------
-       USER
-    ----------------------------------------------------- */
-
-    if (!userId) {
-
-      return {
-
-        success:
-          false,
+        code:
+          "USER_ID_REQUIRED",
 
         message:
           "User ID required"
@@ -524,52 +1136,141 @@ async function createCheckoutSession({
     }
 
 
-    /* -----------------------------------------------------
-       CURRENCY
-    ----------------------------------------------------- */
+    /*
+     * Resolve authoritative plan.
+     */
 
-    const unitAmount =
-      Math.round(
-        validation.amount *
-        100
-      );
+    const billing =
+      await resolveBillingPlan({
 
-
-    /* -----------------------------------------------------
-       STRIPE INTERVAL
-    ----------------------------------------------------- */
-
-    const interval =
-      cycle ===
-      "yearly"
-        ? "year"
-        : "month";
-
-
-    /* -----------------------------------------------------
-       METADATA
-    ----------------------------------------------------- */
-
-    const metadata =
-      buildMetadata({
-
-        userId,
+        userId:
+          normalizedUserId,
 
         plan:
-          selectedPlan,
+          planName ||
+          plan,
 
-        billingCycle:
-          cycle,
-
-        amount:
-          validation.amount
+        billingCycle
 
       });
 
 
-    /* -----------------------------------------------------
-       CHECKOUT SESSION
-    ----------------------------------------------------- */
+    /*
+     * Currency comes from Billing Agent.
+     */
+
+    const currencyValidation =
+      validateCurrency(
+        billing.currency
+      );
+
+
+    if (
+      !currencyValidation.valid
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        code:
+          "STRIPE_CURRENCY_NOT_CONFIGURED",
+
+        message:
+          currencyValidation.reason,
+
+        currency:
+          currencyValidation.currency
+
+      };
+
+    }
+
+
+    /*
+     * Optional caller amount is only a check.
+     */
+
+    const amountValidation =
+      validateAmount({
+
+        expectedAmount:
+          billing.amount,
+
+        receivedAmount:
+          amount
+
+      });
+
+
+    if (
+      !amountValidation.valid
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        code:
+          "AMOUNT_VALIDATION_FAILED",
+
+        message:
+          amountValidation.reason,
+
+        expected:
+          amountValidation.expected,
+
+        received:
+          amountValidation.received
+
+      };
+
+    }
+
+
+    const unitAmount =
+      toStripeAmount(
+        billing.amount
+      );
+
+
+    const interval =
+      billing.billingCycle ===
+      "yearly"
+
+        ? "year"
+
+        : "month";
+
+
+    const metadata =
+      buildMetadata({
+
+        userId:
+          normalizedUserId,
+
+        plan:
+          billing.plan,
+
+        billingCycle:
+          billing.billingCycle,
+
+        amount:
+          billing.amount,
+
+        currency:
+          billing.currency,
+
+        billingId
+
+      });
+
+
+    /*
+     * Recurring Checkout.
+     */
 
     const sessionParams = {
 
@@ -588,15 +1289,15 @@ async function createCheckoutSession({
             product_data: {
 
               name:
-                `ZyrionOS ${selectedPlan}`,
+                `ZyrionOS ${billing.plan}`,
 
               metadata: {
 
                 plan:
-                  selectedPlan,
+                  billing.plan,
 
                 platform:
-                  "ZyrionOS"
+                  PLATFORM_NAME
 
               }
 
@@ -620,17 +1321,15 @@ async function createCheckoutSession({
 
       ],
 
-      /*
-       * Session metadata.
-       */
       metadata,
 
       /*
-       * Subscription metadata.
-       *
-       * This is critical because recurring invoice
-       * webhooks need user/plan information.
+       * Critical:
+       * Copy metadata onto the Stripe Subscription so
+       * subscription/invoice lifecycle events retain the
+       * user and plan context.
        */
+
       subscription_data: {
 
         metadata
@@ -649,26 +1348,21 @@ async function createCheckoutSession({
     };
 
 
-    /* -----------------------------------------------------
-       CUSTOMER EMAIL
-    ----------------------------------------------------- */
+    const normalizedEmail =
+      normalizeEmail(
+        customerEmail
+      );
+
 
     if (
-      customerEmail &&
-      String(customerEmail).trim()
+      normalizedEmail
     ) {
 
       sessionParams.customer_email =
-        String(
-          customerEmail
-        ).trim();
+        normalizedEmail;
 
     }
 
-
-    /* -----------------------------------------------------
-       CREATE SESSION
-    ----------------------------------------------------- */
 
     const session =
       await stripe
@@ -679,8 +1373,30 @@ async function createCheckoutSession({
         );
 
 
+    if (
+      !session ||
+      !session.id
+    ) {
+
+      const error =
+        new Error(
+          "Stripe returned an invalid Checkout Session"
+        );
+
+
+      error.code =
+        "INVALID_STRIPE_SESSION_RESPONSE";
+
+
+      throw error;
+
+    }
+
+
     logger.success(
-      `Stripe Checkout Session created: ${session.id} (${selectedPlan}/${cycle})`
+
+      `Stripe Checkout Session created: ${session.id} (${billing.plan}/${billing.billingCycle})`
+
     );
 
 
@@ -690,7 +1406,7 @@ async function createCheckoutSession({
         true,
 
       provider:
-        "stripe",
+        PROVIDER,
 
       session: {
 
@@ -711,44 +1427,60 @@ async function createCheckoutSession({
 
       },
 
-      plan:
-        selectedPlan,
+      billing: {
 
-      billingCycle:
-        cycle,
+        plan:
+          billing.plan,
 
-      amount:
-        validation.amount,
+        billingCycle:
+          billing.billingCycle,
 
-      currency:
-        SUPPORTED_CURRENCY
+        amount:
+          billing.amount,
+
+        currency:
+          billing.currency,
+
+        billingId:
+          billingId ||
+          billing.billing?.billingId ||
+          null
+
+      }
 
     };
 
-  } catch (error) {
+  }
+
+  catch (error) {
 
     logger.error(
-      `Stripe Checkout creation failed: ${error?.message}`
+
+      `Stripe Checkout creation failed: ${error?.message || error}`
+
     );
+
 
     return {
 
       success:
         false,
 
+      code:
+        error?.code ||
+        "STRIPE_CHECKOUT_CREATION_FAILED",
+
       message:
         "Stripe Checkout creation failed",
 
       error:
         error?.message ||
-        "Unknown Stripe error",
-
-      code:
-        error?.code ||
-        null
+        "Unknown Stripe error"
 
     };
+
   }
+
 }
 
 
@@ -756,21 +1488,19 @@ async function createCheckoutSession({
    CREATE PAYMENT INTENT
 =========================================================
 
-   This method is retained for compatibility with existing
-   integrations.
+   Compatibility method.
 
    IMPORTANT:
 
-   PaymentIntent != recurring subscription.
+   PaymentIntent is NOT treated as a recurring subscription.
 
-   For ZyrionOS recurring subscriptions, the preferred
-   production flow is:
+   Preferred recurring flow:
 
    createCheckoutSession()
        ↓
    Stripe Checkout
        ↓
-   Stripe webhook
+   Verified webhook
        ↓
    Subscription activation
 
@@ -778,10 +1508,11 @@ async function createCheckoutSession({
 
 async function createPaymentIntent({
   amount,
-  currency = "USD",
+  currency = DEFAULT_CURRENCY,
   userId,
   plan,
-  billingCycle = "monthly"
+  billingCycle = "monthly",
+  billingId
 } = {}) {
 
   try {
@@ -789,16 +1520,23 @@ async function createPaymentIntent({
     ensureStripe();
 
 
-    /* -----------------------------------------------------
-       USER
-    ----------------------------------------------------- */
+    const normalizedUserId =
+      normalizeUserId(
+        userId
+      );
 
-    if (!userId) {
+
+    if (
+      !normalizedUserId
+    ) {
 
       return {
 
         success:
           false,
+
+        code:
+          "USER_ID_REQUIRED",
 
         message:
           "User ID required"
@@ -808,68 +1546,27 @@ async function createPaymentIntent({
     }
 
 
-    /* -----------------------------------------------------
-       PLAN
-    ----------------------------------------------------- */
+    const billing =
+      await resolveBillingPlan({
 
-    const selectedPlan =
-      normalizePlan(
-        plan
-      );
+        userId:
+          normalizedUserId,
 
-    if (!selectedPlan) {
+        plan,
 
-      return {
-
-        success:
-          false,
-
-        message:
-          "Invalid Stripe plan"
-
-      };
-
-    }
-
-
-    /* -----------------------------------------------------
-       BILLING CYCLE
-    ----------------------------------------------------- */
-
-    const cycle =
-      normalizeBillingCycle(
         billingCycle
+
+      });
+
+
+    const currencyValidation =
+      validateCurrency(
+        billing.currency
       );
 
-    if (!cycle) {
-
-      return {
-
-        success:
-          false,
-
-        message:
-          "Invalid billing cycle"
-
-      };
-
-    }
-
-
-    /* -----------------------------------------------------
-       CURRENCY
-    ----------------------------------------------------- */
-
-    const normalizedCurrency =
-      String(
-        currency
-      )
-        .trim()
-        .toUpperCase();
 
     if (
-      normalizedCurrency !==
-      SUPPORTED_CURRENCY
+      !currencyValidation.valid
     ) {
 
       return {
@@ -877,30 +1574,77 @@ async function createPaymentIntent({
         success:
           false,
 
+        code:
+          "STRIPE_CURRENCY_NOT_CONFIGURED",
+
         message:
-          "ZyrionOS Stripe catalog currently uses USD"
+          currencyValidation.reason,
+
+        currency:
+          currencyValidation.currency
 
       };
 
     }
 
 
-    /* -----------------------------------------------------
-       PRICE
-    ----------------------------------------------------- */
+    /*
+     * The method argument is only a consistency check.
+     */
+
+    if (
+      currency !==
+        undefined &&
+      currency !==
+        null
+    ) {
+
+      const requestedCurrency =
+        normalizeCurrency(
+          currency
+        );
+
+
+      if (
+        requestedCurrency !==
+        billing.currency
+      ) {
+
+        return {
+
+          success:
+            false,
+
+          code:
+            "CURRENCY_MISMATCH",
+
+          message:
+            "Requested currency does not match Billing Agent currency",
+
+          expected:
+            billing.currency,
+
+          received:
+            requestedCurrency
+
+        };
+
+      }
+
+    }
+
 
     const validation =
       validateAmount({
 
-        plan:
-          selectedPlan,
+        expectedAmount:
+          billing.amount,
 
-        billingCycle:
-          cycle,
-
-        amount
+        receivedAmount:
+          amount
 
       });
+
 
     if (
       !validation.valid
@@ -910,6 +1654,9 @@ async function createPaymentIntent({
 
         success:
           false,
+
+        code:
+          "AMOUNT_VALIDATION_FAILED",
 
         message:
           validation.reason,
@@ -925,30 +1672,28 @@ async function createPaymentIntent({
     }
 
 
-    /* -----------------------------------------------------
-       METADATA
-    ----------------------------------------------------- */
-
     const metadata =
       buildMetadata({
 
-        userId,
+        userId:
+          normalizedUserId,
 
         plan:
-          selectedPlan,
+          billing.plan,
 
         billingCycle:
-          cycle,
+          billing.billingCycle,
 
         amount:
-          validation.amount
+          billing.amount,
+
+        currency:
+          billing.currency,
+
+        billingId
 
       });
 
-
-    /* -----------------------------------------------------
-       PAYMENT INTENT
-    ----------------------------------------------------- */
 
     const paymentIntent =
       await stripe
@@ -956,9 +1701,8 @@ async function createPaymentIntent({
         .create({
 
           amount:
-            Math.round(
-              validation.amount *
-              100
+            toStripeAmount(
+              billing.amount
             ),
 
           currency:
@@ -976,8 +1720,30 @@ async function createPaymentIntent({
         });
 
 
+    if (
+      !paymentIntent ||
+      !paymentIntent.id
+    ) {
+
+      const error =
+        new Error(
+          "Stripe returned an invalid PaymentIntent"
+        );
+
+
+      error.code =
+        "INVALID_STRIPE_PAYMENT_INTENT_RESPONSE";
+
+
+      throw error;
+
+    }
+
+
     logger.success(
+
       `Stripe PaymentIntent created: ${paymentIntent.id}`
+
     );
 
 
@@ -987,7 +1753,7 @@ async function createPaymentIntent({
         true,
 
       provider:
-        "stripe",
+        PROVIDER,
 
       paymentIntent: {
 
@@ -1008,38 +1774,60 @@ async function createPaymentIntent({
 
       },
 
-      plan:
-        selectedPlan,
+      billing: {
 
-      billingCycle:
-        cycle
+        plan:
+          billing.plan,
+
+        billingCycle:
+          billing.billingCycle,
+
+        amount:
+          billing.amount,
+
+        currency:
+          billing.currency,
+
+        billingId:
+          billingId ||
+          billing.billing?.billingId ||
+          null
+
+      }
 
     };
 
-  } catch (error) {
+  }
+
+  catch (error) {
 
     logger.error(
-      `Stripe PaymentIntent creation failed: ${error?.message}`
+
+      `Stripe PaymentIntent creation failed: ${error?.message || error}`
+
     );
+
 
     return {
 
       success:
         false,
 
+      code:
+        error?.code ||
+        "STRIPE_PAYMENT_INTENT_CREATION_FAILED",
+
       message:
         "Stripe PaymentIntent creation failed",
 
       error:
         error?.message ||
-        "Unknown Stripe error",
-
-      code:
-        error?.code ||
-        null
+        "Unknown Stripe error"
 
     };
+
   }
+
 }
 
 
@@ -1055,12 +1843,25 @@ async function retrieveCheckoutSession(
 
     ensureStripe();
 
-    if (!sessionId) {
+
+    const normalizedId =
+      String(
+        sessionId ||
+        ""
+      ).trim();
+
+
+    if (
+      !normalizedId
+    ) {
 
       return {
 
         success:
           false,
+
+        code:
+          "SESSION_ID_REQUIRED",
 
         message:
           "Stripe session ID required"
@@ -1075,8 +1876,28 @@ async function retrieveCheckoutSession(
         .checkout
         .sessions
         .retrieve(
-          sessionId
+          normalizedId
         );
+
+
+    if (
+      !session
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        code:
+          "SESSION_NOT_FOUND",
+
+        message:
+          "Stripe Checkout Session not found"
+
+      };
+
+    }
 
 
     return {
@@ -1085,36 +1906,43 @@ async function retrieveCheckoutSession(
         true,
 
       provider:
-        "stripe",
+        PROVIDER,
 
       session
 
     };
 
-  } catch (error) {
+  }
+
+  catch (error) {
 
     logger.error(
-      `Stripe session retrieval failed: ${error?.message}`
+
+      `Stripe session retrieval failed: ${error?.message || error}`
+
     );
+
 
     return {
 
       success:
         false,
 
+      code:
+        error?.code ||
+        "STRIPE_SESSION_RETRIEVAL_FAILED",
+
       message:
         "Unable to retrieve Stripe session",
 
       error:
         error?.message ||
-        "Unknown Stripe error",
-
-      code:
-        error?.code ||
-        null
+        "Unknown Stripe error"
 
     };
+
   }
+
 }
 
 
@@ -1130,12 +1958,25 @@ async function retrieveSubscription(
 
     ensureStripe();
 
-    if (!subscriptionId) {
+
+    const normalizedId =
+      String(
+        subscriptionId ||
+        ""
+      ).trim();
+
+
+    if (
+      !normalizedId
+    ) {
 
       return {
 
         success:
           false,
+
+        code:
+          "SUBSCRIPTION_ID_REQUIRED",
 
         message:
           "Stripe subscription ID required"
@@ -1149,8 +1990,28 @@ async function retrieveSubscription(
       await stripe
         .subscriptions
         .retrieve(
-          subscriptionId
+          normalizedId
         );
+
+
+    if (
+      !subscription
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        code:
+          "SUBSCRIPTION_NOT_FOUND",
+
+        message:
+          "Stripe subscription not found"
+
+      };
+
+    }
 
 
     return {
@@ -1159,36 +2020,242 @@ async function retrieveSubscription(
         true,
 
       provider:
-        "stripe",
+        PROVIDER,
 
       subscription
 
     };
 
-  } catch (error) {
+  }
+
+  catch (error) {
 
     logger.error(
-      `Stripe subscription retrieval failed: ${error?.message}`
+
+      `Stripe subscription retrieval failed: ${error?.message || error}`
+
     );
+
 
     return {
 
       success:
         false,
 
+      code:
+        error?.code ||
+        "STRIPE_SUBSCRIPTION_RETRIEVAL_FAILED",
+
       message:
         "Unable to retrieve Stripe subscription",
 
       error:
         error?.message ||
-        "Unknown Stripe error",
+        "Unknown Stripe error"
+
+    };
+
+  }
+
+}
+
+
+/* =========================================================
+   RETRIEVE PAYMENT INTENT
+========================================================= */
+
+async function retrievePaymentIntent(
+  paymentIntentId
+) {
+
+  try {
+
+    ensureStripe();
+
+
+    const normalizedId =
+      String(
+        paymentIntentId ||
+        ""
+      ).trim();
+
+
+    if (
+      !normalizedId
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        code:
+          "PAYMENT_INTENT_ID_REQUIRED",
+
+        message:
+          "Stripe PaymentIntent ID required"
+
+      };
+
+    }
+
+
+    const paymentIntent =
+      await stripe
+        .paymentIntents
+        .retrieve(
+          normalizedId
+        );
+
+
+    if (
+      !paymentIntent
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        code:
+          "PAYMENT_INTENT_NOT_FOUND",
+
+        message:
+          "Stripe PaymentIntent not found"
+
+      };
+
+    }
+
+
+    return {
+
+      success:
+        true,
+
+      provider:
+        PROVIDER,
+
+      paymentIntent
+
+    };
+
+  }
+
+  catch (error) {
+
+    logger.error(
+
+      `Stripe PaymentIntent retrieval failed: ${error?.message || error}`
+
+    );
+
+
+    return {
+
+      success:
+        false,
 
       code:
         error?.code ||
-        null
+        "STRIPE_PAYMENT_INTENT_RETRIEVAL_FAILED",
+
+      message:
+        "Unable to retrieve Stripe PaymentIntent",
+
+      error:
+        error?.message ||
+        "Unknown Stripe error"
 
     };
+
   }
+
+}
+
+
+/* =========================================================
+   GET CONFIGURATION STATUS
+========================================================= */
+
+function getConfigurationStatus() {
+
+  return {
+
+    configured:
+      Boolean(
+        stripe
+      ),
+
+    provider:
+      PROVIDER,
+
+    secretConfigured:
+      Boolean(
+        stripeSecretKey
+      ),
+
+    catalogCurrency:
+      DEFAULT_CURRENCY,
+
+    stripeCurrency:
+      STRIPE_API_CURRENCY,
+
+    frontendUrl:
+      getFrontendUrl()
+
+  };
+
+}
+
+
+/* =========================================================
+   HEALTH CHECK
+========================================================= */
+
+async function healthCheck() {
+
+  const configuration =
+    getConfigurationStatus();
+
+
+  if (
+    !configuration.configured
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      healthy:
+        false,
+
+      code:
+        "STRIPE_NOT_CONFIGURED",
+
+      configuration
+
+    };
+
+  }
+
+
+  return {
+
+    success:
+      true,
+
+    healthy:
+      true,
+
+    provider:
+      PROVIDER,
+
+    configuration
+
+  };
+
 }
 
 
@@ -1206,10 +2273,67 @@ module.exports = {
 
   retrieveSubscription,
 
-  getPlanPrice,
+  retrievePaymentIntent,
+
+  getPlanPrice: async function getPlanPrice(
+    plan,
+    billingCycle,
+    userId
+  ) {
+
+    /*
+     * Kept for compatibility.
+     *
+     * New code should use resolveBillingPlan().
+     */
+
+    if (
+      userId
+    ) {
+
+      const billing =
+        await resolveBillingPlan({
+
+          userId,
+
+          plan,
+
+          billingCycle
+
+        });
+
+
+      return billing.amount;
+
+    }
+
+
+    /*
+     * Without userId, Billing Agent cannot be consulted
+     * safely. Return null instead of maintaining another
+     * price catalog here.
+     */
+
+    return null;
+
+  },
 
   normalizePlan,
 
-  normalizeBillingCycle
+  normalizeBillingCycle,
+
+  normalizeCurrency,
+
+  resolveBillingPlan,
+
+  validateCurrency,
+
+  validateAmount,
+
+  toStripeAmount,
+
+  getConfigurationStatus,
+
+  healthCheck
 
 };
