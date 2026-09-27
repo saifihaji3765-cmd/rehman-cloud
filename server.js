@@ -3,7 +3,7 @@
  * ZYRIONOS SERVER
  * =========================================================
  *
- * Version: 5.1.0
+ * Version: 5.2.0
  *
  * Responsibilities:
  *
@@ -18,6 +18,7 @@
  * - API route mounting
  * - Environment management
  * - Deployment Log System
+ * - GitHub System
  * - Auto Fix trigger API
  * - Health/readiness endpoints
  * - Global error handling
@@ -156,7 +157,7 @@ const financialRoutes =
 /**
  * Environment System
  *
- * Environment flow:
+ * Flow:
  *
  * Routes
  *   ↓
@@ -197,14 +198,57 @@ const environmentRoutes =
  * Fix Agent Handoff
  *
  *
- * Streaming is intentionally NOT mounted here.
- *
- * Current architecture uses request/response based
- * deployment log operations.
+ * Streaming is intentionally NOT mounted separately.
  */
 
 const deploymentLogRoutes =
   require("./server/routes/deploymentLogRoutes");
+
+
+/* =========================================================
+   GITHUB ROUTES
+========================================================= */
+
+/**
+ * GitHub System
+ *
+ * Flow:
+ *
+ * GitHub Routes
+ *      ↓
+ * Auth Middleware
+ *      ↓
+ * GitHub Controller
+ *      ↓
+ * GitHub Agent
+ *      ↓
+ * GitHub Service
+ *      ↓
+ * GitHub API
+ *
+ *
+ * Current responsibilities:
+ *
+ * - GitHub connection management
+ * - Repository listing
+ * - Repository details
+ * - Branch listing
+ * - Repository contents
+ * - File retrieval
+ * - Default branch detection
+ *
+ *
+ * GitHub OAuth LOGIN remains under:
+ *
+ * /api/auth/github
+ *
+ * GitHub WORKSPACE integration uses:
+ *
+ * /api/github
+ */
+
+const githubRoutes =
+  require("./server/routes/githubRoutes");
 
 
 /* =========================================================
@@ -305,14 +349,7 @@ app.use(
       ) {
 
         /*
-         * Requests without an Origin header are allowed.
-         *
-         * Typical examples:
-         *
-         * - server-to-server requests
-         * - CLI requests
-         * - health checks
-         * - provider callbacks
+         * Allow requests without Origin.
          */
 
         if (!origin) {
@@ -429,27 +466,6 @@ app.use(
    REQUEST ID
 ========================================================= */
 
-/**
- * The frontend can send:
- *
- *    X-Request-ID
- *
- * Otherwise:
- *
- *    X-Correlation-ID
- *
- * Otherwise a new request ID is generated.
- *
- *
- * This becomes important for:
- *
- *    GitHub
- *    Deployment Logs
- *    Auto-Fix
- *    AI Agents
- *    AWS deployments
- */
-
 app.use(
   (
     req,
@@ -531,9 +547,6 @@ app.use(
  * webhook controller
  *      ↓
  * normal body parsers
- *
- *
- * DO NOT MOVE express.json() ABOVE THIS.
  */
 
 app.use(
@@ -695,27 +708,6 @@ app.use(
    ENVIRONMENT SYSTEM
 ========================================================= */
 
-/**
- * Environment Management API
- *
- * Examples:
- *
- * GET
- * /api/environments?projectId=PROJECT_ID
- *
- * GET
- * /api/environments/PROJECT_ID/production
- *
- * POST
- * /api/environments/PROJECT_ID/production/variables
- *
- * PATCH
- * /api/environments/PROJECT_ID/production/variables/API_KEY
- *
- * DELETE
- * /api/environments/PROJECT_ID/production/variables/API_KEY
- */
-
 app.use(
   "/api/environments",
   environmentRoutes
@@ -726,71 +718,61 @@ app.use(
    DEPLOYMENT LOG SYSTEM
 ========================================================= */
 
+app.use(
+  "/api/deployment-logs",
+  deploymentLogRoutes
+);
+
+
+/* =========================================================
+   GITHUB SYSTEM
+========================================================= */
+
 /**
- * Deployment Log Management API
+ * GitHub Workspace API
  *
  * Examples:
  *
  * GET
- * /api/deployment-logs/health
- *
- * POST
- * /api/deployment-logs
+ * /api/github/health
  *
  * GET
- * /api/deployment-logs/search
+ * /api/github/connections
+ *
+ * POST
+ * /api/github/connections
  *
  * GET
- * /api/deployment-logs/project/PROJECT_ID
+ * /api/github/repositories
  *
  * GET
- * /api/deployment-logs/project/PROJECT_ID/active
+ * /api/github/repositories/:owner/:repository
  *
  * GET
- * /api/deployment-logs/DEPLOYMENT_ID
+ * /api/github/repositories/:owner/:repository/branches
  *
  * GET
- * /api/deployment-logs/DEPLOYMENT_ID/latest
+ * /api/github/repositories/:owner/:repository/contents
  *
- * POST
- * /api/deployment-logs/DEPLOYMENT_ID/start
+ * GET
+ * /api/github/repositories/:owner/:repository/file
  *
- * POST
- * /api/deployment-logs/DEPLOYMENT_ID/complete
- *
- * POST
- * /api/deployment-logs/DEPLOYMENT_ID/events
- *
- * PATCH
- * /api/deployment-logs/DEPLOYMENT_ID/progress
- *
- * POST
- * /api/deployment-logs/DEPLOYMENT_ID/errors
- *
- * POST
- * /api/deployment-logs/DEPLOYMENT_ID/warnings
- *
- * POST
- * /api/deployment-logs/DEPLOYMENT_ID/auto-fix/eligible
- *
- * POST
- * /api/deployment-logs/DEPLOYMENT_ID/auto-fix/triggered
- *
- * POST
- * /api/deployment-logs/DEPLOYMENT_ID/archive
+ * GET
+ * /api/github/repositories/:owner/:repository/default-branch
  *
  *
- * IMPORTANT:
+ * NOTE:
  *
- * Streaming is intentionally not mounted.
+ * /api/auth/github
+ * remains the GitHub authentication/login flow.
  *
- * Auto Fix is triggered through the backend Log Agent
- * boundary, not directly from the frontend.
+ * /api/github
+ * is the connected GitHub workspace API.
  */
 
 app.use(
-  "/api/deployment-logs",
-  deploymentLogRoutes
+  "/api/github",
+  githubRoutes
 );
 
 
@@ -821,7 +803,7 @@ app.get(
             : "online",
 
         version:
-          "5.1.0",
+          "5.2.0",
 
         requestId:
           req.requestId,
@@ -839,14 +821,6 @@ app.get(
 /* =========================================================
    LIVENESS
 ========================================================= */
-
-/**
- * Liveness answers:
- *
- *    "Is the Node process alive?"
- *
- * It intentionally does not require MongoDB or Redis.
- */
 
 app.get(
   "/api/health",
@@ -875,7 +849,7 @@ app.get(
           "development",
 
         version:
-          "5.1.0",
+          "5.2.0",
 
         uptime:
           process.uptime(),
@@ -902,22 +876,6 @@ app.get(
 /* =========================================================
    READINESS
 ========================================================= */
-
-/**
- * Readiness answers:
- *
- *    "Can this instance actually serve the application?"
- *
- *
- * MongoDB:
- *
- *    mandatory
- *
- *
- * Redis:
- *
- *    degraded but non-fatal under current architecture
- */
 
 app.get(
   "/api/health/ready",
@@ -1006,36 +964,6 @@ app.get(
 
 
 /* =========================================================
-   DEPLOYMENT LOG HEALTH
-========================================================= */
-
-/**
- * Deployment Log System has its own health endpoint:
- *
- *    /api/deployment-logs/health
- *
- * It remains separate from global application health.
- *
- * This allows deployment-log failures to be diagnosed
- * without pretending that the entire API is down.
- */
-
-
-/* =========================================================
-   ENVIRONMENT SYSTEM HEALTH
-========================================================= */
-
-/**
- * Environment service exposes its own health endpoint:
- *
- *    /api/environments/health
- *
- * Authentication and environment-service health remain
- * separated from infrastructure liveness.
- */
-
-
-/* =========================================================
    404 HANDLER
 ========================================================= */
 
@@ -1082,13 +1010,6 @@ app.use(
     next
   ) => {
 
-    /*
-     * Express identifies error middleware through the
-     * four-argument signature.
-     *
-     * next is intentionally unused.
-     */
-
     const statusCode =
       Number.isInteger(
         err?.status
@@ -1116,10 +1037,6 @@ app.use(
       ) ===
       "production";
 
-
-    /* =====================================================
-       LOG ERROR
-    ===================================================== */
 
     try {
 
@@ -1159,10 +1076,6 @@ app.use(
     }
 
 
-    /* =====================================================
-       CORS ERROR
-    ===================================================== */
-
     if (
       err?.message ===
       "CORS origin not allowed"
@@ -1184,10 +1097,6 @@ app.use(
 
     }
 
-
-    /* =====================================================
-       JSON PARSER ERROR
-    ===================================================== */
 
     if (
       err instanceof SyntaxError &&
@@ -1216,10 +1125,6 @@ app.use(
     }
 
 
-    /* =====================================================
-       PAYLOAD TOO LARGE
-    ===================================================== */
-
     if (
       err?.type ===
         "entity.too.large" ||
@@ -1242,10 +1147,6 @@ app.use(
 
     }
 
-
-    /* =====================================================
-       CLIENT ABORT / REQUEST CLOSED
-    ===================================================== */
 
     if (
       err?.code ===
@@ -1271,10 +1172,6 @@ app.use(
     }
 
 
-    /* =====================================================
-       DEFAULT ERROR
-    ===================================================== */
-
     const safeStatus =
       statusCode >= 400 &&
       statusCode < 600
@@ -1299,11 +1196,6 @@ app.use(
 
     };
 
-
-    /*
-     * Never expose stack traces or internal details in
-     * production.
-     */
 
     if (
       !isProduction
@@ -1341,10 +1233,6 @@ async function startServer() {
 
 
   try {
-
-    /* =====================================================
-       VALIDATION
-    ===================================================== */
 
     logger.info(
       "Starting ZyrionOS..."
@@ -1399,18 +1287,6 @@ async function startServer() {
       logger.error(
         `Redis Failed: ${redisError.message}`
       );
-
-
-      /*
-       * Redis is currently non-fatal.
-       *
-       * /api/health/ready will report:
-       *
-       * status = degraded
-       *
-       * instead of marking the application completely
-       * unavailable.
-       */
 
     }
 
@@ -1737,13 +1613,6 @@ async function startServer() {
         }
 
 
-        /*
-         * An uncaught exception can leave the Node process
-         * in an unsafe state.
-         *
-         * Try graceful shutdown, then exit.
-         */
-
         try {
 
           await shutdown(
@@ -1799,10 +1668,6 @@ async function startServer() {
     }
 
 
-    /* =====================================================
-       STARTUP CLEANUP
-    ===================================================== */
-
     try {
 
       if (
@@ -1849,12 +1714,6 @@ startServer();
 /* =========================================================
    EXPORT
 ========================================================= */
-
-/**
- * Exporting app allows integration/smoke tests to import
- * the application without needing to construct another
- * Express instance.
- */
 
 module.exports =
   app;
