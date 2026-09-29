@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const passport = require("passport");
+const axios = require("axios");
 
 const GoogleStrategy =
   require("passport-google-oauth20").Strategy;
@@ -10,6 +11,190 @@ const GitHubStrategy =
 
 const User =
   require("../models/userModel");
+
+/* =========================================================
+   GITHUB EMAIL RESOLVER
+========================================================= */
+
+async function resolveGithubEmail(
+  accessToken,
+  profile
+) {
+  /* =======================================================
+     1. PROFILE EMAILS
+  ======================================================= */
+
+  const profileEmails =
+    Array.isArray(profile?.emails)
+      ? profile.emails
+      : [];
+
+  const profileVerifiedEmail =
+    profileEmails.find(
+      (item) =>
+        item?.value &&
+        item?.verified === true
+    )?.value;
+
+  if (profileVerifiedEmail) {
+    return profileVerifiedEmail
+      .trim()
+      .toLowerCase();
+  }
+
+  const profileAnyEmail =
+    profileEmails.find(
+      (item) =>
+        typeof item?.value === "string" &&
+        item.value.trim()
+    )?.value;
+
+  if (profileAnyEmail) {
+    return profileAnyEmail
+      .trim()
+      .toLowerCase();
+  }
+
+  /* =======================================================
+     2. DIRECT GITHUB EMAIL API
+  ======================================================= */
+
+  if (!accessToken) {
+    throw new Error(
+      "GitHub access token unavailable"
+    );
+  }
+
+  try {
+    const response =
+      await axios.get(
+        "https://api.github.com/user/emails",
+        {
+          headers: {
+            Authorization:
+              `Bearer ${accessToken}`,
+
+            Accept:
+              "application/vnd.github+json",
+
+            "X-GitHub-Api-Version":
+              "2022-11-28"
+          },
+
+          timeout: 10000
+        }
+      );
+
+    const emails =
+      Array.isArray(response.data)
+        ? response.data
+        : [];
+
+    /* =====================================================
+       VERIFIED PRIMARY EMAIL
+    ===================================================== */
+
+    const primaryVerified =
+      emails.find(
+        (item) =>
+          item?.primary === true &&
+          item?.verified === true &&
+          typeof item?.email === "string" &&
+          item.email.trim()
+      );
+
+    if (primaryVerified?.email) {
+      return primaryVerified.email
+        .trim()
+        .toLowerCase();
+    }
+
+    /* =====================================================
+       ANY VERIFIED EMAIL
+    ===================================================== */
+
+    const verifiedEmail =
+      emails.find(
+        (item) =>
+          item?.verified === true &&
+          typeof item?.email === "string" &&
+          item.email.trim()
+      );
+
+    if (verifiedEmail?.email) {
+      return verifiedEmail.email
+        .trim()
+        .toLowerCase();
+    }
+
+    /* =====================================================
+       PRIMARY EMAIL FALLBACK
+    ===================================================== */
+
+    const primaryEmail =
+      emails.find(
+        (item) =>
+          item?.primary === true &&
+          typeof item?.email === "string" &&
+          item.email.trim()
+      );
+
+    if (primaryEmail?.email) {
+      return primaryEmail.email
+        .trim()
+        .toLowerCase();
+    }
+
+    /* =====================================================
+       ANY EMAIL FALLBACK
+    ===================================================== */
+
+    const anyEmail =
+      emails.find(
+        (item) =>
+          typeof item?.email === "string" &&
+          item.email.trim()
+      );
+
+    if (anyEmail?.email) {
+      return anyEmail.email
+        .trim()
+        .toLowerCase();
+    }
+
+    throw new Error(
+      "GitHub account email unavailable"
+    );
+
+  } catch (error) {
+
+    if (
+      error?.response?.status === 401
+    ) {
+      throw new Error(
+        "GitHub access token is invalid or expired"
+      );
+    }
+
+    if (
+      error?.response?.status === 403
+    ) {
+      throw new Error(
+        "GitHub email permission was denied"
+      );
+    }
+
+    if (
+      error?.response?.status
+    ) {
+      throw new Error(
+        `GitHub email API failed with status ${error.response.status}`
+      );
+    }
+
+    throw error;
+  }
+}
 
 /* =========================================================
    GOOGLE STRATEGY
@@ -123,18 +308,9 @@ passport.use(
               avatar;
           }
 
-          /*
-           * Google has verified
-           * the account email.
-           */
           user.isVerified =
             true;
 
-          /*
-           * Keep provider consistent
-           * when Google is the linked
-           * authentication provider.
-           */
           if (
             user.provider !== "google"
           ) {
@@ -207,9 +383,10 @@ passport.use(
         ========================= */
 
         const email =
-          profile.emails?.[0]?.value
-            ?.trim()
-            .toLowerCase();
+          await resolveGithubEmail(
+            accessToken,
+            profile
+          );
 
         if (!email) {
           return done(
@@ -289,17 +466,9 @@ passport.use(
               avatar;
           }
 
-          /*
-           * GitHub authentication
-           * supplied the verified
-           * account identity.
-           */
           user.isVerified =
             true;
 
-          /*
-           * Keep provider consistent.
-           */
           if (
             user.provider !== "github"
           ) {
@@ -330,6 +499,7 @@ passport.use(
 
         console.error(
           "GitHub Passport Error:",
+          error?.message ||
           error
         );
 
