@@ -50,22 +50,6 @@ const AUTH_COOKIE_NAME =
 
 /* =========================================================
    OPTIONAL AUTH MIDDLEWARE
-=========================================================
-
-   Important:
-
-   GitHub OAuth is used in TWO situations:
-
-   1. Login
-      User is not authenticated yet.
-
-   2. Connect GitHub
-      User is already logged into ZyrionOS.
-
-   Normal authMiddleware would reject case #1.
-
-   This middleware therefore tries authentication but does
-   NOT reject unauthenticated users.
 ========================================================= */
 
 async function optionalAuthMiddleware(
@@ -82,18 +66,14 @@ async function optionalAuthMiddleware(
 
     if (
       req.cookies &&
-      req.cookies[
-        AUTH_COOKIE_NAME
-      ]
+      req.cookies[AUTH_COOKIE_NAME]
     ) {
       token =
-        req.cookies[
-          AUTH_COOKIE_NAME
-        ];
+        req.cookies[AUTH_COOKIE_NAME];
     }
 
     /* -------------------------------------------------------
-       Bearer fallback
+       Bearer token fallback
     ------------------------------------------------------- */
 
     if (
@@ -110,8 +90,6 @@ async function optionalAuthMiddleware(
 
     /* -------------------------------------------------------
        No authentication
-       
-       This is valid for normal GitHub login.
     ------------------------------------------------------- */
 
     if (!token) {
@@ -120,7 +98,7 @@ async function optionalAuthMiddleware(
 
     if (!JWT_SECRET) {
       console.error(
-        "JWT_SECRET is missing"
+        "[Auth] JWT_SECRET is missing"
       );
 
       return next();
@@ -148,43 +126,24 @@ async function optionalAuthMiddleware(
       return next();
     }
 
-    /* -------------------------------------------------------
-       Attach lightweight authenticated user
-    ------------------------------------------------------- */
-
     req.user = {
-      id:
-        user._id,
-
-      name:
-        user.name,
-
-      email:
-        user.email,
-
-      role:
-        user.role,
-
-      provider:
-        user.provider,
-
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      provider: user.provider,
       subscriptionPlan:
         user.subscriptionPlan,
-
-      credits:
-        user.credits,
-
+      credits: user.credits,
       deploymentsUsed:
         user.deploymentsUsed,
-
-      avatar:
-        user.avatar,
+      avatar: user.avatar,
     };
 
     return next();
   } catch (error) {
     /*
-     * Optional authentication must never block normal
+     * Optional authentication must never block
      * unauthenticated OAuth login.
      */
 
@@ -196,9 +155,7 @@ async function optionalAuthMiddleware(
    GITHUB OAUTH STATE
 ========================================================= */
 
-function createGithubOAuthState(
-  req
-) {
+function createGithubOAuthState(req) {
   if (!JWT_SECRET) {
     throw new Error(
       "JWT_SECRET is missing"
@@ -212,23 +169,19 @@ function createGithubOAuthState(
 
   return jwt.sign(
     {
-      purpose:
-        "github_oauth",
+      purpose: "github_oauth",
 
-      mode:
-        userId
-          ? "connect"
-          : "login",
+      mode: userId
+        ? "connect"
+        : "login",
 
-      userId:
-        userId
-          ? String(userId)
-          : null,
+      userId: userId
+        ? String(userId)
+        : null,
     },
     JWT_SECRET,
     {
-      expiresIn:
-        "10m",
+      expiresIn: "10m",
     }
   );
 }
@@ -273,13 +226,6 @@ function verifyGithubOAuthState(
       );
     }
 
-    /* -------------------------------------------------------
-       CONNECT MODE
-       
-       If OAuth started while logged in, the same user must
-       still be authenticated at callback time.
-    ------------------------------------------------------- */
-
     if (
       decoded.mode ===
       "connect"
@@ -313,7 +259,7 @@ function verifyGithubOAuthState(
     return next();
   } catch (error) {
     console.error(
-      "GitHub OAuth state verification failed:",
+      "[GitHub OAuth] State verification failed:",
       error?.message ||
         error
     );
@@ -322,6 +268,77 @@ function verifyGithubOAuthState(
       `${FRONTEND_URL}/login?error=github_state_invalid`
     );
   }
+}
+
+/* =========================================================
+   GOOGLE PASSPORT HANDLER
+=========================================================
+
+   IMPORTANT:
+
+   We intentionally do NOT use failureRedirect here.
+
+   Passport errors were previously being hidden behind a
+   generic redirect to /login.
+
+   This handler logs the REAL failure so ECS logs tell us
+   exactly what is wrong.
+========================================================= */
+
+function handleGoogleAuthentication(
+  req,
+  res,
+  next
+) {
+  passport.authenticate(
+    "google",
+    {
+      session: false,
+    },
+    (error, user, info) => {
+      /* -----------------------------------------------------
+         PASSPORT / STRATEGY ERROR
+      ----------------------------------------------------- */
+
+      if (error) {
+        console.error(
+          "[Google OAuth] Passport error:",
+          error?.stack ||
+            error?.message ||
+            error
+        );
+
+        return res.redirect(
+          `${FRONTEND_URL}/login?error=google_auth_failed`
+        );
+      }
+
+      /* -----------------------------------------------------
+         GOOGLE AUTHENTICATION FAILED
+      ----------------------------------------------------- */
+
+      if (!user) {
+        console.error(
+          "[Google OAuth] Authentication failed:",
+          info?.message ||
+            info ||
+            "Unknown Google authentication failure"
+        );
+
+        return res.redirect(
+          `${FRONTEND_URL}/login?error=google_auth_failed`
+        );
+      }
+
+      /* -----------------------------------------------------
+         AUTHENTICATION SUCCESS
+      ----------------------------------------------------- */
+
+      req.user = user;
+
+      return next();
+    }
+  )(req, res, next);
 }
 
 /* =========================================================
@@ -367,6 +384,7 @@ router.post(
 
 router.get(
   "/google",
+
   passport.authenticate(
     "google",
     {
@@ -387,30 +405,13 @@ router.get(
 router.get(
   "/google/callback",
 
-  passport.authenticate(
-    "google",
-    {
-      session: false,
-
-      failureRedirect:
-        `${FRONTEND_URL}/login?error=google_auth_failed`,
-    }
-  ),
+  handleGoogleAuthentication,
 
   googleCallback
 );
 
 /* =========================================================
    GITHUB AUTH START
-=========================================================
-
-   This route supports both:
-
-   - GitHub login
-   - GitHub connection from Settings
-
-   optionalAuthMiddleware detects whether the user is
-   already logged into ZyrionOS.
 ========================================================= */
 
 router.get(
@@ -439,8 +440,10 @@ router.get(
       )(req, res, next);
     } catch (error) {
       console.error(
-        "GitHub OAuth start error:",
-        error
+        "[GitHub OAuth] Start error:",
+        error?.stack ||
+          error?.message ||
+          error
       );
 
       return res.redirect(
@@ -457,21 +460,10 @@ router.get(
 router.get(
   "/github/callback",
 
-  /*
-   * Restore existing ZyrionOS authentication if the
-   * GitHub OAuth was initiated from Settings.
-   */
   optionalAuthMiddleware,
 
-  /*
-   * Verify signed OAuth state BEFORE accepting GitHub
-   * identity.
-   */
   verifyGithubOAuthState,
 
-  /*
-   * Passport performs GitHub OAuth verification.
-   */
   passport.authenticate(
     "github",
     {
@@ -482,13 +474,6 @@ router.get(
     }
   ),
 
-  /*
-   * Controller handles:
-   *
-   * login mode
-   * OR
-   * existing-user connection mode
-   */
   githubCallback
 );
 
