@@ -1,94 +1,176 @@
 const jwt = require("jsonwebtoken");
-
 const User = require("../models/userModel");
 
-/* =========================
-AUTH MIDDLEWARE
-========================= */
+/* =========================================================
+   CONFIG
+========================================================= */
 
-async function authMiddleware(req, res, next) {
+const AUTH_COOKIE_NAME =
+  process.env.AUTH_COOKIE_NAME ||
+  "access_token";
+
+/* =========================================================
+   GET AUTH TOKEN
+========================================================= */
+
+function getAuthToken(req) {
+  /* -------------------------------------------------------
+     PRIMARY:
+     HttpOnly authentication cookie
+  ------------------------------------------------------- */
+
+  if (
+    req.cookies &&
+    req.cookies[AUTH_COOKIE_NAME]
+  ) {
+    return req.cookies[AUTH_COOKIE_NAME];
+  }
+
+  /* -------------------------------------------------------
+     FALLBACK:
+     Bearer token
+  ------------------------------------------------------- */
+
+  const authorization =
+    req.headers.authorization;
+
+  if (
+    authorization &&
+    authorization.startsWith("Bearer ")
+  ) {
+    return authorization
+      .slice(7)
+      .trim();
+  }
+
+  return null;
+}
+
+/* =========================================================
+   AUTH MIDDLEWARE
+========================================================= */
+
+async function authMiddleware(
+  req,
+  res,
+  next
+) {
   try {
-    /* =========================
+    /* -------------------------------------------------------
+       JWT SECRET
+    ------------------------------------------------------- */
+
+    const JWT_SECRET =
+      process.env.JWT_SECRET;
+
+    if (!JWT_SECRET) {
+      console.error(
+        "[Auth] JWT_SECRET is missing"
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          "Authentication configuration error",
+      });
+    }
+
+    /* -------------------------------------------------------
        GET TOKEN
-    ========================= */
+    ------------------------------------------------------- */
 
-    let token = null;
-
-    /*
-     * PRIMARY:
-     * HttpOnly cookie authentication
-     */
-    if (req.cookies && req.cookies.access_token) {
-      token = req.cookies.access_token;
-    }
-
-    /*
-     * FALLBACK:
-     * Bearer token authentication
-     */
-    if (
-      !token &&
-      req.headers.authorization &&
-      req.headers.authorization.startsWith("Bearer ")
-    ) {
-      token = req.headers.authorization.split(" ")[1];
-    }
-
-    /* =========================
-       TOKEN CHECK
-    ========================= */
+    const token =
+      getAuthToken(req);
 
     if (!token) {
       return res.status(401).json({
         success: false,
-        message: "Access token required"
+        message:
+          "Access token required",
       });
     }
 
-    /* =========================
-       JWT SECRET CHECK
-    ========================= */
+    /* -------------------------------------------------------
+       VERIFY JWT
+    ------------------------------------------------------- */
 
-    if (!process.env.JWT_SECRET) {
-      console.error("JWT_SECRET is missing");
+    let decoded;
 
-      return res.status(500).json({
+    try {
+      decoded =
+        jwt.verify(
+          token,
+          JWT_SECRET
+        );
+    } catch (error) {
+      if (
+        error?.name ===
+        "TokenExpiredError"
+      ) {
+        return res.status(401).json({
+          success: false,
+          message:
+            "Token expired",
+        });
+      }
+
+      if (
+        error?.name ===
+        "JsonWebTokenError"
+      ) {
+        return res.status(401).json({
+          success: false,
+          message:
+            "Invalid token",
+        });
+      }
+
+      console.error(
+        "[Auth] JWT verification error:",
+        error?.stack ||
+          error?.message ||
+          error
+      );
+
+      return res.status(401).json({
         success: false,
-        message: "Authentication configuration error"
+        message:
+          "Authentication failed",
       });
     }
 
-    /* =========================
-       VERIFY TOKEN
-    ========================= */
+    /* -------------------------------------------------------
+       TOKEN PAYLOAD VALIDATION
+    ------------------------------------------------------- */
 
-    const decoded = jwt.verify(
-      token,
-      process.env.JWT_SECRET
-    );
+    if (!decoded || !decoded.id) {
+      return res.status(401).json({
+        success: false,
+        message:
+          "Invalid authentication token",
+      });
+    }
 
-    /* =========================
+    /* -------------------------------------------------------
        FIND USER
-    ========================= */
+    ------------------------------------------------------- */
 
-    const user = await User.findById(
-      decoded.id
-    ).select("-password");
-
-    /* =========================
-       USER CHECK
-    ========================= */
+    const user =
+      await User.findById(
+        decoded.id
+      ).select("-password");
 
     if (!user) {
       return res.status(401).json({
         success: false,
-        message: "User not found"
+        message:
+          "User not found",
       });
     }
 
-    /* =========================
-       VERIFIED CHECK
-    ========================= */
+    /* -------------------------------------------------------
+       EMAIL VERIFICATION
+    ------------------------------------------------------- */
 
     if (
       user.isVerified === false &&
@@ -96,118 +178,118 @@ async function authMiddleware(req, res, next) {
     ) {
       return res.status(403).json({
         success: false,
-        message: "Account not verified"
+        message:
+          "Account not verified",
       });
     }
 
-    /* =========================
-       ATTACH USER
-    ========================= */
+    /* -------------------------------------------------------
+       ATTACH AUTHENTICATED USER
+    ------------------------------------------------------- */
 
     req.user = {
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      provider: user.provider,
-      subscriptionPlan: user.subscriptionPlan,
-      credits: user.credits,
-      deploymentsUsed: user.deploymentsUsed,
-      avatar: user.avatar
+      id:
+        user._id,
+      name:
+        user.name,
+      email:
+        user.email,
+      role:
+        user.role,
+      provider:
+        user.provider,
+      subscriptionPlan:
+        user.subscriptionPlan,
+      credits:
+        user.credits,
+      deploymentsUsed:
+        user.deploymentsUsed,
+      avatar:
+        user.avatar,
     };
 
-    /* =========================
-       NEXT
-    ========================= */
+    /* -------------------------------------------------------
+       CONTINUE
+    ------------------------------------------------------- */
 
-    next();
+    return next();
 
   } catch (error) {
-
-    /* =========================
-       TOKEN EXPIRED
-    ========================= */
-
-    if (
-      error.name === "TokenExpiredError"
-    ) {
-      return res.status(401).json({
-        success: false,
-        message: "Token expired"
-      });
-    }
-
-    /* =========================
-       INVALID TOKEN
-    ========================= */
-
-    if (
-      error.name === "JsonWebTokenError"
-    ) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid token"
-      });
-    }
-
-    /* =========================
-       SERVER ERROR
-    ========================= */
-
     console.error(
-      "Auth middleware error:",
-      error
+      "[Auth] Middleware error:",
+      error?.stack ||
+        error?.message ||
+        error
     );
 
     return res.status(500).json({
       success: false,
-      message: "Authentication failed"
+      message:
+        "Authentication failed",
     });
   }
 }
 
-/* =========================
-ADMIN MIDDLEWARE
-========================= */
+/* =========================================================
+   ADMIN MIDDLEWARE
+========================================================= */
 
-function adminMiddleware(req, res, next) {
+function adminMiddleware(
+  req,
+  res,
+  next
+) {
   try {
+    /* -------------------------------------------------------
+       AUTHENTICATION CHECK
+    ------------------------------------------------------- */
 
     if (!req.user) {
       return res.status(401).json({
         success: false,
-        message: "Authentication required"
+        message:
+          "Authentication required",
       });
     }
 
-    if (req.user.role !== "admin") {
+    /* -------------------------------------------------------
+       ADMIN ROLE CHECK
+    ------------------------------------------------------- */
+
+    if (
+      req.user.role !==
+      "admin"
+    ) {
       return res.status(403).json({
         success: false,
-        message: "Admin access required"
+        message:
+          "Admin access required",
       });
     }
 
-    next();
+    return next();
 
   } catch (error) {
-
     console.error(
-      "Admin middleware error:",
-      error
+      "[Admin] Middleware error:",
+      error?.stack ||
+        error?.message ||
+        error
     );
 
     return res.status(500).json({
       success: false,
-      message: "Authorization failed"
+      message:
+        "Authorization failed",
     });
   }
 }
 
-/* =========================
-EXPORTS
-========================= */
+/* =========================================================
+   EXPORTS
+========================================================= */
 
 module.exports = {
   authMiddleware,
-  adminMiddleware
+  adminMiddleware,
 };
