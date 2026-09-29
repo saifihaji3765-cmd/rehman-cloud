@@ -19,16 +19,43 @@ const AUTH_COOKIE_NAME =
   process.env.AUTH_COOKIE_NAME ||
   "access_token";
 
+const JWT_EXPIRES_IN =
+  process.env.JWT_EXPIRES_IN ||
+  "7d";
+
+const COOKIE_MAX_AGE =
+  7 * 24 * 60 * 60 * 1000;
+
+/*
+ * Production OAuth runs over HTTPS.
+ *
+ * SameSite=None is required when frontend and backend
+ * are on different sites/origins and the browser must
+ * send the authentication cookie.
+ */
+const IS_PRODUCTION =
+  process.env.NODE_ENV === "production";
+
 const COOKIE_SAME_SITE =
-  process.env.COOKIE_SAME_SITE ||
-  "none";
+  IS_PRODUCTION
+    ? "none"
+    : (
+        process.env.COOKIE_SAME_SITE ||
+        "lax"
+      );
+
+const COOKIE_SECURE =
+  IS_PRODUCTION;
 
 /* =========================================================
-   HELPERS
+   JWT
 ========================================================= */
 
 function generateToken(user) {
-  if (!process.env.JWT_SECRET) {
+  const JWT_SECRET =
+    process.env.JWT_SECRET;
+
+  if (!JWT_SECRET) {
     throw new Error(
       "JWT_SECRET is missing"
     );
@@ -46,13 +73,14 @@ function generateToken(user) {
 
   return jwt.sign(
     {
-      id: userId,
+      id: String(userId),
       email: user.email,
       role: user.role,
     },
-    process.env.JWT_SECRET,
+    JWT_SECRET,
     {
-      expiresIn: "7d",
+      expiresIn:
+        JWT_EXPIRES_IN,
     }
   );
 }
@@ -65,6 +93,12 @@ function setAuthCookie(
   res,
   token
 ) {
+  if (!token) {
+    throw new Error(
+      "Authentication token is missing"
+    );
+  }
+
   res.cookie(
     AUTH_COOKIE_NAME,
     token,
@@ -72,18 +106,34 @@ function setAuthCookie(
       httpOnly: true,
 
       secure:
-        process.env.NODE_ENV ===
-        "production",
+        COOKIE_SECURE,
 
       sameSite:
         COOKIE_SAME_SITE,
 
       maxAge:
-        7 *
-        24 *
-        60 *
-        60 *
-        1000,
+        COOKIE_MAX_AGE,
+
+      path: "/",
+    }
+  );
+}
+
+/* =========================================================
+   CLEAR AUTH COOKIE
+========================================================= */
+
+function clearAuthCookie(res) {
+  res.clearCookie(
+    AUTH_COOKIE_NAME,
+    {
+      httpOnly: true,
+
+      secure:
+        COOKIE_SECURE,
+
+      sameSite:
+        COOKIE_SAME_SITE,
 
       path: "/",
     }
@@ -98,37 +148,43 @@ function formatUser(user) {
   return {
     id:
       user?._id ||
-      user?.id,
+      user?.id ||
+      null,
 
     name:
-      user?.name,
+      user?.name ||
+      null,
 
     email:
-      user?.email,
+      user?.email ||
+      null,
 
     avatar:
       user?.avatar ||
       null,
 
     role:
-      user?.role,
+      user?.role ||
+      "user",
 
     provider:
-      user?.provider,
+      user?.provider ||
+      null,
 
     subscriptionPlan:
-      user?.subscriptionPlan,
+      user?.subscriptionPlan ||
+      null,
 
     credits:
-      user?.credits,
+      user?.credits ?? 0,
 
     deploymentsUsed:
-      user?.deploymentsUsed,
+      user?.deploymentsUsed ?? 0,
   };
 }
 
 /* =========================================================
-   REGISTER USER
+   REGISTER
 ========================================================= */
 
 async function registerUser(
@@ -140,7 +196,7 @@ async function registerUser(
       name,
       email,
       password,
-    } = req.body;
+    } = req.body || {};
 
     if (
       !name ||
@@ -155,7 +211,7 @@ async function registerUser(
     }
 
     const normalizedEmail =
-      email
+      String(email)
         .trim()
         .toLowerCase();
 
@@ -182,7 +238,7 @@ async function registerUser(
     const user =
       await User.create({
         name:
-          name.trim(),
+          String(name).trim(),
 
         email:
           normalizedEmail,
@@ -207,13 +263,20 @@ async function registerUser(
 
     return res.status(201).json({
       success: true,
+
+      /*
+       * Kept for backward compatibility.
+       * Primary browser authentication is HttpOnly cookie.
+       */
       token,
+
       user:
         formatUser(user),
     });
+
   } catch (error) {
     console.error(
-      "Register error:",
+      "[Register] Error:",
       error?.stack ||
         error?.message ||
         error
@@ -228,7 +291,7 @@ async function registerUser(
 }
 
 /* =========================================================
-   LOGIN USER
+   EMAIL LOGIN
 ========================================================= */
 
 async function loginUser(
@@ -239,7 +302,7 @@ async function loginUser(
     const {
       email,
       password,
-    } = req.body;
+    } = req.body || {};
 
     if (
       !email ||
@@ -253,7 +316,7 @@ async function loginUser(
     }
 
     const normalizedEmail =
-      email
+      String(email)
         .trim()
         .toLowerCase();
 
@@ -294,10 +357,8 @@ async function loginUser(
     }
 
     if (
-      user.isVerified ===
-        false &&
-      user.provider ===
-        "email"
+      user.isVerified === false &&
+      user.provider === "email"
     ) {
       return res.status(403).json({
         success: false,
@@ -321,13 +382,20 @@ async function loginUser(
 
     return res.status(200).json({
       success: true,
+
+      /*
+       * Backward compatibility.
+       * Browser authentication uses HttpOnly cookie.
+       */
       token,
+
       user:
         formatUser(user),
     });
+
   } catch (error) {
     console.error(
-      "Login error:",
+      "[Login] Error:",
       error?.stack ||
         error?.message ||
         error
@@ -373,14 +441,14 @@ async function googleCallback(
     await user.save();
 
     /* -------------------------------------------------------
-       APPLICATION JWT
+       GENERATE APPLICATION JWT
     ------------------------------------------------------- */
 
     const token =
       generateToken(user);
 
     /* -------------------------------------------------------
-       AUTH COOKIE
+       SET AUTH COOKIE
     ------------------------------------------------------- */
 
     setAuthCookie(
@@ -388,17 +456,31 @@ async function googleCallback(
       token
     );
 
+    console.log(
+      "[Google Callback] Authentication successful",
+      {
+        userId:
+          String(
+            user._id ||
+              user.id
+          ),
+        cookie:
+          AUTH_COOKIE_NAME,
+        sameSite:
+          COOKIE_SAME_SITE,
+        secure:
+          COOKIE_SECURE,
+      }
+    );
+
     /* -------------------------------------------------------
        REDIRECT
     ------------------------------------------------------- */
 
-    console.log(
-      "[Google Callback] Authentication successful"
-    );
-
     return res.redirect(
       `${FRONTEND_URL}/dashboard`
     );
+
   } catch (error) {
     console.error(
       "[Google Callback] Error:",
@@ -436,25 +518,24 @@ async function githubCallback(
     }
 
     /* =====================================================
-       CHECK WHETHER THIS WAS A GITHUB CONNECTION
+       DETERMINE CONNECTION MODE
     ===================================================== */
 
     const githubOAuth =
       req.githubOAuth;
 
     const connectionMode =
-      githubOAuth?.connectionMode ===
-        true ||
-      req.githubOAuthMode ===
-        "connect";
+      githubOAuth?.connectionMode === true ||
+      req.githubOAuthMode === "connect";
 
     /* =====================================================
-       CONNECT GITHUB TO EXISTING ZYRIONOS USER
+       CONNECT GITHUB TO EXISTING ACCOUNT
     ===================================================== */
 
     if (connectionMode) {
+
       /* ---------------------------------------------------
-         OAUTH HANDOFF MUST EXIST
+         OAUTH HANDOFF
       --------------------------------------------------- */
 
       if (
@@ -470,11 +551,15 @@ async function githubCallback(
         );
       }
 
+      /* ---------------------------------------------------
+         GITHUB IDENTITY
+      --------------------------------------------------- */
+
       if (
         !githubOAuth.githubUser
       ) {
         console.error(
-          "[GitHub Callback] GitHub user identity missing"
+          "[GitHub Callback] GitHub identity missing"
         );
 
         return res.redirect(
@@ -486,7 +571,7 @@ async function githubCallback(
         githubOAuth.githubUser;
 
       /* ---------------------------------------------------
-         FINAL IDENTITY VALIDATION
+         VALIDATE GITHUB ID
       --------------------------------------------------- */
 
       if (
@@ -501,12 +586,16 @@ async function githubCallback(
         );
       }
 
+      /* ---------------------------------------------------
+         VALIDATE IDENTITY
+      --------------------------------------------------- */
+
       if (
         !githubUser.username &&
         !githubUser.name
       ) {
         console.error(
-          "[GitHub Callback] GitHub user identity is incomplete"
+          "[GitHub Callback] GitHub identity incomplete"
         );
 
         return res.redirect(
@@ -515,10 +604,7 @@ async function githubCallback(
       }
 
       /* ---------------------------------------------------
-         PERSIST GITHUB CONNECTION
-         
-         githubService encrypts the access token.
-         Token itself is never sent to frontend.
+         CREATE GITHUB CONNECTION
       --------------------------------------------------- */
 
       const connection =
@@ -575,28 +661,19 @@ async function githubCallback(
           }
         );
 
-      /* ---------------------------------------------------
-         SUCCESS
-      --------------------------------------------------- */
+      user.lastLogin =
+        new Date();
+
+      await user.save();
 
       console.log(
-        "[GitHub Callback] GitHub connection created successfully:",
+        "[GitHub Callback] Connection created:",
         String(
           connection?._id ||
             connection?.id ||
             ""
         )
       );
-
-      /*
-       * We do not need to replace the user's primary
-       * provider. The GitHub account is simply connected.
-       */
-
-      user.lastLogin =
-        new Date();
-
-      await user.save();
 
       return res.redirect(
         `${FRONTEND_URL}/settings?section=integrations&github=connected`
@@ -621,12 +698,26 @@ async function githubCallback(
     );
 
     console.log(
-      "[GitHub Callback] Login successful"
+      "[GitHub Callback] Authentication successful",
+      {
+        userId:
+          String(
+            user._id ||
+              user.id
+          ),
+        cookie:
+          AUTH_COOKIE_NAME,
+        sameSite:
+          COOKIE_SAME_SITE,
+        secure:
+          COOKIE_SECURE,
+      }
     );
 
     return res.redirect(
       `${FRONTEND_URL}/dashboard`
     );
+
   } catch (error) {
     console.error(
       "[GitHub Callback] Error:",
@@ -636,19 +727,9 @@ async function githubCallback(
         error
     );
 
-    /*
-     * Never expose:
-     * - access token
-     * - refresh token
-     * - encryption key
-     * - raw OAuth credentials
-     */
-
     const connectionMode =
-      req.githubOAuthMode ===
-        "connect" ||
-      req.githubOAuth?.connectionMode ===
-        true;
+      req.githubOAuthMode === "connect" ||
+      req.githubOAuth?.connectionMode === true;
 
     if (connectionMode) {
       return res.redirect(
@@ -663,10 +744,7 @@ async function githubCallback(
 }
 
 /* =========================================================
-   ALIASES
-=========================================================
-
-   Keep compatibility with older authRoutes files.
+   BACKWARD COMPATIBILITY
 ========================================================= */
 
 const googleLogin =
@@ -676,7 +754,7 @@ const githubLogin =
   githubCallback;
 
 /* =========================================================
-   GET CURRENT USER
+   CURRENT USER
 ========================================================= */
 
 async function getCurrentUser(
@@ -705,7 +783,8 @@ async function getCurrentUser(
           req.user.email,
 
         avatar:
-          req.user.avatar,
+          req.user.avatar ||
+          null,
 
         role:
           req.user.role,
@@ -723,9 +802,10 @@ async function getCurrentUser(
           req.user.deploymentsUsed,
       },
     });
+
   } catch (error) {
     console.error(
-      "Get current user error:",
+      "[Current User] Error:",
       error?.stack ||
         error?.message ||
         error
@@ -748,30 +828,17 @@ async function logoutUser(
   res
 ) {
   try {
-    res.clearCookie(
-      AUTH_COOKIE_NAME,
-      {
-        httpOnly: true,
-
-        secure:
-          process.env.NODE_ENV ===
-          "production",
-
-        sameSite:
-          COOKIE_SAME_SITE,
-
-        path: "/",
-      }
-    );
+    clearAuthCookie(res);
 
     return res.status(200).json({
       success: true,
       message:
         "Logged out successfully",
     });
+
   } catch (error) {
     console.error(
-      "Logout error:",
+      "[Logout] Error:",
       error?.stack ||
         error?.message ||
         error
@@ -796,9 +863,6 @@ module.exports = {
   googleCallback,
   githubCallback,
 
-  /*
-   * Backward compatibility.
-   */
   googleLogin,
   githubLogin,
 
