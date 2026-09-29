@@ -3,196 +3,160 @@ require("dotenv").config();
 const passport = require("passport");
 const axios = require("axios");
 
-const GoogleStrategy =
-  require("passport-google-oauth20").Strategy;
+const {
+  Strategy: GoogleStrategy,
+} = require("passport-google-oauth20");
 
-const GitHubStrategy =
-  require("passport-github2").Strategy;
+const {
+  Strategy: GitHubStrategy,
+} = require("passport-github2");
 
-const User =
-  require("../models/userModel");
+const User = require("../models/userModel");
+
+/* =========================================================
+   CONFIG
+========================================================= */
+
+const GITHUB_API_BASE_URL =
+  process.env.GITHUB_API_BASE_URL ||
+  "https://api.github.com";
+
+const GITHUB_API_VERSION =
+  process.env.GITHUB_API_VERSION ||
+  "2022-11-28";
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
+function normalizeEmail(value) {
+  if (!value || typeof value !== "string") {
+    return "";
+  }
+
+  return value.trim().toLowerCase();
+}
+
+function getGithubHeaders(accessToken) {
+  return {
+    Authorization: `Bearer ${accessToken}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": GITHUB_API_VERSION,
+    "User-Agent": "ZyrionOS",
+  };
+}
 
 /* =========================================================
    GITHUB EMAIL RESOLVER
 ========================================================= */
 
-async function resolveGithubEmail(
-  accessToken,
-  profile
-) {
-  /* =======================================================
-     1. PROFILE EMAILS
-  ======================================================= */
-
-  const profileEmails =
-    Array.isArray(profile?.emails)
+async function resolveGithubEmail(accessToken, profile) {
+  try {
+    const profileEmails = Array.isArray(profile?.emails)
       ? profile.emails
       : [];
 
-  const profileVerifiedEmail =
-    profileEmails.find(
+    const primaryProfileEmail = profileEmails.find(
       (item) =>
-        item?.value &&
-        item?.verified === true
-    )?.value;
-
-  if (profileVerifiedEmail) {
-    return profileVerifiedEmail
-      .trim()
-      .toLowerCase();
-  }
-
-  const profileAnyEmail =
-    profileEmails.find(
-      (item) =>
-        typeof item?.value === "string" &&
-        item.value.trim()
-    )?.value;
-
-  if (profileAnyEmail) {
-    return profileAnyEmail
-      .trim()
-      .toLowerCase();
-  }
-
-  /* =======================================================
-     2. DIRECT GITHUB EMAIL API
-  ======================================================= */
-
-  if (!accessToken) {
-    throw new Error(
-      "GitHub access token unavailable"
+        item &&
+        item.primary === true &&
+        item.verified === true &&
+        item.value
     );
-  }
 
-  try {
-    const response =
-      await axios.get(
-        "https://api.github.com/user/emails",
-        {
-          headers: {
-            Authorization:
-              `Bearer ${accessToken}`,
+    if (primaryProfileEmail?.value) {
+      return normalizeEmail(primaryProfileEmail.value);
+    }
 
-            Accept:
-              "application/vnd.github+json",
+    const verifiedProfileEmail = profileEmails.find(
+      (item) =>
+        item &&
+        item.verified === true &&
+        item.value
+    );
 
-            "X-GitHub-Api-Version":
-              "2022-11-28"
-          },
+    if (verifiedProfileEmail?.value) {
+      return normalizeEmail(verifiedProfileEmail.value);
+    }
 
-          timeout: 10000
-        }
-      );
+    const anyProfileEmail = profileEmails.find(
+      (item) => item && item.value
+    );
 
-    const emails =
-      Array.isArray(response.data)
-        ? response.data
-        : [];
+    if (anyProfileEmail?.value) {
+      return normalizeEmail(anyProfileEmail.value);
+    }
 
-    /* =====================================================
-       VERIFIED PRIMARY EMAIL
-    ===================================================== */
+    /* -------------------------------------------------------
+       FALLBACK: GitHub API
+    ------------------------------------------------------- */
 
-    const primaryVerified =
-      emails.find(
-        (item) =>
-          item?.primary === true &&
-          item?.verified === true &&
-          typeof item?.email === "string" &&
-          item.email.trim()
-      );
+    const response = await axios.get(
+      `${GITHUB_API_BASE_URL}/user/emails`,
+      {
+        headers: getGithubHeaders(accessToken),
+        timeout: 10000,
+      }
+    );
+
+    const emails = Array.isArray(response.data)
+      ? response.data
+      : [];
+
+    const primaryVerified = emails.find(
+      (item) =>
+        item &&
+        item.primary === true &&
+        item.verified === true &&
+        item.email
+    );
 
     if (primaryVerified?.email) {
-      return primaryVerified.email
-        .trim()
-        .toLowerCase();
+      return normalizeEmail(primaryVerified.email);
     }
 
-    /* =====================================================
-       ANY VERIFIED EMAIL
-    ===================================================== */
-
-    const verifiedEmail =
-      emails.find(
-        (item) =>
-          item?.verified === true &&
-          typeof item?.email === "string" &&
-          item.email.trim()
-      );
-
-    if (verifiedEmail?.email) {
-      return verifiedEmail.email
-        .trim()
-        .toLowerCase();
-    }
-
-    /* =====================================================
-       PRIMARY EMAIL FALLBACK
-    ===================================================== */
-
-    const primaryEmail =
-      emails.find(
-        (item) =>
-          item?.primary === true &&
-          typeof item?.email === "string" &&
-          item.email.trim()
-      );
-
-    if (primaryEmail?.email) {
-      return primaryEmail.email
-        .trim()
-        .toLowerCase();
-    }
-
-    /* =====================================================
-       ANY EMAIL FALLBACK
-    ===================================================== */
-
-    const anyEmail =
-      emails.find(
-        (item) =>
-          typeof item?.email === "string" &&
-          item.email.trim()
-      );
-
-    if (anyEmail?.email) {
-      return anyEmail.email
-        .trim()
-        .toLowerCase();
-    }
-
-    throw new Error(
-      "GitHub account email unavailable"
+    const verified = emails.find(
+      (item) =>
+        item &&
+        item.verified === true &&
+        item.email
     );
 
+    if (verified?.email) {
+      return normalizeEmail(verified.email);
+    }
+
+    const primary = emails.find(
+      (item) =>
+        item &&
+        item.primary === true &&
+        item.email
+    );
+
+    if (primary?.email) {
+      return normalizeEmail(primary.email);
+    }
+
+    const anyEmail = emails.find(
+      (item) =>
+        item &&
+        item.email
+    );
+
+    if (anyEmail?.email) {
+      return normalizeEmail(anyEmail.email);
+    }
+
+    return "";
   } catch (error) {
+    console.error(
+      "GitHub email resolution failed:",
+      error?.response?.data ||
+        error?.message ||
+        error
+    );
 
-    if (
-      error?.response?.status === 401
-    ) {
-      throw new Error(
-        "GitHub access token is invalid or expired"
-      );
-    }
-
-    if (
-      error?.response?.status === 403
-    ) {
-      throw new Error(
-        "GitHub email permission was denied"
-      );
-    }
-
-    if (
-      error?.response?.status
-    ) {
-      throw new Error(
-        `GitHub email API failed with status ${error.response.status}`
-      );
-    }
-
-    throw error;
+    return "";
   }
 }
 
@@ -200,81 +164,64 @@ async function resolveGithubEmail(
    GOOGLE STRATEGY
 ========================================================= */
 
-passport.use(
-  new GoogleStrategy(
-    {
-      clientID:
-        process.env.GOOGLE_CLIENT_ID,
+if (
+  process.env.GOOGLE_CLIENT_ID &&
+  process.env.GOOGLE_CLIENT_SECRET
+) {
+  passport.use(
+    new GoogleStrategy(
+      {
+        clientID:
+          process.env.GOOGLE_CLIENT_ID,
 
-      clientSecret:
-        process.env.GOOGLE_CLIENT_SECRET,
+        clientSecret:
+          process.env.GOOGLE_CLIENT_SECRET,
 
-      callbackURL:
-        process.env.GOOGLE_CALLBACK_URL
-    },
+        callbackURL:
+          process.env.GOOGLE_CALLBACK_URL ||
+          "https://api.zyrionos.com/api/auth/google/callback",
+      },
 
-    async (
-      accessToken,
-      refreshToken,
-      profile,
-      done
-    ) => {
-      try {
+      async (
+        accessToken,
+        refreshToken,
+        profile,
+        done
+      ) => {
+        try {
+          const email =
+            normalizeEmail(
+              profile?.emails?.[0]?.value
+            );
 
-        /* =========================
-           GOOGLE EMAIL
-        ========================= */
+          if (!email) {
+            return done(
+              null,
+              false,
+              {
+                message:
+                  "Google account email unavailable",
+              }
+            );
+          }
 
-        const email =
-          profile.emails?.[0]?.value
-            ?.trim()
-            .toLowerCase();
+          let user =
+            await User.findOne({
+              email,
+            });
 
-        if (!email) {
-          return done(
-            new Error(
-              "Google account email unavailable"
-            ),
-            null
-          );
-        }
+          /* ---------------------------------------------------
+             CREATE USER
+          --------------------------------------------------- */
 
-        /* =========================
-           GOOGLE USER DATA
-        ========================= */
-
-        const name =
-          profile.displayName ||
-          profile.name?.givenName ||
-          "Google User";
-
-        const avatar =
-          profile.photos?.[0]?.value ||
-          "";
-
-        /* =========================
-           FIND EXISTING USER
-        ========================= */
-
-        let user =
-          await User.findOne({
-            email
-          });
-
-        /* =========================
-           CREATE USER
-        ========================= */
-
-        if (!user) {
-
-          user =
-            await User.create({
-
-              name,
+          if (!user) {
+            user = await User.create({
+              name:
+                profile.displayName ||
+                profile.name?.givenName ||
+                "Google User",
 
               email,
-
-              avatar,
 
               googleId:
                 profile.id,
@@ -282,235 +229,412 @@ passport.use(
               provider:
                 "google",
 
+              avatar:
+                profile.photos?.[0]?.value ||
+                null,
+
               isVerified:
-                true
+                true,
 
+              lastLogin:
+                new Date(),
             });
+          }
 
+          /* ---------------------------------------------------
+             UPDATE EXISTING USER
+          --------------------------------------------------- */
+
+          else {
+            let changed = false;
+
+            if (
+              !user.googleId ||
+              String(user.googleId) !==
+                String(profile.id)
+            ) {
+              user.googleId =
+                profile.id;
+
+              changed = true;
+            }
+
+            if (
+              !user.avatar &&
+              profile.photos?.[0]?.value
+            ) {
+              user.avatar =
+                profile.photos[0].value;
+
+              changed = true;
+            }
+
+            if (
+              user.isVerified !== true
+            ) {
+              user.isVerified = true;
+              changed = true;
+            }
+
+            user.lastLogin =
+              new Date();
+
+            changed = true;
+
+            if (changed) {
+              await user.save();
+            }
+          }
+
+          return done(null, user);
+        } catch (error) {
+          console.error(
+            "Google Passport error:",
+            error
+          );
+
+          return done(
+            error,
+            null
+          );
         }
-
-        /* =========================
-           LINK EXISTING USER
-        ========================= */
-
-        else {
-
-          if (!user.googleId) {
-            user.googleId =
-              profile.id;
-          }
-
-          if (
-            !user.avatar &&
-            avatar
-          ) {
-            user.avatar =
-              avatar;
-          }
-
-          user.isVerified =
-            true;
-
-          if (
-            user.provider !== "google"
-          ) {
-            user.provider =
-              "google";
-          }
-        }
-
-        /* =========================
-           UPDATE LAST LOGIN
-        ========================= */
-
-        user.lastLogin =
-          new Date();
-
-        await user.save();
-
-        /* =========================
-           PASSPORT USER
-        ========================= */
-
-        return done(
-          null,
-          user
-        );
-
-      } catch (error) {
-
-        console.error(
-          "Google Passport Error:",
-          error
-        );
-
-        return done(
-          error,
-          null
-        );
       }
-    }
-  )
-);
+    )
+  );
+} else {
+  console.warn(
+    "[Passport] Google OAuth is not configured."
+  );
+}
 
 /* =========================================================
    GITHUB STRATEGY
 ========================================================= */
 
-passport.use(
-  new GitHubStrategy(
-    {
-      clientID:
-        process.env.GITHUB_CLIENT_ID,
+if (
+  process.env.GITHUB_CLIENT_ID &&
+  process.env.GITHUB_CLIENT_SECRET
+) {
+  passport.use(
+    new GitHubStrategy(
+      {
+        clientID:
+          process.env.GITHUB_CLIENT_ID,
 
-      clientSecret:
-        process.env.GITHUB_CLIENT_SECRET,
+        clientSecret:
+          process.env.GITHUB_CLIENT_SECRET,
 
-      callbackURL:
-        process.env.GITHUB_CALLBACK_URL
-    },
+        callbackURL:
+          process.env.GITHUB_CALLBACK_URL ||
+          "https://api.zyrionos.com/api/auth/github/callback",
 
-    async (
-      accessToken,
-      refreshToken,
-      profile,
-      done
-    ) => {
-      try {
+        passReqToCallback:
+          true,
+      },
 
-        /* =========================
-           GITHUB EMAIL
-        ========================= */
+      async (
+        req,
+        accessToken,
+        refreshToken,
+        profile,
+        done
+      ) => {
+        try {
+          const githubId =
+            profile?.id
+              ? String(profile.id)
+              : "";
 
-        const email =
-          await resolveGithubEmail(
-            accessToken,
-            profile
-          );
+          if (!githubId) {
+            return done(
+              null,
+              false,
+              {
+                message:
+                  "GitHub account ID unavailable",
+              }
+            );
+          }
 
-        if (!email) {
-          return done(
-            new Error(
-              "GitHub account email unavailable"
-            ),
-            null
-          );
-        }
+          const email =
+            await resolveGithubEmail(
+              accessToken,
+              profile
+            );
 
-        /* =========================
-           GITHUB USER DATA
-        ========================= */
+          if (!email) {
+            return done(
+              null,
+              false,
+              {
+                message:
+                  "GitHub account email unavailable",
+              }
+            );
+          }
 
-        const name =
-          profile.displayName ||
-          profile.username ||
-          "GitHub User";
+          const githubName =
+            profile.displayName ||
+            profile.username ||
+            profile._json?.name ||
+            "GitHub User";
 
-        const avatar =
-          profile.photos?.[0]?.value ||
-          "";
+          const githubAvatar =
+            profile.photos?.[0]?.value ||
+            profile._json?.avatar_url ||
+            null;
 
-        /* =========================
-           FIND EXISTING USER
-        ========================= */
+          const scopes = [
+            "user:email",
+          ];
 
-        let user =
-          await User.findOne({
-            email
-          });
+          /* ===================================================
+             DETERMINE AUTH MODE
+             
+             req.user exists when the user started OAuth while
+             already logged into ZyrionOS.
+          =================================================== */
 
-        /* =========================
-           CREATE USER
-        ========================= */
+          const existingAuthUser =
+            req?.user &&
+            (
+              req.user.id ||
+              req.user._id
+            )
+              ? req.user
+              : null;
 
-        if (!user) {
+          /* ===================================================
+             CONNECT MODE
+             
+             Existing ZyrionOS user is connecting GitHub.
+          =================================================== */
 
-          user =
-            await User.create({
+          if (existingAuthUser) {
+            const zyrionUserId =
+              String(
+                existingAuthUser.id ||
+                existingAuthUser._id
+              );
 
-              name,
+            /* -------------------------------------------------
+               VERIFY THAT GITHUB ACCOUNT IS NOT ALREADY
+               LINKED TO ANOTHER ZYRIONOS USER
+            ------------------------------------------------- */
+
+            const githubLinkedUser =
+              await User.findOne({
+                githubId,
+              });
+
+            if (
+              githubLinkedUser &&
+              String(
+                githubLinkedUser._id
+              ) !== zyrionUserId
+            ) {
+              return done(
+                null,
+                false,
+                {
+                  message:
+                    "This GitHub account is already connected to another ZyrionOS account",
+                }
+              );
+            }
+
+            const user =
+              await User.findById(
+                zyrionUserId
+              );
+
+            if (!user) {
+              return done(
+                null,
+                false,
+                {
+                  message:
+                    "ZyrionOS user not found",
+                }
+              );
+            }
+
+            /* -------------------------------------------------
+               LINK GITHUB ACCOUNT
+            ------------------------------------------------- */
+
+            user.githubId =
+              githubId;
+
+            if (
+              !user.avatar &&
+              githubAvatar
+            ) {
+              user.avatar =
+                githubAvatar;
+            }
+
+            /*
+             * Do NOT replace the user's existing provider.
+             * A user who registered with email/Google should
+             * continue retaining that primary login method.
+             */
+
+            await user.save();
+
+            /* -------------------------------------------------
+               SERVER-SIDE OAUTH DATA
+               
+               This never goes into URL/frontend response.
+            ------------------------------------------------- */
+
+            req.githubOAuth = {
+              connectionMode:
+                true,
+
+              accessToken,
+
+              refreshToken:
+                refreshToken || null,
+
+              scopes,
+
+              githubUser: {
+                githubId,
+                username:
+                  profile.username ||
+                  null,
+
+                name:
+                  githubName,
+
+                email,
+
+                avatar:
+                  githubAvatar,
+
+                profileUrl:
+                  profile.profileUrl ||
+                  `https://github.com/${profile.username || ""}`,
+              },
+            };
+
+            return done(
+              null,
+              user
+            );
+          }
+
+          /* ===================================================
+             NORMAL GITHUB LOGIN MODE
+          =================================================== */
+
+          let user =
+            await User.findOne({
+              email,
+            });
+
+          /* ---------------------------------------------------
+             CREATE USER
+          --------------------------------------------------- */
+
+          if (!user) {
+            user = await User.create({
+              name:
+                githubName,
 
               email,
 
-              avatar,
-
-              githubId:
-                profile.id,
+              githubId,
 
               provider:
                 "github",
 
+              avatar:
+                githubAvatar,
+
               isVerified:
-                true
+                true,
 
+              lastLogin:
+                new Date(),
             });
+          }
 
-        }
+          /* ---------------------------------------------------
+             EXISTING USER
+          --------------------------------------------------- */
 
-        /* =========================
-           LINK EXISTING USER
-        ========================= */
+          else {
+            if (
+              user.githubId &&
+              String(user.githubId) !==
+                githubId
+            ) {
+              return done(
+                null,
+                false,
+                {
+                  message:
+                    "This email is already linked to another GitHub account",
+                }
+              );
+            }
 
-        else {
-
-          if (!user.githubId) {
             user.githubId =
-              profile.id;
+              githubId;
+
+            if (
+              !user.avatar &&
+              githubAvatar
+            ) {
+              user.avatar =
+                githubAvatar;
+            }
+
+            if (
+              user.isVerified !== true
+            ) {
+              user.isVerified =
+                true;
+            }
+
+            user.lastLogin =
+              new Date();
+
+            /*
+             * Keep the original provider.
+             * This avoids breaking email/password login.
+             */
+
+            await user.save();
           }
 
-          if (
-            !user.avatar &&
-            avatar
-          ) {
-            user.avatar =
-              avatar;
-          }
+          return done(
+            null,
+            user
+          );
+        } catch (error) {
+          console.error(
+            "GitHub Passport error:",
+            error?.response?.data ||
+              error?.message ||
+              error
+          );
 
-          user.isVerified =
-            true;
-
-          if (
-            user.provider !== "github"
-          ) {
-            user.provider =
-              "github";
-          }
+          return done(
+            error,
+            null
+          );
         }
-
-        /* =========================
-           UPDATE LAST LOGIN
-        ========================= */
-
-        user.lastLogin =
-          new Date();
-
-        await user.save();
-
-        /* =========================
-           PASSPORT USER
-        ========================= */
-
-        return done(
-          null,
-          user
-        );
-
-      } catch (error) {
-
-        console.error(
-          "GitHub Passport Error:",
-          error?.message ||
-          error
-        );
-
-        return done(
-          error,
-          null
-        );
       }
-    }
-  )
-);
+    )
+  );
+} else {
+  console.warn(
+    "[Passport] GitHub OAuth is not configured."
+  );
+}
 
 /* =========================================================
    EXPORT
