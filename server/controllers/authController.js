@@ -10,112 +10,55 @@ const githubService = require("../services/githubService");
    CONFIG
 ========================================================= */
 
-const JWT_SECRET =
-  process.env.JWT_SECRET;
+const FRONTEND_URL =
+  process.env.FRONTEND_URL ||
+  process.env.CLIENT_URL ||
+  "https://zyrionos.com";
 
-const JWT_EXPIRES_IN =
-  process.env.JWT_EXPIRES_IN ||
-  "7d";
-
-const COOKIE_NAME =
+const AUTH_COOKIE_NAME =
   process.env.AUTH_COOKIE_NAME ||
   "access_token";
 
-const COOKIE_MAX_AGE =
-  7 * 24 * 60 * 60 * 1000;
-
-const FRONTEND_URL =
-  process.env.FRONTEND_URL ||
-  "https://zyrionos.com";
+const COOKIE_SAME_SITE =
+  process.env.COOKIE_SAME_SITE ||
+  "none";
 
 /* =========================================================
-   SANITIZE USER
-========================================================= */
-
-function sanitizeUser(user) {
-  if (!user) {
-    return null;
-  }
-
-  const source =
-    typeof user.toObject === "function"
-      ? user.toObject()
-      : { ...user };
-
-  delete source.password;
-  delete source.passwordHash;
-  delete source.accessToken;
-  delete source.refreshToken;
-
-  return source;
-}
-
-/* =========================================================
-   GENERATE JWT
+   HELPERS
 ========================================================= */
 
 function generateToken(user) {
+  if (!process.env.JWT_SECRET) {
+    throw new Error(
+      "JWT_SECRET is missing"
+    );
+  }
+
   const userId =
     user?._id ||
     user?.id;
 
-  const email =
-    user?.email || "";
-
-  const role =
-    user?.role || "user";
-
   if (!userId) {
     throw new Error(
-      "Cannot generate token: user ID missing"
-    );
-  }
-
-  if (!JWT_SECRET) {
-    throw new Error(
-      "JWT_SECRET is not configured"
+      "User ID is missing"
     );
   }
 
   return jwt.sign(
     {
-      id: String(userId),
-      email,
-      role,
+      id: userId,
+      email: user.email,
+      role: user.role,
     },
-    JWT_SECRET,
+    process.env.JWT_SECRET,
     {
-      expiresIn:
-        JWT_EXPIRES_IN,
+      expiresIn: "7d",
     }
   );
 }
 
 /* =========================================================
-   COOKIE OPTIONS
-========================================================= */
-
-function getCookieOptions() {
-  return {
-    httpOnly: true,
-
-    secure:
-      process.env.NODE_ENV ===
-      "production",
-
-    sameSite:
-      process.env.COOKIE_SAME_SITE ||
-      "lax",
-
-    maxAge:
-      COOKIE_MAX_AGE,
-
-    path: "/",
-  };
-}
-
-/* =========================================================
-   SET AUTH COOKIE
+   AUTH COOKIE
 ========================================================= */
 
 function setAuthCookie(
@@ -123,19 +66,8 @@ function setAuthCookie(
   token
 ) {
   res.cookie(
-    COOKIE_NAME,
+    AUTH_COOKIE_NAME,
     token,
-    getCookieOptions()
-  );
-}
-
-/* =========================================================
-   CLEAR AUTH COOKIE
-========================================================= */
-
-function clearAuthCookie(res) {
-  res.clearCookie(
-    COOKIE_NAME,
     {
       httpOnly: true,
 
@@ -144,8 +76,14 @@ function clearAuthCookie(res) {
         "production",
 
       sameSite:
-        process.env.COOKIE_SAME_SITE ||
-        "lax",
+        COOKIE_SAME_SITE,
+
+      maxAge:
+        7 *
+        24 *
+        60 *
+        60 *
+        1000,
 
       path: "/",
     }
@@ -153,7 +91,44 @@ function clearAuthCookie(res) {
 }
 
 /* =========================================================
-   REGISTER
+   USER RESPONSE
+========================================================= */
+
+function formatUser(user) {
+  return {
+    id:
+      user?._id ||
+      user?.id,
+
+    name:
+      user?.name,
+
+    email:
+      user?.email,
+
+    avatar:
+      user?.avatar ||
+      null,
+
+    role:
+      user?.role,
+
+    provider:
+      user?.provider,
+
+    subscriptionPlan:
+      user?.subscriptionPlan,
+
+    credits:
+      user?.credits,
+
+    deploymentsUsed:
+      user?.deploymentsUsed,
+  };
+}
+
+/* =========================================================
+   REGISTER USER
 ========================================================= */
 
 async function registerUser(
@@ -165,7 +140,7 @@ async function registerUser(
       name,
       email,
       password,
-    } = req.body || {};
+    } = req.body;
 
     if (
       !name ||
@@ -175,12 +150,12 @@ async function registerUser(
       return res.status(400).json({
         success: false,
         message:
-          "Name, email and password are required",
+          "All fields required",
       });
     }
 
     const normalizedEmail =
-      String(email)
+      email
         .trim()
         .toLowerCase();
 
@@ -191,23 +166,23 @@ async function registerUser(
       });
 
     if (existingUser) {
-      return res.status(409).json({
+      return res.status(400).json({
         success: false,
         message:
-          "An account with this email already exists",
+          "User already exists",
       });
     }
 
     const hashedPassword =
       await bcrypt.hash(
         password,
-        12
+        10
       );
 
     const user =
       await User.create({
         name:
-          String(name).trim(),
+          name.trim(),
 
         email:
           normalizedEmail,
@@ -219,10 +194,7 @@ async function registerUser(
           "email",
 
         isVerified:
-          false,
-
-        lastLogin:
-          new Date(),
+          true,
       });
 
     const token =
@@ -235,29 +207,28 @@ async function registerUser(
 
     return res.status(201).json({
       success: true,
-      message:
-        "Registration successful",
-      data: {
-        user:
-          sanitizeUser(user),
-      },
+      token,
+      user:
+        formatUser(user),
     });
   } catch (error) {
     console.error(
       "Register error:",
-      error
+      error?.stack ||
+        error?.message ||
+        error
     );
 
     return res.status(500).json({
       success: false,
       message:
-        "Registration failed",
+        "Register failed",
     });
   }
 }
 
 /* =========================================================
-   LOGIN
+   LOGIN USER
 ========================================================= */
 
 async function loginUser(
@@ -268,7 +239,7 @@ async function loginUser(
     const {
       email,
       password,
-    } = req.body || {};
+    } = req.body;
 
     if (
       !email ||
@@ -277,12 +248,12 @@ async function loginUser(
       return res.status(400).json({
         success: false,
         message:
-          "Email and password are required",
+          "Email and password required",
       });
     }
 
     const normalizedEmail =
-      String(email)
+      email
         .trim()
         .toLowerCase();
 
@@ -290,44 +261,43 @@ async function loginUser(
       await User.findOne({
         email:
           normalizedEmail,
-      }).select(
-        "+password"
-      );
+      });
 
     if (!user) {
-      return res.status(401).json({
-        success: false,
-        message:
-          "Invalid email or password",
-      });
-    }
-
-    if (
-      !user.password
-    ) {
       return res.status(400).json({
         success: false,
         message:
-          "This account does not use email/password login",
+          "Invalid credentials",
       });
     }
 
-    const passwordValid =
+    if (!user.password) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "This account uses social login",
+      });
+    }
+
+    const validPassword =
       await bcrypt.compare(
         password,
         user.password
       );
 
-    if (!passwordValid) {
-      return res.status(401).json({
+    if (!validPassword) {
+      return res.status(400).json({
         success: false,
         message:
-          "Invalid email or password",
+          "Invalid credentials",
       });
     }
 
     if (
-      user.isVerified === false
+      user.isVerified ===
+        false &&
+      user.provider ===
+        "email"
     ) {
       return res.status(403).json({
         success: false,
@@ -351,17 +321,16 @@ async function loginUser(
 
     return res.status(200).json({
       success: true,
-      message:
-        "Login successful",
-      data: {
-        user:
-          sanitizeUser(user),
-      },
+      token,
+      user:
+        formatUser(user),
     });
   } catch (error) {
     console.error(
       "Login error:",
-      error
+      error?.stack ||
+        error?.message ||
+        error
     );
 
     return res.status(500).json({
@@ -381,20 +350,50 @@ async function googleCallback(
   res
 ) {
   try {
-    if (!req.user) {
+    const user =
+      req.user;
+
+    if (!user) {
+      console.error(
+        "[Google Callback] Passport user missing"
+      );
+
       return res.redirect(
         `${FRONTEND_URL}/login?error=google_user_missing`
       );
     }
 
+    /* -------------------------------------------------------
+       UPDATE LAST LOGIN
+    ------------------------------------------------------- */
+
+    user.lastLogin =
+      new Date();
+
+    await user.save();
+
+    /* -------------------------------------------------------
+       APPLICATION JWT
+    ------------------------------------------------------- */
+
     const token =
-      generateToken(
-        req.user
-      );
+      generateToken(user);
+
+    /* -------------------------------------------------------
+       AUTH COOKIE
+    ------------------------------------------------------- */
 
     setAuthCookie(
       res,
       token
+    );
+
+    /* -------------------------------------------------------
+       REDIRECT
+    ------------------------------------------------------- */
+
+    console.log(
+      "[Google Callback] Authentication successful"
     );
 
     return res.redirect(
@@ -402,8 +401,10 @@ async function googleCallback(
     );
   } catch (error) {
     console.error(
-      "Google callback error:",
-      error
+      "[Google Callback] Error:",
+      error?.stack ||
+        error?.message ||
+        error
     );
 
     return res.redirect(
@@ -421,33 +422,47 @@ async function githubCallback(
   res
 ) {
   try {
-    if (!req.user) {
+    const user =
+      req.user;
+
+    if (!user) {
+      console.error(
+        "[GitHub Callback] Passport user missing"
+      );
+
       return res.redirect(
         `${FRONTEND_URL}/login?error=github_user_missing`
       );
     }
 
-    /* =======================================================
-       GITHUB CONNECTION MODE
-       
-       passport.js places OAuth credentials in req.githubOAuth.
-       They are NEVER returned to the frontend.
-    ======================================================= */
+    /* =====================================================
+       CHECK WHETHER THIS WAS A GITHUB CONNECTION
+    ===================================================== */
 
     const githubOAuth =
       req.githubOAuth;
 
-    if (
-      githubOAuth &&
-      githubOAuth.connectionMode === true
-    ) {
-      const userId =
-        req.user?._id ||
-        req.user?.id;
+    const connectionMode =
+      githubOAuth?.connectionMode ===
+        true ||
+      req.githubOAuthMode ===
+        "connect";
 
-      if (!userId) {
+    /* =====================================================
+       CONNECT GITHUB TO EXISTING ZYRIONOS USER
+    ===================================================== */
+
+    if (connectionMode) {
+      /* ---------------------------------------------------
+         OAUTH HANDOFF MUST EXIST
+      --------------------------------------------------- */
+
+      if (
+        !githubOAuth ||
+        !githubOAuth.accessToken
+      ) {
         console.error(
-          "GitHub connection failed: user ID missing"
+          "[GitHub Callback] OAuth token handoff missing"
         );
 
         return res.redirect(
@@ -456,11 +471,10 @@ async function githubCallback(
       }
 
       if (
-        !githubOAuth.accessToken ||
-        !githubOAuth.githubUser?.githubId
+        !githubOAuth.githubUser
       ) {
         console.error(
-          "GitHub connection failed: OAuth credentials missing"
+          "[GitHub Callback] GitHub user identity missing"
         );
 
         return res.redirect(
@@ -468,63 +482,146 @@ async function githubCallback(
         );
       }
 
-      /* -----------------------------------------------------
-         CREATE / UPDATE ENCRYPTED GITHUB CONNECTION
-      ----------------------------------------------------- */
+      const githubUser =
+        githubOAuth.githubUser;
 
-      await githubService.createConnection({
-        userId,
+      /* ---------------------------------------------------
+         FINAL IDENTITY VALIDATION
+      --------------------------------------------------- */
 
-        projectId:
-          null,
-
-        accessToken:
-          githubOAuth.accessToken,
-
-        connectionType:
-          "oauth",
-
-        githubUser:
-          githubOAuth.githubUser,
-
-        scopes:
-          githubOAuth.scopes || [
-            "user:email",
-          ],
-      });
-
-      /*
-       * Refresh the normal ZyrionOS JWT.
-       * This does not contain the GitHub token.
-       */
-
-      const token =
-        generateToken(
-          req.user
+      if (
+        !githubUser.githubId
+      ) {
+        console.error(
+          "[GitHub Callback] GitHub ID missing"
         );
 
-      setAuthCookie(
-        res,
-        token
+        return res.redirect(
+          `${FRONTEND_URL}/settings?section=integrations&github=error`
+        );
+      }
+
+      if (
+        !githubUser.username &&
+        !githubUser.name
+      ) {
+        console.error(
+          "[GitHub Callback] GitHub user identity is incomplete"
+        );
+
+        return res.redirect(
+          `${FRONTEND_URL}/settings?section=integrations&github=error`
+        );
+      }
+
+      /* ---------------------------------------------------
+         PERSIST GITHUB CONNECTION
+         
+         githubService encrypts the access token.
+         Token itself is never sent to frontend.
+      --------------------------------------------------- */
+
+      const connection =
+        await githubService.createConnection(
+          {
+            userId:
+              user._id ||
+              user.id,
+
+            projectId:
+              null,
+
+            accessToken:
+              githubOAuth.accessToken,
+
+            connectionType:
+              "oauth",
+
+            githubUser: {
+              githubId:
+                String(
+                  githubUser.githubId
+                ),
+
+              username:
+                githubUser.username ||
+                null,
+
+              name:
+                githubUser.name ||
+                "GitHub User",
+
+              email:
+                githubUser.email ||
+                null,
+
+              avatar:
+                githubUser.avatar ||
+                null,
+
+              profileUrl:
+                githubUser.profileUrl ||
+                null,
+            },
+
+            scopes:
+              Array.isArray(
+                githubOAuth.scopes
+              )
+                ? githubOAuth.scopes
+                : [
+                    "user:email",
+                  ],
+          }
+        );
+
+      /* ---------------------------------------------------
+         SUCCESS
+      --------------------------------------------------- */
+
+      console.log(
+        "[GitHub Callback] GitHub connection created successfully:",
+        String(
+          connection?._id ||
+            connection?.id ||
+            ""
+        )
       );
+
+      /*
+       * We do not need to replace the user's primary
+       * provider. The GitHub account is simply connected.
+       */
+
+      user.lastLogin =
+        new Date();
+
+      await user.save();
 
       return res.redirect(
         `${FRONTEND_URL}/settings?section=integrations&github=connected`
       );
     }
 
-    /* =======================================================
+    /* =====================================================
        NORMAL GITHUB LOGIN
-    ======================================================= */
+    ===================================================== */
+
+    user.lastLogin =
+      new Date();
+
+    await user.save();
 
     const token =
-      generateToken(
-        req.user
-      );
+      generateToken(user);
 
     setAuthCookie(
       res,
       token
+    );
+
+    console.log(
+      "[GitHub Callback] Login successful"
     );
 
     return res.redirect(
@@ -532,20 +629,54 @@ async function githubCallback(
     );
   } catch (error) {
     console.error(
-      "GitHub callback error:",
+      "[GitHub Callback] Error:",
       error?.response?.data ||
+        error?.stack ||
         error?.message ||
         error
     );
 
+    /*
+     * Never expose:
+     * - access token
+     * - refresh token
+     * - encryption key
+     * - raw OAuth credentials
+     */
+
+    const connectionMode =
+      req.githubOAuthMode ===
+        "connect" ||
+      req.githubOAuth?.connectionMode ===
+        true;
+
+    if (connectionMode) {
+      return res.redirect(
+        `${FRONTEND_URL}/settings?section=integrations&github=error`
+      );
+    }
+
     return res.redirect(
-      `${FRONTEND_URL}/settings?section=integrations&github=error`
+      `${FRONTEND_URL}/login?error=github_auth_failed`
     );
   }
 }
 
 /* =========================================================
-   CURRENT USER
+   ALIASES
+=========================================================
+
+   Keep compatibility with older authRoutes files.
+========================================================= */
+
+const googleLogin =
+  googleCallback;
+
+const githubLogin =
+  githubCallback;
+
+/* =========================================================
+   GET CURRENT USER
 ========================================================= */
 
 async function getCurrentUser(
@@ -557,31 +688,53 @@ async function getCurrentUser(
       return res.status(401).json({
         success: false,
         message:
-          "Authentication required",
+          "Not authenticated",
       });
     }
 
     return res.status(200).json({
       success: true,
-      message:
-        "Current user retrieved",
-      data: {
-        user:
-          sanitizeUser(
-            req.user
-          ),
+      user: {
+        id:
+          req.user.id,
+
+        name:
+          req.user.name,
+
+        email:
+          req.user.email,
+
+        avatar:
+          req.user.avatar,
+
+        role:
+          req.user.role,
+
+        provider:
+          req.user.provider,
+
+        subscriptionPlan:
+          req.user.subscriptionPlan,
+
+        credits:
+          req.user.credits,
+
+        deploymentsUsed:
+          req.user.deploymentsUsed,
       },
     });
   } catch (error) {
     console.error(
       "Get current user error:",
-      error
+      error?.stack ||
+        error?.message ||
+        error
     );
 
     return res.status(500).json({
       success: false,
       message:
-        "Unable to retrieve current user",
+        "Failed to get current user",
     });
   }
 }
@@ -595,19 +748,33 @@ async function logoutUser(
   res
 ) {
   try {
-    clearAuthCookie(
-      res
+    res.clearCookie(
+      AUTH_COOKIE_NAME,
+      {
+        httpOnly: true,
+
+        secure:
+          process.env.NODE_ENV ===
+          "production",
+
+        sameSite:
+          COOKIE_SAME_SITE,
+
+        path: "/",
+      }
     );
 
     return res.status(200).json({
       success: true,
       message:
-        "Logout successful",
+        "Logged out successfully",
     });
   } catch (error) {
     console.error(
       "Logout error:",
-      error
+      error?.stack ||
+        error?.message ||
+        error
     );
 
     return res.status(500).json({
@@ -619,16 +786,6 @@ async function logoutUser(
 }
 
 /* =========================================================
-   BACKWARD-COMPATIBILITY ALIASES
-========================================================= */
-
-const googleLogin =
-  googleCallback;
-
-const githubLogin =
-  githubCallback;
-
-/* =========================================================
    EXPORTS
 ========================================================= */
 
@@ -637,9 +794,12 @@ module.exports = {
   loginUser,
 
   googleCallback,
-  googleLogin,
-
   githubCallback,
+
+  /*
+   * Backward compatibility.
+   */
+  googleLogin,
   githubLogin,
 
   getCurrentUser,
