@@ -1,11 +1,12 @@
 /* =========================================================
-   ZyrionOS PAYMENT CONTROLLER v2.0.0
+   ZyrionOS PAYMENT CONTROLLER v2.0.1
 
    Responsibilities:
    - Stripe PaymentIntent creation
    - Razorpay Order creation
    - Authenticated user validation
    - Billing Agent authoritative plan validation
+   - Authoritative billing plan catalog
    - Client price protection
    - Provider normalization
    - Billing-cycle normalization
@@ -21,6 +22,7 @@
    - Never activate subscription from payment creation.
    - Never activate subscription from Razorpay signature verification.
    - Provider webhooks are authoritative for final payment state.
+   - Frontend pricing is NEVER the source of truth.
 ========================================================= */
 
 
@@ -247,6 +249,111 @@ function normalizeCurrency(
 
 
   return value;
+
+}
+
+
+/* =========================================================
+   BILLING PLAN CATALOG
+   AUTHORITATIVE SOURCE
+========================================================= */
+
+/*
+ * IMPORTANT:
+ *
+ * The frontend must never contain the authoritative
+ * subscription prices.
+ *
+ * billingAgent.getPlans() is the single source of truth.
+ *
+ * This endpoint exposes that catalog to the authenticated
+ * frontend without allowing the client to modify it.
+ */
+
+async function getPlansController(
+  req,
+  res
+) {
+
+  try {
+
+    const plans =
+      billingAgent.getPlans();
+
+
+    if (
+      !Array.isArray(plans)
+    ) {
+
+      logger.error(
+        "Billing Agent returned an invalid plan catalog"
+      );
+
+
+      return res
+        .status(500)
+        .json(
+          formatResponse({
+
+            success:
+              false,
+
+            message:
+              "Billing plan catalog is unavailable",
+
+            code:
+              "BILLING_CATALOG_INVALID"
+
+          })
+        );
+
+    }
+
+
+    return res
+      .status(200)
+      .json(
+        formatResponse({
+
+          success:
+            true,
+
+          plans
+
+        })
+      );
+
+  }
+
+  catch (error) {
+
+    logger.error(
+      `Billing plan catalog failed: ${error?.message}`
+    );
+
+
+    return res
+      .status(500)
+      .json(
+        formatResponse({
+
+          success:
+            false,
+
+          message:
+            "Unable to load billing plan catalog",
+
+          error:
+            error?.message ||
+            "Unknown billing catalog error",
+
+          code:
+            "BILLING_CATALOG_UNAVAILABLE"
+
+        })
+      );
+
+  }
 
 }
 
@@ -963,7 +1070,7 @@ async function createPaymentController(
 
     /* =========================
        BILLING
-       ========================= */
+    ========================= */
 
     const {
       billing,
@@ -2105,15 +2212,6 @@ async function creditsController(
    WEBHOOK COMPATIBILITY EXPORTS
 ========================================================= */
 
-/*
- * Actual webhook processing must live in the dedicated
- * webhook controller/service layer.
- *
- * These functions remain exported so existing routes
- * do not immediately crash while the webhook layer is
- * being migrated.
- */
-
 async function stripeWebhookController(
   req,
   res
@@ -2179,6 +2277,12 @@ module.exports = {
   billingHistoryController,
 
   creditsController,
+
+  /* =======================================================
+     BILLING PLAN CATALOG
+  ======================================================= */
+
+  getPlansController,
 
   stripeWebhookController,
 
