@@ -4,8 +4,7 @@
    =========================================================
 
    Responsibilities:
-   - Authenticated payment endpoints
-   - Authoritative billing plan catalog
+   - Authenticated billing catalog
    - Payment/order creation
    - Payment verification
    - Subscription request
@@ -17,10 +16,6 @@
 
    Webhooks MUST use:
       /routes/webhookRoutes.js
-
-   Reason:
-   Stripe signature verification requires the original
-   raw request body before express.json() modifies it.
 
    Architecture:
 
@@ -37,17 +32,18 @@
       Stripe / Razorpay Service
 
 
-   Pricing architecture:
+   Billing catalog:
 
-      Billing Agent
-        ↓
-      getPlansController
+      Client
         ↓
       GET /plans
         ↓
-      Billing Service
+      Payment Controller
         ↓
-      Billing UI
+      billingAgent.getPlans()
+        ↓
+      Authoritative plan catalog
+
 
    Webhook architecture is separate:
 
@@ -82,12 +78,12 @@ const paymentController =
 ========================================================= */
 
 const requiredControllers = [
+  "getPlansController",
   "createPaymentController",
   "verifyPaymentController",
   "createSubscriptionController",
   "billingHistoryController",
-  "creditsController",
-  "getPlansController"
+  "creditsController"
 ];
 
 
@@ -112,12 +108,12 @@ for (const controllerName of requiredControllers) {
 ========================================================= */
 
 const {
+  getPlansController,
   createPaymentController,
   verifyPaymentController,
   createSubscriptionController,
   billingHistoryController,
-  creditsController,
-  getPlansController
+  creditsController
 } = paymentController;
 
 
@@ -166,18 +162,8 @@ if (
 
 
 /* =========================================================
-   ROUTE HELPER
+   MIDDLEWARE STACK
 ========================================================= */
-
-/*
- * Payment endpoints all require:
- *
- * 1. Authentication
- * 2. API rate limiting
- *
- * Keeping this consistent prevents accidentally adding
- * an unprotected payment endpoint later.
- */
 
 const protectedPaymentMiddleware = [
   authMiddleware,
@@ -195,22 +181,13 @@ const protectedPaymentMiddleware = [
    Authentication:
    REQUIRED
 
+   Source:
+      billingAgent.getPlans()
+
    IMPORTANT:
-   Prices are NOT stored in the frontend.
-
-   The Billing Agent is the authoritative source.
-
-   Flow:
-
-      Billing Agent
-          ↓
-      Payment Controller
-          ↓
-      /plans
-          ↓
-      Frontend Billing Service
-          ↓
-      Billing UI
+   - Frontend does NOT define prices.
+   - Client cannot modify catalog values.
+   - Billing Agent remains authoritative.
 ========================================================= */
 
 router.get(
@@ -258,8 +235,6 @@ router.post(
    Authentication:
    REQUIRED
 
-   Used for provider-side verification where applicable.
-
    IMPORTANT:
    Successful client-side verification does NOT itself
    activate a subscription.
@@ -284,8 +259,6 @@ router.post(
    Authentication:
    REQUIRED
 
-   This preserves the existing controller contract.
-
    Payment and subscription activation must still pass
    through the provider/webhook flow.
 ========================================================= */
@@ -306,9 +279,6 @@ router.post(
 
    Authentication:
    REQUIRED
-
-   Returns the authenticated user's billing/subscription
-   history only.
 ========================================================= */
 
 router.get(
@@ -327,9 +297,6 @@ router.get(
 
    Authentication:
    REQUIRED
-
-   Returns the authenticated user's current credit/usage
-   information.
 ========================================================= */
 
 router.get(
