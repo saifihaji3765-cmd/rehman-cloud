@@ -1,10 +1,11 @@
 /* =========================================================
    ZyrionOS PAYMENT ROUTES
-   Version: 4.0.0
+   Version: 4.1.0
    =========================================================
 
    Responsibilities:
    - Authenticated payment endpoints
+   - Authoritative billing plan catalog
    - Payment/order creation
    - Payment verification
    - Subscription request
@@ -35,6 +36,18 @@
         ↓
       Stripe / Razorpay Service
 
+
+   Pricing architecture:
+
+      Billing Agent
+        ↓
+      getPlansController
+        ↓
+      GET /plans
+        ↓
+      Billing Service
+        ↓
+      Billing UI
 
    Webhook architecture is separate:
 
@@ -68,20 +81,13 @@ const paymentController =
    CONTROLLER VALIDATION
 ========================================================= */
 
-/*
- * Fail early if the controller contract is broken.
- *
- * This is preferable to silently mounting undefined
- * handlers and discovering the problem only when the
- * first customer attempts payment.
- */
-
 const requiredControllers = [
   "createPaymentController",
   "verifyPaymentController",
   "createSubscriptionController",
   "billingHistoryController",
-  "creditsController"
+  "creditsController",
+  "getPlansController"
 ];
 
 
@@ -110,7 +116,8 @@ const {
   verifyPaymentController,
   createSubscriptionController,
   billingHistoryController,
-  creditsController
+  creditsController,
+  getPlansController
 } = paymentController;
 
 
@@ -176,6 +183,41 @@ const protectedPaymentMiddleware = [
   authMiddleware,
   apiLimiter
 ];
+
+
+/* =========================================================
+   BILLING PLAN CATALOG
+=========================================================
+
+   GET
+   /plans
+
+   Authentication:
+   REQUIRED
+
+   IMPORTANT:
+   Prices are NOT stored in the frontend.
+
+   The Billing Agent is the authoritative source.
+
+   Flow:
+
+      Billing Agent
+          ↓
+      Payment Controller
+          ↓
+      /plans
+          ↓
+      Frontend Billing Service
+          ↓
+      Billing UI
+========================================================= */
+
+router.get(
+  "/plans",
+  ...protectedPaymentMiddleware,
+  getPlansController
+);
 
 
 /* =========================================================
@@ -323,7 +365,7 @@ router.get(
 
 router.paymentRouteContract = {
 
-  version: "4.0.0",
+  version: "4.1.0",
 
   authenticationRequired: true,
 
@@ -332,6 +374,11 @@ router.paymentRouteContract = {
   webhookRoutesIncluded: false,
 
   endpoints: {
+
+    plans: {
+      method: "GET",
+      path: "/plans"
+    },
 
     createOrder: {
       method: "POST",
