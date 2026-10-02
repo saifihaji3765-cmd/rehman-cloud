@@ -1,5 +1,5 @@
 /* =========================================================
-   ZyrionOS PAYMENT CONTROLLER v2.0.1
+   ZyrionOS PAYMENT CONTROLLER v2.0.2
 
    Responsibilities:
    - Stripe PaymentIntent creation
@@ -23,6 +23,7 @@
    - Never activate subscription from Razorpay signature verification.
    - Provider webhooks are authoritative for final payment state.
    - Frontend pricing is NEVER the source of truth.
+   - billingAgent is the authoritative pricing source.
 ========================================================= */
 
 
@@ -268,6 +269,21 @@ function normalizeCurrency(
  *
  * This endpoint exposes that catalog to the authenticated
  * frontend without allowing the client to modify it.
+ *
+ * RESPONSE CONTRACT:
+ *
+ * {
+ *   success: true,
+ *   message: "...",
+ *   data: {
+ *     plans: [...]
+ *   }
+ * }
+ *
+ * IMPORTANT:
+ *
+ * formatResponse() only preserves the standardized response
+ * envelope. Therefore plans MUST live inside data.plans.
  */
 
 async function getPlansController(
@@ -281,12 +297,17 @@ async function getPlansController(
       billingAgent.getPlans();
 
 
+    /* =====================================================
+       VALIDATE PLAN CATALOG
+    ===================================================== */
+
     if (
-      !Array.isArray(plans)
+      !Array.isArray(plans) ||
+      plans.length === 0
     ) {
 
       logger.error(
-        "Billing Agent returned an invalid plan catalog"
+        "Billing Agent returned an empty or invalid plan catalog"
       );
 
 
@@ -301,6 +322,9 @@ async function getPlansController(
             message:
               "Billing plan catalog is unavailable",
 
+            error:
+              "Billing Agent returned no plans",
+
             code:
               "BILLING_CATALOG_INVALID"
 
@@ -310,6 +334,10 @@ async function getPlansController(
     }
 
 
+    /* =====================================================
+       AUTHORITATIVE PLAN RESPONSE
+    ===================================================== */
+
     return res
       .status(200)
       .json(
@@ -318,7 +346,14 @@ async function getPlansController(
           success:
             true,
 
-          plans
+          message:
+            "Billing plan catalog loaded successfully",
+
+          data: {
+
+            plans
+
+          }
 
         })
       );
@@ -328,7 +363,10 @@ async function getPlansController(
   catch (error) {
 
     logger.error(
-      `Billing plan catalog failed: ${error?.message}`
+      `Billing plan catalog failed: ${
+        error?.message ||
+        "Unknown error"
+      }`
     );
 
 
@@ -1014,7 +1052,7 @@ async function createPaymentController(
 
     /* =========================
        PLAN VALIDATION
-       ========================= */
+    ========================= */
 
     if (
       !normalizedPlan
@@ -1042,7 +1080,7 @@ async function createPaymentController(
 
     /* =========================
        PROVIDER VALIDATION
-       ========================= */
+    ========================= */
 
     if (
       !normalizedProvider
