@@ -3,87 +3,60 @@
  * ZYRIONOS MASTER AGENT
  * =========================================================
  *
- * Version: 5.2.0
+ * Version: 5.3.0
  *
  * Central Autonomous Orchestrator / CEO Control Plane
  *
- * CORE PIPELINE
+ * IMPORTANT ARCHITECTURE
  *
  * User Request
  *      ↓
- * Master Agent
+ * Master
  *      ↓
  * Memory
  *      ↓
  * Intent
  *      ↓
- * Workflow Decision
+ * Workflow
  *      ↓
  * Planning
  *      ↓
- * GitHub / Build / Fix / File / Environment
+ * Builder
  *      ↓
- * Validation Gates
+ * Build Validation
+ *      ↓
+ * Deployment Gates
  *      ↓
  * Deployment
  *      ↓
- * Deployment Log
+ * Deployment Logs
  *      ↓
- * Auto Fix Eligibility
- *      ↓
- * Auto Fix Trigger
- *      ↓
- * Fix Agent Handoff
+ * Auto Fix
  *      ↓
  * Monitoring / Scaling
  *      ↓
- * Final Verification
- *      ↓
- * Master Response
+ * Final Response
  *
  *
- * MASTER OWNS
+ * MASTER DOES NOT:
  *
- * - Request normalization
- * - Memory context
- * - Intent classification
- * - Workflow selection
- * - Agent sequencing
- * - Dependency enforcement
- * - Environment gates
- * - Build gates
- * - GitHub workflow coordination
- * - Deployment gates
- * - Deployment failure logging coordination
- * - Auto Fix trigger coordination
- * - Billing coordination
- * - Subscription coordination
- * - Failure propagation
- * - Final result aggregation
+ * - Generate source code directly
+ * - Modify source files directly
+ * - Access MongoDB directly
+ * - Access GitHub API directly
+ * - Execute Docker directly
+ * - Configure AWS directly
+ * - Resolve secrets directly
+ * - Process payments directly
+ * - Call Gemini/OpenAI directly
  *
- *
- * MASTER DOES NOT
- *
- * - Generate source code itself
- * - Modify files itself
- * - Execute Docker itself
- * - Configure AWS itself
- * - Configure DNS itself
- * - Configure SSL itself
- * - Process payments itself
- * - Directly access MongoDB
- * - Resolve deployment secrets for itself
- * - Directly call GitHub API
- *
- *
- * AI PROVIDER RULE
- *
- * Master does not directly instantiate or configure
- * Gemini/OpenAI/etc.
- *
- * All AI generation remains behind:
+ * AI generation remains behind:
  *
  * services/ai/aiProviderService.js
+ *
+ * Build validation remains behind:
+ *
+ * services/buildValidationService.js
  *
  * =========================================================
  */
@@ -92,7 +65,7 @@
 
 
 /* =========================================================
-   SPECIALIZED AGENTS
+   CORE AGENTS
 ========================================================= */
 
 const intentAgent =
@@ -116,51 +89,23 @@ const memoryAgent =
 const environmentAgent =
   require("./environmentAgent");
 
-
-/* =========================================================
-   DEPLOYMENT LOG / AUTO FIX AGENT
-========================================================= */
-
 const logAgent =
   require("./logAgent");
 
 
 /* =========================================================
-   GITHUB AGENTS
+   GITHUB
 ========================================================= */
-
-/*
- * GitHub Agent owns:
- *
- * - GitHub connection
- * - Repository access
- * - Repository browser
- * - Branches
- * - Contents
- * - Repository analysis orchestration
- */
 
 const githubAgent =
   require("./githubAgent");
-
-
-/*
- * GitHub Deployment Agent owns:
- *
- * - Deployment contract
- * - Deployment readiness
- * - Deployment preparation
- * - Docker handoff preparation
- * - AWS handoff preparation
- * - Contract sanitization
- */
 
 const githubDeploymentAgent =
   require("./githubDeploymentAgent");
 
 
 /* =========================================================
-   INFRASTRUCTURE AGENTS
+   INFRASTRUCTURE
 ========================================================= */
 
 const dockerAgent =
@@ -183,7 +128,7 @@ const scalingAgent =
 
 
 /* =========================================================
-   BUSINESS / DEPLOYMENT AGENTS
+   BUSINESS
 ========================================================= */
 
 const billingAgent =
@@ -197,7 +142,7 @@ const deployAgent =
 
 
 /* =========================================================
-   FINANCIAL CONTROL AGENTS
+   FINANCIAL CONTROL
 ========================================================= */
 
 const financialControlAgent =
@@ -232,6 +177,9 @@ const whatsappControlAgent =
 const logger =
   require("../services/loggerService");
 
+const buildValidationService =
+  require("../services/buildValidationService");
+
 const {
   generateText
 } =
@@ -243,30 +191,23 @@ const {
 ========================================================= */
 
 const MASTER_VERSION =
-  "5.2.0";
-
+  "5.3.0";
 
 const MAX_PROMPT_LENGTH =
   12000;
 
-const MAX_MEMORY_LENGTH =
-  5000;
-
-const MAX_CONTEXT_LENGTH =
-  18000;
-
 const MAX_WORKFLOW_STEPS =
-  30;
+  40;
 
 const MAX_AGENT_RESULTS =
-  50;
+  60;
 
 const MAX_FINAL_RESPONSE_TOKENS =
   1800;
 
 
 /* =========================================================
-   ENVIRONMENT NAMES
+   ENVIRONMENTS
 ========================================================= */
 
 const VALID_ENVIRONMENTS =
@@ -282,8 +223,6 @@ const VALID_ENVIRONMENTS =
 ========================================================= */
 
 const agentRegistry = {
-
-  /* Core */
 
   intent:
     intentAgent,
@@ -306,14 +245,8 @@ const agentRegistry = {
   environment:
     environmentAgent,
 
-
-  /* Deployment Logs / Auto Fix */
-
   log:
     logAgent,
-
-
-  /* GitHub */
 
   github:
     githubAgent,
@@ -321,14 +254,8 @@ const agentRegistry = {
   githubDeployment:
     githubDeploymentAgent,
 
-
-  /* Deployment */
-
   deploy:
     deployAgent,
-
-
-  /* Infrastructure */
 
   docker:
     dockerAgent,
@@ -348,17 +275,11 @@ const agentRegistry = {
   scaling:
     scalingAgent,
 
-
-  /* Business */
-
   billing:
     billingAgent,
 
   subscription:
     subscriptionAgent,
-
-
-  /* Financial */
 
   financialControl:
     financialControlAgent,
@@ -388,6 +309,121 @@ const agentRegistry = {
 
 
 /* =========================================================
+   SECRET SANITIZATION
+========================================================= */
+
+const SECRET_KEYS =
+  new Set([
+
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "accessToken",
+    "refreshToken",
+    "apiKey",
+    "api_key",
+    "authorization",
+    "cookie",
+    "privateKey",
+    "private_key",
+    "encryptedValue",
+    "plainValue",
+    "credentials",
+    "clientSecret",
+    "client_secret",
+    "webhookSecret",
+    "webhook_secret",
+    "secretValue",
+    "secret_value"
+
+  ]);
+
+
+/* =========================================================
+   SAFE CONTEXT SANITIZER
+========================================================= */
+
+function sanitizeForContext(
+  value,
+  depth = 0
+) {
+
+  if (depth > 7) {
+    return "[truncated]";
+  }
+
+  if (
+    value === null ||
+    value === undefined
+  ) {
+    return value;
+  }
+
+  if (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+
+    return value
+      .slice(0, 100)
+      .map(
+        item =>
+          sanitizeForContext(
+            item,
+            depth + 1
+          )
+      );
+
+  }
+
+  if (
+    typeof value === "object"
+  ) {
+
+    const output = {};
+
+    for (
+      const [
+        key,
+        item
+      ] of Object.entries(value)
+    ) {
+
+      if (
+        SECRET_KEYS.has(key)
+      ) {
+
+        output[key] =
+          "[REDACTED]";
+
+        continue;
+
+      }
+
+      output[key] =
+        sanitizeForContext(
+          item,
+          depth + 1
+        );
+
+    }
+
+    return output;
+
+  }
+
+  return "[unsupported]";
+
+}
+
+
+/* =========================================================
    SAFE JSON
 ========================================================= */
 
@@ -403,9 +439,7 @@ function safeJson(
       )
     );
 
-  } catch (
-    error
-  ) {
+  } catch {
 
     return JSON.stringify({
       error:
@@ -418,7 +452,7 @@ function safeJson(
 
 
 /* =========================================================
-   SAFE STRING
+   STRING CLEANER
 ========================================================= */
 
 function cleanString(
@@ -427,20 +461,13 @@ function cleanString(
 ) {
 
   if (
-    typeof value !==
-    "string"
+    typeof value !== "string"
   ) {
-
     return "";
-
   }
 
-
   return value
-    .replace(
-      /\u0000/g,
-      ""
-    )
+    .replace(/\u0000/g, "")
     .trim()
     .slice(
       0,
@@ -459,15 +486,10 @@ function getUserId(
 ) {
 
   return (
-
     user?.id ||
-
     user?._id ||
-
     user?.userId ||
-
     null
-
   );
 
 }
@@ -482,22 +504,17 @@ function getProjectId(
 ) {
 
   return (
-
     request?.projectId ||
-
     request?.project?._id ||
-
     request?.project?.id ||
-
     null
-
   );
 
 }
 
 
 /* =========================================================
-   SUCCESS CHECK
+   SUCCESS
 ========================================================= */
 
 function isSuccessful(
@@ -513,7 +530,7 @@ function isSuccessful(
 
 
 /* =========================================================
-   ERROR NORMALIZER
+   ERROR NORMALIZATION
 ========================================================= */
 
 function normalizeError(
@@ -523,23 +540,17 @@ function normalizeError(
   if (!error) {
 
     return {
-
       message:
         "Unknown error",
-
       name:
         "Error",
-
       status:
         null,
-
       code:
         null
-
     };
 
   }
-
 
   return {
 
@@ -574,192 +585,21 @@ function getAgentError(
 ) {
 
   if (!result) {
-
     return "Agent returned no result.";
-
   }
 
-
   return (
-
     result.error ||
-
     result.message ||
-
     result.details?.message ||
-
     "Agent returned an unsuccessful result."
-
   );
 
 }
 
 
 /* =========================================================
-   SAFE CONTEXT SANITIZER
-========================================================= */
-
-const SECRET_KEYS =
-  new Set([
-
-    "password",
-
-    "passwd",
-
-    "secret",
-
-    "token",
-
-    "accessToken",
-
-    "refreshToken",
-
-    "apiKey",
-
-    "api_key",
-
-    "authorization",
-
-    "cookie",
-
-    "privateKey",
-
-    "private_key",
-
-    "encryptedValue",
-
-    "plainValue",
-
-    "credentials",
-
-    "clientSecret",
-
-    "client_secret",
-
-    "webhookSecret",
-
-    "webhook_secret",
-
-    "secretValue",
-
-    "secret_value"
-
-  ]);
-
-
-function sanitizeForContext(
-  value,
-  depth = 0
-) {
-
-  if (
-    depth >
-    7
-  ) {
-
-    return "[truncated]";
-
-  }
-
-
-  if (
-    value === null ||
-    value === undefined
-  ) {
-
-    return value;
-
-  }
-
-
-  if (
-    typeof value ===
-      "string" ||
-    typeof value ===
-      "number" ||
-    typeof value ===
-      "boolean"
-  ) {
-
-    return value;
-
-  }
-
-
-  if (
-    Array.isArray(
-      value
-    )
-  ) {
-
-    return value
-      .slice(
-        0,
-        100
-      )
-      .map(
-        item =>
-          sanitizeForContext(
-            item,
-            depth + 1
-          )
-      );
-
-  }
-
-
-  if (
-    typeof value ===
-    "object"
-  ) {
-
-    const output = {};
-
-
-    for (
-      const [
-        key,
-        item
-      ] of Object.entries(
-        value
-      )
-    ) {
-
-      if (
-        SECRET_KEYS.has(
-          key
-        )
-      ) {
-
-        output[key] =
-          "[REDACTED]";
-
-        continue;
-
-      }
-
-
-      output[key] =
-        sanitizeForContext(
-          item,
-          depth + 1
-        );
-
-    }
-
-
-    return output;
-
-  }
-
-
-  return "[unsupported]";
-
-}
-
-
-/* =========================================================
-   LOGGER HELPERS
+   LOGGER
 ========================================================= */
 
 function logInfo(
@@ -771,7 +611,6 @@ function logInfo(
     sanitizeForContext(
       metadata
     );
-
 
   try {
 
@@ -789,9 +628,7 @@ function logInfo(
 
     }
 
-  } catch (
-    error
-  ) {}
+  } catch {}
 
   console.log(
     `[MASTER] ${message}`,
@@ -811,7 +648,6 @@ function logSuccess(
       metadata
     );
 
-
   try {
 
     if (
@@ -828,9 +664,7 @@ function logSuccess(
 
     }
 
-  } catch (
-    error
-  ) {}
+  } catch {}
 
   console.log(
     `[MASTER] ${message}`,
@@ -850,7 +684,6 @@ function logWarn(
       metadata
     );
 
-
   try {
 
     if (
@@ -867,7 +700,6 @@ function logWarn(
 
     }
 
-
     if (
       typeof logger?.warning ===
       "function"
@@ -882,9 +714,7 @@ function logWarn(
 
     }
 
-  } catch (
-    error
-  ) {}
+  } catch {}
 
   console.warn(
     `[MASTER] ${message}`,
@@ -904,7 +734,6 @@ function logError(
       metadata
     );
 
-
   try {
 
     if (
@@ -921,9 +750,7 @@ function logError(
 
     }
 
-  } catch (
-    error
-  ) {}
+  } catch {}
 
   console.error(
     `[MASTER] ${message}`,
@@ -944,35 +771,25 @@ function normalizeRequest(
 
   let normalized = {};
 
-
   if (
-    typeof request ===
-    "string"
+    typeof request === "string"
   ) {
 
     normalized = {
-
       prompt:
         request
-
     };
 
-  }
-
-  else if (
+  } else if (
     request &&
-    typeof request ===
-    "object"
+    typeof request === "object"
   ) {
 
     normalized = {
-
       ...request
-
     };
 
   }
-
 
   normalized.prompt =
     cleanString(
@@ -980,14 +797,11 @@ function normalizeRequest(
       MAX_PROMPT_LENGTH
     );
 
-
   normalized.type =
     cleanString(
       normalized.type,
       100
-    )
-      .toLowerCase();
-
+    ).toLowerCase();
 
   normalized.framework =
     cleanString(
@@ -995,13 +809,11 @@ function normalizeRequest(
       200
     );
 
-
   normalized.projectId =
     cleanString(
       normalized.projectId,
       300
     );
-
 
   normalized.projectName =
     cleanString(
@@ -1009,31 +821,11 @@ function normalizeRequest(
       200
     );
 
-
-  normalized.environmentName =
-    normalizeEnvironmentName(
-      normalized.environmentName ||
-      normalized.environment ||
-      normalized.deployEnvironment,
-      {
-        allowEmpty:
-          true
-      }
-    );
-
-
-  normalized.user =
-    normalized.user ||
-    fallbackUser ||
-    {};
-
-
   normalized.workflowId =
     cleanString(
       normalized.workflowId,
       200
     );
-
 
   normalized.requestId =
     cleanString(
@@ -1041,6 +833,20 @@ function normalizeRequest(
       200
     );
 
+  normalized.environmentName =
+    normalizeEnvironmentName(
+      normalized.environmentName ||
+      normalized.environment ||
+      normalized.deployEnvironment,
+      {
+        allowEmpty: true
+      }
+    );
+
+  normalized.user =
+    normalized.user ||
+    fallbackUser ||
+    {};
 
   return normalized;
 
@@ -1057,32 +863,21 @@ function normalizeEnvironmentName(
 ) {
 
   if (
-    value ===
-      undefined ||
-    value ===
-      null ||
-    value ===
-      ""
+    value === undefined ||
+    value === null ||
+    value === ""
   ) {
 
-    if (
-      options.allowEmpty
-    ) {
-
-      return null;
-
-    }
-
-    return "production";
+    return options.allowEmpty
+      ? null
+      : "production";
 
   }
-
 
   const normalized =
     String(value)
       .trim()
       .toLowerCase();
-
 
   if (
     !VALID_ENVIRONMENTS.has(
@@ -1096,7 +891,6 @@ function normalizeEnvironmentName(
     );
 
   }
-
 
   return normalized;
 
@@ -1115,9 +909,7 @@ function createWorkflowState(
   return {
 
     workflowId:
-
       request.workflowId ||
-
       `zyrionos-${Date.now()}-${Math.random()
         .toString(36)
         .slice(2, 10)}`,
@@ -1172,6 +964,9 @@ function createWorkflowState(
     agentResults:
       {},
 
+    buildValidation:
+      null,
+
     metrics: {
 
       startedAt:
@@ -1202,68 +997,36 @@ function recordStage(
 ) {
 
   if (!workflow) {
-
-    return null;
-
+    return;
   }
-
-
-  const entry = {
-
-    stage,
-
-    status,
-
-    timestamp:
-      new Date(),
-
-    success:
-      result?.success === true
-
-  };
-
 
   if (
-    status ===
-    "completed"
+    status === "completed"
   ) {
 
-    workflow.completedStages.push(
-      stage
-    );
+    workflow.completedStages
+      .push(stage);
+
+  } else if (
+    status === "failed"
+  ) {
+
+    workflow.failedStages
+      .push(stage);
+
+  } else if (
+    status === "skipped"
+  ) {
+
+    workflow.skippedStages
+      .push(stage);
 
   }
 
-  else if (
-    status ===
-    "failed"
-  ) {
-
-    workflow.failedStages.push(
-      stage
-    );
-
-  }
-
-  else if (
-    status ===
-    "skipped"
-  ) {
-
-    workflow.skippedStages.push(
-      stage
-    );
-
-  }
-
-
-  workflow.agentResults[
-    stage
-  ] =
+  workflow.agentResults[stage] =
     sanitizeForContext(
       result
     );
-
 
   if (
     workflow.completedStages.length >
@@ -1277,7 +1040,6 @@ function recordStage(
 
   }
 
-
   if (
     workflow.failedStages.length >
     MAX_WORKFLOW_STEPS
@@ -1289,7 +1051,6 @@ function recordStage(
       );
 
   }
-
 
   if (
     workflow.skippedStages.length >
@@ -1303,12 +1064,10 @@ function recordStage(
 
   }
 
-
   const keys =
     Object.keys(
       workflow.agentResults
     );
-
 
   if (
     keys.length >
@@ -1318,7 +1077,6 @@ function recordStage(
     const removeCount =
       keys.length -
       MAX_AGENT_RESULTS;
-
 
     for (
       let i = 0;
@@ -1334,14 +1092,11 @@ function recordStage(
 
   }
 
-
-  return entry;
-
 }
 
 
 /* =========================================================
-   INTENT HELPERS
+   INTENT DATA
 ========================================================= */
 
 function getIntentData(
@@ -1350,35 +1105,33 @@ function getIntentData(
 
   if (
     intent?.data &&
-    typeof intent.data ===
-    "object"
+    typeof intent.data === "object"
   ) {
 
     return intent.data;
 
   }
 
-
   if (
     intent &&
-    typeof intent ===
-    "object"
+    typeof intent === "object"
   ) {
 
     return intent;
 
   }
 
-
   return {
-
     type:
       "chat"
-
   };
 
 }
 
+
+/* =========================================================
+   SECONDARY INTENTS
+========================================================= */
 
 function getSecondaryIntents(
   intent
@@ -1388,7 +1141,6 @@ function getSecondaryIntents(
     getIntentData(
       intent
     );
-
 
   if (
     !Array.isArray(
@@ -1400,16 +1152,12 @@ function getSecondaryIntents(
 
   }
 
-
   return [
-
     ...new Set(
-
       data.secondaryIntents
         .filter(
           item =>
-            typeof item ===
-            "string"
+            typeof item === "string"
         )
         .map(
           item =>
@@ -1418,9 +1166,7 @@ function getSecondaryIntents(
               .toLowerCase()
         )
         .filter(Boolean)
-
     )
-
   ];
 
 }
@@ -1440,26 +1186,21 @@ function determineWorkflow(
       intent
     );
 
-
   const type =
     cleanString(
       data.type,
       100
-    )
-      .toLowerCase();
-
+    ).toLowerCase();
 
   const secondary =
     getSecondaryIntents(
       intent
     );
 
-
   const workflow = {
 
     type:
-      type ||
-      "chat",
+      type || "chat",
 
     secondary,
 
@@ -1513,9 +1254,7 @@ function determineWorkflow(
   ) {
 
     case "build":
-
     case "create":
-
     case "code":
 
       workflow.requiresPlanning =
@@ -1528,7 +1267,6 @@ function determineWorkflow(
 
 
     case "fix":
-
     case "debug":
 
       workflow.requiresFix =
@@ -1546,9 +1284,7 @@ function determineWorkflow(
 
 
     case "environment":
-
     case "env":
-
     case "configuration":
 
       workflow.requiresEnvironment =
@@ -1558,15 +1294,10 @@ function determineWorkflow(
 
 
     case "github":
-
     case "repository":
-
     case "repo":
-
     case "github-import":
-
     case "github_import":
-
     case "repository-import":
 
       workflow.requiresGithub =
@@ -1576,13 +1307,9 @@ function determineWorkflow(
 
 
     case "github-deploy":
-
     case "github_deploy":
-
     case "repository-deploy":
-
     case "repository_deploy":
-
     case "repo-deploy":
 
       workflow.requiresGithub =
@@ -1614,7 +1341,6 @@ function determineWorkflow(
 
 
     case "monitor":
-
     case "monitoring":
 
       workflow.requiresMonitoring =
@@ -1624,7 +1350,6 @@ function determineWorkflow(
 
 
     case "scale":
-
     case "scaling":
 
       workflow.requiresScaling =
@@ -1642,13 +1367,6 @@ function determineWorkflow(
 
 
     case "automation":
-
-      workflow.requiresPlanning =
-        true;
-
-      break;
-
-
     case "infrastructure":
 
       workflow.requiresPlanning =
@@ -1656,28 +1374,16 @@ function determineWorkflow(
 
       break;
 
-
-    case "chat":
-
-    case "thumbnail":
-
     default:
-
       break;
 
   }
 
 
   if (
-    secondary.includes(
-      "github"
-    ) ||
-    secondary.includes(
-      "repository"
-    ) ||
-    secondary.includes(
-      "repo"
-    )
+    secondary.includes("github") ||
+    secondary.includes("repository") ||
+    secondary.includes("repo")
   ) {
 
     workflow.requiresGithub =
@@ -1687,18 +1393,10 @@ function determineWorkflow(
 
 
   if (
-    secondary.includes(
-      "github-deploy"
-    ) ||
-    secondary.includes(
-      "github_deploy"
-    ) ||
-    secondary.includes(
-      "repository-deploy"
-    ) ||
-    secondary.includes(
-      "repository_deploy"
-    )
+    secondary.includes("github-deploy") ||
+    secondary.includes("github_deploy") ||
+    secondary.includes("repository-deploy") ||
+    secondary.includes("repository_deploy")
   ) {
 
     workflow.requiresGithub =
@@ -1714,9 +1412,7 @@ function determineWorkflow(
 
 
   if (
-    secondary.includes(
-      "deploy"
-    )
+    secondary.includes("deploy")
   ) {
 
     workflow.requiresDeploy =
@@ -1726,15 +1422,9 @@ function determineWorkflow(
 
 
   if (
-    secondary.includes(
-      "environment"
-    ) ||
-    secondary.includes(
-      "env"
-    ) ||
-    secondary.includes(
-      "configuration"
-    )
+    secondary.includes("environment") ||
+    secondary.includes("env") ||
+    secondary.includes("configuration")
   ) {
 
     workflow.requiresEnvironment =
@@ -1744,9 +1434,7 @@ function determineWorkflow(
 
 
   if (
-    secondary.includes(
-      "build"
-    )
+    secondary.includes("build")
   ) {
 
     workflow.requiresBuild =
@@ -1759,9 +1447,7 @@ function determineWorkflow(
 
 
   if (
-    secondary.includes(
-      "fix"
-    )
+    secondary.includes("fix")
   ) {
 
     workflow.requiresFix =
@@ -1771,9 +1457,7 @@ function determineWorkflow(
 
 
   if (
-    secondary.includes(
-      "billing"
-    )
+    secondary.includes("billing")
   ) {
 
     workflow.requiresBilling =
@@ -1783,9 +1467,7 @@ function determineWorkflow(
 
 
   if (
-    secondary.includes(
-      "subscription"
-    )
+    secondary.includes("subscription")
   ) {
 
     workflow.requiresSubscription =
@@ -1795,12 +1477,8 @@ function determineWorkflow(
 
 
   if (
-    secondary.includes(
-      "monitor"
-    ) ||
-    secondary.includes(
-      "monitoring"
-    )
+    secondary.includes("monitor") ||
+    secondary.includes("monitoring")
   ) {
 
     workflow.requiresMonitoring =
@@ -1810,12 +1488,8 @@ function determineWorkflow(
 
 
   if (
-    secondary.includes(
-      "scale"
-    ) ||
-    secondary.includes(
-      "scaling"
-    )
+    secondary.includes("scale") ||
+    secondary.includes("scaling")
   ) {
 
     workflow.requiresScaling =
@@ -1825,8 +1499,7 @@ function determineWorkflow(
 
 
   if (
-    request?.autoDeploy ===
-    true
+    request?.autoDeploy === true
   ) {
 
     workflow.requiresDeploy =
@@ -1836,8 +1509,7 @@ function determineWorkflow(
 
 
   if (
-    request?.afterBuild ===
-    "deploy"
+    request?.afterBuild === "deploy"
   ) {
 
     workflow.requiresDeploy =
@@ -1894,15 +1566,10 @@ function getProjectName(
 ) {
 
   return (
-
     planningData?.projectName ||
-
     request?.projectName ||
-
     request?.name ||
-
     null
-
   );
 
 }
@@ -1917,13 +1584,28 @@ function getPlanningData(
 ) {
 
   return (
-
     planning?.data ||
-
     planning ||
-
     null
+  );
 
+}
+
+
+/* =========================================================
+   PROJECT FILES
+========================================================= */
+
+function getProjectFiles(
+  request,
+  buildResult
+) {
+
+  return (
+    buildResult?.data?.files ||
+    buildResult?.files ||
+    request?.files ||
+    []
   );
 
 }
@@ -1939,33 +1621,19 @@ function getDeploymentId(
 ) {
 
   return (
-
-    deploymentResult
-      ?.deployment
-      ?.deploymentId ||
-
-    deploymentResult
-      ?.data
-      ?.deploymentId ||
-
-    deploymentResult
-      ?.deploymentId ||
-
-    deploymentResult
-      ?.data
-      ?.id ||
-
+    deploymentResult?.deployment?.deploymentId ||
+    deploymentResult?.data?.deploymentId ||
+    deploymentResult?.deploymentId ||
+    deploymentResult?.data?.id ||
     projectId ||
-
     null
-
   );
 
 }
 
 
 /* =========================================================
-   BUILD RESULT VALIDATION
+   BUILD RESULT SHAPE
 ========================================================= */
 
 function validateBuildResult(
@@ -1973,9 +1641,7 @@ function validateBuildResult(
 ) {
 
   if (
-    !isSuccessful(
-      result
-    )
+    !isSuccessful(result)
   ) {
 
     return {
@@ -1992,16 +1658,12 @@ function validateBuildResult(
 
   }
 
-
   const files =
     result?.data?.files ||
     result?.files;
 
-
   if (
-    !Array.isArray(
-      files
-    )
+    !Array.isArray(files)
   ) {
 
     return {
@@ -2016,10 +1678,8 @@ function validateBuildResult(
 
   }
 
-
   if (
-    files.length ===
-    0
+    files.length === 0
   ) {
 
     return {
@@ -2034,7 +1694,6 @@ function validateBuildResult(
 
   }
 
-
   return {
 
     valid:
@@ -2048,12 +1707,204 @@ function validateBuildResult(
 
 
 /* =========================================================
-   BUILD GATE
+   BUILD VALIDATION
+========================================================= */
+
+async function validateGeneratedBuild(
+  workflowState,
+  request,
+  planningData,
+  buildResult
+) {
+
+  const basic =
+    validateBuildResult(
+      buildResult
+    );
+
+  if (
+    !basic.valid
+  ) {
+
+    return {
+
+      success:
+        false,
+
+      ready:
+        false,
+
+      authoritative:
+        false,
+
+      mode:
+        "builder-contract",
+
+      error:
+        basic.error
+
+    };
+
+  }
+
+
+  const files =
+    basic.files;
+
+  const framework =
+    request.framework ||
+    planningData?.framework ||
+    planningData?.frontend?.framework ||
+    "react";
+
+
+  try {
+
+    if (
+      typeof buildValidationService
+        ?.validateProject !==
+      "function"
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        ready:
+          false,
+
+        authoritative:
+          false,
+
+        mode:
+          "validator-unavailable",
+
+        error:
+          "Build validation service is unavailable."
+
+      };
+
+    }
+
+
+    const validation =
+      await buildValidationService.validateProject({
+
+        projectId:
+          workflowState.projectId,
+
+        projectName:
+          getProjectName(
+            request,
+            planningData
+          ),
+
+        framework,
+
+        files
+
+      });
+
+
+    const ready =
+      validation?.success === true &&
+      validation?.valid === true &&
+      validation?.ready === true;
+
+
+    return {
+
+      success:
+        validation?.success !== false,
+
+      ready,
+
+      authoritative:
+        validation?.authoritative === true,
+
+      mode:
+        validation?.validationMode ||
+        validation?.mode ||
+        "static",
+
+      framework,
+
+      fileCount:
+        files.length,
+
+      sourceHash:
+        validation?.sourceHash ||
+        null,
+
+      errors:
+        Array.isArray(
+          validation?.errors
+        )
+          ? validation.errors
+          : [],
+
+      warnings:
+        Array.isArray(
+          validation?.warnings
+        )
+          ? validation.warnings
+          : [],
+
+      validation
+
+    };
+
+  } catch (
+    error
+  ) {
+
+    const normalized =
+      normalizeError(
+        error
+      );
+
+    return {
+
+      success:
+        false,
+
+      ready:
+        false,
+
+      authoritative:
+        false,
+
+      mode:
+        "validator-exception",
+
+      error:
+        normalized.message,
+
+      errors: [
+        {
+          message:
+            normalized.message,
+          code:
+            normalized.code
+        }
+      ]
+
+    };
+
+  }
+
+}
+
+
+/* =========================================================
+   DEPLOYMENT BUILD GATE
 ========================================================= */
 
 function canDeployAfterBuild(
   workflow,
-  buildResult
+  buildResult,
+  buildValidation
 ) {
 
   if (
@@ -2085,21 +1936,16 @@ function canDeployAfterBuild(
         false,
 
       reason:
-        "Deployment blocked because build failed."
+        "Deployment blocked because builder failed."
 
     };
 
   }
 
 
-  const validation =
-    validateBuildResult(
-      buildResult
-    );
-
-
   if (
-    !validation.valid
+    !buildValidation ||
+    buildValidation.ready !== true
   ) {
 
     return {
@@ -2108,7 +1954,7 @@ function canDeployAfterBuild(
         false,
 
       reason:
-        validation.error
+        "Deployment blocked because build validation did not pass."
 
     };
 
@@ -2121,7 +1967,7 @@ function canDeployAfterBuild(
       true,
 
     reason:
-      "Build gate passed."
+      "Build and static validation gates passed."
 
   };
 
@@ -2157,11 +2003,9 @@ async function checkEnvironmentGate(
 
   }
 
-
   const environmentName =
     request.environmentName ||
     "production";
-
 
   workflowState.environmentName =
     environmentName;
@@ -2202,9 +2046,7 @@ async function checkEnvironmentGate(
 
 
   if (
-    !isSuccessful(
-      result
-    )
+    !isSuccessful(result)
   ) {
 
     return {
@@ -2216,9 +2058,7 @@ async function checkEnvironmentGate(
         environmentName,
 
       reason:
-        getAgentError(
-          result
-        ),
+        getAgentError(result),
 
       result
 
@@ -2235,8 +2075,7 @@ async function checkEnvironmentGate(
 
   if (
     readiness &&
-    readiness.deployable ===
-    false
+    readiness.deployable === false
   ) {
 
     return {
@@ -2277,11 +2116,10 @@ async function checkEnvironmentGate(
 
 
 /* =========================================================
-   DEPLOYMENT SNAPSHOT
+   ENVIRONMENT SNAPSHOT
 ========================================================= */
 
 async function createEnvironmentSnapshot(
-  request,
   workflowState,
   environmentName
 ) {
@@ -2296,10 +2134,7 @@ async function createEnvironmentSnapshot(
         true,
 
       skipped:
-        true,
-
-      reason:
-        "No environment selected."
+        true
 
     };
 
@@ -2387,11 +2222,11 @@ async function markEnvironmentDeployed(
       success:
         false,
 
-      message:
-        "Cannot mark environment deployed without deployment ID.",
-
       error:
-        "DEPLOYMENT_ID_MISSING"
+        "DEPLOYMENT_ID_MISSING",
+
+      message:
+        "Cannot synchronize environment state without deployment ID."
 
     };
 
@@ -2436,30 +2271,6 @@ async function markEnvironmentDeployed(
 
 
 /* =========================================================
-   PROJECT FILES
-========================================================= */
-
-function getProjectFiles(
-  request,
-  buildResult
-) {
-
-  return (
-
-    buildResult?.data?.files ||
-
-    buildResult?.files ||
-
-    request?.files ||
-
-    []
-
-  );
-
-}
-
-
-/* =========================================================
    PAYMENT CONTEXT
 ========================================================= */
 
@@ -2474,8 +2285,7 @@ function getPaymentContext(
       null,
 
     paymentConfirmed:
-      request?.paymentConfirmed ===
-      true,
+      request?.paymentConfirmed === true,
 
     paymentProvider:
       request?.paymentProvider ||
@@ -2516,10 +2326,8 @@ function canProcessSubscription(
       request
     );
 
-
   if (
-    request?.operation ===
-    "status"
+    request?.operation === "status"
   ) {
 
     return {
@@ -2533,7 +2341,6 @@ function canProcessSubscription(
     };
 
   }
-
 
   if (
     payment.paymentConfirmed
@@ -2551,7 +2358,6 @@ function canProcessSubscription(
 
   }
 
-
   return {
 
     allowed:
@@ -2559,67 +2365,6 @@ function canProcessSubscription(
 
     reason:
       "Subscription Agent may inspect authoritative entitlement/payment state."
-
-  };
-
-}
-
-
-/* =========================================================
-   AGENT CONTEXT
-========================================================= */
-
-function createAgentContext(
-  workflowState,
-  request,
-  intent,
-  planningData,
-  memoryContext
-) {
-
-  return {
-
-    workflowId:
-      workflowState.workflowId,
-
-    requestId:
-      workflowState.requestId,
-
-    userId:
-      workflowState.userId,
-
-    projectId:
-      workflowState.projectId,
-
-    projectName:
-      workflowState.projectName,
-
-    environmentName:
-      workflowState.environmentName,
-
-    prompt:
-      request.prompt,
-
-    user:
-      request.user,
-
-    framework:
-      request.framework,
-
-    intent,
-
-    planning:
-      planningData,
-
-    memoryContext,
-
-    workflow:
-      workflowState,
-
-    previousResults:
-      sanitizeForContext(
-        workflowState.agentResults
-      )
 
   };
 
@@ -2841,7 +2586,7 @@ function getGithubDeploymentContext(
 
 
 /* =========================================================
-   DEPLOYMENT ERROR EXTRACTION
+   DEPLOYMENT ERROR
 ========================================================= */
 
 function getDeploymentErrorDetails(
@@ -2852,7 +2597,6 @@ function getDeploymentErrorDetails(
     deploymentResult ||
     {};
 
-
   const nestedError =
     source?.errorDetails ||
     source?.details ||
@@ -2860,43 +2604,33 @@ function getDeploymentErrorDetails(
     source?.data?.details ||
     null;
 
-
-  const message =
-    cleanString(
-      source?.error ||
-      source?.message ||
-      nestedError?.message ||
-      "Deployment failed.",
-      4000
-    );
-
-
-  const code =
-    cleanString(
-      source?.code ||
-      nestedError?.code ||
-      "DEPLOYMENT_FAILED",
-      200
-    );
-
-
-  const type =
-    cleanString(
-      source?.errorType ||
-      source?.type ||
-      nestedError?.type ||
-      "deployment_error",
-      200
-    );
-
-
   return {
 
-    message,
+    message:
+      cleanString(
+        source?.error ||
+        source?.message ||
+        nestedError?.message ||
+        "Deployment failed.",
+        4000
+      ),
 
-    code,
+    code:
+      cleanString(
+        source?.code ||
+        nestedError?.code ||
+        "DEPLOYMENT_FAILED",
+        200
+      ),
 
-    type,
+    type:
+      cleanString(
+        source?.errorType ||
+        source?.type ||
+        nestedError?.type ||
+        "deployment_error",
+        200
+      ),
 
     stage:
       cleanString(
@@ -2918,7 +2652,7 @@ function getDeploymentErrorDetails(
 
 
 /* =========================================================
-   AUTO FIX TRIGGER
+   AUTO FIX FROM DEPLOYMENT FAILURE
 ========================================================= */
 
 async function triggerAutoFixFromDeploymentFailure(
@@ -2937,9 +2671,7 @@ async function triggerAutoFixFromDeploymentFailure(
     );
 
 
-  if (
-    !deploymentId
-  ) {
+  if (!deploymentId) {
 
     return {
 
@@ -2952,38 +2684,11 @@ async function triggerAutoFixFromDeploymentFailure(
       eligible:
         false,
 
-      message:
-        "Auto Fix trigger skipped because deployment ID is missing.",
-
       error:
-        "DEPLOYMENT_ID_MISSING"
-
-    };
-
-  }
-
-
-  if (
-    typeof logAgent !==
-    "function"
-  ) {
-
-    return {
-
-      success:
-        false,
-
-      triggered:
-        false,
-
-      eligible:
-        false,
+        "DEPLOYMENT_ID_MISSING",
 
       message:
-        "Auto Fix trigger unavailable because Log Agent is not callable.",
-
-      error:
-        "LOG_AGENT_UNAVAILABLE"
+        "Auto Fix skipped because deployment ID is missing."
 
     };
 
@@ -2996,97 +2701,9 @@ async function triggerAutoFixFromDeploymentFailure(
     );
 
 
-  const fixRequest = {
-
-    workflowId:
-      workflowState.workflowId,
-
-    requestId:
-      workflowState.requestId,
-
-    deploymentId,
-
-    projectId:
-      workflowState.projectId,
-
-    projectName:
-      workflowState.projectName ||
-      getProjectName(
-        request,
-        planningData
-      ),
-
-    userId:
-      workflowState.userId,
-
-    environmentName:
-      workflowState.environmentName,
-
-    prompt:
-      cleanString(
-        request?.prompt,
-        MAX_PROMPT_LENGTH
-      ),
-
-    error: {
-
-      message:
-        errorDetails.message,
-
-      code:
-        errorDetails.code,
-
-      type:
-        errorDetails.type,
-
-      stage:
-        errorDetails.stage,
-
-      details:
-        errorDetails.details
-
-    },
-
-    intent:
-      sanitizeForContext(
-        intent
-      ),
-
-    planning:
-      sanitizeForContext(
-        planningData
-      ),
-
-    buildResult:
-      sanitizeForContext(
-        buildResult
-      ),
-
-    deploymentResult:
-      sanitizeForContext(
-        deploymentResult
-      ),
-
-    files:
-      sanitizeForContext(
-        getProjectFiles(
-          request,
-          buildResult
-        )
-      ),
-
-    source:
-      "masterAgent",
-
-    trigger:
-      "deployment_failure"
-
-  };
-
-
   try {
 
-    const errorRecordResult =
+    const logResult =
       await runAgent(
 
         workflowState,
@@ -3126,27 +2743,8 @@ async function triggerAutoFixFromDeploymentFailure(
 
 
     if (
-      !isSuccessful(
-        errorRecordResult
-      )
+      !isSuccessful(logResult)
     ) {
-
-      logWarn(
-        "Deployment failure recorded unsuccessfully. Auto Fix eligibility cannot be trusted.",
-        {
-          workflowId:
-            workflowState.workflowId,
-
-          deploymentId,
-
-          error:
-            getAgentError(
-              errorRecordResult
-            )
-
-        }
-      );
-
 
       return {
 
@@ -3161,16 +2759,13 @@ async function triggerAutoFixFromDeploymentFailure(
 
         deploymentId,
 
-        message:
-          "Deployment failed and Log Agent could not establish Auto Fix eligibility.",
-
         error:
           getAgentError(
-            errorRecordResult
+            logResult
           ),
 
-        logResult:
-          errorRecordResult
+        message:
+          "Deployment failed and error logging could not establish Auto Fix eligibility."
 
       };
 
@@ -3208,86 +2803,80 @@ async function triggerAutoFixFromDeploymentFailure(
           error:
             errorDetails,
 
-          fixRequest,
+          fixRequest: {
 
-          environmentName:
-            workflowState.environmentName
+            workflowId:
+              workflowState.workflowId,
+
+            requestId:
+              workflowState.requestId,
+
+            deploymentId,
+
+            projectId:
+              workflowState.projectId,
+
+            projectName:
+              workflowState.projectName ||
+              getProjectName(
+                request,
+                planningData
+              ),
+
+            userId:
+              workflowState.userId,
+
+            environmentName:
+              workflowState.environmentName,
+
+            prompt:
+              cleanString(
+                request.prompt,
+                MAX_PROMPT_LENGTH
+              ),
+
+            error:
+              errorDetails,
+
+            intent:
+              sanitizeForContext(
+                intent
+              ),
+
+            planning:
+              sanitizeForContext(
+                planningData
+              ),
+
+            buildResult:
+              sanitizeForContext(
+                buildResult
+              ),
+
+            deploymentResult:
+              sanitizeForContext(
+                deploymentResult
+              ),
+
+            files:
+              sanitizeForContext(
+                getProjectFiles(
+                  request,
+                  buildResult
+                )
+              ),
+
+            source:
+              "masterAgent",
+
+            trigger:
+              "deployment_failure"
+
+          }
 
         }
 
       );
-
-
-    if (
-      !isSuccessful(
-        autoFixResult
-      )
-    ) {
-
-      const eligible =
-        autoFixResult?.eligible === true ||
-        autoFixResult?.data?.eligible === true;
-
-
-      if (
-        !eligible
-      ) {
-
-        return {
-
-          success:
-            true,
-
-          triggered:
-            false,
-
-          eligible:
-            false,
-
-          deploymentId,
-
-          message:
-            "Deployment failed. Auto Fix was not triggered because the error was not eligible.",
-
-          logResult:
-            errorRecordResult,
-
-          autoFixResult
-
-        };
-
-      }
-
-
-      return {
-
-        success:
-          false,
-
-        triggered:
-          false,
-
-        eligible:
-          true,
-
-        deploymentId,
-
-        message:
-          "Deployment failure was eligible for Auto Fix, but the trigger failed.",
-
-        error:
-          getAgentError(
-            autoFixResult
-          ),
-
-        logResult:
-          errorRecordResult,
-
-        autoFixResult
-
-      };
-
-    }
 
 
     const triggered =
@@ -3297,27 +2886,12 @@ async function triggerAutoFixFromDeploymentFailure(
       autoFixResult?.data?.autoFixTriggered === true;
 
 
-    if (
-      triggered
-    ) {
-
-      logSuccess(
-        "Auto Fix Triggered",
-        {
-          workflowId:
-            workflowState.workflowId,
-
-          deploymentId
-        }
-      );
-
-    }
-
-
     return {
 
       success:
-        true,
+        isSuccessful(
+          autoFixResult
+        ),
 
       triggered,
 
@@ -3326,13 +2900,7 @@ async function triggerAutoFixFromDeploymentFailure(
 
       deploymentId,
 
-      message:
-        triggered
-          ? "Deployment failure recorded and Auto Fix triggered."
-          : "Deployment failure recorded but Auto Fix was not executed.",
-
-      logResult:
-        errorRecordResult,
+      logResult,
 
       autoFixResult
 
@@ -3347,22 +2915,6 @@ async function triggerAutoFixFromDeploymentFailure(
         error
       );
 
-
-    logError(
-      "Auto Fix Trigger Exception",
-      {
-        workflowId:
-          workflowState.workflowId,
-
-        deploymentId,
-
-        error:
-          normalized.message
-
-      }
-    );
-
-
     return {
 
       success:
@@ -3375,9 +2927,6 @@ async function triggerAutoFixFromDeploymentFailure(
         false,
 
       deploymentId,
-
-      message:
-        "Deployment failed and Auto Fix trigger encountered an exception.",
 
       error:
         normalized.message
@@ -3405,8 +2954,7 @@ async function runAgent(
 
 
   if (
-    typeof agent !==
-    "function"
+    typeof agent !== "function"
   ) {
 
     const failure = {
@@ -3429,7 +2977,6 @@ async function runAgent(
       failure,
       "failed"
     );
-
 
     return failure;
 
@@ -3461,9 +3008,7 @@ async function runAgent(
 
 
     if (
-      isSuccessful(
-        result
-      )
+      isSuccessful(result)
     ) {
 
       recordStage(
@@ -3485,9 +3030,7 @@ async function runAgent(
         }
       );
 
-    }
-
-    else {
+    } else {
 
       recordStage(
         workflow,
@@ -3587,10 +3130,8 @@ async function masterAgent(
   const startedAt =
     Date.now();
 
-
   let currentStage =
     "request-normalization";
-
 
   let normalizedRequest =
     null;
@@ -3614,6 +3155,9 @@ async function masterAgent(
     null;
 
   let buildResult =
+    null;
+
+  let buildValidation =
     null;
 
   let fixResult =
@@ -3658,7 +3202,7 @@ async function masterAgent(
 
 
     /* =====================================================
-       REQUEST NORMALIZATION
+       REQUEST
     ===================================================== */
 
     normalizedRequest =
@@ -3759,23 +3303,6 @@ async function masterAgent(
       );
 
 
-    if (
-      !isSuccessful(
-        memoryContext
-      )
-    ) {
-
-      logWarn(
-        "Memory unavailable. Continuing without memory.",
-        {
-          workflowId:
-            workflowState.workflowId
-        }
-      );
-
-    }
-
-
     /* =====================================================
        INTENT
     ===================================================== */
@@ -3819,21 +3346,11 @@ async function masterAgent(
 
 
     if (
-      !isSuccessful(
-        intent
-      )
+      !isSuccessful(intent)
     ) {
 
       workflowState.status =
         "failed";
-
-      workflowState.metrics.completedAt =
-        new Date();
-
-      workflowState.metrics.durationMs =
-        Date.now() -
-        startedAt;
-
 
       return {
 
@@ -3860,12 +3377,11 @@ async function masterAgent(
 
 
     /* =====================================================
-       EXPLICIT TYPE OVERRIDES
+       EXPLICIT OVERRIDES
     ===================================================== */
 
     if (
-      normalizedRequest.type ===
-      "code"
+      normalizedRequest.type === "code"
     ) {
 
       intent = {
@@ -3892,8 +3408,7 @@ async function masterAgent(
 
 
     if (
-      normalizedRequest.type ===
-      "deploy"
+      normalizedRequest.type === "deploy"
     ) {
 
       intent = {
@@ -3920,8 +3435,7 @@ async function masterAgent(
 
 
     if (
-      normalizedRequest.type ===
-      "environment"
+      normalizedRequest.type === "environment"
     ) {
 
       intent = {
@@ -3948,7 +3462,7 @@ async function masterAgent(
 
 
     /* =====================================================
-       WORKFLOW DECISION
+       WORKFLOW
     ===================================================== */
 
     currentStage =
@@ -4007,27 +3521,21 @@ async function masterAgent(
         type:
           workflow.type,
 
-        github:
-          workflow.requiresGithub,
-
-        githubDeployment:
-          workflow.requiresGithubDeployment,
-
         build:
           workflow.requiresBuild,
 
         deploy:
           workflow.requiresDeploy,
 
-        environment:
-          workflowState.environmentName
+        github:
+          workflow.requiresGithub
 
       }
     );
 
 
     /* =====================================================
-       ENVIRONMENT OPERATIONS
+       ENVIRONMENT OPERATION
     ===================================================== */
 
     if (
@@ -4037,7 +3545,7 @@ async function masterAgent(
     ) {
 
       currentStage =
-        "environment-agent";
+        "environment";
 
 
       environmentResult =
@@ -4088,7 +3596,6 @@ async function masterAgent(
         workflowState.status =
           "failed";
 
-
         return {
 
           success:
@@ -4119,9 +3626,6 @@ async function masterAgent(
 
     /* =====================================================
        GITHUB
-       -----------------------------------------------------
-       GitHub Agent is responsible for GitHub operations.
-       Master only orchestrates it.
     ===================================================== */
 
     if (
@@ -4130,24 +3634,6 @@ async function masterAgent(
 
       currentStage =
         "github";
-
-
-      const githubPayload =
-        getGithubContext(
-
-          normalizedRequest,
-
-          workflowState,
-
-          intent,
-
-          planningData,
-
-          memoryContext,
-
-          buildResult
-
-        );
 
 
       githubResult =
@@ -4159,7 +3645,21 @@ async function masterAgent(
 
           githubAgent,
 
-          githubPayload
+          getGithubContext(
+
+            normalizedRequest,
+
+            workflowState,
+
+            intent,
+
+            planningData,
+
+            memoryContext,
+
+            buildResult
+
+          )
 
         );
 
@@ -4172,7 +3672,6 @@ async function masterAgent(
 
         workflowState.status =
           "failed";
-
 
         return {
 
@@ -4192,8 +3691,6 @@ async function masterAgent(
 
           workflow:
             workflowState,
-
-          intent,
 
           githubResult
 
@@ -4261,7 +3758,6 @@ async function masterAgent(
         workflowState.status =
           "failed";
 
-
         return {
 
           success:
@@ -4299,7 +3795,7 @@ async function masterAgent(
 
 
     /* =====================================================
-       GITHUB DEPLOYMENT CONTRACT / PREPARATION
+       GITHUB DEPLOYMENT
     ===================================================== */
 
     if (
@@ -4347,14 +3843,13 @@ async function masterAgent(
         workflowState.status =
           "failed";
 
-
         return {
 
           success:
             false,
 
           message:
-            "GitHub Deployment preparation failed",
+            "GitHub deployment preparation failed",
 
           error:
             getAgentError(
@@ -4366,8 +3861,6 @@ async function masterAgent(
 
           workflow:
             workflowState,
-
-          intent,
 
           githubResult,
 
@@ -4382,7 +3875,7 @@ async function masterAgent(
 
     /* =====================================================
        BUILD
-    ===================================================== */
+       ===================================================== */
 
     if (
       workflow.requiresBuild
@@ -4396,7 +3889,6 @@ async function masterAgent(
 
         workflowState.status =
           "failed";
-
 
         return {
 
@@ -4421,6 +3913,10 @@ async function masterAgent(
 
       }
 
+
+      /* ---------------------------------------------------
+         BUILDER
+      --------------------------------------------------- */
 
       currentStage =
         "builder";
@@ -4471,19 +3967,18 @@ async function masterAgent(
         );
 
 
-      const buildValidation =
+      const builderContract =
         validateBuildResult(
           buildResult
         );
 
 
       if (
-        !buildValidation.valid
+        !builderContract.valid
       ) {
 
         workflowState.status =
           "failed";
-
 
         return {
 
@@ -4491,18 +3986,16 @@ async function masterAgent(
             false,
 
           message:
-            "Build failed",
+            "Build generation failed",
 
           error:
-            buildValidation.error,
+            builderContract.error,
 
           stage:
             currentStage,
 
           workflow:
             workflowState,
-
-          intent,
 
           planning,
 
@@ -4513,14 +4006,112 @@ async function masterAgent(
       }
 
 
+      /* ---------------------------------------------------
+         STATIC BUILD VALIDATION
+      --------------------------------------------------- */
+
+      currentStage =
+        "build-validation";
+
+
+      buildValidation =
+        await validateGeneratedBuild(
+
+          workflowState,
+
+          normalizedRequest,
+
+          planningData,
+
+          buildResult
+
+        );
+
+
+      workflowState.buildValidation =
+        sanitizeForContext(
+          buildValidation
+        );
+
+
+      recordStage(
+        workflowState,
+        "build-validation",
+        buildValidation,
+        buildValidation.ready
+          ? "completed"
+          : "failed"
+      );
+
+
+      if (
+        !buildValidation.ready
+      ) {
+
+        workflowState.status =
+          "failed";
+
+
+        logError(
+          "Build Validation Failed",
+          {
+            workflowId:
+              workflowState.workflowId,
+
+            errors:
+              buildValidation.errors,
+
+            error:
+              buildValidation.error ||
+              "Generated project failed static validation."
+
+          }
+        );
+
+
+        return {
+
+          success:
+            false,
+
+          message:
+            "Build validation failed",
+
+          error:
+            buildValidation.error ||
+            "Generated project failed validation.",
+
+          stage:
+            "build-validation",
+
+          workflow:
+            workflowState,
+
+          planning,
+
+          buildResult,
+
+          buildValidation
+
+        };
+
+      }
+
+
       logSuccess(
-        "Build Gate Passed",
+        "Build Validation Passed",
         {
           workflowId:
             workflowState.workflowId,
 
           fileCount:
-            buildValidation.files.length
+            buildValidation.fileCount,
+
+          mode:
+            buildValidation.mode,
+
+          authoritative:
+            buildValidation.authoritative
 
         }
       );
@@ -4593,7 +4184,6 @@ async function masterAgent(
 
         workflowState.status =
           "failed";
-
 
         return {
 
@@ -4688,7 +4278,6 @@ async function masterAgent(
 
         workflowState.status =
           "failed";
-
 
         return {
 
@@ -4799,19 +4388,18 @@ async function masterAgent(
       workflow.requiresSubscription
     ) {
 
-      const subscriptionGate =
+      const gate =
         canProcessSubscription(
           normalizedRequest
         );
 
 
       if (
-        !subscriptionGate.allowed
+        !gate.allowed
       ) {
 
         workflowState.status =
           "failed";
-
 
         return {
 
@@ -4822,7 +4410,7 @@ async function masterAgent(
             "Subscription operation blocked",
 
           error:
-            subscriptionGate.reason,
+            gate.reason,
 
           stage:
             "subscription-gate",
@@ -4905,20 +4493,15 @@ async function masterAgent(
 
     /* =====================================================
        DEPLOYMENT
-       -----------------------------------------------------
-       FULL DEPLOYMENT GATE:
-       1. Build gate
-       2. Environment readiness
-       3. Environment snapshot
-       4. Deploy Agent
-       5. Environment deployment state
-       6. Deployment failure logging
-       7. Auto Fix eligibility / trigger
     ===================================================== */
 
     if (
       workflow.requiresDeploy
     ) {
+
+      /* ---------------------------------------------------
+         BUILD GATE
+      --------------------------------------------------- */
 
       currentStage =
         "deployment-build-gate";
@@ -4926,8 +4509,13 @@ async function masterAgent(
 
       const buildGate =
         canDeployAfterBuild(
+
           workflow,
-          buildResult
+
+          buildResult,
+
+          buildValidation
+
         );
 
 
@@ -4937,15 +4525,6 @@ async function masterAgent(
 
         workflowState.status =
           "failed";
-
-
-        logError(
-          "Deployment blocked by build gate",
-          {
-            reason:
-              buildGate.reason
-          }
-        );
 
 
         return {
@@ -4965,12 +4544,18 @@ async function masterAgent(
           workflow:
             workflowState,
 
-          buildResult
+          buildResult,
+
+          buildValidation
 
         };
 
       }
 
+
+      /* ---------------------------------------------------
+         ENVIRONMENT GATE
+      --------------------------------------------------- */
 
       currentStage =
         "deployment-environment-gate";
@@ -4978,9 +4563,13 @@ async function masterAgent(
 
       const environmentGate =
         await checkEnvironmentGate(
+
           workflow,
+
           normalizedRequest,
+
           workflowState
+
         );
 
 
@@ -4990,7 +4579,6 @@ async function masterAgent(
 
         workflowState.status =
           "failed";
-
 
         return {
 
@@ -5006,13 +4594,12 @@ async function masterAgent(
           stage:
             currentStage,
 
-          environment:
-            environmentGate.environment,
-
           workflow:
             workflowState,
 
           buildResult,
+
+          buildValidation,
 
           environmentResult:
             environmentGate.result ||
@@ -5028,15 +4615,21 @@ async function masterAgent(
         null;
 
 
+      /* ---------------------------------------------------
+         ENVIRONMENT SNAPSHOT
+      --------------------------------------------------- */
+
       currentStage =
         "deployment-environment-snapshot";
 
 
       const snapshotResult =
         await createEnvironmentSnapshot(
-          normalizedRequest,
+
           workflowState,
+
           environmentGate.environment
+
         );
 
 
@@ -5048,7 +4641,6 @@ async function masterAgent(
 
         workflowState.status =
           "failed";
-
 
         return {
 
@@ -5077,6 +4669,10 @@ async function masterAgent(
 
       }
 
+
+      /* ---------------------------------------------------
+         DEPLOY
+      --------------------------------------------------- */
 
       currentStage =
         "deploy";
@@ -5194,9 +4790,9 @@ async function masterAgent(
         );
 
 
-      /* ===================================================
+      /* ---------------------------------------------------
          DEPLOYMENT FAILURE
-      =================================================== */
+      --------------------------------------------------- */
 
       if (
         !isSuccessful(
@@ -5261,6 +4857,8 @@ async function masterAgent(
 
           buildResult,
 
+          buildValidation,
+
           environmentResult,
 
           deploymentResult,
@@ -5272,9 +4870,9 @@ async function masterAgent(
       }
 
 
-      /* ===================================================
-         ENVIRONMENT DEPLOYMENT STATE
-      =================================================== */
+      /* ---------------------------------------------------
+         ENVIRONMENT DEPLOYED
+      --------------------------------------------------- */
 
       currentStage =
         "environment-deployed";
@@ -5282,9 +4880,13 @@ async function masterAgent(
 
       const environmentDeployedResult =
         await markEnvironmentDeployed(
+
           workflowState,
+
           environmentGate.environment,
+
           deploymentResult
+
         );
 
 
@@ -5315,17 +4917,17 @@ async function masterAgent(
       }
 
 
-      const deploymentId =
-        getDeploymentId(
-          deploymentResult,
-          projectId
-        );
-
-
       logSuccess(
         "Deployment Gate Passed",
         {
-          deploymentId,
+          workflowId:
+            workflowState.workflowId,
+
+          deploymentId:
+            getDeploymentId(
+              deploymentResult,
+              projectId
+            ),
 
           environment:
             environmentGate.environment
@@ -5364,11 +4966,11 @@ async function masterAgent(
           success:
             false,
 
-          message:
-            "Deployment or project ID required for monitoring",
-
           error:
-            "DEPLOYMENT_ID_MISSING"
+            "DEPLOYMENT_ID_MISSING",
+
+          message:
+            "Deployment or project ID required for monitoring."
 
         };
 
@@ -5380,9 +4982,7 @@ async function masterAgent(
           "failed"
         );
 
-      }
-
-      else {
+      } else {
 
         monitoringResult =
           await runAgent(
@@ -5462,11 +5062,11 @@ async function masterAgent(
           success:
             false,
 
-          message:
-            "Deployment or project ID required for scaling",
-
           error:
-            "DEPLOYMENT_ID_MISSING"
+            "DEPLOYMENT_ID_MISSING",
+
+          message:
+            "Deployment or project ID required for scaling."
 
         };
 
@@ -5478,9 +5078,7 @@ async function masterAgent(
           "failed"
         );
 
-      }
-
-      else {
+      } else {
 
         scalingResult =
           await runAgent(
@@ -5533,7 +5131,7 @@ async function masterAgent(
 
 
     /* =====================================================
-       WORKFLOW COMPLETION
+       COMPLETE
     ===================================================== */
 
     workflowState.currentStage =
@@ -5542,7 +5140,7 @@ async function masterAgent(
 
     workflowState.status =
       workflowState.status ===
-        "degraded"
+      "degraded"
         ? "degraded"
         : "completed";
 
@@ -5550,13 +5148,14 @@ async function masterAgent(
     workflowState.metrics.completedAt =
       new Date();
 
+
     workflowState.metrics.durationMs =
       Date.now() -
       startedAt;
 
 
     /* =====================================================
-       ORCHESTRATION SNAPSHOT
+       ORCHESTRATION
     ===================================================== */
 
     const orchestration = {
@@ -5598,6 +5197,11 @@ async function masterAgent(
       buildResult:
         sanitizeForContext(
           buildResult
+        ),
+
+      buildValidation:
+        sanitizeForContext(
+          buildValidation
         ),
 
       deploymentResult:
@@ -5658,7 +5262,7 @@ async function masterAgent(
 
 
     /* =====================================================
-       FINAL COMMUNICATION
+       FINAL AI RESPONSE
     ===================================================== */
 
     currentStage =
@@ -5687,69 +5291,32 @@ You are the final communication layer of ZyrionOS.
 
 The Master Agent has already executed the workflow.
 
-Your ONLY job is to explain the actual backend results.
-
 The backend is the source of truth.
 
-STRICT RULES:
+Rules:
 
-1. Never invent a result.
-
-2. Never invent a deployment URL.
-
-3. Never invent payment success.
-
-4. Never invent subscription entitlement.
-
-5. Never invent AWS resources.
-
-6. Never invent Docker results.
-
-7. Never invent monitoring results.
-
-8. Never invent scaling results.
-
-9. Never expose secrets.
-
-10. Never expose API keys.
-
-11. Never expose tokens.
-
-12. Never expose passwords.
-
-13. Never expose environment variable values.
-
-14. Never claim build success unless buildResult.success=true.
-
-15. Never claim deployment success unless deploymentResult.success=true.
-
-16. Never claim environment readiness unless the
-    environment gate passed.
-
-17. Never claim GitHub operation success unless
-    githubResult.success=true.
-
-18. Never claim GitHub deployment preparation
-    success unless githubDeploymentResult.success=true.
-
-19. If something failed, clearly state that it failed.
-
-20. If something is unavailable, state that it is unavailable.
-
-21. If Auto Fix was triggered, clearly state that
-    Auto Fix was triggered, but do not claim that
-    the deployment has already been repaired.
-
-22. Use the exact deployment URL returned by the backend.
-
-23. Never construct a URL yourself.
-
-24. Keep the response concise and useful.
-
-25. Do not explain internal implementation unless
-    necessary.
-
-26. Do not claim that an agent ran when it was skipped.
+1. Never invent results.
+2. Never invent URLs.
+3. Never invent deployment success.
+4. Never invent payment success.
+5. Never invent subscription entitlement.
+6. Never invent AWS resources.
+7. Never expose secrets.
+8. Never expose API keys.
+9. Never expose tokens.
+10. Never expose passwords.
+11. Never claim build success unless buildResult.success=true AND buildValidation.ready=true.
+12. Never claim deployment success unless deploymentResult.success=true.
+13. Never claim environment readiness unless its gate passed.
+14. Never claim GitHub success unless githubResult.success=true.
+15. Never claim GitHub deployment preparation success unless githubDeploymentResult.success=true.
+16. If something failed, clearly state it failed.
+17. If Auto Fix was triggered, say it was triggered but do not claim the issue is already repaired.
+18. Use only the exact deployment URL returned by the backend.
+19. Never construct URLs.
+20. Keep the answer concise.
+21. Never expose internal secrets or credentials.
+22. Never claim that an agent ran when it was skipped.
 
 `
 
@@ -5769,7 +5336,7 @@ ${cleanString(
   MAX_PROMPT_LENGTH
 )}
 
-FINAL WORKFLOW STATE:
+WORKFLOW:
 
 ${safeJson(
   workflowState
@@ -5787,13 +5354,25 @@ ${safeJson(
   planning
 )}
 
-GITHUB RESULT:
+BUILD:
+
+${safeJson(
+  buildResult
+)}
+
+BUILD VALIDATION:
+
+${safeJson(
+  buildValidation
+)}
+
+GITHUB:
 
 ${safeJson(
   githubResult
 )}
 
-GITHUB DEPLOYMENT RESULT:
+GITHUB DEPLOYMENT:
 
 ${safeJson(
   githubDeploymentResult
@@ -5805,55 +5384,49 @@ ${safeJson(
   environmentResult
 )}
 
-BUILD RESULT:
-
-${safeJson(
-  buildResult
-)}
-
-DEPLOYMENT RESULT:
+DEPLOYMENT:
 
 ${safeJson(
   deploymentResult
 )}
 
-AUTO FIX RESULT:
+AUTO FIX:
 
 ${safeJson(
   autoFixResult
 )}
 
-BILLING RESULT:
+BILLING:
 
 ${safeJson(
   billingResult
 )}
 
-SUBSCRIPTION RESULT:
+SUBSCRIPTION:
 
 ${safeJson(
   subscriptionResult
 )}
 
-MONITORING RESULT:
+MONITORING:
 
 ${safeJson(
   monitoringResult
 )}
 
-SCALING RESULT:
+SCALING:
 
 ${safeJson(
   scalingResult
 )}
 
-FIX RESULT:
+FIX:
 
 ${safeJson(
   fixResult
 )}
 
-FILE RESULT:
+FILE:
 
 ${safeJson(
   fileResult
@@ -5872,8 +5445,7 @@ ${safeJson(
 
 
       if (
-        completion?.success ===
-        true
+        completion?.success === true
       ) {
 
         reply =
@@ -5885,14 +5457,14 @@ ${safeJson(
       }
 
     } catch (
-      finalResponseError
+      error
     ) {
 
       logWarn(
-        "Final communication AI failed. Using deterministic response.",
+        "Final communication generation failed.",
         {
           error:
-            finalResponseError.message
+            error.message
         }
       );
 
@@ -5903,23 +5475,15 @@ ${safeJson(
        DETERMINISTIC FALLBACK
     ===================================================== */
 
-    if (
-      !reply
-    ) {
+    if (!reply) {
 
       const completed =
         workflowState.completedStages
-          .join(
-            ", "
-          );
-
+          .join(", ");
 
       const failed =
         workflowState.failedStages
-          .join(
-            ", "
-          );
-
+          .join(", ");
 
       const deploymentUrl =
         deploymentResult?.deployment?.url ||
@@ -5938,6 +5502,10 @@ ${safeJson(
 
           failed
             ? `Failed: ${failed}.`
+            : "",
+
+          buildValidation?.ready
+            ? "Build validation passed."
             : "",
 
           githubResult?.success
@@ -6081,6 +5649,16 @@ ${safeJson(
             planning
           ),
 
+        buildResult:
+          sanitizeForContext(
+            buildResult
+          ),
+
+        buildValidation:
+          sanitizeForContext(
+            buildValidation
+          ),
+
         githubResult:
           sanitizeForContext(
             githubResult
@@ -6094,11 +5672,6 @@ ${safeJson(
         environment:
           sanitizeForContext(
             environmentResult
-          ),
-
-        buildResult:
-          sanitizeForContext(
-            buildResult
           ),
 
         deploymentResult:
@@ -6151,20 +5724,17 @@ ${safeJson(
 
 
 /* =========================================================
-   MASTER METADATA
+   METADATA
 ========================================================= */
 
 masterAgent.version =
   MASTER_VERSION;
 
-
 masterAgent.agentName =
   "masterAgent";
 
-
 masterAgent.agents =
   agentRegistry;
-
 
 masterAgent.agentCount =
   Object.keys(
@@ -6181,208 +5751,113 @@ masterAgent.ownership = {
   master: [
 
     "request_normalization",
-
     "intent_routing",
-
     "workflow_orchestration",
-
     "dependency_enforcement",
-
+    "build_validation_gates",
     "environment_gates",
-
-    "build_gates",
-
     "github_workflow_coordination",
-
-    "github_deployment_coordination",
-
     "deployment_gates",
-
     "deployment_failure_logging",
-
     "auto_fix_trigger_coordination",
-
     "failure_propagation",
-
     "final_result_aggregation"
 
   ],
 
-
   memory: [
-
     "context_memory"
-
   ],
-
 
   intent: [
-
     "intent_classification"
-
   ],
-
 
   planning: [
-
     "implementation_planning",
-
     "dependency_planning",
-
     "project_decomposition"
-
   ],
-
 
   builder: [
-
     "project_file_generation"
-
   ],
-
 
   fix: [
-
     "bug_analysis",
-
     "bug_repair"
-
   ],
-
 
   file: [
-
     "file_operations"
-
   ],
-
 
   environment: [
-
     "environment_configuration",
-
     "environment_validation",
-
     "environment_secret_boundary",
-
     "deployment_environment_state"
-
   ],
-
 
   log: [
-
     "deployment_logging",
-
     "deployment_error_recording",
-
     "auto_fix_eligibility",
-
     "auto_fix_trigger"
-
   ],
-
 
   github: [
-
     "github_connection_operations",
-
     "repository_operations",
-
     "branch_operations",
-
     "repository_contents",
-
     "repository_analysis"
-
   ],
-
 
   githubDeployment: [
-
     "github_deployment_contract",
-
     "github_deployment_readiness",
-
-    "github_deployment_preparation",
-
-    "docker_handoff_preparation",
-
-    "aws_handoff_preparation",
-
-    "deployment_contract_sanitization"
-
+    "github_deployment_preparation"
   ],
-
 
   deploy: [
-
     "deployment_orchestration",
-
     "deployment_lifecycle",
-
     "deployment_result"
-
   ],
-
 
   docker: [
-
     "docker_operations"
-
   ],
-
 
   aws: [
-
     "aws_infrastructure"
-
   ],
-
 
   domain: [
-
     "dns_operations"
-
   ],
-
 
   ssl: [
-
     "certificate_operations"
-
   ],
-
 
   monitoring: [
-
     "runtime_monitoring"
-
   ],
-
 
   scaling: [
-
     "capacity_scaling"
-
   ],
-
 
   billing: [
-
     "billing_operations",
-
     "payment_state"
-
   ],
 
-
   subscription: [
-
     "subscription_state",
-
     "entitlements"
-
   ]
 
 };
@@ -6424,6 +5899,9 @@ masterAgent.security = {
   providerArchitecture:
     "centralized-ai-provider-service",
 
+  buildValidationArchitecture:
+    "centralized-build-validation-service",
+
   githubArchitecture:
     "github-agent-service-boundary",
 
@@ -6442,142 +5920,99 @@ masterAgent.workflowContract = {
   build: [
 
     "memory",
-
     "intent",
-
     "planning",
-
-    "builder"
+    "builder",
+    "build-validation"
 
   ],
-
 
   buildAndDeploy: [
 
     "memory",
-
     "intent",
-
     "planning",
-
     "builder",
-
+    "build-validation",
     "environment-readiness",
-
     "environment-snapshot",
-
     "deploy",
-
     "environment-deployed"
 
   ],
-
 
   deploy: [
 
     "memory",
-
     "intent",
-
     "environment-readiness",
-
     "environment-snapshot",
-
     "deploy",
-
     "deployment-error-log",
-
     "auto-fix-trigger",
-
     "environment-deployed"
 
   ],
-
 
   github: [
 
     "memory",
-
     "intent",
-
     "github"
 
   ],
 
-
   githubDeployment: [
 
     "memory",
-
     "intent",
-
     "github",
-
     "github-deployment",
-
+    "build-validation",
     "environment-readiness",
-
     "environment-snapshot",
-
     "deploy",
-
     "environment-deployed"
 
   ],
 
-
   deploymentFailure: [
 
     "deploy",
-
     "deployment-error-log",
-
     "auto-fix-trigger",
-
     "fix-agent-handoff"
 
   ],
 
-
   environment: [
 
     "memory",
-
     "intent",
-
     "environment"
 
   ],
 
-
   fix: [
 
     "memory",
-
     "intent",
-
     "fix"
 
   ],
 
-
   subscription: [
 
     "memory",
-
     "intent",
-
     "subscription"
 
   ],
 
-
   billing: [
 
     "memory",
-
     "intent",
-
     "billing"
 
   ]
