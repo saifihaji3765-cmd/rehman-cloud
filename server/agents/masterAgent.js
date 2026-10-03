@@ -3,11 +3,11 @@
  * ZYRIONOS MASTER AGENT
  * =========================================================
  *
- * Version: 5.3.0
+ * Version: 5.4.0
  *
  * Central Autonomous Orchestrator / CEO Control Plane
  *
- * IMPORTANT ARCHITECTURE
+ * ARCHITECTURE
  *
  * User Request
  *      ↓
@@ -23,7 +23,11 @@
  *      ↓
  * Builder
  *      ↓
- * Build Validation
+ * Static Build Validation
+ *      ↓
+ * Fix Agent (if validation fails)
+ *      ↓
+ * Re-Validation
  *      ↓
  * Deployment Gates
  *      ↓
@@ -36,7 +40,6 @@
  * Monitoring / Scaling
  *      ↓
  * Final Response
- *
  *
  * MASTER DOES NOT:
  *
@@ -191,7 +194,7 @@ const {
 ========================================================= */
 
 const MASTER_VERSION =
-  "5.3.0";
+  "5.4.0";
 
 const MAX_PROMPT_LENGTH =
   12000;
@@ -204,6 +207,18 @@ const MAX_AGENT_RESULTS =
 
 const MAX_FINAL_RESPONSE_TOKENS =
   1800;
+
+/*
+ * Build repair is intentionally bounded.
+ *
+ * One bad generation must not create an infinite:
+ *
+ * Builder → Fix → Validation → Fix → Validation
+ *
+ * loop.
+ */
+const MAX_BUILD_REPAIR_ROUNDS =
+  2;
 
 
 /* =========================================================
@@ -967,6 +982,23 @@ function createWorkflowState(
     buildValidation:
       null,
 
+    buildRepair:
+      {
+
+        attempted:
+          false,
+
+        rounds:
+          0,
+
+        maxRounds:
+          MAX_BUILD_REPAIR_ROUNDS,
+
+        status:
+          "not_started"
+
+      },
+
     metrics: {
 
       startedAt:
@@ -1707,6 +1739,283 @@ function validateBuildResult(
 
 
 /* =========================================================
+   EXTRACT FILES FROM FIX RESULT
+========================================================= */
+
+function extractFilesFromFixResult(
+  fixResult
+) {
+
+  const candidates = [
+
+    fixResult?.data?.files,
+
+    fixResult?.data?.changedFiles,
+
+    fixResult?.data?.repairedFiles,
+
+    fixResult?.files,
+
+    fixResult?.changedFiles,
+
+    fixResult?.repairedFiles
+
+  ];
+
+  for (
+    const candidate of candidates
+  ) {
+
+    if (
+      Array.isArray(candidate) &&
+      candidate.length > 0
+    ) {
+
+      return candidate;
+
+    }
+
+  }
+
+  return [];
+
+}
+
+
+/* =========================================================
+   FILE PATH
+========================================================= */
+
+function getFilePath(
+  file
+) {
+
+  if (
+    typeof file === "string"
+  ) {
+
+    return file;
+
+  }
+
+  if (
+    !file ||
+    typeof file !== "object"
+  ) {
+
+    return null;
+
+  }
+
+  return (
+    file.path ||
+    file.name ||
+    file.filePath ||
+    null
+  );
+
+}
+
+
+/* =========================================================
+   FILE CONTENT
+========================================================= */
+
+function getFileContent(
+  file
+) {
+
+  if (
+    typeof file === "string"
+  ) {
+
+    return null;
+
+  }
+
+  if (
+    !file ||
+    typeof file !== "object"
+  ) {
+
+    return null;
+
+  }
+
+  if (
+    typeof file.content === "string"
+  ) {
+
+    return file.content;
+
+  }
+
+  if (
+    typeof file.source === "string"
+  ) {
+
+    return file.source;
+
+  }
+
+  return null;
+
+}
+
+
+/* =========================================================
+   MERGE FIXED FILES
+========================================================= */
+
+function mergeFixedFiles(
+  originalFiles,
+  fixedFiles
+) {
+
+  if (
+    !Array.isArray(originalFiles)
+  ) {
+
+    return [];
+
+  }
+
+  if (
+    !Array.isArray(fixedFiles) ||
+    fixedFiles.length === 0
+  ) {
+
+    return originalFiles;
+
+  }
+
+  const merged =
+    originalFiles.map(
+      file => {
+
+        if (
+          typeof file !== "object" ||
+          file === null
+        ) {
+
+          return file;
+
+        }
+
+        return {
+          ...file
+        };
+
+      }
+    );
+
+  const indexByPath =
+    new Map();
+
+  for (
+    let index = 0;
+    index < merged.length;
+    index++
+  ) {
+
+    const path =
+      getFilePath(
+        merged[index]
+      );
+
+    if (path) {
+      indexByPath.set(
+        path,
+        index
+      );
+    }
+
+  }
+
+  for (
+    const fixedFile of fixedFiles
+  ) {
+
+    const path =
+      getFilePath(
+        fixedFile
+      );
+
+    if (!path) {
+      continue;
+    }
+
+    const content =
+      getFileContent(
+        fixedFile
+      );
+
+    if (
+      typeof content !== "string"
+    ) {
+
+      continue;
+
+    }
+
+    const existingIndex =
+      indexByPath.get(
+        path
+      );
+
+    if (
+      existingIndex !== undefined
+    ) {
+
+      const existing =
+        merged[existingIndex];
+
+      merged[existingIndex] = {
+
+        ...existing,
+
+        ...fixedFile,
+
+        path:
+          existing.path ||
+          fixedFile.path ||
+          path,
+
+        name:
+          existing.name ||
+          fixedFile.name ||
+          path,
+
+        content
+
+      };
+
+    } else {
+
+      merged.push({
+        ...fixedFile,
+        path,
+        name:
+          fixedFile.name ||
+          path,
+        content
+      });
+
+      indexByPath.set(
+        path,
+        merged.length - 1
+      );
+
+    }
+
+  }
+
+  return merged;
+
+}
+
+
+/* =========================================================
    BUILD VALIDATION
 ========================================================= */
 
@@ -1898,6 +2207,605 @@ async function validateGeneratedBuild(
 
 
 /* =========================================================
+   BUILD FAILURE CONTEXT
+========================================================= */
+
+function createBuildRepairContext(
+  workflowState,
+  request,
+  intent,
+  planningData,
+  buildResult,
+  buildValidation
+) {
+
+  return {
+
+    source:
+      "masterAgent",
+
+    trigger:
+      "build_validation_failure",
+
+    workflowId:
+      workflowState.workflowId,
+
+    requestId:
+      workflowState.requestId,
+
+    projectId:
+      workflowState.projectId,
+
+    projectName:
+      workflowState.projectName ||
+      getProjectName(
+        request,
+        planningData
+      ),
+
+    userId:
+      workflowState.userId,
+
+    prompt:
+      cleanString(
+        request.prompt,
+        MAX_PROMPT_LENGTH
+      ),
+
+    framework:
+      request.framework ||
+      planningData?.framework ||
+      planningData?.frontend?.framework ||
+      null,
+
+    intent:
+      sanitizeForContext(
+        intent
+      ),
+
+    planning:
+      sanitizeForContext(
+        planningData
+      ),
+
+    buildResult:
+      sanitizeForContext(
+        buildResult
+      ),
+
+    buildValidation:
+      sanitizeForContext(
+        buildValidation
+      ),
+
+    errors:
+      sanitizeForContext(
+        buildValidation?.errors ||
+        []
+      ),
+
+    warnings:
+      sanitizeForContext(
+        buildValidation?.warnings ||
+        []
+      ),
+
+    validationMode:
+      buildValidation?.mode ||
+      "static",
+
+    authoritative:
+      buildValidation?.authoritative === true,
+
+    repairRound:
+      workflowState.buildRepair?.rounds ||
+      0
+
+  };
+
+}
+
+
+/* =========================================================
+   BUILD → FIX → REVALIDATE LOOP
+========================================================= */
+
+async function validateAndRepairBuild(
+  workflowState,
+  request,
+  normalizedUser,
+  intent,
+  planningData,
+  initialBuildResult
+) {
+
+  let buildResult =
+    initialBuildResult;
+
+  let buildValidation =
+    await validateGeneratedBuild(
+
+      workflowState,
+
+      request,
+
+      planningData,
+
+      buildResult
+
+    );
+
+
+  workflowState.buildValidation =
+    sanitizeForContext(
+      buildValidation
+    );
+
+
+  recordStage(
+    workflowState,
+    "build-validation",
+    buildValidation,
+    buildValidation.ready
+      ? "completed"
+      : "failed"
+  );
+
+
+  if (
+    buildValidation.ready
+  ) {
+
+    workflowState.buildRepair.status =
+      "not_required";
+
+    return {
+
+      success:
+        true,
+
+      buildResult,
+
+      buildValidation,
+
+      repaired:
+        false,
+
+      repairRounds:
+        0
+
+    };
+
+  }
+
+
+  /*
+   * Validation failed.
+   *
+   * Now the Fix Agent receives the actual validator
+   * output instead of receiving only the original user
+   * prompt.
+   */
+
+  for (
+    let round = 1;
+    round <= MAX_BUILD_REPAIR_ROUNDS;
+    round++
+  ) {
+
+    workflowState.buildRepair.attempted =
+      true;
+
+    workflowState.buildRepair.rounds =
+      round;
+
+    workflowState.buildRepair.status =
+      "repairing";
+
+
+    currentStageForRepair:
+    {
+
+      /* Intentionally scoped block. */
+    }
+
+
+    const repairContext =
+      createBuildRepairContext(
+
+        workflowState,
+
+        request,
+
+        intent,
+
+        planningData,
+
+        buildResult,
+
+        buildValidation
+
+      );
+
+
+    const repairPayload = {
+
+      prompt:
+        request.prompt,
+
+      user:
+        normalizedUser,
+
+      userId:
+        workflowState.userId,
+
+      intent,
+
+      planning:
+        planningData,
+
+      memoryContext:
+        null,
+
+      projectId:
+        workflowState.projectId,
+
+      projectName:
+        workflowState.projectName ||
+        getProjectName(
+          request,
+          planningData
+        ),
+
+      workflowId:
+        workflowState.workflowId,
+
+      requestId:
+        workflowState.requestId,
+
+      files:
+        getProjectFiles(
+          request,
+          buildResult
+        ),
+
+      buildResult:
+        sanitizeForContext(
+          buildResult
+        ),
+
+      buildValidation:
+        sanitizeForContext(
+          buildValidation
+        ),
+
+      buildError:
+        buildValidation?.error ||
+        "Static build validation failed.",
+
+      validationErrors:
+        sanitizeForContext(
+          buildValidation?.errors ||
+          []
+        ),
+
+      validationWarnings:
+        sanitizeForContext(
+          buildValidation?.warnings ||
+          []
+        ),
+
+      repairContext:
+        sanitizeForContext(
+          repairContext
+        ),
+
+      repairRound:
+        round,
+
+      maxRepairRounds:
+        MAX_BUILD_REPAIR_ROUNDS,
+
+      source:
+        "masterAgent",
+
+      trigger:
+        "build_validation_failure"
+
+    };
+
+
+    const fixResult =
+      await runAgent(
+
+        workflowState,
+
+        `build-fix-${round}`,
+
+        fixAgent,
+
+        repairPayload
+
+      );
+
+
+    if (
+      !isSuccessful(
+        fixResult
+      )
+    ) {
+
+      workflowState.buildRepair.status =
+        "failed";
+
+      return {
+
+        success:
+          false,
+
+        buildResult,
+
+        buildValidation,
+
+        fixResult,
+
+        repaired:
+          round > 0,
+
+        repairRounds:
+          round,
+
+        error:
+          getAgentError(
+            fixResult
+          )
+
+      };
+
+    }
+
+
+    const fixedFiles =
+      extractFilesFromFixResult(
+        fixResult
+      );
+
+
+    if (
+      fixedFiles.length === 0
+    ) {
+
+      workflowState.buildRepair.status =
+        "failed_no_files";
+
+      return {
+
+        success:
+          false,
+
+        buildResult,
+
+        buildValidation,
+
+        fixResult,
+
+        repaired:
+          false,
+
+        repairRounds:
+          round,
+
+        error:
+          "Fix Agent completed without returning repaired files."
+
+      };
+
+    }
+
+
+    const originalFiles =
+      getProjectFiles(
+        request,
+        buildResult
+      );
+
+
+    const mergedFiles =
+      mergeFixedFiles(
+        originalFiles,
+        fixedFiles
+      );
+
+
+    /*
+     * Important:
+     *
+     * We do NOT call Builder again.
+     *
+     * Builder generated the project.
+     * Fix Agent repairs the existing project.
+     * Master then validates the repaired project.
+     */
+
+    buildResult = {
+
+      ...buildResult,
+
+      success:
+        true,
+
+      data: {
+
+        ...(buildResult?.data || {}),
+
+        files:
+          mergedFiles
+
+      },
+
+      files:
+        mergedFiles,
+
+      metadata: {
+
+        ...(buildResult?.metadata || {}),
+
+        repaired:
+          true,
+
+        repairRound:
+          round,
+
+        repairedBy:
+          "fixAgent"
+
+      }
+
+    };
+
+
+    recordStage(
+      workflowState,
+      `build-fix-${round}`,
+      {
+
+        success:
+          true,
+
+        round,
+
+        changedFileCount:
+          fixedFiles.length,
+
+        totalFileCount:
+          mergedFiles.length
+
+      },
+      "completed"
+    );
+
+
+    /*
+     * Re-run the SAME validation layer against the
+     * repaired source.
+     */
+
+    buildValidation =
+      await validateGeneratedBuild(
+
+        workflowState,
+
+        request,
+
+        planningData,
+
+        buildResult
+
+      );
+
+
+    workflowState.buildValidation =
+      sanitizeForContext(
+        buildValidation
+      );
+
+
+    recordStage(
+      workflowState,
+      `build-revalidation-${round}`,
+      buildValidation,
+      buildValidation.ready
+        ? "completed"
+        : "failed"
+    );
+
+
+    if (
+      buildValidation.ready
+    ) {
+
+      workflowState.buildRepair.status =
+        "repaired";
+
+      return {
+
+        success:
+          true,
+
+        buildResult,
+
+        buildValidation,
+
+        fixResult,
+
+        repaired:
+          true,
+
+        repairRounds:
+          round
+
+      };
+
+    }
+
+
+    /*
+     * Validation still failed.
+     *
+     * If this was the final round, stop.
+     * Otherwise the next Fix Agent call receives the
+     * NEW validation errors.
+     */
+
+    logWarn(
+      "Build remains invalid after repair round.",
+      {
+
+        workflowId:
+          workflowState.workflowId,
+
+        round,
+
+        maxRounds:
+          MAX_BUILD_REPAIR_ROUNDS,
+
+        errors:
+          buildValidation.errors
+
+      }
+    );
+
+  }
+
+
+  workflowState.buildRepair.status =
+    "exhausted";
+
+
+  return {
+
+    success:
+      false,
+
+    buildResult,
+
+    buildValidation,
+
+    repaired:
+      true,
+
+    repairRounds:
+      MAX_BUILD_REPAIR_ROUNDS,
+
+    error:
+      "Build validation failed after the maximum repair rounds."
+
+  };
+
+}
+
+
+/* =========================================================
    DEPLOYMENT BUILD GATE
 ========================================================= */
 
@@ -1967,7 +2875,9 @@ function canDeployAfterBuild(
       true,
 
     reason:
-      "Build and static validation gates passed."
+      buildValidation.authoritative === true
+        ? "Build and authoritative validation gates passed."
+        : "Build and static validation gates passed."
 
   };
 
@@ -3875,7 +4785,7 @@ async function masterAgent(
 
     /* =====================================================
        BUILD
-       ===================================================== */
+    ===================================================== */
 
     if (
       workflow.requiresBuild
@@ -4007,19 +4917,23 @@ async function masterAgent(
 
 
       /* ---------------------------------------------------
-         STATIC BUILD VALIDATION
+         STATIC VALIDATION + AUTO REPAIR LOOP
       --------------------------------------------------- */
 
       currentStage =
         "build-validation";
 
 
-      buildValidation =
-        await validateGeneratedBuild(
+      const repairPipeline =
+        await validateAndRepairBuild(
 
           workflowState,
 
           normalizedRequest,
+
+          normalizedUser,
+
+          intent,
 
           planningData,
 
@@ -4028,24 +4942,25 @@ async function masterAgent(
         );
 
 
+      buildResult =
+        repairPipeline.buildResult;
+
+      buildValidation =
+        repairPipeline.buildValidation;
+
+      fixResult =
+        repairPipeline.fixResult ||
+        null;
+
+
       workflowState.buildValidation =
         sanitizeForContext(
           buildValidation
         );
 
 
-      recordStage(
-        workflowState,
-        "build-validation",
-        buildValidation,
-        buildValidation.ready
-          ? "completed"
-          : "failed"
-      );
-
-
       if (
-        !buildValidation.ready
+        !repairPipeline.success
       ) {
 
         workflowState.status =
@@ -4053,18 +4968,21 @@ async function masterAgent(
 
 
         logError(
-          "Build Validation Failed",
+          "Build Validation / Repair Pipeline Failed",
           {
             workflowId:
               workflowState.workflowId,
 
+            repairRounds:
+              repairPipeline.repairRounds,
+
             errors:
-              buildValidation.errors,
+              buildValidation?.errors,
 
             error:
-              buildValidation.error ||
-              "Generated project failed static validation."
-
+              repairPipeline.error ||
+              buildValidation?.error ||
+              "Generated project could not be validated."
           }
         );
 
@@ -4075,10 +4993,11 @@ async function masterAgent(
             false,
 
           message:
-            "Build validation failed",
+            "Build validation failed after repair attempts",
 
           error:
-            buildValidation.error ||
+            repairPipeline.error ||
+            buildValidation?.error ||
             "Generated project failed validation.",
 
           stage:
@@ -4091,7 +5010,9 @@ async function masterAgent(
 
           buildResult,
 
-          buildValidation
+          buildValidation,
+
+          fixResult
 
         };
 
@@ -4099,7 +5020,9 @@ async function masterAgent(
 
 
       logSuccess(
-        "Build Validation Passed",
+        repairPipeline.repaired
+          ? "Build Validation Passed After Auto Repair"
+          : "Build Validation Passed",
         {
           workflowId:
             workflowState.workflowId,
@@ -4111,7 +5034,10 @@ async function masterAgent(
             buildValidation.mode,
 
           authoritative:
-            buildValidation.authoritative
+            buildValidation.authoritative,
+
+          repairRounds:
+            repairPipeline.repairRounds
 
         }
       );
@@ -4120,7 +5046,7 @@ async function masterAgent(
 
 
     /* =====================================================
-       FIX
+       EXPLICIT FIX WORKFLOW
     ===================================================== */
 
     if (
@@ -4734,6 +5660,11 @@ async function masterAgent(
                 githubDeploymentResult
               ),
 
+            buildValidation:
+              sanitizeForContext(
+                buildValidation
+              ),
+
             workflowId:
               workflowState.workflowId,
 
@@ -5204,6 +6135,11 @@ async function masterAgent(
           buildValidation
         ),
 
+      buildRepair:
+        sanitizeForContext(
+          workflowState.buildRepair
+        ),
+
       deploymentResult:
         sanitizeForContext(
           deploymentResult
@@ -5317,6 +6253,9 @@ Rules:
 20. Keep the answer concise.
 21. Never expose internal secrets or credentials.
 22. Never claim that an agent ran when it was skipped.
+23. If buildRepair.attempted=true, report repair only when the repaired build validation passed.
+24. Never describe static validation as an authoritative production build.
+25. Never claim runtime success from static validation alone.
 
 `
 
@@ -5364,6 +6303,12 @@ BUILD VALIDATION:
 
 ${safeJson(
   buildValidation
+)}
+
+BUILD REPAIR:
+
+${safeJson(
+  workflowState.buildRepair
 )}
 
 GITHUB:
@@ -5505,7 +6450,16 @@ ${safeJson(
             : "",
 
           buildValidation?.ready
-            ? "Build validation passed."
+            ? (
+                buildValidation.authoritative === true
+                  ? "Build validation passed."
+                  : "Static build validation passed."
+              )
+            : "",
+
+          workflowState.buildRepair?.attempted &&
+          buildValidation?.ready
+            ? `Build repaired in ${workflowState.buildRepair.rounds} repair round(s).`
             : "",
 
           githubResult?.success
@@ -5659,6 +6613,11 @@ ${safeJson(
             buildValidation
           ),
 
+        buildRepair:
+          sanitizeForContext(
+            workflowState?.buildRepair
+          ),
+
         githubResult:
           sanitizeForContext(
             githubResult
@@ -5755,6 +6714,7 @@ masterAgent.ownership = {
     "workflow_orchestration",
     "dependency_enforcement",
     "build_validation_gates",
+    "build_repair_orchestration",
     "environment_gates",
     "github_workflow_coordination",
     "deployment_gates",
@@ -5906,7 +6866,10 @@ masterAgent.security = {
     "github-agent-service-boundary",
 
   autoFixArchitecture:
-    "log-agent-trigger-boundary"
+    "log-agent-trigger-boundary",
+
+  buildRepairArchitecture:
+    "master-validation-fix-revalidation-loop"
 
 };
 
@@ -5923,7 +6886,9 @@ masterAgent.workflowContract = {
     "intent",
     "planning",
     "builder",
-    "build-validation"
+    "build-validation",
+    "build-fix-*",
+    "build-revalidation-*"
 
   ],
 
@@ -5934,6 +6899,8 @@ masterAgent.workflowContract = {
     "planning",
     "builder",
     "build-validation",
+    "build-fix-*",
+    "build-revalidation-*",
     "environment-readiness",
     "environment-snapshot",
     "deploy",
@@ -5969,6 +6936,8 @@ masterAgent.workflowContract = {
     "github",
     "github-deployment",
     "build-validation",
+    "build-fix-*",
+    "build-revalidation-*",
     "environment-readiness",
     "environment-snapshot",
     "deploy",
