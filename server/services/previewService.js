@@ -1,1043 +1,375 @@
-const fs = require("fs");
-const fsp = require("fs/promises");
-const os = require("os");
-const path = require("path");
-const crypto = require("crypto");
-const { spawn } = require("child_process");
+// server/services/previewService.js
 
-const Project = require("../models/projectModel");
+"use strict";
+
+/**
+ * =========================================================
+ * ZYRION OS — PREVIEW SERVICE
+ * =========================================================
+ *
+ * Flow:
+ *
+ * Successful Authoritative Build
+ *          ↓
+ * ProjectBuild.artifacts[]
+ *          ↓
+ * Artifact verification
+ *          ↓
+ * Artifact extraction
+ *          ↓
+ * Runtime dependency preparation
+ *          ↓
+ * Isolated Docker runtime
+ *          ↓
+ * Health check
+ *          ↓
+ * Preview URL
+ *
+ * IMPORTANT:
+ * - This service NEVER rebuilds source code.
+ * - Preview MUST consume a successful authoritative build.
+ * - Runtime executes only the verified build artifact.
+ * =========================================================
+ */
+
+const fs = require("fs");
+const fsp = fs.promises;
+const path = require("path");
+const os = require("os");
+const crypto = require("crypto");
+const { spawn, execFile } = require("child_process");
+const { promisify } = require("util");
+
 const ProjectBuild = require("../models/projectBuildModel");
 const ProjectPreview = require("../models/projectPreviewModel");
 
-const authoritativeBuildService = require("./authoritativeBuildService");
-
+const execFileAsync = promisify(execFile);
 
 /* =========================================================
-   ZYRION OS — PREVIEW SERVICE
-   ENTERPRISE ARTIFACT-NATIVE PREVIEW RUNTIME
-
-   Architecture:
-
-   Project
-      ↓
-   Successful Authoritative Build
-      ↓
-   ProjectBuild.artifacts[]
-      ↓
-   Artifact Verification
-      ↓
-   Artifact Extraction
-      ↓
-   Runtime Preparation
-      ↓
-   Isolated Docker Runtime
-      ↓
-   Health Check
-      ↓
-   Preview URL
-
-   IMPORTANT:
-
-   1. Preview NEVER trusts raw generated source as the
-      authoritative build result.
-
-   2. Preview NEVER calls the authoritative build service
-      to rebuild the same source.
-
-   3. Preview consumes an existing successful authoritative
-      build artifact.
-
-   4. Artifact checksum is verified before extraction.
-
-   5. Production secrets are never injected.
-
-   6. Runtime is isolated inside Docker.
-
-   7. Preview is ephemeral and TTL controlled.
-
-   8. MongoDB is the persistent source of truth.
-
-   9. activeRuntimes is only process-local coordination
-      state and is NOT treated as persistent state.
+   SERVICE CONFIG
    ========================================================= */
 
+const SERVICE_VERSION = "3.0.0";
 
-/* =========================================================
-   SERVICE CONFIGURATION
-========================================================= */
-
-const SERVICE_VERSION = "2.0.0";
-
-const DEFAULT_TTL_MS =
-  Number(process.env.PREVIEW_TTL_MS) ||
-  30 * 60 * 1000;
-
-const MIN_TTL_MS =
-  5 * 60 * 1000;
-
-const MAX_TTL_MS =
-  24 * 60 * 60 * 1000;
-
-const STARTUP_TIMEOUT_MS =
-  Number(process.env.PREVIEW_STARTUP_TIMEOUT_MS) ||
-  60 * 1000;
-
-const HEALTHCHECK_TIMEOUT_MS =
-  Number(process.env.PREVIEW_HEALTHCHECK_TIMEOUT_MS) ||
-  15 * 1000;
-
-const HEALTHCHECK_INTERVAL_MS =
-  Number(process.env.PREVIEW_HEALTHCHECK_INTERVAL_MS) ||
-  1000;
-
-const MAX_ARTIFACT_SIZE =
-  Number(process.env.PREVIEW_MAX_ARTIFACT_SIZE) ||
-  500 * 1024 * 1024;
-
-const PREVIEW_CPU_LIMIT =
-  process.env.PREVIEW_CPU_LIMIT ||
-  "1";
-
-const PREVIEW_MEMORY_LIMIT =
-  process.env.PREVIEW_MEMORY_LIMIT ||
-  "512m";
-
-const PREVIEW_PIDS_LIMIT =
-  Number(process.env.PREVIEW_PIDS_LIMIT) ||
-  128;
-
-const PREVIEW_NETWORK =
-  process.env.PREVIEW_NETWORK ||
-  "bridge";
-
-const PREVIEW_CONTAINER_PORT =
-  Number(process.env.PREVIEW_CONTAINER_PORT) ||
-  3000;
-
-const PREVIEW_IMAGE =
-  process.env.PREVIEW_DOCKER_IMAGE ||
-  "node:20-bookworm-slim";
+const PREVIEW_HOST =
+  process.env.PREVIEW_HOST || "127.0.0.1";
 
 const PREVIEW_BASE_URL =
-  String(
-    process.env.PREVIEW_BASE_URL || ""
-  )
-    .trim()
-    .replace(/\/+$/, "");
+  process.env.PREVIEW_BASE_URL || "";
 
-const ARTIFACT_ROOT =
-  process.env.AUTH_ARTIFACT_ROOT ||
-  path.join(
-    os.tmpdir(),
-    "zyrionos-build-artifacts"
+const PREVIEW_PORT =
+  Number(process.env.PREVIEW_PORT || 0);
+
+const PREVIEW_TTL_MS =
+  Number(process.env.PREVIEW_TTL_MS || 30 * 60 * 1000);
+
+const PREVIEW_MAX_ACTIVE =
+  Number(process.env.PREVIEW_MAX_ACTIVE || 3);
+
+const PREVIEW_CPU =
+  process.env.PREVIEW_CPU || "1";
+
+const PREVIEW_MEMORY =
+  process.env.PREVIEW_MEMORY || "512m";
+
+const PREVIEW_PIDS =
+  process.env.PREVIEW_PIDS || "128";
+
+const PREVIEW_NETWORK =
+  process.env.PREVIEW_NETWORK || "bridge";
+
+const PREVIEW_RUNTIME_NETWORK =
+  process.env.PREVIEW_RUNTIME_NETWORK || "none";
+
+const PREVIEW_INSTALL_TIMEOUT =
+  Number(
+    process.env.PREVIEW_INSTALL_TIMEOUT ||
+      10 * 60 * 1000
   );
 
-const ARTIFACT_BUCKET =
-  process.env.AUTH_ARTIFACT_BUCKET ||
-  "";
+const PREVIEW_START_TIMEOUT =
+  Number(
+    process.env.PREVIEW_START_TIMEOUT ||
+      30 * 1000
+  );
 
-const ARTIFACT_REGION =
+const PREVIEW_HEALTH_TIMEOUT =
+  Number(
+    process.env.PREVIEW_HEALTH_TIMEOUT ||
+      30 * 1000
+  );
+
+const PREVIEW_HEALTH_INTERVAL =
+  Number(
+    process.env.PREVIEW_HEALTH_INTERVAL ||
+      1000
+  );
+
+const PREVIEW_MAX_ARTIFACT_SIZE =
+  Number(
+    process.env.PREVIEW_MAX_ARTIFACT_SIZE ||
+      500 * 1024 * 1024
+  );
+
+const PREVIEW_MAX_LOG_SIZE =
+  Number(
+    process.env.PREVIEW_MAX_LOG_SIZE ||
+      200 * 1024
+  );
+
+const AUTH_ARTIFACT_ROOT =
+  process.env.AUTH_ARTIFACT_ROOT || "";
+
+const AUTH_ARTIFACT_BUCKET =
+  process.env.AUTH_ARTIFACT_BUCKET || "";
+
+const AUTH_ARTIFACT_REGION =
+  process.env.AUTH_ARTIFACT_REGION ||
   process.env.AWS_REGION ||
   "ap-south-1";
 
-const ARTIFACT_STORAGE_PREFIX =
-  String(
-    process.env.AUTH_ARTIFACT_PREFIX ||
-      "zyrionos/builds"
-  )
-    .replace(/^\/+|\/+$/g, "");
+/* =========================================================
+   DOCKER IMAGES
+   ========================================================= */
 
-const MAX_LOG_SIZE =
-  Number(process.env.PREVIEW_MAX_LOG_SIZE) ||
-  1024 * 1024;
+const NODE_IMAGES = {
+  "20": "node:20-bookworm-slim",
+  "22": "node:22-bookworm-slim"
+};
 
-const RUNTIME_INSTALL_TIMEOUT_MS =
-  Number(
-    process.env.PREVIEW_RUNTIME_INSTALL_TIMEOUT_MS
-  ) ||
-  5 * 60 * 1000;
+const BUN_IMAGE =
+  process.env.PREVIEW_BUN_DOCKER_IMAGE ||
+  "oven/bun:1";
 
+/* =========================================================
+   STATUS
+   ========================================================= */
+
+const ACTIVE_STATUSES = [
+  "queued",
+  "starting",
+  "running",
+  "ready"
+];
+
+const STOPPED_STATUSES = [
+  "stopped",
+  "expired",
+  "failed"
+];
+
+/* =========================================================
+   ERROR CLASS
+   ========================================================= */
+
+class PreviewServiceError extends Error {
+  constructor(
+    message,
+    code = "PREVIEW_ERROR",
+    statusCode = 500,
+    details = {}
+  ) {
+    super(message);
+
+    this.name = "PreviewServiceError";
+    this.code = code;
+    this.statusCode = statusCode;
+    this.details = details;
+
+    Error.captureStackTrace(
+      this,
+      PreviewServiceError
+    );
+  }
+}
 
 /* =========================================================
    ACTIVE RUNTIME REGISTRY
-========================================================= */
+   ========================================================= */
 
-const activeRuntimes =
-  new Map();
-
+const activeRuntimes = new Map();
 
 /* =========================================================
-   UTILITIES
-========================================================= */
+   BASIC HELPERS
+   ========================================================= */
 
-function generateId(prefix) {
-  return `${prefix}_${Date.now()}_${crypto
-    .randomBytes(8)
-    .toString("hex")}`;
+function now() {
+  return new Date();
 }
 
-
-function sha256Buffer(buffer) {
-  return crypto
-    .createHash("sha256")
-    .update(buffer)
-    .digest("hex");
+function normalizeId(value) {
+  if (!value) return "";
+  return String(value).trim();
 }
 
-
-function sha256String(value) {
-  return crypto
-    .createHash("sha256")
-    .update(value)
-    .digest("hex");
-}
-
-
-function clamp(
-  value,
-  min,
-  max
-) {
-  return Math.min(
-    Math.max(value, min),
-    max
+function isObject(value) {
+  return (
+    value !== null &&
+    typeof value === "object"
   );
 }
 
-
-function safeString(
+function clampText(
   value,
-  max = 5000
+  max = PREVIEW_MAX_LOG_SIZE
 ) {
-  if (
-    value === null ||
-    value === undefined
-  ) {
-    return "";
+  if (!value) return "";
+
+  const text = String(value);
+
+  if (text.length <= max) {
+    return text;
   }
 
-  return String(value).slice(
-    0,
-    max
+  return (
+    text.slice(0, max) +
+    "\n...[truncated]"
   );
 }
 
+function safeErrorMessage(error) {
+  if (!error) {
+    return "Unknown preview error";
+  }
+
+  return clampText(
+    error.message ||
+      String(error)
+  );
+}
 
 function sleep(ms) {
-  return new Promise(
-    (resolve) =>
-      setTimeout(
-        resolve,
-        ms
-      )
-  );
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
-
 
 /* =========================================================
-   ERROR CREATION
-========================================================= */
+   HASH
+   ========================================================= */
 
-function createPreviewError(
-  code,
-  message,
-  stage = "system",
-  category = "unknown",
-  retryable = false
-) {
-  const error =
-    new Error(
-      safeString(
-        message,
-        5000
-      )
-    );
-
-  error.code =
-    code;
-
-  error.stage =
-    stage;
-
-  error.category =
-    category;
-
-  error.retryable =
-    Boolean(
-      retryable
-    );
-
-  return error;
-}
-
-
-/* =========================================================
-   DOCKER AVAILABILITY
-========================================================= */
-
-function dockerAvailable() {
-  return new Promise(
-    (resolve) => {
-      let finished = false;
-
-      const child =
-        spawn(
-          "docker",
-          [
-            "version",
-            "--format",
-            "{{.Server.Version}}"
-          ],
-          {
-            stdio: [
-              "ignore",
-              "pipe",
-              "pipe"
-            ]
-          }
-        );
-
-      const timer =
-        setTimeout(
-          () => {
-            if (
-              finished
-            ) {
-              return;
-            }
-
-            finished = true;
-
-            try {
-              child.kill(
-                "SIGKILL"
-              );
-            } catch {}
-
-            resolve(false);
-          },
-          5000
-        );
-
-      child.on(
-        "error",
-        () => {
-          if (
-            finished
-          ) {
-            return;
-          }
-
-          finished = true;
-
-          clearTimeout(
-            timer
-          );
-
-          resolve(false);
-        }
-      );
-
-      child.on(
-        "close",
-        (code) => {
-          if (
-            finished
-          ) {
-            return;
-          }
-
-          finished = true;
-
-          clearTimeout(
-            timer
-          );
-
-          resolve(
-            code === 0
-          );
-        }
-      );
-    }
-  );
-}
-
-
-/* =========================================================
-   TEMP WORKSPACE
-========================================================= */
-
-async function createWorkspace() {
-  return fsp.mkdtemp(
-    path.join(
-      os.tmpdir(),
-      "zyrion-preview-"
-    )
-  );
-}
-
-
-async function cleanupWorkspace(
-  workspace
-) {
-  if (!workspace) {
-    return;
-  }
-
-  try {
-    await fsp.rm(
-      workspace,
-      {
-        recursive: true,
-        force: true
-      }
-    );
-  } catch (error) {
-    console.error(
-      "[PreviewService] workspace cleanup failed:",
-      error.message
-    );
-  }
-}
-
-
-/* =========================================================
-   PATH SAFETY
-========================================================= */
-
-function validateArchivePath(
-  archivePath
-) {
-  const normalized =
-    String(
-      archivePath || ""
-    )
-      .replace(
-        /\\/g,
-        "/"
-      )
-      .trim();
-
-  if (!normalized) {
-    return false;
-  }
-
-  if (
-    normalized.startsWith("/")
-  ) {
-    return false;
-  }
-
-  if (
-    normalized.includes("\0")
-  ) {
-    return false;
-  }
-
-  const parts =
-    normalized.split("/");
-
-  if (
-    parts.includes("..")
-  ) {
-    return false;
-  }
-
-  return true;
-}
-
-
-function ensureInside(
-  root,
-  target
-) {
-  const rootPath =
-    path.resolve(root) +
-    path.sep;
-
-  const targetPath =
-    path.resolve(target);
-
-  if (
-    !targetPath.startsWith(
-      rootPath
-    )
-  ) {
-    throw new Error(
-      "Path escapes preview workspace"
-    );
-  }
-}
-
-
-/* =========================================================
-   ARTIFACT LOCAL PATH
-========================================================= */
-
-function resolveLocalArtifactPath(
-  storageKey
-) {
-  if (!storageKey) {
-    throw new Error(
-      "Artifact storage key is missing"
-    );
-  }
-
-  const prefix =
-    `${ARTIFACT_STORAGE_PREFIX}/`;
-
-  if (
-    !storageKey.startsWith(
-      prefix
-    )
-  ) {
-    throw new Error(
-      "Invalid artifact storage key"
-    );
-  }
-
-  const relative =
-    storageKey.slice(
-      prefix.length
-    );
-
-  if (
-    !validateArchivePath(
-      relative
-    )
-  ) {
-    throw new Error(
-      "Unsafe artifact storage path"
-    );
-  }
-
-  const root =
-    path.resolve(
-      ARTIFACT_ROOT
-    );
-
-  const artifactPath =
-    path.resolve(
-      root,
-      relative
-    );
-
-  ensureInside(
-    root,
-    artifactPath
-  );
-
-  return artifactPath;
-}
-
-
-/* =========================================================
-   CHECKSUM
-========================================================= */
-
-async function checksumFile(
-  filePath
-) {
-  const hash =
-    crypto.createHash(
-      "sha256"
-    );
-
+async function sha256File(filePath) {
   return new Promise(
     (resolve, reject) => {
+      const hash =
+        crypto.createHash("sha256");
+
       const stream =
-        fs.createReadStream(
-          filePath
-        );
+        fs.createReadStream(filePath);
+
+      stream.on("error", reject);
 
       stream.on(
         "data",
-        (chunk) =>
-          hash.update(
-            chunk
-          )
-      );
-
-      stream.on(
-        "error",
-        reject
+        (chunk) => hash.update(chunk)
       );
 
       stream.on(
         "end",
-        () =>
-          resolve(
-            hash.digest(
-              "hex"
-            )
-          )
+        () => resolve(hash.digest("hex"))
       );
     }
   );
 }
-
 
 /* =========================================================
-   ARTIFACT DOWNLOAD
-========================================================= */
+   DOCKER
+   ========================================================= */
 
-async function downloadS3Artifact(
-  storageKey,
-  destination
-) {
-  let S3Client;
-  let GetObjectCommand;
+function dockerAvailable() {
+  return execFileAsync(
+    "docker",
+    ["version", "--format", "{{.Server.Version}}"],
+    {
+      timeout: 10000,
+      maxBuffer: 1024 * 1024
+    }
+  )
+    .then(() => true)
+    .catch(() => false);
+}
 
-  try {
-    const s3 =
-      require(
-        "@aws-sdk/client-s3"
-      );
-
-    S3Client =
-      s3.S3Client;
-
-    GetObjectCommand =
-      s3.GetObjectCommand;
-
-  } catch {
-    throw new Error(
-      "S3 artifact storage requires @aws-sdk/client-s3"
-    );
-  }
-
-  const client =
-    new S3Client({
-      region:
-        ARTIFACT_REGION
-    });
-
-  const result =
-    await client.send(
-      new GetObjectCommand({
-        Bucket:
-          ARTIFACT_BUCKET,
-
-        Key:
-          storageKey
-      })
-    );
-
-  if (
-    !result.Body
-  ) {
-    throw new Error(
-      "Artifact download returned an empty body"
-    );
-  }
-
-  const file =
-    fs.createWriteStream(
-      destination
-    );
-
-  await new Promise(
-    (resolve, reject) => {
-      result.Body.pipe(
-        file
-      );
-
-      result.Body.on(
-        "error",
-        reject
-      );
-
-      file.on(
-        "finish",
-        resolve
-      );
-
-      file.on(
-        "error",
-        reject
-      );
+function spawnDocker(args, options = {}) {
+  return spawn(
+    "docker",
+    args,
+    {
+      stdio: [
+        "ignore",
+        "pipe",
+        "pipe"
+      ],
+      ...options
     }
   );
 }
 
-
-async function acquireArtifact({
-  artifact
-}) {
-  if (
-    !artifact ||
-    !artifact.storageKey
-  ) {
-    throw createPreviewError(
-      "PREVIEW_ARTIFACT_MISSING",
-      "Authoritative build artifact is missing",
-      "artifact",
-      "build",
-      false
-    );
-  }
-
-  const workspace =
-    await createWorkspace();
-
-  const artifactPath =
-    path.join(
-      workspace,
-      "build.tar.gz"
-    );
-
+async function dockerExec(
+  args,
+  {
+    timeout = 30000,
+    maxBuffer = 1024 * 1024
+  } = {}
+) {
   try {
-    /*
-     * S3 artifact.
-     */
-    if (
-      ARTIFACT_BUCKET
-    ) {
-      await downloadS3Artifact(
-        artifact.storageKey,
-        artifactPath
+    const result =
+      await execFileAsync(
+        "docker",
+        args,
+        {
+          timeout,
+          maxBuffer
+        }
       );
-    } else {
-      /*
-       * Local artifact.
-       */
-      const sourcePath =
-        resolveLocalArtifactPath(
-          artifact.storageKey
-        );
-
-      await fsp.copyFile(
-        sourcePath,
-        artifactPath
-      );
-    }
-
-    const stat =
-      await fsp.stat(
-        artifactPath
-      );
-
-    if (
-      stat.size >
-      MAX_ARTIFACT_SIZE
-    ) {
-      throw createPreviewError(
-        "PREVIEW_ARTIFACT_TOO_LARGE",
-        "Build artifact exceeds preview size limit",
-        "artifact",
-        "resource",
-        false
-      );
-    }
-
-    /*
-     * Verify immutable artifact checksum
-     * before any extraction.
-     */
-    const actualChecksum =
-      await checksumFile(
-        artifactPath
-      );
-
-    if (
-      actualChecksum !==
-      artifact.checksum
-    ) {
-      throw createPreviewError(
-        "PREVIEW_ARTIFACT_CHECKSUM_MISMATCH",
-        "Build artifact checksum verification failed",
-        "artifact",
-        "build",
-        false
-      );
-    }
 
     return {
-      workspace,
-      artifactPath,
-      checksum:
-        actualChecksum,
-      size:
-        stat.size
+      stdout:
+        result.stdout || "",
+      stderr:
+        result.stderr || "",
+      exitCode: 0
     };
-
   } catch (error) {
-    await cleanupWorkspace(
-      workspace
-    );
-
-    throw error;
+    return {
+      stdout:
+        error.stdout || "",
+      stderr:
+        error.stderr ||
+        error.message ||
+        "",
+      exitCode:
+        typeof error.code === "number"
+          ? error.code
+          : 1
+    };
   }
 }
-
-
-/* =========================================================
-   ARCHIVE VALIDATION
-========================================================= */
-
-async function listArchiveFiles(
-  artifactPath
-) {
-  return new Promise(
-    (resolve, reject) => {
-      const child =
-        spawn(
-          "tar",
-          [
-            "-tzf",
-            artifactPath
-          ],
-          {
-            stdio: [
-              "ignore",
-              "pipe",
-              "pipe"
-            ]
-          }
-        );
-
-      let stdout = "";
-      let stderr = "";
-
-      child.stdout.on(
-        "data",
-        (chunk) => {
-          stdout +=
-            chunk.toString();
-        }
-      );
-
-      child.stderr.on(
-        "data",
-        (chunk) => {
-          stderr +=
-            chunk.toString();
-        }
-      );
-
-      child.on(
-        "error",
-        reject
-      );
-
-      child.on(
-        "close",
-        (code) => {
-          if (
-            code !== 0
-          ) {
-            return reject(
-              new Error(
-                stderr ||
-                "Unable to inspect build artifact"
-              )
-            );
-          }
-
-          const entries =
-            stdout
-              .split(/\r?\n/)
-              .map(
-                (value) =>
-                  value.trim()
-              )
-              .filter(
-                Boolean
-              );
-
-          for (
-            const entry of entries
-          ) {
-            if (
-              !validateArchivePath(
-                entry
-              )
-            ) {
-              return reject(
-                new Error(
-                  `Unsafe path detected inside build artifact: ${entry}`
-                )
-              );
-            }
-          }
-
-          resolve(
-            entries
-          );
-        }
-      );
-    }
-  );
-}
-
-
-/* =========================================================
-   ARTIFACT EXTRACTION
-========================================================= */
-
-async function extractArtifact({
-  artifactPath,
-  destination
-}) {
-  await listArchiveFiles(
-    artifactPath
-  );
-
-  await fsp.mkdir(
-    destination,
-    {
-      recursive: true
-    }
-  );
-
-  await new Promise(
-    (resolve, reject) => {
-      const child =
-        spawn(
-          "tar",
-          [
-            "--no-same-owner",
-            "--no-same-permissions",
-            "-xzf",
-            artifactPath,
-            "-C",
-            destination
-          ],
-          {
-            stdio: [
-              "ignore",
-              "pipe",
-              "pipe"
-            ]
-          }
-        );
-
-      let stderr = "";
-
-      child.stderr.on(
-        "data",
-        (chunk) => {
-          stderr +=
-            chunk.toString();
-        }
-      );
-
-      child.on(
-        "error",
-        reject
-      );
-
-      child.on(
-        "close",
-        (code) => {
-          if (
-            code !== 0
-          ) {
-            return reject(
-              new Error(
-                stderr ||
-                "Build artifact extraction failed"
-              )
-            );
-          }
-
-          resolve();
-        }
-      );
-    }
-  );
-}
-
-
-/* =========================================================
-   PACKAGE.JSON
-========================================================= */
-
-async function readPackageJson(
-  workspace
-) {
-  const packagePath =
-    path.join(
-      workspace,
-      "package.json"
-    );
-
-  if (
-    !fs.existsSync(
-      packagePath
-    )
-  ) {
-    throw createPreviewError(
-      "PREVIEW_PACKAGE_JSON_MISSING",
-      "Build artifact does not contain package.json",
-      "runtime",
-      "runtime",
-      false
-    );
-  }
-
-  try {
-    const raw =
-      await fsp.readFile(
-        packagePath,
-        "utf8"
-      );
-
-    return JSON.parse(
-      raw
-    );
-
-  } catch {
-    throw createPreviewError(
-      "PREVIEW_PACKAGE_JSON_INVALID",
-      "Build artifact contains invalid package.json",
-      "runtime",
-      "runtime",
-      false
-    );
-  }
-}
-
 
 /* =========================================================
    PACKAGE MANAGER
-========================================================= */
+   ========================================================= */
 
 function detectPackageManager(
-  workspace,
-  project,
-  build
+  packageJson,
+  workspace
 ) {
-  /*
-   * The authoritative build's package manager
-   * is the source of truth.
-   */
-  if (
-    build.packageManager &&
-    [
-      "npm",
-      "yarn",
-      "pnpm",
-      "bun"
-    ].includes(
-      build.packageManager
+  const packageManager =
+    String(
+      packageJson?.packageManager || ""
     )
-  ) {
-    return build.packageManager;
+      .trim()
+      .toLowerCase();
+
+  if (packageManager.startsWith("pnpm")) {
+    return "pnpm";
   }
 
-  if (
-    project.settings &&
-    [
-      "npm",
-      "yarn",
-      "pnpm",
-      "bun"
-    ].includes(
-      project.settings.packageManager
-    )
-  ) {
-    return project.settings.packageManager;
+  if (packageManager.startsWith("yarn")) {
+    return "yarn";
+  }
+
+  if (packageManager.startsWith("bun")) {
+    return "bun";
   }
 
   if (
@@ -1066,13 +398,13 @@ function detectPackageManager(
     fs.existsSync(
       path.join(
         workspace,
-        "bun.lock"
+        "bun.lockb"
       )
     ) ||
     fs.existsSync(
       path.join(
         workspace,
-        "bun.lockb"
+        "bun.lock"
       )
     )
   ) {
@@ -1082,480 +414,871 @@ function detectPackageManager(
   return "npm";
 }
 
+/* =========================================================
+   NODE VERSION
+   ========================================================= */
+
+function normalizeNodeVersion(
+  value
+) {
+  const raw =
+    String(value || "20")
+      .trim();
+
+  if (raw.startsWith("22")) {
+    return "22";
+  }
+
+  return "20";
+}
+
+function getRuntimeImage(
+  nodeVersion,
+  packageManager
+) {
+  if (packageManager === "bun") {
+    return BUN_IMAGE;
+  }
+
+  return (
+    NODE_IMAGES[
+      normalizeNodeVersion(
+        nodeVersion
+      )
+    ] ||
+    NODE_IMAGES["20"]
+  );
+}
 
 /* =========================================================
-   RUNTIME INSTALL COMMAND
-========================================================= */
+   PACKAGE COMMANDS
+   ========================================================= */
 
-function getRuntimeInstallCommand(
+function getInstallCommand(
   packageManager,
-  hasLockfile
+  workspace
 ) {
-  switch (
-    packageManager
-  ) {
+  const hasPackageLock =
+    fs.existsSync(
+      path.join(
+        workspace,
+        "package-lock.json"
+      )
+    );
+
+  const hasPnpmLock =
+    fs.existsSync(
+      path.join(
+        workspace,
+        "pnpm-lock.yaml"
+      )
+    );
+
+  const hasYarnLock =
+    fs.existsSync(
+      path.join(
+        workspace,
+        "yarn.lock"
+      )
+    );
+
+  const hasBunLock =
+    fs.existsSync(
+      path.join(
+        workspace,
+        "bun.lock"
+      )
+    ) ||
+    fs.existsSync(
+      path.join(
+        workspace,
+        "bun.lockb"
+      )
+    );
+
+  switch (packageManager) {
     case "pnpm":
-      return hasLockfile
-        ? "corepack pnpm install --frozen-lockfile"
-        : "corepack pnpm install";
+      return hasPnpmLock
+        ? "corepack enable && corepack pnpm install --frozen-lockfile"
+        : "corepack enable && corepack pnpm install";
 
     case "yarn":
-      return hasLockfile
-        ? "corepack yarn install --immutable"
-        : "corepack yarn install";
+      return hasYarnLock
+        ? "corepack enable && corepack yarn install --immutable"
+        : "corepack enable && corepack yarn install";
 
     case "bun":
-      return hasLockfile
+      return hasBunLock
         ? "bun install --frozen-lockfile"
         : "bun install";
 
-    case "npm":
     default:
-      return hasLockfile
+      return hasPackageLock
         ? "npm ci"
         : "npm install";
   }
 }
 
+function getRunCommand(
+  packageManager,
+  script
+) {
+  switch (packageManager) {
+    case "pnpm":
+      return `corepack enable && corepack pnpm run ${script}`;
+
+    case "yarn":
+      return `corepack enable && corepack yarn run ${script}`;
+
+    case "bun":
+      return `bun run ${script}`;
+
+    default:
+      return `npm run ${script}`;
+  }
+}
 
 /* =========================================================
-   START COMMAND
-========================================================= */
+   PACKAGE.JSON
+   ========================================================= */
 
-function resolveStartCommand(
-  project,
+async function readPackageJson(
+  workspace
+) {
+  const packagePath =
+    path.join(
+      workspace,
+      "package.json"
+    );
+
+  if (
+    !fs.existsSync(packagePath)
+  ) {
+    throw new PreviewServiceError(
+      "Preview artifact does not contain package.json",
+      "PREVIEW_PACKAGE_JSON_MISSING",
+      422
+    );
+  }
+
+  let parsed;
+
+  try {
+    parsed =
+      JSON.parse(
+        await fsp.readFile(
+          packagePath,
+          "utf8"
+        )
+      );
+  } catch (error) {
+    throw new PreviewServiceError(
+      "Preview artifact contains invalid package.json",
+      "PREVIEW_PACKAGE_JSON_INVALID",
+      422,
+      {
+        reason:
+          safeErrorMessage(error)
+      }
+    );
+  }
+
+  if (
+    !parsed ||
+    typeof parsed !== "object"
+  ) {
+    throw new PreviewServiceError(
+      "Invalid package.json structure",
+      "PREVIEW_PACKAGE_JSON_INVALID",
+      422
+    );
+  }
+
+  return parsed;
+}
+
+/* =========================================================
+   START SCRIPT
+   ========================================================= */
+
+function resolveStartScript(
   packageJson
 ) {
   const scripts =
-    packageJson.scripts || {};
+    packageJson?.scripts || {};
 
-  /*
-   * A preview command can be supplied through
-   * project settings in future.
-   */
-  if (
-    project.settings &&
-    project.settings.previewCommand
-  ) {
-    return String(
-      project.settings.previewCommand
-    );
-  }
-
-  /*
-   * Production start.
-   */
   if (
     typeof scripts.start ===
-      "string" &&
+    "string" &&
     scripts.start.trim()
   ) {
-    return "npm run start";
+    return "start";
   }
 
-  /*
-   * Vite preview.
-   */
   if (
     typeof scripts.preview ===
-      "string" &&
+    "string" &&
     scripts.preview.trim()
   ) {
-    return "npm run preview -- --host 0.0.0.0";
+    return "preview";
   }
 
-  /*
-   * Development fallback.
-   */
   if (
     typeof scripts.dev ===
-      "string" &&
+    "string" &&
     scripts.dev.trim()
   ) {
-    return "npm run dev -- --host 0.0.0.0";
+    return "dev";
   }
 
-  throw createPreviewError(
-    "PREVIEW_START_COMMAND_MISSING",
-    "Build artifact has no supported start, preview, or dev script",
-    "startup",
-    "runtime",
-    false
+  throw new PreviewServiceError(
+    "Preview artifact has no start, preview, or dev script",
+    "PREVIEW_START_SCRIPT_MISSING",
+    422
   );
 }
 
+/* =========================================================
+   START COMMAND
+   ========================================================= */
+
+function resolveStartCommand({
+  packageJson,
+  packageManager,
+  project
+}) {
+  const configured =
+    project?.settings?.previewCommand;
+
+  if (
+    typeof configured === "string" &&
+    configured.trim()
+  ) {
+    return configured.trim();
+  }
+
+  const script =
+    resolveStartScript(
+      packageJson
+    );
+
+  return getRunCommand(
+    packageManager,
+    script
+  );
+}
 
 /* =========================================================
-   LOG BUFFER
-========================================================= */
+   ARTIFACT STORAGE
+   ========================================================= */
 
-function createLogBuffer() {
-  let stdout = "";
-  let stderr = "";
-
-  function append(
-    current,
-    chunk
+function resolveLocalArtifactPath(
+  storageKey
+) {
+  if (
+    !AUTH_ARTIFACT_ROOT
   ) {
-    const next =
-      current +
-      chunk.toString();
+    return null;
+  }
 
-    if (
-      Buffer.byteLength(
-        next,
-        "utf8"
-      ) <=
-      MAX_LOG_SIZE
-    ) {
-      return next;
-    }
+  const normalizedKey =
+    String(storageKey || "")
+      .replace(/^\/+/, "");
 
-    return next.slice(
-      -MAX_LOG_SIZE
+  if (
+    !normalizedKey ||
+    normalizedKey.includes("..")
+  ) {
+    throw new PreviewServiceError(
+      "Invalid artifact storage key",
+      "PREVIEW_INVALID_ARTIFACT_KEY",
+      422
     );
   }
 
-  return {
-    appendStdout(
-      chunk
-    ) {
-      stdout =
-        append(
-          stdout,
-          chunk
-        );
-    },
+  const root =
+    path.resolve(
+      AUTH_ARTIFACT_ROOT
+    );
 
-    appendStderr(
-      chunk
-    ) {
-      stderr =
-        append(
-          stderr,
-          chunk
-        );
-    },
+  const candidate =
+    path.resolve(
+      root,
+      normalizedKey
+    );
 
-    get stdout() {
-      return stdout;
-    },
+  if (
+    candidate !== root &&
+    !candidate.startsWith(
+      root + path.sep
+    )
+  ) {
+    throw new PreviewServiceError(
+      "Artifact path escapes storage root",
+      "PREVIEW_ARTIFACT_PATH_TRAVERSAL",
+      422
+    );
+  }
 
-    get stderr() {
-      return stderr;
-    }
-  };
+  return candidate;
 }
-
 
 /* =========================================================
-   DOCKER COMMAND
-========================================================= */
+   S3
+   ========================================================= */
 
-function spawnDocker(
-  args,
-  options = {}
+async function downloadArtifactFromS3(
+  storageKey,
+  destination
 ) {
-  return spawn(
-    "docker",
-    args,
-    {
-      cwd:
-        options.cwd,
+  if (
+    !AUTH_ARTIFACT_BUCKET
+  ) {
+    return false;
+  }
 
-      env: {
-        /*
-         * Start with only a clean subset of the
-         * server environment.
-         *
-         * Generated preview applications should
-         * never inherit backend credentials.
-         */
-        NODE_ENV:
-          "production",
+  let S3Client;
+  let GetObjectCommand;
 
-        PATH:
-          process.env.PATH,
+  try {
+    ({
+      S3Client,
+      GetObjectCommand
+    } = require(
+      "@aws-sdk/client-s3"
+    ));
+  } catch (error) {
+    throw new PreviewServiceError(
+      "AWS S3 SDK is required for remote preview artifacts",
+      "PREVIEW_S3_SDK_MISSING",
+      500
+    );
+  }
 
-        ...(
-          options.env || {}
-        )
-      },
+  const client =
+    new S3Client({
+      region:
+        AUTH_ARTIFACT_REGION
+    });
 
-      stdio: [
-        "ignore",
-        "pipe",
-        "pipe"
-      ]
+  const response =
+    await client.send(
+      new GetObjectCommand({
+        Bucket:
+          AUTH_ARTIFACT_BUCKET,
+        Key:
+          storageKey
+      })
+    );
+
+  if (
+    !response.Body ||
+    typeof response.Body.pipe !==
+      "function"
+  ) {
+    throw new PreviewServiceError(
+      "S3 artifact stream is unavailable",
+      "PREVIEW_ARTIFACT_DOWNLOAD_FAILED",
+      502
+    );
+  }
+
+  await new Promise(
+    (resolve, reject) => {
+      const output =
+        fs.createWriteStream(
+          destination
+        );
+
+      response.Body.on(
+        "error",
+        reject
+      );
+
+      output.on(
+        "error",
+        reject
+      );
+
+      output.on(
+        "finish",
+        resolve
+      );
+
+      response.Body.pipe(
+        output
+      );
     }
   );
+
+  return true;
 }
 
+/* =========================================================
+   ARTIFACT DOWNLOAD
+   ========================================================= */
+
+async function materializeArtifact(
+  artifact,
+  workspace
+) {
+  if (!artifact) {
+    throw new PreviewServiceError(
+      "Authoritative build has no preview artifact",
+      "PREVIEW_ARTIFACT_MISSING",
+      422
+    );
+  }
+
+  const storageKey =
+    String(
+      artifact.storageKey || ""
+    ).trim();
+
+  if (!storageKey) {
+    throw new PreviewServiceError(
+      "Preview artifact has no storage key",
+      "PREVIEW_ARTIFACT_STORAGE_KEY_MISSING",
+      422
+    );
+  }
+
+  const artifactFile =
+    path.join(
+      workspace,
+      "__artifact.tar.gz"
+    );
+
+  const localPath =
+    resolveLocalArtifactPath(
+      storageKey
+    );
+
+  if (
+    localPath &&
+    fs.existsSync(localPath)
+  ) {
+    await fsp.copyFile(
+      localPath,
+      artifactFile
+    );
+  } else {
+    const downloaded =
+      await downloadArtifactFromS3(
+        storageKey,
+        artifactFile
+      );
+
+    if (!downloaded) {
+      throw new PreviewServiceError(
+        "Preview artifact is not available in local storage or S3",
+        "PREVIEW_ARTIFACT_UNAVAILABLE",
+        404
+      );
+    }
+  }
+
+  const stat =
+    await fsp.stat(
+      artifactFile
+    );
+
+  if (
+    stat.size >
+    PREVIEW_MAX_ARTIFACT_SIZE
+  ) {
+    throw new PreviewServiceError(
+      "Preview artifact exceeds maximum allowed size",
+      "PREVIEW_ARTIFACT_TOO_LARGE",
+      413
+    );
+  }
+
+  if (
+    artifact.size &&
+    Number(artifact.size) !==
+      stat.size
+  ) {
+    throw new PreviewServiceError(
+      "Preview artifact size verification failed",
+      "PREVIEW_ARTIFACT_SIZE_MISMATCH",
+      422,
+      {
+        expected:
+          Number(artifact.size),
+        actual:
+          stat.size
+      }
+    );
+  }
+
+  if (
+    artifact.checksum
+  ) {
+    const actual =
+      await sha256File(
+        artifactFile
+      );
+
+    const expected =
+      String(
+        artifact.checksum
+      )
+        .replace(
+          /^sha256:/i,
+          ""
+        )
+        .trim()
+        .toLowerCase();
+
+    if (
+      actual.toLowerCase() !==
+      expected
+    ) {
+      throw new PreviewServiceError(
+        "Preview artifact checksum verification failed",
+        "PREVIEW_ARTIFACT_CHECKSUM_MISMATCH",
+        422,
+        {
+          expected,
+          actual
+        }
+      );
+    }
+  }
+
+  return artifactFile;
+}
+
+/* =========================================================
+   TAR SECURITY
+   ========================================================= */
+
+function validateTarEntry(
+  entry
+) {
+  const normalized =
+    String(entry || "")
+      .trim();
+
+  if (!normalized) {
+    return;
+  }
+
+  if (
+    normalized.startsWith("/") ||
+    normalized.startsWith("\\")
+  ) {
+    throw new PreviewServiceError(
+      "Artifact contains an absolute path",
+      "PREVIEW_ARTIFACT_PATH_TRAVERSAL",
+      422,
+      { entry }
+    );
+  }
+
+  const parts =
+    normalized.split(
+      /[\\/]+/
+    );
+
+  if (
+    parts.includes("..")
+  ) {
+    throw new PreviewServiceError(
+      "Artifact contains path traversal",
+      "PREVIEW_ARTIFACT_PATH_TRAVERSAL",
+      422,
+      { entry }
+    );
+  }
+}
+
+/* =========================================================
+   TAR LIST
+   ========================================================= */
+
+async function validateArchive(
+  archivePath
+) {
+  const result =
+    await dockerExec(
+      [
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "-v",
+        `${archivePath}:/artifact.tar.gz:ro`,
+        "alpine:3.20",
+        "sh",
+        "-lc",
+        "tar -tzf /artifact.tar.gz"
+      ],
+      {
+        timeout: 30000,
+        maxBuffer:
+          10 * 1024 * 1024
+      }
+    );
+
+  if (
+    result.exitCode !== 0
+  ) {
+    throw new PreviewServiceError(
+      "Preview artifact is not a valid tar.gz archive",
+      "PREVIEW_ARTIFACT_INVALID_ARCHIVE",
+      422,
+      {
+        stderr:
+          clampText(
+            result.stderr
+          )
+      }
+    );
+  }
+
+  const entries =
+    result.stdout
+      .split("\n")
+      .map((item) =>
+        item.trim()
+      )
+      .filter(Boolean);
+
+  for (
+    const entry of entries
+  ) {
+    validateTarEntry(entry);
+  }
+
+  return entries;
+}
+
+/* =========================================================
+   EXTRACT ARTIFACT
+   ========================================================= */
+
+async function extractArtifact(
+  archivePath,
+  targetWorkspace
+) {
+  await validateArchive(
+    archivePath
+  );
+
+  await fsp.mkdir(
+    targetWorkspace,
+    {
+      recursive: true
+    }
+  );
+
+  const result =
+    await dockerExec(
+      [
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "-v",
+        `${archivePath}:/artifact.tar.gz:ro`,
+        "-v",
+        `${targetWorkspace}:/workspace:rw`,
+        "alpine:3.20",
+        "sh",
+        "-lc",
+        "cd /workspace && tar --no-same-owner --no-same-permissions --no-overwrite-dir -xzf /artifact.tar.gz"
+      ],
+      {
+        timeout:
+          120000,
+        maxBuffer:
+          2 * 1024 * 1024
+      }
+    );
+
+  if (
+    result.exitCode !== 0
+  ) {
+    throw new PreviewServiceError(
+      "Failed to extract preview artifact",
+      "PREVIEW_ARTIFACT_EXTRACTION_FAILED",
+      422,
+      {
+        stderr:
+          clampText(
+            result.stderr
+          )
+      }
+    );
+  }
+}
+
+/* =========================================================
+   AUTHORITATIVE BUILD
+   ========================================================= */
+
+async function getAuthoritativeBuild({
+  projectId,
+  userId,
+  buildId
+}) {
+  if (!buildId) {
+    throw new PreviewServiceError(
+      "buildId is required",
+      "PREVIEW_BUILD_ID_REQUIRED",
+      400
+    );
+  }
+
+  const build =
+    await ProjectBuild.findOne({
+      _id: undefined,
+      projectId,
+      userId,
+      buildId
+    });
+
+  if (!build) {
+    throw new PreviewServiceError(
+      "Authoritative build was not found",
+      "PREVIEW_BUILD_NOT_FOUND",
+      404
+    );
+  }
+
+  if (
+    build.status !== "success"
+  ) {
+    throw new PreviewServiceError(
+      "Preview requires a successful build",
+      "PREVIEW_BUILD_NOT_SUCCESSFUL",
+      409,
+      {
+        status:
+          build.status
+      }
+    );
+  }
+
+  const metadata =
+    isObject(build.metadata)
+      ? build.metadata
+      : {};
+
+  if (
+    metadata.authoritative !== true
+  ) {
+    throw new PreviewServiceError(
+      "Build is not authoritative",
+      "PREVIEW_BUILD_NOT_AUTHORITATIVE",
+      409
+    );
+  }
+
+  if (
+    metadata.validationMode !==
+    "authoritative"
+  ) {
+    throw new PreviewServiceError(
+      "Build validation mode is not authoritative",
+      "PREVIEW_BUILD_VALIDATION_MODE_INVALID",
+      409
+    );
+  }
+
+  if (
+    !Array.isArray(
+      build.artifacts
+    ) ||
+    build.artifacts.length === 0
+  ) {
+    throw new PreviewServiceError(
+      "Authoritative build contains no artifacts",
+      "PREVIEW_ARTIFACT_MISSING",
+      422
+    );
+  }
+
+  return build;
+}
+
+/* =========================================================
+   SELECT ARTIFACT
+   ========================================================= */
+
+function selectPreviewArtifact(
+  build
+) {
+  const artifacts =
+    Array.isArray(
+      build.artifacts
+    )
+      ? build.artifacts
+      : [];
+
+  const artifact =
+    artifacts.find(
+      (item) =>
+        item &&
+        item.storageKey &&
+        (
+          item.type ===
+            "build" ||
+          item.type ===
+            "archive" ||
+          item.type ===
+            "bundle"
+        )
+    ) ||
+    artifacts.find(
+      (item) =>
+        item &&
+        item.storageKey
+    );
+
+  if (!artifact) {
+    throw new PreviewServiceError(
+      "No executable preview artifact exists for this build",
+      "PREVIEW_ARTIFACT_MISSING",
+      422
+    );
+  }
+
+  return artifact;
+}
 
 /* =========================================================
    RUNTIME INSTALL
-========================================================= */
+   ========================================================= */
 
 async function installRuntimeDependencies({
   workspace,
   packageManager,
-  hasLockfile,
   image
 }) {
   const command =
-    getRuntimeInstallCommand(
+    getInstallCommand(
       packageManager,
-      hasLockfile
+      workspace
     );
-
-  return runDockerCommand({
-    image,
-    workspace,
-    command,
-    network:
-      PREVIEW_NETWORK,
-    timeoutMs:
-      RUNTIME_INSTALL_TIMEOUT_MS
-  });
-}
-
-
-/* =========================================================
-   DOCKER COMMAND EXECUTION
-========================================================= */
-
-function runDockerCommand({
-  image,
-  workspace,
-  command,
-  network,
-  timeoutMs
-}) {
-  return new Promise(
-    (resolve) => {
-      const args = [
-        "run",
-        "--rm",
-
-        "--cpus",
-        PREVIEW_CPU_LIMIT,
-
-        "--memory",
-        PREVIEW_MEMORY_LIMIT,
-
-        "--pids-limit",
-        String(
-          PREVIEW_PIDS_LIMIT
-        ),
-
-        "--cap-drop",
-        "ALL",
-
-        "--security-opt",
-        "no-new-privileges",
-
-        "--read-only",
-
-        "--tmpfs",
-        "/tmp:rw,noexec,nosuid,size=128m",
-
-        "--tmpfs",
-        "/home/node:rw,nosuid,size=64m",
-
-        "--network",
-        network,
-
-        "-v",
-        `${workspace}:/workspace:rw`,
-
-        "-w",
-        "/workspace",
-
-        image,
-
-        "sh",
-        "-lc",
-        command
-      ];
-
-      const child =
-        spawnDocker(
-          args
-        );
-
-      const logs =
-        createLogBuffer();
-
-      let finished =
-        false;
-
-      let timedOut =
-        false;
-
-      const timer =
-        setTimeout(
-          () => {
-            if (
-              finished
-            ) {
-              return;
-            }
-
-            timedOut =
-              true;
-
-            try {
-              child.kill(
-                "SIGKILL"
-              );
-            } catch {}
-          },
-          timeoutMs
-        );
-
-      child.stdout.on(
-        "data",
-        (chunk) =>
-          logs.appendStdout(
-            chunk
-          )
-      );
-
-      child.stderr.on(
-        "data",
-        (chunk) =>
-          logs.appendStderr(
-            chunk
-          )
-      );
-
-      child.on(
-        "error",
-        (error) => {
-          if (
-            finished
-          ) {
-            return;
-          }
-
-          finished =
-            true;
-
-          clearTimeout(
-            timer
-          );
-
-          resolve({
-            success:
-              false,
-
-            timedOut,
-
-            exitCode:
-              null,
-
-            signal:
-              null,
-
-            stdout:
-              logs.stdout,
-
-            stderr:
-              logs.stderr ||
-              error.message
-          });
-        }
-      );
-
-      child.on(
-        "close",
-        (
-          code,
-          signal
-        ) => {
-          if (
-            finished
-          ) {
-            return;
-          }
-
-          finished =
-            true;
-
-          clearTimeout(
-            timer
-          );
-
-          resolve({
-            success:
-              code === 0 &&
-              !timedOut,
-
-            timedOut,
-
-            exitCode:
-              code,
-
-            signal:
-              signal || null,
-
-            stdout:
-              logs.stdout,
-
-            stderr:
-              logs.stderr
-          });
-        }
-      );
-    }
-  );
-}
-
-
-/* =========================================================
-   START RUNTIME
-========================================================= */
-
-async function startRuntime({
-  previewId,
-  workspace,
-  startCommand,
-  nodeVersion
-}) {
-  const safeId =
-    previewId
-      .replace(
-        /[^a-zA-Z0-9_-]/g,
-        ""
-      )
-      .slice(-50);
-
-  const containerName =
-    `zyrion-preview-${safeId}`;
-
-  const image =
-    NODE_IMAGES[
-      nodeVersion
-    ] ||
-    PREVIEW_IMAGE;
 
   const args = [
     "run",
     "--rm",
 
-    "--name",
-    containerName,
+    "--network",
+    PREVIEW_NETWORK,
 
     "--cpus",
-    PREVIEW_CPU_LIMIT,
+    PREVIEW_CPU,
 
     "--memory",
-    PREVIEW_MEMORY_LIMIT,
+    PREVIEW_MEMORY,
 
     "--pids-limit",
-    String(
-      PREVIEW_PIDS_LIMIT
-    ),
+    PREVIEW_PIDS,
 
     "--cap-drop",
     "ALL",
@@ -1569,363 +1292,417 @@ async function startRuntime({
     "/tmp:rw,noexec,nosuid,size=128m",
 
     "--tmpfs",
-    "/home/node:rw,nosuid,size=64m",
-
-    "-p",
-    `127.0.0.1::${PREVIEW_CONTAINER_PORT}`,
-
-    "-w",
-    "/workspace",
-
-    "-e",
-    `PORT=${PREVIEW_CONTAINER_PORT}`,
-
-    "-e",
-    "HOST=0.0.0.0",
-
-    "-e",
-    "NODE_ENV=production",
+    "/home/node:rw,nosuid,size=256m",
 
     "-v",
     `${workspace}:/workspace:rw`,
 
-    /*
-     * Runtime does not need outbound network
-     * after dependency preparation.
-     */
-    "--network",
-    "none",
+    "-w",
+    "/workspace",
 
     image,
 
     "sh",
     "-lc",
-    startCommand
+    command
   ];
 
-  const child =
-    spawnDocker(
-      args
+  const result =
+    await dockerExec(
+      args,
+      {
+        timeout:
+          PREVIEW_INSTALL_TIMEOUT,
+        maxBuffer:
+          10 * 1024 * 1024
+      }
     );
 
-  const logs =
-    createLogBuffer();
+  if (
+    result.exitCode !== 0
+  ) {
+    throw new PreviewServiceError(
+      "Preview runtime dependency installation failed",
+      "PREVIEW_RUNTIME_INSTALL_FAILED",
+      422,
+      {
+        stdout:
+          clampText(
+            result.stdout
+          ),
+        stderr:
+          clampText(
+            result.stderr
+          )
+      }
+    );
+  }
 
-  let started =
-    false;
-
-  let resolved =
-    false;
-
-  return new Promise(
-    (resolve) => {
-      const timer =
-        setTimeout(
-          () => {
-            if (
-              resolved
-            ) {
-              return;
-            }
-
-            resolved =
-              true;
-
-            try {
-              child.kill(
-                "SIGTERM"
-              );
-            } catch {}
-
-            resolve({
-              success:
-                false,
-
-              timedOut:
-                true,
-
-              containerName,
-
-              stdout:
-                logs.stdout,
-
-              stderr:
-                logs.stderr
-            });
-          },
-          STARTUP_TIMEOUT_MS
-        );
-
-      child.stdout.on(
-        "data",
-        (chunk) => {
-          logs.appendStdout(
-            chunk
-          );
-
-          if (
-            !started
-          ) {
-            started =
-              true;
-          }
-        }
-      );
-
-      child.stderr.on(
-        "data",
-        (chunk) => {
-          logs.appendStderr(
-            chunk
-          );
-
-          if (
-            !started
-          ) {
-            started =
-              true;
-          }
-        }
-      );
-
-      child.on(
-        "error",
-        (error) => {
-          if (
-            resolved
-          ) {
-            return;
-          }
-
-          resolved =
-            true;
-
-          clearTimeout(
-            timer
-          );
-
-          resolve({
-            success:
-              false,
-
-            timedOut:
-              false,
-
-            containerName,
-
-            error:
-              error.message,
-
-            stdout:
-              logs.stdout,
-
-            stderr:
-              logs.stderr
-          });
-        }
-      );
-
-      child.on(
-        "close",
-        (
-          code,
-          signal
-        ) => {
-          if (
-            resolved
-          ) {
-            return;
-          }
-
-          /*
-           * If the process exits before health check,
-           * startup failed.
-           */
-          resolved =
-            true;
-
-          clearTimeout(
-            timer
-          );
-
-          resolve({
-            success:
-              false,
-
-            timedOut:
-              false,
-
-            containerName,
-
-            exitCode:
-              code,
-
-            signal:
-              signal || null,
-
-            stdout:
-              logs.stdout,
-
-            stderr:
-              logs.stderr
-          });
-        }
-      );
-
-      /*
-       * Docker has been given enough time to create
-       * the runtime. Health check is the actual readiness
-       * gate.
-       */
-      setTimeout(
-        () => {
-          if (
-            resolved
-          ) {
-            return;
-          }
-
-          resolve({
-            success:
-              true,
-
-            timedOut:
-              false,
-
-            containerName,
-
-            process:
-              child,
-
-            logs
-          });
-        },
-        1500
-      );
-    }
-  );
+  return {
+    command,
+    stdout:
+      clampText(
+        result.stdout
+      ),
+    stderr:
+      clampText(
+        result.stderr
+      )
+  };
 }
-
 
 /* =========================================================
-   PORT LOOKUP
-========================================================= */
+   CONTAINER NAME
+   ========================================================= */
 
-async function getMappedPort(
-  containerName
+function containerName(
+  previewId
 ) {
-  return new Promise(
-    (resolve, reject) => {
-      const child =
-        spawn(
-          "docker",
-          [
-            "port",
-            containerName,
-            String(
-              PREVIEW_CONTAINER_PORT
-            )
-          ],
-          {
-            stdio: [
-              "ignore",
-              "pipe",
-              "pipe"
-            ]
-          }
-        );
+  const safe =
+    String(previewId)
+      .replace(
+        /[^a-zA-Z0-9_.-]/g,
+        "-"
+      )
+      .slice(0, 100);
 
-      let stdout = "";
-      let stderr = "";
+  return `zyrionos-preview-${safe}`;
+}
 
-      child.stdout.on(
-        "data",
-        (chunk) => {
-          stdout +=
-            chunk.toString();
-        }
-      );
+/* =========================================================
+   PORT
+   ========================================================= */
 
-      child.stderr.on(
-        "data",
-        (chunk) => {
-          stderr +=
-            chunk.toString();
-        }
-      );
+function getInternalPort() {
+  return 3000;
+}
 
-      child.on(
-        "error",
-        reject
-      );
+/* =========================================================
+   CREATE DOCKER RUNTIME
+   ========================================================= */
 
-      child.on(
-        "close",
-        (code) => {
-          if (
-            code !== 0
-          ) {
-            return reject(
-              new Error(
-                stderr ||
-                "Unable to resolve preview port"
-              )
-            );
-          }
+async function startRuntime({
+  previewId,
+  workspace,
+  image,
+  startCommand
+}) {
+  const name =
+    containerName(
+      previewId
+    );
 
-          const match =
-            stdout.match(
-              /:(\d+)/
-            );
-
-          if (
-            !match
-          ) {
-            return reject(
-              new Error(
-                "Docker did not return a mapped preview port"
-              )
-            );
-          }
-
-          resolve(
-            Number(
-              match[1]
-            )
-          );
-        }
-      );
+  await dockerExec(
+    [
+      "rm",
+      "-f",
+      name
+    ],
+    {
+      timeout: 10000
     }
+  );
+
+  const internalPort =
+    getInternalPort();
+
+  const dockerArgs = [
+    "run",
+    "-d",
+
+    "--name",
+    name,
+
+    "--network",
+    PREVIEW_RUNTIME_NETWORK,
+
+    "--cpus",
+    PREVIEW_CPU,
+
+    "--memory",
+    PREVIEW_MEMORY,
+
+    "--pids-limit",
+    PREVIEW_PIDS,
+
+    "--cap-drop",
+    "ALL",
+
+    "--security-opt",
+    "no-new-privileges",
+
+    "--read-only",
+
+    "--tmpfs",
+    "/tmp:rw,noexec,nosuid,size=128m",
+
+    "--tmpfs",
+    "/home/node:rw,nosuid,size=256m",
+
+    "-p",
+    `${PREVIEW_HOST}::${internalPort}`,
+
+    "-e",
+    "NODE_ENV=production",
+
+    "-e",
+    "HOST=0.0.0.0",
+
+    "-e",
+    `PORT=${internalPort}`,
+
+    "-v",
+    `${workspace}:/workspace:ro`,
+
+    "-w",
+    "/workspace",
+
+    image,
+
+    "sh",
+    "-lc",
+    `exec ${startCommand}`
+  ];
+
+  const result =
+    await dockerExec(
+      dockerArgs,
+      {
+        timeout:
+          PREVIEW_START_TIMEOUT,
+        maxBuffer:
+          2 * 1024 * 1024
+      }
+    );
+
+  if (
+    result.exitCode !== 0
+  ) {
+    throw new PreviewServiceError(
+      "Failed to start preview runtime",
+      "PREVIEW_RUNTIME_START_FAILED",
+      500,
+      {
+        stdout:
+          clampText(
+            result.stdout
+          ),
+        stderr:
+          clampText(
+            result.stderr
+          )
+      }
+    );
+  }
+
+  const containerId =
+    String(
+      result.stdout || ""
+    ).trim();
+
+  if (!containerId) {
+    throw new PreviewServiceError(
+      "Docker did not return a preview container id",
+      "PREVIEW_RUNTIME_START_FAILED",
+      500
+    );
+  }
+
+  const portResult =
+    await dockerExec(
+      [
+        "port",
+        containerId,
+        `${internalPort}/tcp`
+      ],
+      {
+        timeout: 10000
+      }
+    );
+
+  if (
+    portResult.exitCode !== 0
+  ) {
+    await stopDockerContainer(
+      containerId
+    );
+
+    throw new PreviewServiceError(
+      "Preview runtime port could not be resolved",
+      "PREVIEW_RUNTIME_PORT_FAILED",
+      500,
+      {
+        stderr:
+          clampText(
+            portResult.stderr
+          )
+      }
+    );
+  }
+
+  const portText =
+    String(
+      portResult.stdout || ""
+    ).trim();
+
+  const match =
+    portText.match(
+      /:(\d+)\s*$/
+    );
+
+  if (!match) {
+    await stopDockerContainer(
+      containerId
+    );
+
+    throw new PreviewServiceError(
+      "Preview runtime exposed port could not be determined",
+      "PREVIEW_RUNTIME_PORT_FAILED",
+      500
+    );
+  }
+
+  const hostPort =
+    Number(match[1]);
+
+  if (
+    !Number.isInteger(
+      hostPort
+    ) ||
+    hostPort <= 0
+  ) {
+    await stopDockerContainer(
+      containerId
+    );
+
+    throw new PreviewServiceError(
+      "Invalid preview host port",
+      "PREVIEW_RUNTIME_PORT_FAILED",
+      500
+    );
+  }
+
+  const runtime = {
+    containerId,
+    containerName: name,
+    hostPort,
+    internalPort,
+    image
+  };
+
+  activeRuntimes.set(
+    String(previewId),
+    runtime
+  );
+
+  return runtime;
+}
+
+/* =========================================================
+   CONTAINER STATUS
+   ========================================================= */
+
+async function isContainerRunning(
+  containerId
+) {
+  const result =
+    await dockerExec(
+      [
+        "inspect",
+        "-f",
+        "{{.State.Running}}",
+        containerId
+      ],
+      {
+        timeout: 10000
+      }
+    );
+
+  return (
+    result.exitCode === 0 &&
+    String(
+      result.stdout || ""
+    ).trim() === "true"
   );
 }
 
+/* =========================================================
+   CONTAINER LOGS
+   ========================================================= */
+
+async function getContainerLogs(
+  containerId
+) {
+  const result =
+    await dockerExec(
+      [
+        "logs",
+        "--tail",
+        "200",
+        containerId
+      ],
+      {
+        timeout: 10000,
+        maxBuffer:
+          PREVIEW_MAX_LOG_SIZE
+      }
+    );
+
+  return {
+    stdout:
+      clampText(
+        result.stdout
+      ),
+    stderr:
+      clampText(
+        result.stderr
+      )
+  };
+}
+
+/* =========================================================
+   STOP CONTAINER
+   ========================================================= */
+
+async function stopDockerContainer(
+  containerId
+) {
+  if (!containerId) {
+    return;
+  }
+
+  await dockerExec(
+    [
+      "rm",
+      "-f",
+      containerId
+    ],
+    {
+      timeout: 15000
+    }
+  );
+}
 
 /* =========================================================
    HEALTH CHECK
-========================================================= */
+   ========================================================= */
 
 async function healthCheck(
-  url
+  hostPort
 ) {
-  const startedAt =
-    Date.now();
-
   const deadline =
-    startedAt +
-    HEALTHCHECK_TIMEOUT_MS;
+    Date.now() +
+    PREVIEW_HEALTH_TIMEOUT;
 
-  let attempts =
-    0;
+  const url =
+    `http://${PREVIEW_HOST}:${hostPort}/`;
 
   let lastError =
-    null;
+    "Health check has not completed";
 
   while (
-    Date.now() <
-    deadline
+    Date.now() < deadline
   ) {
-    attempts++;
-
     try {
       const controller =
         new AbortController();
@@ -1941,1599 +1718,895 @@ async function healthCheck(
         await fetch(
           url,
           {
-            method:
-              "GET",
-
-            redirect:
-              "manual",
-
+            method: "GET",
+            redirect: "manual",
             signal:
               controller.signal
           }
         );
 
-      clearTimeout(
-        timer
-      );
+      clearTimeout(timer);
 
-      const responseTimeMs =
-        Date.now() -
-        startedAt;
-
-      /*
-       * Any application response means the
-       * process is reachable. Application-level
-       * errors are preserved in the response status.
-       */
       if (
         response.status >= 200 &&
         response.status < 500
       ) {
         return {
-          healthy:
-            true,
-
-          status:
+          healthy: true,
+          statusCode:
             response.status,
-
-          responseTimeMs,
-
-          attempts
+          url
         };
       }
 
       lastError =
-        `Preview returned HTTP ${response.status}`;
-
+        `HTTP ${response.status}`;
     } catch (error) {
       lastError =
-        error.message;
+        safeErrorMessage(error);
     }
 
     await sleep(
-      HEALTHCHECK_INTERVAL_MS
+      PREVIEW_HEALTH_INTERVAL
     );
   }
 
   return {
-    healthy:
-      false,
-
-    status:
-      null,
-
-    responseTimeMs:
-      Date.now() -
-      startedAt,
-
-    attempts,
-
-    error:
-      lastError ||
-      "Preview health check timed out"
+    healthy: false,
+    statusCode: null,
+    url,
+    error: lastError
   };
 }
-
-
-/* =========================================================
-   STOP CONTAINER
-========================================================= */
-
-async function stopContainer(
-  containerName
-) {
-  if (
-    !containerName
-  ) {
-    return;
-  }
-
-  await new Promise(
-    (resolve) => {
-      const child =
-        spawn(
-          "docker",
-          [
-            "stop",
-            "-t",
-            "5",
-            containerName
-          ],
-          {
-            stdio:
-              "ignore"
-          }
-        );
-
-      const timer =
-        setTimeout(
-          () => {
-            try {
-              child.kill(
-                "SIGKILL"
-              );
-            } catch {}
-
-            resolve();
-          },
-          10000
-        );
-
-      child.on(
-        "close",
-        () => {
-          clearTimeout(
-            timer
-          );
-
-          resolve();
-        }
-      );
-
-      child.on(
-        "error",
-        () => {
-          clearTimeout(
-            timer
-          );
-
-          resolve();
-        }
-      );
-    }
-  );
-}
-
 
 /* =========================================================
    PREVIEW URL
-========================================================= */
+   ========================================================= */
 
-function createPreviewUrl(
+function buildPreviewUrl(
   previewId,
-  mappedPort
+  hostPort
 ) {
-  /*
-   * Production:
-   *
-   * PREVIEW_BASE_URL=https://preview.zyrionos.com
-   *
-   * The gateway/reverse proxy should route:
-   *
-   * /preview/:previewId
-   *
-   * to the correct runtime.
-   */
-
   if (
     PREVIEW_BASE_URL
   ) {
-    return `${PREVIEW_BASE_URL}/preview/${encodeURIComponent(
-      previewId
-    )}`;
+    return (
+      PREVIEW_BASE_URL.replace(
+        /\/+$/,
+        ""
+      ) +
+      `/preview/${encodeURIComponent(
+        previewId
+      )}`
+    );
   }
 
-  /*
-   * Local development fallback.
-   */
-  return `http://127.0.0.1:${mappedPort}`;
+  return (
+    `http://${PREVIEW_HOST}:${hostPort}`
+  );
 }
 
-
 /* =========================================================
-   GET AUTHORITATIVE BUILD
-========================================================= */
+   CLEANUP WORKSPACE
+   ========================================================= */
 
-async function getAuthoritativeBuild({
-  projectId,
-  userId,
-  buildId
-}) {
-  if (
-    !buildId
-  ) {
-    throw createPreviewError(
-      "PREVIEW_BUILD_ID_REQUIRED",
-      "A successful authoritative buildId is required for preview",
-      "build",
-      "build",
-      false
-    );
-  }
-
-  const build =
-    await ProjectBuild.findOne({
-      projectId,
-      userId,
-      buildId
-    });
-
-  if (
-    !build
-  ) {
-    throw createPreviewError(
-      "PREVIEW_BUILD_NOT_FOUND",
-      "Authoritative build was not found",
-      "build",
-      "build",
-      false
-    );
-  }
-
-  if (
-    build.status !==
-    "success"
-  ) {
-    throw createPreviewError(
-      "PREVIEW_BUILD_NOT_SUCCESSFUL",
-      `Preview requires a successful build. Current status: ${build.status}`,
-      "build",
-      "build",
-      false
-    );
-  }
-
-  if (
-    !build.metadata ||
-    build.metadata.authoritative !==
-      true
-  ) {
-    throw createPreviewError(
-      "PREVIEW_BUILD_NOT_AUTHORITATIVE",
-      "Selected build is not an authoritative build",
-      "build",
-      "build",
-      false
-    );
-  }
-
-  if (
-    build.metadata.validationMode !==
-    "authoritative"
-  ) {
-    throw createPreviewError(
-      "PREVIEW_BUILD_VALIDATION_MODE_INVALID",
-      "Selected build does not have authoritative validation mode",
-      "build",
-      "build",
-      false
-    );
-  }
-
-  if (
-    !Array.isArray(
-      build.artifacts
-    ) ||
-    build.artifacts.length === 0
-  ) {
-    throw createPreviewError(
-      "PREVIEW_BUILD_ARTIFACT_MISSING",
-      "Successful authoritative build has no artifact",
-      "artifact",
-      "build",
-      false
-    );
-  }
-
-  const artifact =
-    build.artifacts.find(
-      (item) =>
-        item.type ===
-        "build"
-    ) ||
-    build.artifacts[0];
-
-  if (
-    !artifact.storageKey ||
-    !artifact.checksum
-  ) {
-    throw createPreviewError(
-      "PREVIEW_ARTIFACT_METADATA_INVALID",
-      "Authoritative build artifact metadata is incomplete",
-      "artifact",
-      "build",
-      false
-    );
-  }
-
-  return {
-    build,
-    artifact
-  };
-}
-
-
-/* =========================================================
-   PREVIEW NUMBER
-========================================================= */
-
-async function getNextPreviewNumber(
-  projectId
+async function removeWorkspace(
+  workspace
 ) {
-  const latest =
-    await ProjectPreview
-      .findOne({
-        projectId
-      })
-      .sort({
-        previewNumber:
-          -1
-      })
-      .select({
-        previewNumber:
-          1
-      })
-      .lean();
-
-  return latest &&
-    Number.isFinite(
-      latest.previewNumber
-    )
-    ? latest.previewNumber + 1
-    : 1;
-}
-
-
-/* =========================================================
-   STATUS
-========================================================= */
-
-async function updatePreviewStatus(
-  preview,
-  status
-) {
-  preview.status =
-    status;
-
-  if (
-    status ===
-    "stopped" &&
-    !preview.stoppedAt
-  ) {
-    preview.stoppedAt =
-      new Date();
+  if (!workspace) {
+    return;
   }
-
-  if (
-    [
-      "stopped",
-      "expired",
-      "cancelled",
-      "failed"
-    ].includes(
-      status
-    ) &&
-    !preview.completedAt
-  ) {
-    preview.completedAt =
-      new Date();
-  }
-
-  await preview.save();
-
-  return preview;
-}
-
-
-/* =========================================================
-   NORMALIZE ERROR
-========================================================= */
-
-function normalizePreviewError(
-  error
-) {
-  return {
-    code:
-      safeString(
-        error.code ||
-          "PREVIEW_FAILED",
-        200
-      ),
-
-    message:
-      safeString(
-        error.message ||
-          "Preview failed",
-        5000
-      ),
-
-    stage:
-      safeString(
-        error.stage ||
-          "system",
-        100
-      ),
-
-    category:
-      safeString(
-        error.category ||
-          "unknown",
-        100
-      ),
-
-    retryable:
-      Boolean(
-        error.retryable
-      ),
-
-    timestamp:
-      new Date()
-  };
-}
-
-
-/* =========================================================
-   CREATE PREVIEW
-========================================================= */
-
-async function createPreview({
-  projectId,
-  userId,
-  buildId,
-  trigger = "manual",
-  ttlMs = DEFAULT_TTL_MS,
-  workspaceSessionId = "",
-  aiGenerated = false,
-  aiModel = "",
-  promptId = ""
-}) {
-  if (
-    !projectId
-  ) {
-    throw new Error(
-      "projectId is required"
-    );
-  }
-
-  if (
-    !userId
-  ) {
-    throw new Error(
-      "userId is required"
-    );
-  }
-
-  /*
-   * IMPORTANT:
-   *
-   * buildId is mandatory in the artifact-native
-   * architecture.
-   *
-   * No hidden rebuild is performed here.
-   */
-  if (
-    !buildId
-  ) {
-    throw createPreviewError(
-      "PREVIEW_BUILD_ID_REQUIRED",
-      "Preview requires a successful authoritative buildId",
-      "build",
-      "build",
-      false
-    );
-  }
-
-  const project =
-    await Project.findOne({
-      _id:
-        projectId,
-
-      userId
-    });
-
-  if (
-    !project
-  ) {
-    throw createPreviewError(
-      "PROJECT_NOT_FOUND",
-      "Project not found",
-      "validation",
-      "validation",
-      false
-    );
-  }
-
-  if (
-    project.isArchived
-  ) {
-    throw createPreviewError(
-      "PROJECT_ARCHIVED",
-      "Cannot create preview for archived project",
-      "validation",
-      "validation",
-      false
-    );
-  }
-
-  if (
-    project.settings &&
-    project.settings.previewEnabled ===
-      false
-  ) {
-    throw createPreviewError(
-      "PREVIEW_DISABLED",
-      "Preview is disabled for this project",
-      "validation",
-      "validation",
-      false
-    );
-  }
-
-
-  /* -------------------------------------------------------
-     Build gate
-  ------------------------------------------------------- */
-
-  const {
-    build,
-    artifact
-  } =
-    await getAuthoritativeBuild({
-      projectId,
-      userId,
-      buildId
-    });
-
-
-  /* -------------------------------------------------------
-     Source identity
-  ------------------------------------------------------- */
-
-  const sourceHash =
-    build.metadata &&
-    build.metadata.sourceHash
-      ? build.metadata.sourceHash
-      : "";
-
-
-  /* -------------------------------------------------------
-     TTL
-  ------------------------------------------------------- */
-
-  const normalizedTtl =
-    clamp(
-      Number(ttlMs) ||
-        DEFAULT_TTL_MS,
-
-      MIN_TTL_MS,
-
-      MAX_TTL_MS
-    );
-
-  const expiresAt =
-    new Date(
-      Date.now() +
-      normalizedTtl
-    );
-
-
-  /* -------------------------------------------------------
-     Preview identity
-  ------------------------------------------------------- */
-
-  const previewId =
-    generateId(
-      "preview"
-    );
-
-  const previewNumber =
-    await getNextPreviewNumber(
-      project._id
-    );
-
-
-  /* -------------------------------------------------------
-     Persist queued state
-  ------------------------------------------------------- */
-
-  const preview =
-    new ProjectPreview({
-      projectId:
-        project._id,
-
-      userId,
-
-      previewId,
-
-      previewNumber,
-
-      buildId:
-        build.buildId,
-
-      buildNumber:
-        build.buildNumber,
-
-      sourceVersionId:
-        build.sourceVersionId ||
-        null,
-
-      sourceHash,
-
-      framework:
-        build.framework ||
-        project.framework,
-
-      runtime:
-        build.runtime ||
-        project.framework,
-
-      status:
-        "queued",
-
-      trigger,
-
-      isEphemeral:
-        true,
-
-      expiresAt,
-
-      aiGenerated,
-
-      aiModel,
-
-      promptId,
-
-      workspaceSessionId,
-
-      productionSecretsBlocked:
-        true,
-
-      secretsInjected:
-        false,
-
-      networkAccess:
-        "restricted",
-
-      metadata: {
-        serviceVersion:
-          SERVICE_VERSION,
-
-        artifactChecksum:
-          artifact.checksum,
-
-        artifactStorageKey:
-          artifact.storageKey,
-
-        authoritativeBuild:
-          true
-      }
-    });
-
-  await preview.save();
-
-
-  let artifactWorkspace =
-    null;
-
-  let runtimeWorkspace =
-    null;
-
-  let containerName =
-    "";
 
   try {
-    /* -----------------------------------------------------
-       Docker
-    ----------------------------------------------------- */
-
-    const dockerReady =
-      await dockerAvailable();
-
-    if (
-      !dockerReady
-    ) {
-      throw createPreviewError(
-        "PREVIEW_DOCKER_UNAVAILABLE",
-        "Docker runtime is unavailable",
-        "runtime",
-        "runtime",
-        true
-      );
-    }
-
-
-    /* -----------------------------------------------------
-       Artifact acquisition
-    ----------------------------------------------------- */
-
-    await updatePreviewStatus(
-      preview,
-      "building"
-    );
-
-    preview.buildStartedAt =
-      new Date();
-
-    await preview.save();
-
-    const acquired =
-      await acquireArtifact({
-        artifact
-      });
-
-    artifactWorkspace =
-      acquired.workspace;
-
-
-    /* -----------------------------------------------------
-       Runtime workspace
-    ----------------------------------------------------- */
-
-    runtimeWorkspace =
-      await createWorkspace();
-
-    await extractArtifact({
-      artifactPath:
-        acquired.artifactPath,
-
-      destination:
-        runtimeWorkspace
-    });
-
-
-    /* -----------------------------------------------------
-       Read runtime package
-    ----------------------------------------------------- */
-
-    const packageJson =
-      await readPackageJson(
-        runtimeWorkspace
-      );
-
-    const packageManager =
-      detectPackageManager(
-        runtimeWorkspace,
-        project,
-        build
-      );
-
-    const nodeVersion =
-      String(
-        build.nodeVersion ||
-          "20"
-      ).match(
-        /^(20|22)/
-      )?.[1] ||
-      "20";
-
-    const runtimeImage =
-      NODE_IMAGES[
-        nodeVersion
-      ] ||
-      PREVIEW_IMAGE;
-
-    const hasLockfile =
-      [
-        "package-lock.json",
-        "npm-shrinkwrap.json",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "bun.lock",
-        "bun.lockb"
-      ].some(
-        (fileName) =>
-          fs.existsSync(
-            path.join(
-              runtimeWorkspace,
-              fileName
-            )
-          )
-      );
-
-
-    /* -----------------------------------------------------
-       Runtime dependency preparation
-    ----------------------------------------------------- */
-
-    /*
-     * IMPORTANT:
-     *
-     * This is NOT an authoritative build.
-     *
-     * The artifact is already the verified output of
-     * the authoritative build.
-     *
-     * This step only restores runtime dependencies
-     * because node_modules was intentionally not packed
-     * into the portable artifact.
-     */
-    const installResult =
-      await installRuntimeDependencies({
-        workspace:
-          runtimeWorkspace,
-
-        packageManager,
-
-        hasLockfile,
-
-        image:
-          runtimeImage
-      });
-
-    if (
-      !installResult.success
-    ) {
-      throw createPreviewError(
-        installResult.timedOut
-          ? "PREVIEW_RUNTIME_INSTALL_TIMEOUT"
-          : "PREVIEW_RUNTIME_INSTALL_FAILED",
-
-        installResult.timedOut
-          ? "Preview runtime dependency preparation timed out"
-          : (
-              installResult.stderr ||
-              installResult.stdout ||
-              "Preview runtime dependency preparation failed"
-            ),
-
-        "runtime",
-
-        installResult.timedOut
-          ? "timeout"
-          : "runtime",
-
-        installResult.timedOut
-      );
-    }
-
-
-    /* -----------------------------------------------------
-       Build completed
-    ----------------------------------------------------- */
-
-    preview.buildCompletedAt =
-      new Date();
-
-    preview.runtimeInfo = {
-      status:
-        "starting",
-
-      runtime:
-        build.runtime ||
-        project.framework,
-
-      nodeVersion,
-
-      packageManager,
-
-      command:
-        "",
-
-      workingDirectory:
-        "/workspace",
-
-      cpuLimit:
-        PREVIEW_CPU_LIMIT,
-
-      memoryLimit:
-        PREVIEW_MEMORY_LIMIT
-    };
-
-    await preview.save();
-
-
-    /* -----------------------------------------------------
-       Start runtime
-    ----------------------------------------------------- */
-
-    await updatePreviewStatus(
-      preview,
-      "starting"
-    );
-
-    preview.startedAt =
-      new Date();
-
-    const startCommand =
-      resolveStartCommand(
-        project,
-        packageJson
-      );
-
-    preview.runtimeInfo.command =
-      startCommand;
-
-    await preview.save();
-
-    const runtime =
-      await startRuntime({
-        previewId,
-
-        workspace:
-          runtimeWorkspace,
-
-        startCommand,
-
-        nodeVersion
-      });
-
-    if (
-      !runtime.success
-    ) {
-      throw createPreviewError(
-        runtime.timedOut
-          ? "PREVIEW_START_TIMEOUT"
-          : "PREVIEW_START_FAILED",
-
-        runtime.timedOut
-          ? "Preview runtime startup timed out"
-          : (
-              runtime.stderr ||
-              runtime.error ||
-              "Preview runtime failed to start"
-            ),
-
-        "startup",
-
-        runtime.timedOut
-          ? "timeout"
-          : "runtime",
-
-        runtime.timedOut
-      );
-    }
-
-    containerName =
-      runtime.containerName;
-
-    preview.runtimeInfo.containerId =
-      containerName;
-
-    preview.runtimeInfo.status =
-      "running";
-
-    await preview.save();
-
-
-    /* -----------------------------------------------------
-       Port
-    ----------------------------------------------------- */
-
-    const mappedPort =
-      await getMappedPort(
-        containerName
-      );
-
-    preview.runtimeInfo.hostPort =
-      mappedPort;
-
-    preview.runtimeInfo.internalPort =
-      PREVIEW_CONTAINER_PORT;
-
-    await preview.save();
-
-
-    /* -----------------------------------------------------
-       Health
-    ----------------------------------------------------- */
-
-    const localUrl =
-      `http://127.0.0.1:${mappedPort}`;
-
-    const health =
-      await healthCheck(
-        localUrl
-      );
-
-    preview.healthCheck = {
-      status:
-        health.healthy
-          ? "healthy"
-          : (
-              health.error &&
-              health.error
-                .toLowerCase()
-                .includes(
-                  "timeout"
-                )
-                ? "timeout"
-                : "unhealthy"
-            ),
-
-      url:
-        localUrl,
-
-      method:
-        "GET",
-
-      expectedStatus:
-        200,
-
-      actualStatus:
-        health.status,
-
-      responseTimeMs:
-        health.responseTimeMs,
-
-      attempts:
-        health.attempts,
-
-      lastCheckedAt:
-        new Date(),
-
-      healthyAt:
-        health.healthy
-          ? new Date()
-          : null,
-
-      errorMessage:
-        health.error || ""
-    };
-
-    if (
-      !health.healthy
-    ) {
-      throw createPreviewError(
-        "PREVIEW_HEALTHCHECK_FAILED",
-        health.error ||
-          "Preview failed health check",
-        "healthcheck",
-        "healthcheck",
-        true
-      );
-    }
-
-
-    /* -----------------------------------------------------
-       READY
-    ----------------------------------------------------- */
-
-    const previewUrl =
-      createPreviewUrl(
-        previewId,
-        mappedPort
-      );
-
-    preview.url =
-      previewUrl;
-
-    preview.publicUrl =
-      previewUrl;
-
-    preview.hostname =
-      PREVIEW_BASE_URL
-        ? new URL(
-            PREVIEW_BASE_URL
-          ).hostname
-        : "127.0.0.1";
-
-    preview.readyAt =
-      new Date();
-
-    preview.runtimeInfo.status =
-      "running";
-
-    preview.status =
-      "ready";
-
-    preview.completedAt =
-      null;
-
-    await preview.save();
-
-
-    /* -----------------------------------------------------
-       Runtime registry
-    ----------------------------------------------------- */
-
-    activeRuntimes.set(
-      previewId,
+    await fsp.rm(
+      workspace,
       {
-        previewId,
-
-        containerName,
-
-        workspace:
-          runtimeWorkspace,
-
-        artifactWorkspace,
-
-        expiresAt:
-          expiresAt.getTime()
+        recursive: true,
+        force: true
       }
     );
-
-
-    scheduleExpiration(
-      previewId,
-      normalizedTtl
-    );
-
-
-    /*
-     * Artifact acquisition workspace is no longer needed.
-     */
-    await cleanupWorkspace(
-      artifactWorkspace
-    );
-
-    artifactWorkspace =
-      null;
-
-
-    return serializePreview(
-      preview
-    );
-
-  } catch (error) {
-    const normalized =
-      normalizePreviewError(
-        error
-      );
-
-    preview.errors.push(
-      normalized
-    );
-
-    preview.errorMessage =
-      normalized.message;
-
-    preview.failureCategory =
-      normalized.category;
-
-    preview.status =
-      "failed";
-
-    preview.completedAt =
-      new Date();
-
-    if (
-      preview.runtimeInfo
-    ) {
-      preview.runtimeInfo.status =
-        "crashed";
-    }
-
-    await preview.save();
-
-
-    if (
-      containerName
-    ) {
-      await stopContainer(
-        containerName
-      );
-    }
-
-
-    activeRuntimes.delete(
-      previewId
-    );
-
-
-    await cleanupWorkspace(
-      artifactWorkspace
-    );
-
-    await cleanupWorkspace(
-      runtimeWorkspace
-    );
-
-
-    throw error;
-
-  } finally {
-    /*
-     * Runtime workspace survives only when runtime
-     * successfully entered activeRuntimes.
-     */
-    if (
-      runtimeWorkspace &&
-      !activeRuntimes.has(
-        previewId
-      )
-    ) {
-      await cleanupWorkspace(
-        runtimeWorkspace
-      );
-    }
-
-    if (
-      artifactWorkspace
-    ) {
-      await cleanupWorkspace(
-        artifactWorkspace
-      );
-    }
+  } catch (_) {
+    // Cleanup must never hide the original error.
   }
 }
 
-
 /* =========================================================
-   STOP PREVIEW
-========================================================= */
+   CLEANUP RUNTIME
+   ========================================================= */
 
-async function stopPreview({
-  projectId,
-  userId,
-  previewId,
-  reason = "manual"
-}) {
-  const preview =
-    await ProjectPreview.findOne({
-      projectId,
-      userId,
-      previewId
-    });
-
-  if (
-    !preview
-  ) {
-    throw new Error(
-      "Preview not found"
-    );
-  }
+async function cleanupRuntime(
+  previewId
+) {
+  const key =
+    String(previewId);
 
   const runtime =
     activeRuntimes.get(
-      previewId
+      key
     );
 
-  const containerName =
-    runtime?.containerName ||
-    preview.runtimeInfo?.containerId ||
-    "";
-
-  if (
-    containerName
-  ) {
-    await stopContainer(
-      containerName
-    );
+  if (!runtime) {
+    return;
   }
 
-  if (
-    preview.runtimeInfo
-  ) {
-    preview.runtimeInfo.status =
-      "stopped";
-
-    preview.runtimeInfo.stoppedAt =
-      new Date();
-  }
-
-  preview.status =
-    "stopped";
-
-  preview.stoppedAt =
-    new Date();
-
-  preview.completedAt =
-    new Date();
-
-  preview.stopReason =
-    safeString(
-      reason,
-      2000
-    );
-
-  await preview.save();
-
-
-  activeRuntimes.delete(
-    previewId
+  await stopDockerContainer(
+    runtime.containerId
   );
 
-
-  if (
-    runtime?.workspace
-  ) {
-    await cleanupWorkspace(
-      runtime.workspace
-    );
-  }
-
-  if (
-    runtime?.artifactWorkspace
-  ) {
-    await cleanupWorkspace(
-      runtime.artifactWorkspace
-    );
-  }
-
-
-  return serializePreview(
-    preview
+  activeRuntimes.delete(
+    key
   );
 }
 
-
 /* =========================================================
-   EXPIRE PREVIEW
-========================================================= */
+   SERIALIZE
+   ========================================================= */
 
-async function expirePreview(
-  previewId
+function serializePreview(
+  preview
 ) {
-  const preview =
-    await ProjectPreview.findOne({
-      previewId
-    });
-
-  if (
-    !preview
-  ) {
+  if (!preview) {
     return null;
   }
 
-  if (
-    [
-      "expired",
-      "stopped",
-      "cancelled"
-    ].includes(
-      preview.status
-    )
-  ) {
-    return serializePreview(
-      preview
-    );
-  }
-
-  const runtime =
-    activeRuntimes.get(
-      previewId
-    );
-
-  const containerName =
-    runtime?.containerName ||
-    preview.runtimeInfo?.containerId ||
-    "";
-
-  if (
-    containerName
-  ) {
-    await stopContainer(
-      containerName
-    );
-  }
-
-  if (
-    preview.runtimeInfo
-  ) {
-    preview.runtimeInfo.status =
-      "stopped";
-
-    preview.runtimeInfo.stoppedAt =
-      new Date();
-  }
-
-  preview.status =
-    "expired";
-
-  preview.expiredAt =
-    new Date();
-
-  preview.completedAt =
-    new Date();
-
-  preview.expirationReason =
-    "TTL expired";
-
-  await preview.save();
-
-
-  activeRuntimes.delete(
-    previewId
-  );
-
-
-  if (
-    runtime?.workspace
-  ) {
-    await cleanupWorkspace(
-      runtime.workspace
-    );
-  }
-
-  if (
-    runtime?.artifactWorkspace
-  ) {
-    await cleanupWorkspace(
-      runtime.artifactWorkspace
-    );
-  }
-
-
-  return serializePreview(
-    preview
-  );
-}
-
-
-/* =========================================================
-   EXPIRATION SCHEDULER
-========================================================= */
-
-function scheduleExpiration(
-  previewId,
-  ttlMs
-) {
-  const timer =
-    setTimeout(
-      async () => {
-        try {
-          await expirePreview(
-            previewId
-          );
-        } catch (error) {
-          console.error(
-            "[PreviewService] expiration failed:",
-            error.message
-          );
-        }
-      },
-      ttlMs
-    );
-
-  /*
-   * Do not keep Node process alive only for
-   * preview expiration.
-   */
-  if (
-    typeof timer.unref ===
+  const data =
+    typeof preview.toObject ===
     "function"
+      ? preview.toObject()
+      : {
+          ...preview
+        };
+
+  if (
+    data.runtimeInfo
   ) {
-    timer.unref();
+    data.runtimeInfo = {
+      hostPort:
+        data.runtimeInfo.hostPort ||
+        null,
+      internalPort:
+        data.runtimeInfo.internalPort ||
+        null,
+      image:
+        data.runtimeInfo.image ||
+        ""
+    };
   }
+
+  if (
+    data.metadata
+  ) {
+    delete data.metadata
+      .artifactStorageKey;
+
+    delete data.metadata
+      .workingDirectory;
+
+    delete data.metadata
+      .containerId;
+
+    delete data.metadata
+      .workerId;
+  }
+
+  delete data.workingDirectory;
+  delete data.containerId;
+
+  return data;
 }
 
-
 /* =========================================================
-   GET PREVIEW
-========================================================= */
+   ACTIVE PREVIEW
+   ========================================================= */
 
 async function getPreview({
   projectId,
   userId,
   previewId
 }) {
+  const query = {
+    projectId,
+    userId
+  };
+
+  if (previewId) {
+    query.previewId =
+      previewId;
+
+    const preview =
+      await ProjectPreview.findOne(
+        query
+      );
+
+    return preview
+      ? serializePreview(preview)
+      : null;
+  }
+
+  const preview =
+    await ProjectPreview.findOne({
+      ...query,
+      status: {
+        $in:
+          ACTIVE_STATUSES
+      }
+    })
+      .sort({
+        createdAt: -1
+      });
+
+  return preview
+    ? serializePreview(preview)
+    : null;
+}
+
+/* =========================================================
+   CREATE PREVIEW
+   ========================================================= */
+
+async function createPreview({
+  projectId,
+  userId,
+  buildId,
+  project
+}) {
+  const dockerReady =
+    await dockerAvailable();
+
+  if (!dockerReady) {
+    throw new PreviewServiceError(
+      "Docker is unavailable on the preview worker",
+      "PREVIEW_DOCKER_UNAVAILABLE",
+      503
+    );
+  }
+
+  if (
+    project?.settings &&
+    project.settings.previewEnabled ===
+      false
+  ) {
+    throw new PreviewServiceError(
+      "Preview is disabled for this project",
+      "PREVIEW_DISABLED",
+      403
+    );
+  }
+
+  /* -------------------------------------------------------
+     AUTHORITATIVE BUILD
+     ------------------------------------------------------- */
+
+  const build =
+    await getAuthoritativeBuild({
+      projectId,
+      userId,
+      buildId
+    });
+
+  const artifact =
+    selectPreviewArtifact(
+      build
+    );
+
+  /* -------------------------------------------------------
+     REUSE SAME READY PREVIEW
+     ------------------------------------------------------- */
+
+  const existing =
+    await ProjectPreview.findOne({
+      projectId,
+      userId,
+      buildId,
+      status: "ready"
+    })
+      .sort({
+        createdAt: -1
+      });
+
+  if (
+    existing
+  ) {
+    const runtime =
+      activeRuntimes.get(
+        String(
+          existing.previewId
+        )
+      );
+
+    if (
+      runtime &&
+      (await isContainerRunning(
+        runtime.containerId
+      ))
+    ) {
+      return serializePreview(
+        existing
+      );
+    }
+
+    await ProjectPreview.updateOne(
+      {
+        _id:
+          existing._id
+      },
+      {
+        $set: {
+          status: "stopped",
+          stoppedAt: now(),
+          errorMessage:
+            "Runtime was no longer active"
+        }
+      }
+    );
+  }
+
+  /* -------------------------------------------------------
+     ACTIVE PREVIEW LIMIT
+     ------------------------------------------------------- */
+
+  const activeCount =
+    await ProjectPreview.countDocuments({
+      projectId,
+      userId,
+      status: {
+        $in:
+          ACTIVE_STATUSES
+      }
+    });
+
+  if (
+    activeCount >=
+    PREVIEW_MAX_ACTIVE
+  ) {
+    throw new PreviewServiceError(
+      "Preview limit reached for this project",
+      "PREVIEW_LIMIT_REACHED",
+      429
+    );
+  }
+
+  /* -------------------------------------------------------
+     CREATE ID
+     ------------------------------------------------------- */
+
+  const previewId =
+    `preview_${crypto
+      .randomBytes(12)
+      .toString("hex")}`;
+
+  const createdAt =
+    now();
+
+  const expiresAt =
+    new Date(
+      createdAt.getTime() +
+        PREVIEW_TTL_MS
+    );
+
+  let preview =
+    await ProjectPreview.create({
+      projectId,
+      userId,
+      previewId,
+      buildId,
+      status: "starting",
+      startedAt: createdAt,
+      expiresAt,
+
+      framework:
+        build.framework || "",
+
+      runtime:
+        build.runtime || "node",
+
+      nodeVersion:
+        normalizeNodeVersion(
+          build.nodeVersion
+        ),
+
+      packageManager:
+        build.packageManager ||
+        "npm",
+
+      metadata: {
+        serviceVersion:
+          SERVICE_VERSION,
+
+        authoritativeBuild:
+          true,
+
+        validationMode:
+          "authoritative",
+
+        buildSourceHash:
+          build.metadata?.sourceHash ||
+          "",
+
+        artifactName:
+          artifact.name || "",
+
+        artifactType:
+          artifact.type || ""
+      }
+    });
+
+  let runtimeWorkspace = null;
+  let artifactWorkspace = null;
+
+  try {
+    /* -----------------------------------------------------
+       TEMP WORKSPACE
+       ----------------------------------------------------- */
+
+    const root =
+      await fsp.mkdtemp(
+        path.join(
+          os.tmpdir(),
+          "zyrionos-preview-"
+        )
+      );
+
+    artifactWorkspace =
+      path.join(
+        root,
+        "artifact"
+      );
+
+    runtimeWorkspace =
+      path.join(
+        root,
+        "runtime"
+      );
+
+    await fsp.mkdir(
+      artifactWorkspace,
+      {
+        recursive: true
+      }
+    );
+
+    await fsp.mkdir(
+      runtimeWorkspace,
+      {
+        recursive: true
+      }
+    );
+
+    /* -----------------------------------------------------
+       ARTIFACT
+       ----------------------------------------------------- */
+
+    const artifactFile =
+      await materializeArtifact(
+        artifact,
+        root
+      );
+
+    /* -----------------------------------------------------
+       EXTRACT
+       ----------------------------------------------------- */
+
+    await extractArtifact(
+      artifactFile,
+      artifactWorkspace
+    );
+
+    /* -----------------------------------------------------
+       PACKAGE
+       ----------------------------------------------------- */
+
+    const packageJson =
+      await readPackageJson(
+        artifactWorkspace
+      );
+
+    const packageManager =
+      detectPackageManager(
+        packageJson,
+        artifactWorkspace
+      );
+
+    const nodeVersion =
+      normalizeNodeVersion(
+        build.nodeVersion
+      );
+
+    const image =
+      getRuntimeImage(
+        nodeVersion,
+        packageManager
+      );
+
+    const startCommand =
+      resolveStartCommand({
+        packageJson,
+        packageManager,
+        project
+      });
+
+    /* -----------------------------------------------------
+       COPY ARTIFACT TO RUNTIME
+       ----------------------------------------------------- */
+
+    await fsp.cp(
+      artifactWorkspace,
+      runtimeWorkspace,
+      {
+        recursive: true
+      }
+    );
+
+    /* -----------------------------------------------------
+       UPDATE STATE
+       ----------------------------------------------------- */
+
+    await ProjectPreview.updateOne(
+      {
+        _id:
+          preview._id
+      },
+      {
+        $set: {
+          packageManager,
+          nodeVersion,
+          status: "starting",
+          metadata: {
+            ...(preview.metadata || {}),
+            runtimeImage:
+              image,
+            startCommand:
+              startCommand
+          }
+        }
+      }
+    );
+
+    /* -----------------------------------------------------
+       INSTALL RUNTIME DEPENDENCIES
+       ----------------------------------------------------- */
+
+    const installResult =
+      await installRuntimeDependencies({
+        workspace:
+          runtimeWorkspace,
+        packageManager,
+        image
+      });
+
+    /* -----------------------------------------------------
+       START RUNTIME
+       ----------------------------------------------------- */
+
+    const runtime =
+      await startRuntime({
+        previewId,
+        workspace:
+          runtimeWorkspace,
+        image,
+        startCommand
+      });
+
+    /* -----------------------------------------------------
+       HEALTH CHECK
+       ----------------------------------------------------- */
+
+    const health =
+      await healthCheck(
+        runtime.hostPort
+      );
+
+    if (
+      !health.healthy
+    ) {
+      const logs =
+        await getContainerLogs(
+          runtime.containerId
+        );
+
+      throw new PreviewServiceError(
+        "Preview health check failed",
+        "PREVIEW_HEALTHCHECK_FAILED",
+        502,
+        {
+          health,
+          logs
+        }
+      );
+    }
+
+    /* -----------------------------------------------------
+       FINAL READY
+       ----------------------------------------------------- */
+
+    const previewUrl =
+      buildPreviewUrl(
+        previewId,
+        runtime.hostPort
+      );
+
+    preview =
+      await ProjectPreview.findOneAndUpdate(
+        {
+          _id:
+            preview._id
+        },
+        {
+          $set: {
+            status: "ready",
+
+            readyAt:
+              now(),
+
+            url:
+              previewUrl,
+
+            previewUrl,
+
+            runtimeInfo: {
+              hostPort:
+                runtime.hostPort,
+
+              internalPort:
+                runtime.internalPort,
+
+              image:
+                runtime.image
+            },
+
+            metadata: {
+              ...(preview.metadata || {}),
+              installCommand:
+                installResult.command,
+
+              installOutput:
+                clampText(
+                  installResult.stdout
+                ),
+
+              healthStatus:
+                health.statusCode
+            }
+          }
+        },
+        {
+          new: true
+        }
+      );
+
+    return serializePreview(
+      preview
+    );
+  } catch (error) {
+    await cleanupRuntime(
+      previewId
+    );
+
+    const normalized =
+      error instanceof
+      PreviewServiceError
+        ? error
+        : new PreviewServiceError(
+            safeErrorMessage(
+              error
+            ),
+            "PREVIEW_START_FAILED",
+            500
+          );
+
+    await ProjectPreview.updateOne(
+      {
+        _id:
+          preview._id
+      },
+      {
+        $set: {
+          status: "failed",
+          failedAt: now(),
+          errorMessage:
+            normalized.message,
+          errors: [
+            {
+              code:
+                normalized.code,
+              message:
+                normalized.message,
+              details:
+                normalized.details ||
+                {}
+            }
+          ]
+        }
+      }
+    );
+
+    throw normalized;
+  } finally {
+    /*
+     * Runtime container has its own bind-mounted
+     * workspace. We intentionally remove the temporary
+     * host workspace only after the runtime is stopped.
+     *
+     * Successful runtime needs the files, therefore
+     * cleanup is handled when the preview is stopped.
+     */
+  }
+}
+
+/* =========================================================
+   STOP PREVIEW
+   ========================================================= */
+
+async function stopPreview({
+  projectId,
+  userId,
+  previewId
+}) {
   const preview =
     await ProjectPreview.findOne({
       projectId,
       userId,
       previewId
-    }).lean();
+    });
 
-  if (
-    !preview
-  ) {
-    throw new Error(
-      "Preview not found"
+  if (!preview) {
+    throw new PreviewServiceError(
+      "Preview was not found",
+      "PREVIEW_NOT_FOUND",
+      404
     );
   }
 
+  await cleanupRuntime(
+    previewId
+  );
+
+  const updated =
+    await ProjectPreview.findOneAndUpdate(
+      {
+        _id:
+          preview._id
+      },
+      {
+        $set: {
+          status: "stopped",
+          stoppedAt: now()
+        }
+      },
+      {
+        new: true
+      }
+    );
+
   return serializePreview(
-    preview
+    updated
   );
 }
 
+/* =========================================================
+   EXPIRE PREVIEW
+   ========================================================= */
+
+async function expirePreview(
+  input
+) {
+  const isArgsObject =
+    isObject(input);
+
+  const projectId =
+    isArgsObject
+      ? input.projectId
+      : undefined;
+
+  const userId =
+    isArgsObject
+      ? input.userId
+      : undefined;
+
+  const previewId =
+    isArgsObject
+      ? input.previewId
+      : input;
+
+  if (!previewId) {
+    throw new PreviewServiceError(
+      "previewId is required",
+      "PREVIEW_ID_REQUIRED",
+      400
+    );
+  }
+
+  const query = {
+    previewId
+  };
+
+  if (projectId) {
+    query.projectId =
+      projectId;
+  }
+
+  if (userId) {
+    query.userId =
+      userId;
+  }
+
+  const preview =
+    await ProjectPreview.findOne(
+      query
+    );
+
+  if (!preview) {
+    throw new PreviewServiceError(
+      "Preview was not found",
+      "PREVIEW_NOT_FOUND",
+      404
+    );
+  }
+
+  await cleanupRuntime(
+    previewId
+  );
+
+  const updated =
+    await ProjectPreview.findOneAndUpdate(
+      {
+        _id:
+          preview._id
+      },
+      {
+        $set: {
+          status: "expired",
+          expiredAt: now()
+        }
+      },
+      {
+        new: true
+      }
+    );
+
+  return serializePreview(
+    updated
+  );
+}
 
 /* =========================================================
    LIST PREVIEWS
-========================================================= */
+   ========================================================= */
 
 async function listPreviews({
   projectId,
   userId,
-  limit = 20,
-  skip = 0
+  limit = 20
 }) {
   const safeLimit =
-    clamp(
-      Number(limit) ||
-        20,
-
-      1,
-
+    Math.min(
+      Math.max(
+        Number(limit) || 20,
+        1
+      ),
       100
     );
 
-  const safeSkip =
-    Math.max(
-      Number(skip) ||
-        0,
-
-      0
-    );
-
   const previews =
-    await ProjectPreview
-      .find({
-        projectId,
-        userId
-      })
+    await ProjectPreview.find({
+      projectId,
+      userId
+    })
       .sort({
-        createdAt:
-          -1
+        createdAt: -1
       })
-      .skip(
-        safeSkip
-      )
       .limit(
         safeLimit
-      )
-      .lean();
+      );
 
   return previews.map(
     serializePreview
   );
 }
 
-
-/* =========================================================
-   CLEANUP EXPIRED PREVIEWS
-========================================================= */
-
-async function cleanupExpiredPreviews({
-  limit = 50
-} = {}) {
-  const safeLimit =
-    clamp(
-      Number(limit) ||
-        50,
-
-      1,
-
-      200
-    );
-
-  const now =
-    new Date();
-
-  const previews =
-    await ProjectPreview
-      .find({
-        expiresAt: {
-          $lte:
-            now
-        },
-
-        status: {
-          $in: [
-            "queued",
-            "building",
-            "starting",
-            "ready"
-          ]
-        }
-      })
-      .sort({
-        expiresAt:
-          1
-      })
-      .limit(
-        safeLimit
-      );
-
-  const results =
-    [];
-
-  for (
-    const preview of
-      previews
-  ) {
-    try {
-      results.push(
-        await expirePreview(
-          preview.previewId
-        )
-      );
-    } catch (error) {
-      console.error(
-        `[PreviewService] cleanup failed for ${preview.previewId}:`,
-        error.message
-      );
-    }
-  }
-
-  return results;
-}
-
-
 /* =========================================================
    REFRESH HEALTH
-========================================================= */
+   ========================================================= */
 
 async function refreshPreviewHealth({
   projectId,
@@ -3547,275 +2620,223 @@ async function refreshPreviewHealth({
       previewId
     });
 
-  if (
-    !preview
-  ) {
-    throw new Error(
-      "Preview not found"
-    );
-  }
-
-  if (
-    preview.status !==
-    "ready"
-  ) {
-    return serializePreview(
-      preview
+  if (!preview) {
+    throw new PreviewServiceError(
+      "Preview was not found",
+      "PREVIEW_NOT_FOUND",
+      404
     );
   }
 
   const runtime =
     activeRuntimes.get(
-      previewId
+      String(previewId)
     );
 
-  if (
-    !runtime
-  ) {
-    preview.status =
-      "stopped";
-
-    preview.runtimeInfo.status =
-      "stopped";
-
-    preview.completedAt =
-      new Date();
-
-    await preview.save();
-
-    return serializePreview(
-      preview
-    );
+  if (!runtime) {
+    return {
+      healthy: false,
+      status:
+        preview.status,
+      reason:
+        "Runtime is not registered"
+    };
   }
 
-  const mappedPort =
-    preview.runtimeInfo?.hostPort;
-
-  if (
-    !mappedPort
-  ) {
-    return serializePreview(
-      preview
-    );
-  }
-
-  const result =
-    await healthCheck(
-      `http://127.0.0.1:${mappedPort}`
+  const running =
+    await isContainerRunning(
+      runtime.containerId
     );
 
-  preview.healthCheck.status =
-    result.healthy
-      ? "healthy"
-      : "unhealthy";
+  if (!running) {
+    const logs =
+      await getContainerLogs(
+        runtime.containerId
+      );
 
-  preview.healthCheck.actualStatus =
-    result.status;
-
-  preview.healthCheck.responseTimeMs =
-    result.responseTimeMs;
-
-  preview.healthCheck.attempts =
-    result.attempts;
-
-  preview.healthCheck.lastCheckedAt =
-    new Date();
-
-  preview.healthCheck.healthyAt =
-    result.healthy
-      ? new Date()
-      : preview.healthCheck.healthyAt;
-
-  preview.healthCheck.errorMessage =
-    result.error || "";
-
-
-  if (
-    !result.healthy
-  ) {
-    preview.status =
-      "failed";
-
-    preview.failureCategory =
-      "healthcheck";
-
-    preview.errorMessage =
-      result.error ||
-      "Preview became unhealthy";
-
-    preview.errors.push({
-      code:
-        "PREVIEW_HEALTHCHECK_FAILED",
-
-      message:
-        preview.errorMessage,
-
-      stage:
-        "healthcheck",
-
-      category:
-        "healthcheck",
-
-      retryable:
-        true,
-
-      timestamp:
-        new Date()
-    });
-
-    preview.completedAt =
-      new Date();
-
-    preview.runtimeInfo.status =
-      "crashed";
-
-    await preview.save();
-
-    await stopContainer(
-      runtime.containerName
+    await ProjectPreview.updateOne(
+      {
+        _id:
+          preview._id
+      },
+      {
+        $set: {
+          status: "failed",
+          failedAt: now(),
+          errorMessage:
+            "Preview runtime exited unexpectedly",
+          runtimeLogs:
+            clampText(
+              [
+                logs.stdout,
+                logs.stderr
+              ]
+                .filter(Boolean)
+                .join("\n")
+            )
+        }
+      }
     );
 
     activeRuntimes.delete(
-      previewId
+      String(previewId)
     );
 
-    await cleanupWorkspace(
-      runtime.workspace
+    return {
+      healthy: false,
+      status: "failed",
+      reason:
+        "Runtime exited",
+      logs
+    };
+  }
+
+  const health =
+    await healthCheck(
+      runtime.hostPort
     );
 
-  } else {
-    await preview.save();
+  if (
+    health.healthy &&
+    preview.status !== "ready"
+  ) {
+    await ProjectPreview.updateOne(
+      {
+        _id:
+          preview._id
+      },
+      {
+        $set: {
+          status: "ready",
+          readyAt: now()
+        }
+      }
+    );
   }
 
-  return serializePreview(
-    preview
-  );
+  return {
+    ...health,
+    status:
+      health.healthy
+        ? "ready"
+        : "unhealthy"
+  };
 }
 
-
 /* =========================================================
-   SERIALIZATION
-========================================================= */
+   EXPIRE OLD PREVIEWS
+   ========================================================= */
 
-function serializePreview(
-  preview
-) {
-  if (
-    !preview
+async function cleanupExpiredPreviews() {
+  const expired =
+    await ProjectPreview.find({
+      status: {
+        $in:
+          ACTIVE_STATUSES
+      },
+      expiresAt: {
+        $lte: now()
+      }
+    }).limit(100);
+
+  let count = 0;
+
+  for (
+    const preview of expired
   ) {
-    return null;
+    try {
+      await expirePreview({
+        projectId:
+          preview.projectId,
+        userId:
+          preview.userId,
+        previewId:
+          preview.previewId
+      });
+
+      count++;
+    } catch (_) {
+      // Continue cleaning remaining previews.
+    }
   }
 
-  const data =
-    typeof preview.toObject ===
-    "function"
-      ? preview.toObject()
-      : {
-          ...preview
-        };
-
-  /*
-   * Never expose internal container/runtime
-   * infrastructure to frontend.
-   */
-  if (
-    data.runtimeInfo
-  ) {
-    delete data.runtimeInfo.containerId;
-    delete data.runtimeInfo.workerId;
-    delete data.runtimeInfo.workingDirectory;
-    delete data.runtimeInfo.hostPort;
-    delete data.runtimeInfo.internalPort;
-  }
-
-  /*
-   * Never expose internal security state.
-   */
-  delete data.secretsInjected;
-
-  delete data.productionSecretsBlocked;
-
-  /*
-   * Artifact storage keys are internal infrastructure
-   * identifiers. Frontend only needs preview URL.
-   */
-  if (
-    data.metadata
-  ) {
-    delete data.metadata.artifactStorageKey;
-  }
-
-  return data;
+  return {
+    expired: count
+  };
 }
 
-
 /* =========================================================
-   ARTIFACT INFORMATION
-========================================================= */
+   GET ARTIFACT INFO
+   ========================================================= */
 
 async function getPreviewArtifact({
   projectId,
   userId,
   buildId
 }) {
-  const {
-    build,
-    artifact
-  } =
+  const build =
     await getAuthoritativeBuild({
       projectId,
       userId,
       buildId
     });
 
+  const artifact =
+    selectPreviewArtifact(
+      build
+    );
+
   return {
     buildId:
       build.buildId,
 
-    buildNumber:
-      build.buildNumber,
-
-    sourceHash:
-      build.metadata?.sourceHash ||
-      "",
-
     artifact: {
       name:
-        artifact.name,
-
+        artifact.name || "",
       type:
-        artifact.type,
-
+        artifact.type || "",
       size:
-        artifact.size,
-
+        artifact.size || 0,
       checksum:
-        artifact.checksum
+        artifact.checksum || ""
     }
   };
 }
 
-
 /* =========================================================
    EXPORTS
-========================================================= */
+   ========================================================= */
 
 module.exports = {
   SERVICE_VERSION,
 
+  PreviewServiceError,
+
   createPreview,
+
+  getPreview,
 
   stopPreview,
 
   expirePreview,
 
-  getPreview,
-
   listPreviews,
-
-  cleanupExpiredPreviews,
 
   refreshPreviewHealth,
 
-  getPreviewArtifact
+  cleanupExpiredPreviews,
+
+  getPreviewArtifact,
+
+  serializePreview,
+
+  getAuthoritativeBuild,
+
+  selectPreviewArtifact,
+
+  detectPackageManager,
+
+  resolveStartCommand,
+
+  isContainerRunning
 };
