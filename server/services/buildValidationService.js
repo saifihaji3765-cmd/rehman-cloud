@@ -1,41 +1,63 @@
 /* =========================================================
    ZYRIONOS — BUILD VALIDATION SERVICE
    ---------------------------------------------------------
-   Responsibilities:
+   Version: 2.0.0
 
+   RESPONSIBILITIES
+   ---------------------------------------------------------
    - Validate generated project files
    - Validate file paths
    - Validate package.json
    - Detect malformed / HTML-escaped JSX
-   - Validate JavaScript syntax where possible
+   - Validate JavaScript syntax where safely possible
    - Validate framework / entry-point structure
-   - Detect missing build configuration
-   - Produce structured build-validation results
+   - Validate dependencies
+   - Detect package manager
+   - Detect build command
+   - Validate build configuration
    - Generate deterministic source hash
-   - Never execute generated application code directly
-   - Provide a stable contract for:
+   - Produce structured repair context
+   - Never execute generated application code
+   - Provide stable contract for:
        Master Agent
        Builder Agent
        Fix Agent
-       Build Validation Controller
+       Build Controller
        Workspace
        Deployment Gate
 
-   IMPORTANT:
-
-   This service is the validation layer.
+   ARCHITECTURE
+   ---------------------------------------------------------
 
    Builder Agent
         ↓
    BuildValidationService
         ↓
-   FAILED → Fix Agent
+      FAILED
+        ↓
+     Fix Agent
         ↓
    BuildValidationService
         ↓
-   PASSED
+      PASSED
+        ↓
+   Authoritative Build Executor
         ↓
    Preview / Deploy
+
+   IMPORTANT
+   ---------------------------------------------------------
+   This service is STATIC validation only.
+
+   authoritative === false
+
+   It does NOT:
+   - install dependencies
+   - run npm/pnpm/yarn/bun
+   - execute generated application code
+   - start arbitrary servers
+   - deploy containers
+   - access project secrets
 
 ========================================================= */
 
@@ -44,68 +66,60 @@
    PACKAGES
 ========================================================= */
 
-const crypto =
-  require("crypto");
-
-const vm =
-  require("vm");
-
-const path =
-  require("path");
+const crypto = require("crypto");
+const vm = require("vm");
 
 
 /* =========================================================
    SERVICES
 ========================================================= */
 
-const logger =
-  require("./loggerService");
+const logger = require("./loggerService");
 
 
 /* =========================================================
-   CONSTANTS
+   SERVICE METADATA
 ========================================================= */
 
-const SERVICE_VERSION =
-  "1.0.0";
+const SERVICE_VERSION = "2.0.0";
+
+const VALIDATION_MODE = "static";
+
+const AUTHORITATIVE = false;
 
 
-const MAX_FILES =
-  Number(
-    process.env.BUILD_VALIDATION_MAX_FILES ||
-    1000
-  );
+/* =========================================================
+   LIMITS
+========================================================= */
+
+const MAX_FILES = Number(
+  process.env.BUILD_VALIDATION_MAX_FILES ||
+  1000
+);
+
+const MAX_FILE_SIZE = Number(
+  process.env.BUILD_VALIDATION_MAX_FILE_SIZE ||
+  2 * 1024 * 1024
+);
+
+const MAX_TOTAL_SIZE = Number(
+  process.env.BUILD_VALIDATION_MAX_TOTAL_SIZE ||
+  25 * 1024 * 1024
+);
 
 
-const MAX_FILE_SIZE =
-  Number(
-    process.env.BUILD_VALIDATION_MAX_FILE_SIZE ||
-    2 * 1024 * 1024
-  );
+/* =========================================================
+   FRAMEWORKS
+========================================================= */
 
-
-const MAX_TOTAL_SIZE =
-  Number(
-    process.env.BUILD_VALIDATION_MAX_TOTAL_SIZE ||
-    25 * 1024 * 1024
-  );
-
-
-const ALLOWED_FRAMEWORKS = [
-
+const ALLOWED_FRAMEWORKS = Object.freeze([
   "React",
-
   "Next.js",
-
   "Vue",
-
   "Node.js",
-
   "Express",
-
   "Other"
-
-];
+]);
 
 
 /* =========================================================
@@ -116,351 +130,212 @@ const ALLOWED_FRAMEWORKS = [
 /**
  * Safely convert a value to string.
  */
-function toString(
-  value,
-  fallback = ""
-){
+function toString(value, fallback = "") {
 
-  if(
+  if (
     value === null ||
     value === undefined
-  ){
-
+  ) {
     return fallback;
-
   }
 
   return String(value);
-
 }
 
 
 /**
  * Normalize framework name.
  */
-function normalizeFramework(
-  framework
-){
+function normalizeFramework(framework) {
 
-  const value =
-    toString(
-      framework
-    )
-      .trim();
+  const value = toString(framework)
+    .trim();
 
-
-  if(
-    !value
-  ){
-
+  if (!value) {
     return "Other";
-
   }
 
+  const lower = value.toLowerCase();
 
-  const lower =
-    value.toLowerCase();
-
-
-  if(
-    lower === "react"
-  ){
-
+  if (lower === "react") {
     return "React";
-
   }
 
-
-  if(
+  if (
     lower === "next" ||
     lower === "next.js" ||
     lower === "nextjs"
-  ){
-
+  ) {
     return "Next.js";
-
   }
 
-
-  if(
-    lower === "vue"
-  ){
-
+  if (lower === "vue") {
     return "Vue";
-
   }
 
-
-  if(
+  if (
     lower === "node" ||
     lower === "node.js" ||
     lower === "nodejs"
-  ){
-
+  ) {
     return "Node.js";
-
   }
 
-
-  if(
-    lower === "express"
-  ){
-
+  if (lower === "express") {
     return "Express";
-
   }
-
 
   return "Other";
-
 }
 
 
 /**
  * Normalize project file path.
  */
-function normalizeFilePath(
-  filePath
-){
+function normalizeFilePath(filePath) {
 
-  let value =
-    toString(
-      filePath
-    )
-      .trim()
-      .replace(/\\/g, "/");
+  let value = toString(filePath)
+    .trim()
+    .replace(/\\/g, "/");
 
-
-  while(
-    value.startsWith("./")
-  ){
-
-    value =
-      value.slice(2);
-
+  while (value.startsWith("./")) {
+    value = value.slice(2);
   }
-
 
   return value;
-
 }
 
 
 /**
- * Check whether a path is safe.
+ * Check safe relative project path.
  */
-function isSafeFilePath(
-  filePath
-){
+function isSafeFilePath(filePath) {
 
-  const normalized =
-    normalizeFilePath(
-      filePath
-    );
+  const normalized = normalizeFilePath(filePath);
 
-
-  if(
-    !normalized
-  ){
-
+  if (!normalized) {
     return false;
-
   }
 
-
-  if(
+  if (
     normalized.startsWith("/") ||
     normalized.startsWith("\\")
-  ){
-
+  ) {
     return false;
-
   }
 
-
-  if(
-    normalized.includes("\0")
-  ){
-
+  if (normalized.includes("\0")) {
     return false;
-
   }
 
+  const segments = normalized.split("/");
 
-  const segments =
-    normalized.split("/");
-
-
-  if(
-    segments.includes("..")
-  ){
-
+  if (segments.includes("..")) {
     return false;
-
   }
-
 
   return true;
-
 }
 
 
 /**
- * Get file path from supported file shapes.
+ * Extract file path from supported file shapes.
  */
-function getFilePath(
-  file
-){
+function getFilePath(file) {
 
-  if(
+  if (
     !file ||
     typeof file !== "object"
-  ){
-
+  ) {
     return "";
-
   }
-
 
   return normalizeFilePath(
-
     file.path ||
-
     file.name ||
-
     file.filePath ||
-
     ""
-
   );
-
 }
 
 
 /**
- * Get file content.
+ * Extract file content.
  */
-function getFileContent(
-  file
-){
+function getFileContent(file) {
 
-  if(
+  if (
     !file ||
     typeof file !== "object"
-  ){
-
+  ) {
     return "";
-
   }
 
-
-  if(
+  if (
     typeof file.content === "string"
-  ){
-
+  ) {
     return file.content;
-
   }
 
-
-  if(
+  if (
     typeof file.source === "string"
-  ){
-
+  ) {
     return file.source;
-
   }
-
 
   return "";
-
 }
 
 
 /**
- * Calculate SHA-256 hash for source files.
+ * Return lowercase extension.
  */
-function calculateSourceHash(
-  files
-){
+function getExtension(filePath) {
 
-  const hash =
-    crypto.createHash(
-      "sha256"
-    );
+  const value = normalizeFilePath(filePath)
+    .toLowerCase();
 
+  const index = value.lastIndexOf(".");
 
-  const normalized =
-    files
-      .map(
-        file => ({
-
-          path:
-            getFilePath(file),
-
-          content:
-            getFileContent(file)
-
-        })
-      )
-      .sort(
-        (a, b) =>
-          a.path.localeCompare(
-            b.path
-          )
-      );
-
-
-  for(
-    const file of normalized
-  ){
-
-    hash.update(
-      file.path
-    );
-
-    hash.update(
-      "\n"
-    );
-
-    hash.update(
-      file.content
-    );
-
-    hash.update(
-      "\n---FILE---\n"
-    );
-
+  if (index === -1) {
+    return "";
   }
 
-
-  return hash.digest(
-    "hex"
-  );
-
+  return value.slice(index);
 }
 
 
 /**
- * Find a file by exact path.
+ * Determine whether a path is a source file.
  */
-function findFile(
-  files,
-  targetPath
-){
+function isSourceFile(filePath) {
+
+  return [
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".tsx",
+    ".vue"
+  ].includes(
+    getExtension(filePath)
+  );
+}
+
+
+/**
+ * Find file by exact normalized path.
+ */
+function findFile(files, targetPath) {
 
   const normalizedTarget =
-    normalizeFilePath(
-      targetPath
-    );
-
+    normalizeFilePath(targetPath);
 
   return files.find(
     file =>
-      getFilePath(file) ===
-      normalizedTarget
+      getFilePath(file) === normalizedTarget
   );
-
 }
 
 
@@ -470,7 +345,7 @@ function findFile(
 function getFilesByExtension(
   files,
   extensions
-){
+) {
 
   const normalizedExtensions =
     extensions.map(
@@ -478,26 +353,62 @@ function getFilesByExtension(
         extension.toLowerCase()
     );
 
+  return files.filter(file => {
 
-  return files.filter(
-    file => {
+    const filePath =
+      getFilePath(file)
+        .toLowerCase();
 
-      const filePath =
-        getFilePath(file)
-          .toLowerCase();
+    return normalizedExtensions.some(
+      extension =>
+        filePath.endsWith(extension)
+    );
+  });
+}
 
 
-      return normalizedExtensions
-        .some(
-          extension =>
-            filePath.endsWith(
-              extension
-            )
-        );
+/**
+ * Calculate UTF-8 byte size.
+ */
+function getByteSize(content) {
 
-    }
+  return Buffer.byteLength(
+    toString(content),
+    "utf8"
   );
+}
 
+
+/**
+ * Create deterministic SHA-256 source hash.
+ */
+function calculateSourceHash(files) {
+
+  const hash =
+    crypto.createHash("sha256");
+
+  const normalized =
+    Array.isArray(files)
+      ? files
+          .map(file => ({
+            path: getFilePath(file),
+            content: getFileContent(file)
+          }))
+          .sort((a, b) =>
+            a.path.localeCompare(b.path)
+          )
+      : [];
+
+  for (const file of normalized) {
+
+    hash.update(file.path);
+    hash.update("\n");
+
+    hash.update(file.content);
+    hash.update("\n---FILE---\n");
+  }
+
+  return hash.digest("hex");
 }
 
 
@@ -506,37 +417,22 @@ function getFilesByExtension(
 ========================================================= */
 
 function createIssue({
-
   code,
-
   message,
-
   file = null,
-
   severity = "error",
-
   stage = "validation",
-
   details = null
-
-}){
+}) {
 
   return {
-
     code,
-
     message,
-
     file,
-
     severity,
-
     stage,
-
     details
-
   };
-
 }
 
 
@@ -544,261 +440,150 @@ function createIssue({
    FILE STRUCTURE VALIDATION
 ========================================================= */
 
-function validateFileStructure(
-  files
-){
+function validateFileStructure(files) {
 
   const errors = [];
-
   const warnings = [];
 
-  const seenPaths =
-    new Set();
+  const seenPaths = new Set();
 
-
-  if(
-    !Array.isArray(files)
-  ){
+  if (!Array.isArray(files)) {
 
     errors.push(
       createIssue({
-
-        code:
-          "FILES_NOT_ARRAY",
-
-        message:
-          "Project files must be an array."
-
+        code: "FILES_NOT_ARRAY",
+        message: "Project files must be an array."
       })
     );
-
 
     return {
-
       errors,
-
-      warnings
-
+      warnings,
+      totalSize: 0
     };
-
   }
 
-
-  if(
-    files.length === 0
-  ){
+  if (files.length === 0) {
 
     errors.push(
       createIssue({
-
-        code:
-          "NO_PROJECT_FILES",
-
-        message:
-          "Project contains no generated files."
-
+        code: "NO_PROJECT_FILES",
+        message: "Project contains no generated files."
       })
     );
-
   }
 
-
-  if(
-    files.length >
-    MAX_FILES
-  ){
+  if (files.length > MAX_FILES) {
 
     errors.push(
       createIssue({
-
-        code:
-          "FILE_LIMIT_EXCEEDED",
-
+        code: "FILE_LIMIT_EXCEEDED",
         message:
-          `Project contains ${files.length} files. Maximum allowed is ${MAX_FILES}.`
-
+          `Project contains ${files.length} files. ` +
+          `Maximum allowed is ${MAX_FILES}.`,
+        details: {
+          count: files.length,
+          maximum: MAX_FILES
+        }
       })
     );
-
   }
-
 
   let totalSize = 0;
 
-
-  for(
-    const file of files
-  ){
+  for (const file of files) {
 
     const filePath =
       getFilePath(file);
 
-
     const content =
       getFileContent(file);
 
-
-    if(
-      !filePath
-    ){
+    if (!filePath) {
 
       errors.push(
         createIssue({
-
-          code:
-            "FILE_PATH_MISSING",
-
+          code: "FILE_PATH_MISSING",
           message:
             "Generated file is missing a path."
-
         })
       );
-
 
       continue;
-
     }
 
-
-    if(
-      !isSafeFilePath(
-        filePath
-      )
-    ){
+    if (!isSafeFilePath(filePath)) {
 
       errors.push(
         createIssue({
-
-          code:
-            "UNSAFE_FILE_PATH",
-
+          code: "UNSAFE_FILE_PATH",
           message:
             `Unsafe project file path: ${filePath}`,
-
-          file:
-            filePath
-
+          file: filePath
         })
       );
 
+      continue;
     }
 
-
-    if(
-      seenPaths.has(
-        filePath
-      )
-    ){
+    if (seenPaths.has(filePath)) {
 
       errors.push(
         createIssue({
-
-          code:
-            "DUPLICATE_FILE_PATH",
-
+          code: "DUPLICATE_FILE_PATH",
           message:
             `Duplicate project file: ${filePath}`,
-
-          file:
-            filePath
-
+          file: filePath
         })
       );
-
     }
 
-
-    seenPaths.add(
-      filePath
-    );
-
+    seenPaths.add(filePath);
 
     const byteSize =
-      Buffer.byteLength(
-        content,
-        "utf8"
-      );
+      getByteSize(content);
 
+    totalSize += byteSize;
 
-    totalSize +=
-      byteSize;
-
-
-    if(
-      byteSize >
-      MAX_FILE_SIZE
-    ){
+    if (byteSize > MAX_FILE_SIZE) {
 
       errors.push(
         createIssue({
-
-          code:
-            "FILE_SIZE_EXCEEDED",
-
+          code: "FILE_SIZE_EXCEEDED",
           message:
-            `File exceeds maximum allowed size of ${MAX_FILE_SIZE} bytes.`,
-
-          file:
-            filePath,
-
+            `File exceeds maximum allowed size of ` +
+            `${MAX_FILE_SIZE} bytes.`,
+          file: filePath,
           details: {
-
-            size:
-              byteSize,
-
-            maximum:
-              MAX_FILE_SIZE
-
+            size: byteSize,
+            maximum: MAX_FILE_SIZE
           }
-
         })
       );
-
     }
-
   }
 
-
-  if(
-    totalSize >
-    MAX_TOTAL_SIZE
-  ){
+  if (totalSize > MAX_TOTAL_SIZE) {
 
     errors.push(
       createIssue({
-
-        code:
-          "PROJECT_SIZE_EXCEEDED",
-
+        code: "PROJECT_SIZE_EXCEEDED",
         message:
-          `Project source exceeds maximum allowed size of ${MAX_TOTAL_SIZE} bytes.`,
-
+          `Project source exceeds maximum allowed size ` +
+          `of ${MAX_TOTAL_SIZE} bytes.`,
         details: {
-
-          size:
-            totalSize,
-
-          maximum:
-            MAX_TOTAL_SIZE
-
+          size: totalSize,
+          maximum: MAX_TOTAL_SIZE
         }
-
       })
     );
-
   }
 
-
   return {
-
     errors,
-
     warnings,
-
     totalSize
-
   };
-
 }
 
 
@@ -806,235 +591,194 @@ function validateFileStructure(
    PACKAGE.JSON VALIDATION
 ========================================================= */
 
-function validatePackageJson(
-  files
-){
+function validatePackageJson(files) {
 
   const errors = [];
-
   const warnings = [];
 
   const packageFile =
-    findFile(
-      files,
-      "package.json"
-    );
+    findFile(files, "package.json");
 
-
-  if(
-    !packageFile
-  ){
+  if (!packageFile) {
 
     warnings.push(
       createIssue({
-
-        code:
-          "PACKAGE_JSON_MISSING",
-
-        message:
-          "package.json is missing.",
-
-        severity:
-          "warning"
-
+        code: "PACKAGE_JSON_MISSING",
+        message: "package.json is missing.",
+        severity: "warning"
       })
     );
 
-
     return {
-
-      packageJson:
-        null,
-
+      packageJson: null,
       errors,
-
       warnings
-
     };
-
   }
 
-
   const content =
-    getFileContent(
-      packageFile
-    );
-
+    getFileContent(packageFile);
 
   let packageJson;
 
-
-  try{
+  try {
 
     packageJson =
-      JSON.parse(
-        content
-      );
+      JSON.parse(content);
 
-  }
-
-  catch(error){
+  } catch (error) {
 
     errors.push(
       createIssue({
-
-        code:
-          "INVALID_PACKAGE_JSON",
-
+        code: "INVALID_PACKAGE_JSON",
         message:
           `package.json is invalid JSON: ${error.message}`,
-
-        file:
-          "package.json",
-
+        file: "package.json",
+        stage: "package",
         details: {
-
-          originalError:
-            error.message
-
+          name: error.name,
+          originalError: error.message
         }
-
       })
     );
 
-
     return {
-
-      packageJson:
-        null,
-
+      packageJson: null,
       errors,
-
       warnings
-
     };
-
   }
 
-
-  if(
+  if (
     !packageJson ||
     typeof packageJson !== "object" ||
     Array.isArray(packageJson)
-  ){
+  ) {
 
     errors.push(
       createIssue({
-
-        code:
-          "INVALID_PACKAGE_ROOT",
-
+        code: "INVALID_PACKAGE_ROOT",
         message:
           "package.json must contain a JSON object.",
-
-        file:
-          "package.json"
-
+        file: "package.json",
+        stage: "package"
       })
     );
 
-
     return {
-
       packageJson,
       errors,
       warnings
-
     };
-
   }
 
-
-  if(
-    packageJson.scripts &&
-    typeof packageJson.scripts !== "object"
-  ){
+  if (
+    packageJson.scripts !== undefined &&
+    (
+      !packageJson.scripts ||
+      typeof packageJson.scripts !== "object" ||
+      Array.isArray(packageJson.scripts)
+    )
+  ) {
 
     errors.push(
       createIssue({
-
-        code:
-          "INVALID_NPM_SCRIPTS",
-
+        code: "INVALID_NPM_SCRIPTS",
         message:
           "package.json scripts must be an object.",
-
-        file:
-          "package.json"
-
+        file: "package.json",
+        stage: "package"
       })
     );
-
   }
 
+  const scripts =
+    packageJson.scripts &&
+    typeof packageJson.scripts === "object"
+      ? packageJson.scripts
+      : {};
 
   const hasBuildScript =
-    Boolean(
-      packageJson
-        .scripts
-        ?.build
-    );
-
+    typeof scripts.build === "string" &&
+    scripts.build.trim().length > 0;
 
   const hasStartScript =
-    Boolean(
-      packageJson
-        .scripts
-        ?.start
-    );
+    typeof scripts.start === "string" &&
+    scripts.start.trim().length > 0;
 
-
-  if(
+  if (
     !hasBuildScript &&
     !hasStartScript
-  ){
+  ) {
 
     warnings.push(
       createIssue({
-
-        code:
-          "NO_BUILD_OR_START_SCRIPT",
-
+        code: "NO_BUILD_OR_START_SCRIPT",
         message:
           "package.json contains neither a build script nor a start script.",
-
-        file:
-          "package.json",
-
-        severity:
-          "warning"
-
+        file: "package.json",
+        severity: "warning",
+        stage: "package"
       })
     );
-
   }
 
+  if (
+    packageJson.dependencies !== undefined &&
+    (
+      !packageJson.dependencies ||
+      typeof packageJson.dependencies !== "object" ||
+      Array.isArray(packageJson.dependencies)
+    )
+  ) {
+
+    errors.push(
+      createIssue({
+        code: "INVALID_DEPENDENCIES_OBJECT",
+        message:
+          "package.json dependencies must be an object.",
+        file: "package.json",
+        stage: "package"
+      })
+    );
+  }
+
+  if (
+    packageJson.devDependencies !== undefined &&
+    (
+      !packageJson.devDependencies ||
+      typeof packageJson.devDependencies !== "object" ||
+      Array.isArray(packageJson.devDependencies)
+    )
+  ) {
+
+    errors.push(
+      createIssue({
+        code: "INVALID_DEV_DEPENDENCIES_OBJECT",
+        message:
+          "package.json devDependencies must be an object.",
+        file: "package.json",
+        stage: "package"
+      })
+    );
+  }
 
   return {
-
     packageJson,
-
     errors,
-
     warnings
-
   };
-
 }
 
 
 /* =========================================================
-   ESCAPED HTML / JSX DETECTION
+   ESCAPED SOURCE DETECTION
 ========================================================= */
 
-function detectEscapedSource(
-  files
-){
+function detectEscapedSource(files) {
 
   const errors = [];
-
   const warnings = [];
-
 
   const sourceFiles =
     getFilesByExtension(
@@ -1042,80 +786,69 @@ function detectEscapedSource(
       [
         ".js",
         ".jsx",
+        ".mjs",
+        ".cjs",
         ".ts",
         ".tsx",
         ".vue"
       ]
     );
 
-
-  for(
-    const file of sourceFiles
-  ){
+  for (const file of sourceFiles) {
 
     const filePath =
       getFilePath(file);
 
-
     const content =
       getFileContent(file);
 
-
     /*
-     * Detect HTML entities commonly introduced
-     * when JSX source has accidentally been HTML encoded.
+     * Important:
+     * Do not decode source automatically.
+     * We only detect the corruption and let Fix Agent repair it.
      */
 
     const hasEscapedTag =
       /&lt;\/?[A-Za-z_$][^;]*&gt;/
-        .test(
-          content
-        );
-
+        .test(content);
 
     const hasEscapedBrace =
       /&lbrace;|&rbrace;/
-        .test(
-          content
-        );
+        .test(content);
 
+    const hasEscapedQuote =
+      /&quot;/
+        .test(content);
 
-    if(
+    if (
       hasEscapedTag ||
-      hasEscapedBrace
-    ){
+      hasEscapedBrace ||
+      hasEscapedQuote
+    ) {
 
       errors.push(
         createIssue({
-
-          code:
-            "HTML_ESCAPED_SOURCE",
-
+          code: "HTML_ESCAPED_SOURCE",
           message:
-            "Source appears to contain HTML-escaped code. JSX/JavaScript source must contain real syntax instead of HTML entities.",
-
-          file:
-            filePath,
-
-          stage:
-            "syntax"
-
+            "Source appears to contain HTML-escaped code. " +
+            "JSX/JavaScript source must contain real syntax " +
+            "instead of HTML entities.",
+          file: filePath,
+          stage: "syntax",
+          details: {
+            escapedTag: hasEscapedTag,
+            escapedBrace: hasEscapedBrace,
+            escapedQuote: hasEscapedQuote
+          }
         })
       );
-
     }
-
   }
 
-
   return {
-
     errors,
-
     warnings
-
   };
-
 }
 
 
@@ -1125,25 +858,54 @@ function detectEscapedSource(
 
 
 /**
- * Node's VM parser cannot understand JSX/TypeScript.
- *
- * Therefore:
- *
- * JS     → validate directly
- * JSX    → structural validation here
- * TS/TSX → structural validation here
- *
- * A real framework build remains the authoritative
- * compiler stage when an external build executor is used.
+ * Detect JSX-like syntax.
  */
-function validateJavaScriptSyntax(
-  files
-){
+function containsJSX(content) {
+
+  return /<\s*[A-Za-z_$][^>]*>/.test(
+    content
+  );
+}
+
+
+/**
+ * Detect TypeScript syntax which vm.Script cannot parse.
+ */
+function containsTypeScript(content) {
+
+  return (
+    /\binterface\s+[A-Za-z_$]/.test(content) ||
+    /\btype\s+[A-Za-z_$][\w$]*\s*=/.test(content) ||
+    /\benum\s+[A-Za-z_$]/.test(content) ||
+    /\b(?:public|private|protected|readonly)\s+[A-Za-z_$]/.test(content) ||
+    /:\s*(?:string|number|boolean|unknown|any|never|void|ReactNode)\b/.test(content) ||
+    /<\s*[A-Za-z_$][\w$]*\s*>/.test(content)
+  );
+}
+
+
+/**
+ * Detect ESM syntax.
+ */
+function containsESModuleSyntax(content) {
+
+  return (
+    /^\s*import\s+/m.test(content) ||
+    /^\s*export\s+/m.test(content)
+  );
+}
+
+
+/**
+ * Validate JavaScript where Node VM can safely parse it.
+ *
+ * JSX / TS / TSX / ESM are delegated to the
+ * authoritative framework/compiler layer.
+ */
+function validateJavaScriptSyntax(files) {
 
   const errors = [];
-
   const warnings = [];
-
 
   const javascriptFiles =
     getFilesByExtension(
@@ -1155,122 +917,163 @@ function validateJavaScriptSyntax(
       ]
     );
 
-
-  for(
-    const file of javascriptFiles
-  ){
+  for (const file of javascriptFiles) {
 
     const filePath =
       getFilePath(file);
 
-
     const content =
       getFileContent(file);
 
-
-    /*
-     * JSX detection.
-     *
-     * If JSX exists, vm.Script is intentionally skipped.
-     */
-    const containsJSX =
-      /<\s*[A-Za-z][^>]*>/
-        .test(
-          content
-        );
-
-
-    if(
-      containsJSX
-    ){
+    if (!content.trim()) {
 
       warnings.push(
         createIssue({
-
-          code:
-            "JSX_REQUIRES_FRAMEWORK_COMPILER",
-
+          code: "EMPTY_SOURCE_FILE",
           message:
-            "JS/JSX file contains JSX syntax and requires the framework compiler for authoritative validation.",
-
-          file:
-            filePath,
-
-          severity:
-            "warning",
-
-          stage:
-            "syntax"
-
+            "JavaScript source file is empty.",
+          file: filePath,
+          severity: "warning",
+          stage: "syntax"
         })
       );
 
-
       continue;
-
     }
 
+    /*
+     * JSX cannot be parsed by vm.Script.
+     */
+    if (containsJSX(content)) {
 
-    try{
+      warnings.push(
+        createIssue({
+          code:
+            "JSX_REQUIRES_FRAMEWORK_COMPILER",
+          message:
+            "JavaScript file contains JSX syntax and requires " +
+            "the framework compiler for authoritative validation.",
+          file: filePath,
+          severity: "warning",
+          stage: "syntax"
+        })
+      );
+
+      continue;
+    }
+
+    /*
+     * ESM is valid JavaScript but vm.Script is not an
+     * appropriate validator for it.
+     */
+    if (containsESModuleSyntax(content)) {
+
+      warnings.push(
+        createIssue({
+          code:
+            "ES_MODULE_REQUIRES_MODULE_PARSER",
+          message:
+            "ES module syntax detected. Static VM parsing is skipped; " +
+            "authoritative compiler validation is required.",
+          file: filePath,
+          severity: "warning",
+          stage: "syntax"
+        })
+      );
+
+      continue;
+    }
+
+    try {
 
       new vm.Script(
         content,
         {
-
-          filename:
-            filePath,
-
-          displayErrors:
-            true
-
+          filename: filePath,
+          displayErrors: true
         }
       );
 
-    }
-
-    catch(error){
+    } catch (error) {
 
       errors.push(
         createIssue({
-
           code:
             "JAVASCRIPT_SYNTAX_ERROR",
-
           message:
             error.message,
-
-          file:
-            filePath,
-
-          stage:
-            "syntax",
-
+          file: filePath,
+          stage: "syntax",
           details: {
-
-            name:
-              error.name,
-
-            stack:
-              error.stack
-
+            name: error.name,
+            stack: error.stack
           }
+        })
+      );
+    }
+  }
 
+  /*
+   * TS/TSX structural warning.
+   */
+  const typescriptFiles =
+    getFilesByExtension(
+      files,
+      [
+        ".ts",
+        ".tsx"
+      ]
+    );
+
+  for (const file of typescriptFiles) {
+
+    const filePath =
+      getFilePath(file);
+
+    const content =
+      getFileContent(file);
+
+    if (!content.trim()) {
+
+      warnings.push(
+        createIssue({
+          code:
+            "EMPTY_TYPESCRIPT_SOURCE_FILE",
+          message:
+            "TypeScript source file is empty.",
+          file: filePath,
+          severity: "warning",
+          stage: "syntax"
         })
       );
 
+      continue;
     }
 
+    warnings.push(
+      createIssue({
+        code:
+          "TYPESCRIPT_REQUIRES_COMPILER",
+        message:
+          "TypeScript source requires the framework/build compiler " +
+          "for authoritative syntax and type validation.",
+        file: filePath,
+        severity: "warning",
+        stage: "syntax"
+      })
+    );
+
+    /*
+     * Keep helper invocation explicit so this detector remains
+     * available for future compiler adapters.
+     */
+    containsTypeScript(content);
   }
 
-
   return {
-
     errors,
-
     warnings
-
   };
-
 }
 
 
@@ -1278,14 +1081,10 @@ function validateJavaScriptSyntax(
    HTML VALIDATION
 ========================================================= */
 
-function validateHtml(
-  files
-){
+function validateHtml(files) {
 
   const errors = [];
-
   const warnings = [];
-
 
   const htmlFiles =
     getFilesByExtension(
@@ -1296,88 +1095,55 @@ function validateHtml(
       ]
     );
 
-
-  for(
-    const file of htmlFiles
-  ){
+  for (const file of htmlFiles) {
 
     const filePath =
       getFilePath(file);
 
-
     const content =
       getFileContent(file);
 
-
-    if(
-      !content.trim()
-    ){
+    if (!content.trim()) {
 
       errors.push(
         createIssue({
-
-          code:
-            "EMPTY_HTML_FILE",
-
-          message:
-            "HTML file is empty.",
-
-          file:
-            filePath
-
+          code: "EMPTY_HTML_FILE",
+          message: "HTML file is empty.",
+          file: filePath,
+          stage: "html"
         })
       );
 
-
       continue;
-
     }
-
 
     const lower =
       content.toLowerCase();
 
-
-    if(
-      !lower.includes(
-        "<html"
-      ) &&
-      !lower.includes(
-        "<!doctype"
-      )
-    ){
+    if (
+      !lower.includes("<html") &&
+      !lower.includes("<!doctype")
+    ) {
 
       warnings.push(
         createIssue({
-
           code:
             "HTML_DOCUMENT_STRUCTURE_UNCLEAR",
-
           message:
             "HTML file does not appear to contain a normal HTML document root.",
-
-          file:
-            filePath,
-
-          severity:
-            "warning"
-
+          file: filePath,
+          severity: "warning",
+          stage: "html"
         })
       );
-
     }
 
-
-    /*
-     * Detect unclosed script/style tags.
-     */
     const scriptOpen =
       (
         content.match(
           /<script\b/gi
         ) || []
       ).length;
-
 
     const scriptClose =
       (
@@ -1386,40 +1152,53 @@ function validateHtml(
         ) || []
       ).length;
 
-
-    if(
-      scriptOpen !==
-      scriptClose
-    ){
+    if (scriptOpen !== scriptClose) {
 
       errors.push(
         createIssue({
-
           code:
             "HTML_SCRIPT_TAG_MISMATCH",
-
           message:
             "HTML contains an unmatched script tag.",
-
-          file:
-            filePath
-
+          file: filePath,
+          stage: "html"
         })
       );
-
     }
 
+    const styleOpen =
+      (
+        content.match(
+          /<style\b/gi
+        ) || []
+      ).length;
+
+    const styleClose =
+      (
+        content.match(
+          /<\/style>/gi
+        ) || []
+      ).length;
+
+    if (styleOpen !== styleClose) {
+
+      errors.push(
+        createIssue({
+          code:
+            "HTML_STYLE_TAG_MISMATCH",
+          message:
+            "HTML contains an unmatched style tag.",
+          file: filePath,
+          stage: "html"
+        })
+      );
+    }
   }
 
-
   return {
-
     errors,
-
     warnings
-
   };
-
 }
 
 
@@ -1427,104 +1206,110 @@ function validateHtml(
    CSS VALIDATION
 ========================================================= */
 
-function validateCss(
-  files
-){
+function validateCss(files) {
 
   const errors = [];
-
   const warnings = [];
-
 
   const cssFiles =
     getFilesByExtension(
       files,
-      [
-        ".css"
-      ]
+      [".css"]
     );
 
-
-  for(
-    const file of cssFiles
-  ){
+  for (const file of cssFiles) {
 
     const filePath =
       getFilePath(file);
 
-
     const content =
       getFileContent(file);
 
-
     let braces = 0;
+    let parentheses = 0;
+    let brackets = 0;
 
+    for (const character of content) {
 
-    for(
-      const character of content
-    ){
-
-      if(
-        character === "{"
-      ){
-
+      if (character === "{") {
         braces++;
-
       }
 
-
-      if(
-        character === "}"
-      ){
-
+      if (character === "}") {
         braces--;
-
       }
 
+      if (character === "(") {
+        parentheses++;
+      }
 
-      if(
-        braces < 0
-      ){
+      if (character === ")") {
+        parentheses--;
+      }
 
+      if (character === "[") {
+        brackets++;
+      }
+
+      if (character === "]") {
+        brackets--;
+      }
+
+      if (
+        braces < 0 ||
+        parentheses < 0 ||
+        brackets < 0
+      ) {
         break;
-
       }
-
     }
 
-
-    if(
-      braces !== 0
-    ){
+    if (braces !== 0) {
 
       errors.push(
         createIssue({
-
-          code:
-            "CSS_BRACE_MISMATCH",
-
+          code: "CSS_BRACE_MISMATCH",
           message:
             "CSS contains unmatched braces.",
-
-          file:
-            filePath
-
+          file: filePath,
+          stage: "css"
         })
       );
-
     }
 
+    if (parentheses !== 0) {
+
+      errors.push(
+        createIssue({
+          code:
+            "CSS_PARENTHESES_MISMATCH",
+          message:
+            "CSS contains unmatched parentheses.",
+          file: filePath,
+          stage: "css"
+        })
+      );
+    }
+
+    if (brackets !== 0) {
+
+      errors.push(
+        createIssue({
+          code:
+            "CSS_BRACKETS_MISMATCH",
+          message:
+            "CSS contains unmatched brackets.",
+          file: filePath,
+          stage: "css"
+        })
+      );
+    }
   }
 
-
   return {
-
     errors,
-
     warnings
-
   };
-
 }
 
 
@@ -1536,12 +1321,10 @@ function validateEntrypoints(
   files,
   framework,
   packageJson
-){
+) {
 
   const errors = [];
-
   const warnings = [];
-
 
   const paths =
     new Set(
@@ -1551,327 +1334,266 @@ function validateEntrypoints(
       )
     );
 
-
-  if(
-    framework === "React"
-  ){
+  if (framework === "React") {
 
     const reactEntries = [
 
       "src/main.jsx",
       "src/main.js",
+      "src/main.tsx",
+      "src/main.ts",
+
       "src/index.jsx",
       "src/index.js",
+      "src/index.tsx",
+      "src/index.ts",
+
       "main.jsx",
       "main.js",
+      "main.tsx",
+      "main.ts",
+
       "index.jsx",
       "index.js"
 
     ];
 
-
     const hasEntry =
       reactEntries.some(
         filePath =>
-          paths.has(
-            filePath
-          )
+          paths.has(filePath)
       );
 
-
-    if(
-      !hasEntry
-    ){
+    if (!hasEntry) {
 
       warnings.push(
         createIssue({
-
           code:
             "REACT_ENTRYPOINT_NOT_FOUND",
-
           message:
             "A standard React entry point could not be found.",
-
-          severity:
-            "warning"
-
+          severity: "warning",
+          stage: "entrypoint"
         })
       );
-
     }
-
   }
 
-
-  if(
-    framework === "Next.js"
-  ){
+  if (framework === "Next.js") {
 
     const nextEntries = [
 
       "app/page.js",
       "app/page.jsx",
+      "app/page.ts",
       "app/page.tsx",
+
       "pages/index.js",
       "pages/index.jsx",
+      "pages/index.ts",
       "pages/index.tsx",
+
       "src/app/page.js",
       "src/app/page.jsx",
+      "src/app/page.ts",
       "src/app/page.tsx",
+
       "src/pages/index.js",
       "src/pages/index.jsx",
+      "src/pages/index.ts",
       "src/pages/index.tsx"
 
     ];
 
-
     const hasNextEntry =
       nextEntries.some(
         filePath =>
-          paths.has(
-            filePath
-          )
+          paths.has(filePath)
       );
 
-
-    if(
-      !hasNextEntry
-    ){
+    if (!hasNextEntry) {
 
       errors.push(
         createIssue({
-
           code:
             "NEXT_ENTRYPOINT_NOT_FOUND",
-
           message:
-            "No supported Next.js application entry point was found."
-
+            "No supported Next.js application entry point was found.",
+          stage: "entrypoint"
         })
       );
-
     }
-
   }
 
+  if (
+    framework === "Node.js" ||
+    framework === "Express"
+  ) {
 
-  if(
-    (
-      framework === "Node.js" ||
-      framework === "Express"
-    ) &&
-    packageJson
-  ){
-
-    const startScript =
-      packageJson
-        .scripts
-        ?.start;
-
-
-    if(
-      !startScript
-    ){
+    if (!packageJson) {
 
       warnings.push(
         createIssue({
-
           code:
-            "NODE_START_SCRIPT_MISSING",
-
+            "NODE_PACKAGE_JSON_UNAVAILABLE",
           message:
-            "Node/Express project does not define npm start.",
-
-          severity:
-            "warning"
-
+            "Node/Express entrypoint validation is limited because package.json is unavailable.",
+          severity: "warning",
+          stage: "entrypoint"
         })
       );
 
-    }
+    } else {
 
+      const startScript =
+        packageJson
+          .scripts
+          ?.start;
+
+      if (!startScript) {
+
+        warnings.push(
+          createIssue({
+            code:
+              "NODE_START_SCRIPT_MISSING",
+            message:
+              "Node/Express project does not define npm start.",
+            severity: "warning",
+            stage: "entrypoint"
+          })
+        );
+      }
+    }
   }
 
-
   return {
-
     errors,
-
     warnings
-
   };
-
 }
 
 
 /* =========================================================
-   DEPENDENCY CONSISTENCY
+   DEPENDENCY VALIDATION
 ========================================================= */
 
-function validateDependencies(
-  packageJson
-){
+function validateDependencies(packageJson) {
 
   const errors = [];
-
   const warnings = [];
 
-
-  if(
-    !packageJson
-  ){
+  if (!packageJson) {
 
     return {
-
       errors,
-
       warnings
-
     };
-
   }
 
-
   const dependencies =
-    packageJson.dependencies || {};
-
+    packageJson.dependencies &&
+    typeof packageJson.dependencies === "object"
+      ? packageJson.dependencies
+      : {};
 
   const devDependencies =
-    packageJson.devDependencies || {};
-
+    packageJson.devDependencies &&
+    typeof packageJson.devDependencies === "object"
+      ? packageJson.devDependencies
+      : {};
 
   const peerDependencies =
-    packageJson.peerDependencies || {};
-
+    packageJson.peerDependencies &&
+    typeof packageJson.peerDependencies === "object"
+      ? packageJson.peerDependencies
+      : {};
 
   const dependencyNames =
     new Set([
-
-      ...Object.keys(
-        dependencies
-      ),
-
-      ...Object.keys(
-        devDependencies
-      ),
-
-      ...Object.keys(
-        peerDependencies
-      )
-
+      ...Object.keys(dependencies),
+      ...Object.keys(devDependencies),
+      ...Object.keys(peerDependencies)
     ]);
 
-
-  /*
-   * Detect obvious empty dependency versions.
-   */
-  for(
+  for (
     const [name, version]
-    of Object.entries(
-      {
+    of Object.entries({
+      ...dependencies,
+      ...devDependencies,
+      ...peerDependencies
+    })
+  ) {
 
-        ...dependencies,
-
-        ...devDependencies
-
-      }
-    )
-  ){
-
-    if(
+    if (
       !version ||
-      typeof version !== "string"
-    ){
+      typeof version !== "string" ||
+      !version.trim()
+    ) {
 
       errors.push(
         createIssue({
-
           code:
             "INVALID_DEPENDENCY_VERSION",
-
           message:
             `Dependency "${name}" has an invalid version declaration.`,
-
-          file:
-            "package.json"
-
+          file: "package.json",
+          stage: "dependency"
         })
       );
-
     }
-
   }
 
-
-  /*
-   * Basic framework consistency checks.
-   */
-
-  const frameworkPackages = {
-
-    react:
-      dependencyNames.has(
-        "react"
-      ),
-
-    next:
-      dependencyNames.has(
-        "next"
-      ),
-
-    vue:
-      dependencyNames.has(
-        "vue"
-      )
-
-  };
-
-
-  if(
-    frameworkPackages.react &&
-    frameworkPackages.vue
-  ){
+  if (
+    dependencyNames.has("react") &&
+    dependencyNames.has("vue")
+  ) {
 
     warnings.push(
       createIssue({
-
         code:
           "MULTIPLE_FRONTEND_FRAMEWORKS",
-
         message:
           "package.json contains both React and Vue dependencies.",
-
-        file:
-          "package.json",
-
-        severity:
-          "warning"
-
+        file: "package.json",
+        severity: "warning",
+        stage: "dependency"
       })
     );
-
   }
 
+  if (
+    dependencyNames.has("next") &&
+    !dependencyNames.has("react")
+  ) {
+
+    warnings.push(
+      createIssue({
+        code:
+          "NEXT_WITHOUT_REACT",
+        message:
+          "Next.js is declared without an explicit React dependency.",
+        file: "package.json",
+        severity: "warning",
+        stage: "dependency"
+      })
+    );
+  }
 
   return {
-
     errors,
-
     warnings
-
   };
-
 }
 
 
 /* =========================================================
-   LOCKFILE / PACKAGE MANAGER DETECTION
+   PACKAGE MANAGER DETECTION
 ========================================================= */
 
 function detectPackageManager(
   files,
   packageJson
-){
+) {
 
   const paths =
     new Set(
@@ -1881,148 +1603,124 @@ function detectPackageManager(
       )
     );
 
+  /*
+   * Lockfiles take priority because they are concrete
+   * evidence of the project's package manager.
+   */
 
-  if(
-    paths.has(
-      "pnpm-lock.yaml"
-    )
-  ){
-
+  if (
+    paths.has("pnpm-lock.yaml")
+  ) {
     return "pnpm";
-
   }
 
-
-  if(
-    paths.has(
-      "yarn.lock"
-    )
-  ){
-
+  if (
+    paths.has("yarn.lock")
+  ) {
     return "yarn";
-
   }
 
-
-  if(
-    paths.has(
-      "bun.lockb"
-    ) ||
-    paths.has(
-      "bun.lock"
-    )
-  ){
-
+  if (
+    paths.has("bun.lockb") ||
+    paths.has("bun.lock")
+  ) {
     return "bun";
-
   }
 
-
-  if(
-    paths.has(
-      "package-lock.json"
-    )
-  ){
-
+  if (
+    paths.has("package-lock.json")
+  ) {
     return "npm";
-
   }
 
-
-  if(
-    packageJson
-      ?.packageManager
-  ){
+  if (
+    packageJson &&
+    typeof packageJson.packageManager === "string"
+  ) {
 
     const value =
-      String(
-        packageJson.packageManager
-      );
+      packageJson.packageManager
+        .trim()
+        .toLowerCase();
 
-
-    if(
-      value.startsWith(
-        "pnpm"
-      )
-    ){
-
+    if (value.startsWith("pnpm")) {
       return "pnpm";
-
     }
 
-
-    if(
-      value.startsWith(
-        "yarn"
-      )
-    ){
-
+    if (value.startsWith("yarn")) {
       return "yarn";
-
     }
 
-
-    if(
-      value.startsWith(
-        "bun"
-      )
-    ){
-
+    if (value.startsWith("bun")) {
       return "bun";
-
     }
 
-
-    if(
-      value.startsWith(
-        "npm"
-      )
-    ){
-
+    if (value.startsWith("npm")) {
       return "npm";
-
     }
-
   }
 
-
   return "npm";
-
 }
 
 
 /* =========================================================
-   BUILD COMMAND DETECTION
+   BUILD COMMAND
 ========================================================= */
 
 function detectBuildCommand(
   packageJson,
   packageManager
-){
+) {
 
-  if(
-    !packageJson
-  ){
-
+  if (!packageJson) {
     return null;
-
   }
 
+  const buildScript =
+    packageJson
+      .scripts
+      ?.build;
 
-  if(
-    packageJson.scripts &&
-    typeof packageJson.scripts.build ===
-      "string" &&
-    packageJson.scripts.build.trim()
-  ){
+  if (
+    typeof buildScript === "string" &&
+    buildScript.trim()
+  ) {
 
     return `${packageManager} run build`;
-
   }
 
+  return null;
+}
+
+
+/* =========================================================
+   START COMMAND
+========================================================= */
+
+function detectStartCommand(
+  packageJson,
+  packageManager
+) {
+
+  if (!packageJson) {
+    return null;
+  }
+
+  const startScript =
+    packageJson
+      .scripts
+      ?.start;
+
+  if (
+    typeof startScript === "string" &&
+    startScript.trim()
+  ) {
+
+    return `${packageManager} run start`;
+  }
 
   return null;
-
 }
 
 
@@ -2033,83 +1731,64 @@ function detectBuildCommand(
 function validateBuildConfiguration(
   framework,
   packageJson
-){
+) {
 
   const errors = [];
-
   const warnings = [];
 
-
-  if(
-    !packageJson
-  ){
+  if (!packageJson) {
 
     warnings.push(
       createIssue({
-
         code:
           "BUILD_CONFIGURATION_UNAVAILABLE",
-
         message:
           "Build configuration cannot be fully determined without package.json.",
-
-        severity:
-          "warning"
-
+        severity: "warning",
+        stage: "build"
       })
     );
 
-
     return {
-
       errors,
-
       warnings
-
     };
-
   }
 
+  const scripts =
+    packageJson.scripts &&
+    typeof packageJson.scripts === "object"
+      ? packageJson.scripts
+      : {};
 
   const buildScript =
-    packageJson
-      .scripts
-      ?.build;
+    typeof scripts.build === "string"
+      ? scripts.build.trim()
+      : "";
 
-
-  if(
+  if (
     (
       framework === "React" ||
       framework === "Next.js" ||
       framework === "Vue"
     ) &&
     !buildScript
-  ){
+  ) {
 
     warnings.push(
       createIssue({
-
         code:
           "FRONTEND_BUILD_SCRIPT_MISSING",
-
         message:
           `${framework} project does not define an npm build script.`,
-
-        file:
-          "package.json",
-
-        severity:
-          "warning"
-
+        file: "package.json",
+        severity: "warning",
+        stage: "build"
       })
     );
-
   }
 
-
-  if(
-    framework === "Next.js"
-  ){
+  if (framework === "Next.js") {
 
     const nextDependency =
       packageJson.dependencies
@@ -2117,34 +1796,22 @@ function validateBuildConfiguration(
       packageJson.devDependencies
         ?.next;
 
-
-    if(
-      !nextDependency
-    ){
+    if (!nextDependency) {
 
       errors.push(
         createIssue({
-
           code:
             "NEXT_DEPENDENCY_MISSING",
-
           message:
             "Next.js project is missing the next dependency.",
-
-          file:
-            "package.json"
-
+          file: "package.json",
+          stage: "build"
         })
       );
-
     }
-
   }
 
-
-  if(
-    framework === "React"
-  ){
+  if (framework === "React") {
 
     const reactDependency =
       packageJson.dependencies
@@ -2152,37 +1819,23 @@ function validateBuildConfiguration(
       packageJson.devDependencies
         ?.react;
 
-
-    if(
-      !reactDependency
-    ){
+    if (!reactDependency) {
 
       warnings.push(
         createIssue({
-
           code:
             "REACT_DEPENDENCY_MISSING",
-
           message:
             "React project does not declare the react dependency.",
-
-          file:
-            "package.json",
-
-          severity:
-            "warning"
-
+          file: "package.json",
+          severity: "warning",
+          stage: "build"
         })
       );
-
     }
-
   }
 
-
-  if(
-    framework === "Vue"
-  ){
+  if (framework === "Vue") {
 
     const vueDependency =
       packageJson.dependencies
@@ -2190,39 +1843,248 @@ function validateBuildConfiguration(
       packageJson.devDependencies
         ?.vue;
 
-
-    if(
-      !vueDependency
-    ){
+    if (!vueDependency) {
 
       errors.push(
         createIssue({
-
           code:
             "VUE_DEPENDENCY_MISSING",
-
           message:
             "Vue project is missing the vue dependency.",
-
-          file:
-            "package.json"
-
+          file: "package.json",
+          stage: "build"
         })
       );
-
     }
-
   }
 
-
   return {
-
     errors,
-
     warnings
+  };
+}
 
+
+/* =========================================================
+   FRAMEWORK CONSISTENCY
+========================================================= */
+
+function validateFrameworkConsistency(
+  framework,
+  packageJson
+) {
+
+  const errors = [];
+  const warnings = [];
+
+  if (!packageJson) {
+    return {
+      errors,
+      warnings
+    };
+  }
+
+  const dependencies = {
+    ...(packageJson.dependencies || {}),
+    ...(packageJson.devDependencies || {}),
+    ...(packageJson.peerDependencies || {})
   };
 
+  const hasReact =
+    Boolean(dependencies.react);
+
+  const hasNext =
+    Boolean(dependencies.next);
+
+  const hasVue =
+    Boolean(dependencies.vue);
+
+  if (
+    framework === "React" &&
+    hasNext
+  ) {
+
+    warnings.push(
+      createIssue({
+        code:
+          "REACT_FRAMEWORK_WITH_NEXT_DEPENDENCY",
+        message:
+          "Project is classified as React but package.json also contains Next.js.",
+        file: "package.json",
+        severity: "warning",
+        stage: "framework"
+      })
+    );
+  }
+
+  if (
+    framework === "Next.js" &&
+    !hasNext
+  ) {
+
+    errors.push(
+      createIssue({
+        code:
+          "FRAMEWORK_NEXT_DEPENDENCY_MISSING",
+        message:
+          "Project is classified as Next.js but next is not declared.",
+        file: "package.json",
+        stage: "framework"
+      })
+    );
+  }
+
+  if (
+    framework === "Vue" &&
+    !hasVue
+  ) {
+
+    errors.push(
+      createIssue({
+        code:
+          "FRAMEWORK_VUE_DEPENDENCY_MISSING",
+        message:
+          "Project is classified as Vue but vue is not declared.",
+        file: "package.json",
+        stage: "framework"
+      })
+    );
+  }
+
+  if (
+    framework === "React" &&
+    !hasReact
+  ) {
+
+    warnings.push(
+      createIssue({
+        code:
+          "FRAMEWORK_REACT_DEPENDENCY_MISSING",
+        message:
+          "Project is classified as React but react is not declared.",
+        file: "package.json",
+        severity: "warning",
+        stage: "framework"
+      })
+    );
+  }
+
+  return {
+    errors,
+    warnings
+  };
+}
+
+
+/* =========================================================
+   LOCKFILE CONSISTENCY
+========================================================= */
+
+function validateLockfileConsistency(
+  files,
+  packageManager
+) {
+
+  const errors = [];
+  const warnings = [];
+
+  const paths =
+    new Set(
+      files.map(
+        file =>
+          getFilePath(file)
+      )
+    );
+
+  const lockfiles = [
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb"
+  ];
+
+  const presentLockfiles =
+    lockfiles.filter(
+      file =>
+        paths.has(file)
+    );
+
+  if (
+    presentLockfiles.length > 1
+  ) {
+
+    warnings.push(
+      createIssue({
+        code:
+          "MULTIPLE_LOCKFILES",
+        message:
+          `Multiple package-manager lockfiles detected: ${presentLockfiles.join(", ")}.`,
+        severity: "warning",
+        stage: "package-manager",
+        details: {
+          lockfiles: presentLockfiles
+        }
+      })
+    );
+  }
+
+  if (
+    packageManager === "npm" &&
+    paths.has("pnpm-lock.yaml")
+  ) {
+
+    warnings.push(
+      createIssue({
+        code:
+          "PACKAGE_MANAGER_LOCKFILE_MISMATCH",
+        message:
+          "Detected npm as package manager while pnpm-lock.yaml is present.",
+        severity: "warning",
+        stage: "package-manager"
+      })
+    );
+  }
+
+  if (
+    packageManager === "pnpm" &&
+    paths.has("package-lock.json")
+  ) {
+
+    warnings.push(
+      createIssue({
+        code:
+          "PACKAGE_MANAGER_LOCKFILE_MISMATCH",
+        message:
+          "Detected pnpm as package manager while package-lock.json is present.",
+        severity: "warning",
+        stage: "package-manager"
+      })
+    );
+  }
+
+  return {
+    errors,
+    warnings
+  };
+}
+
+
+/* =========================================================
+   PROJECT FILE NORMALIZATION
+========================================================= */
+
+function normalizeFiles(files) {
+
+  if (!Array.isArray(files)) {
+    return [];
+  }
+
+  return files.map(file => ({
+    ...file,
+    path: getFilePath(file),
+    content: getFileContent(file)
+  }));
 }
 
 
@@ -2231,33 +2093,30 @@ function validateBuildConfiguration(
 ========================================================= */
 
 async function validateProject(
-projectData = {}
-){
+  projectData = {}
+) {
 
   const startedAt =
     Date.now();
 
-
-  try{
+  try {
 
     logger.info(
-      "Build Validation Started"
+      "[BuildValidationService] Validation started"
     );
 
-
-    const files =
-      Array.isArray(
-        projectData.files
-      )
+    const rawFiles =
+      Array.isArray(projectData.files)
         ? projectData.files
         : [];
 
+    const files =
+      normalizeFiles(rawFiles);
 
     const framework =
       normalizeFramework(
         projectData.framework
       );
-
 
     /*
      * -------------------------------------------------------
@@ -2266,10 +2125,7 @@ projectData = {}
      */
 
     const structure =
-      validateFileStructure(
-        files
-      );
-
+      validateFileStructure(files);
 
     /*
      * -------------------------------------------------------
@@ -2278,10 +2134,7 @@ projectData = {}
      */
 
     const packageResult =
-      validatePackageJson(
-        files
-      );
-
+      validatePackageJson(files);
 
     /*
      * -------------------------------------------------------
@@ -2290,22 +2143,16 @@ projectData = {}
      */
 
     const escapedSource =
-      detectEscapedSource(
-        files
-      );
-
+      detectEscapedSource(files);
 
     /*
      * -------------------------------------------------------
-     * 4. JAVASCRIPT SYNTAX
+     * 4. JAVASCRIPT / TYPESCRIPT
      * -------------------------------------------------------
      */
 
     const javascript =
-      validateJavaScriptSyntax(
-        files
-      );
-
+      validateJavaScriptSyntax(files);
 
     /*
      * -------------------------------------------------------
@@ -2314,10 +2161,7 @@ projectData = {}
      */
 
     const html =
-      validateHtml(
-        files
-      );
-
+      validateHtml(files);
 
     /*
      * -------------------------------------------------------
@@ -2326,10 +2170,7 @@ projectData = {}
      */
 
     const css =
-      validateCss(
-        files
-      );
-
+      validateCss(files);
 
     /*
      * -------------------------------------------------------
@@ -2339,15 +2180,10 @@ projectData = {}
 
     const entrypoints =
       validateEntrypoints(
-
         files,
-
         framework,
-
         packageResult.packageJson
-
       );
-
 
     /*
      * -------------------------------------------------------
@@ -2360,70 +2196,90 @@ projectData = {}
         packageResult.packageJson
       );
 
-
     /*
      * -------------------------------------------------------
-     * 9. BUILD CONFIG
+     * 9. BUILD CONFIGURATION
      * -------------------------------------------------------
      */
 
     const buildConfiguration =
       validateBuildConfiguration(
-
         framework,
-
         packageResult.packageJson
-
       );
-
 
     /*
      * -------------------------------------------------------
-     * 10. PACKAGE MANAGER
+     * 10. FRAMEWORK CONSISTENCY
+     * -------------------------------------------------------
+     */
+
+    const frameworkConsistency =
+      validateFrameworkConsistency(
+        framework,
+        packageResult.packageJson
+      );
+
+    /*
+     * -------------------------------------------------------
+     * 11. PACKAGE MANAGER
      * -------------------------------------------------------
      */
 
     const packageManager =
       detectPackageManager(
-
         files,
-
         packageResult.packageJson
-
       );
-
 
     /*
      * -------------------------------------------------------
-     * BUILD COMMAND
+     * 12. LOCKFILE CONSISTENCY
+     * -------------------------------------------------------
+     */
+
+    const lockfileConsistency =
+      validateLockfileConsistency(
+        files,
+        packageManager
+      );
+
+    /*
+     * -------------------------------------------------------
+     * 13. BUILD COMMAND
      * -------------------------------------------------------
      */
 
     const buildCommand =
       detectBuildCommand(
-
         packageResult.packageJson,
-
         packageManager
-
       );
-
 
     /*
      * -------------------------------------------------------
-     * SOURCE HASH
+     * 14. START COMMAND
+     * -------------------------------------------------------
+     */
+
+    const startCommand =
+      detectStartCommand(
+        packageResult.packageJson,
+        packageManager
+      );
+
+    /*
+     * -------------------------------------------------------
+     * 15. SOURCE HASH
      * -------------------------------------------------------
      */
 
     const sourceHash =
-      calculateSourceHash(
-        files
-      );
-
+      calculateSourceHash(files);
 
     /*
      * -------------------------------------------------------
-     * MERGE ERRORS
+     * 16. MERGE ERRORS
      * -------------------------------------------------------
      */
 
@@ -2445,14 +2301,17 @@ projectData = {}
 
       ...dependencies.errors,
 
-      ...buildConfiguration.errors
+      ...buildConfiguration.errors,
+
+      ...frameworkConsistency.errors,
+
+      ...lockfileConsistency.errors
 
     ];
 
-
     /*
      * -------------------------------------------------------
-     * MERGE WARNINGS
+     * 17. MERGE WARNINGS
      * -------------------------------------------------------
      */
 
@@ -2474,46 +2333,27 @@ projectData = {}
 
       ...dependencies.warnings,
 
-      ...buildConfiguration.warnings
+      ...buildConfiguration.warnings,
+
+      ...frameworkConsistency.warnings,
+
+      ...lockfileConsistency.warnings
 
     ];
 
-
     /*
      * -------------------------------------------------------
-     * RESULT
+     * 18. RESULT
      * -------------------------------------------------------
      */
 
     const success =
       errors.length === 0;
 
-
     const duration =
-      Date.now() -
-      startedAt;
+      Date.now() - startedAt;
 
-
-    if(
-      success
-    ){
-
-      logger.success(
-        "Build Validation Passed"
-      );
-
-    }
-
-    else{
-
-      logger.error(
-        `Build Validation Failed: ${errors.length} error(s)`
-      );
-
-    }
-
-
-    return {
+    const result = {
 
       success,
 
@@ -2523,10 +2363,10 @@ projectData = {}
           : "failed",
 
       authoritative:
-        false,
+        AUTHORITATIVE,
 
       validationMode:
-        "static",
+        VALIDATION_MODE,
 
       serviceVersion:
         SERVICE_VERSION,
@@ -2541,9 +2381,16 @@ projectData = {}
 
       framework,
 
+      supportedFramework:
+        ALLOWED_FRAMEWORKS.includes(
+          framework
+        ),
+
       packageManager,
 
       buildCommand,
+
+      startCommand,
 
       sourceHash,
 
@@ -2578,32 +2425,69 @@ projectData = {}
       },
 
       validatedAt:
-        new Date()
+        new Date(),
+
+      /*
+       * Useful for Master/Fix/Workspace.
+       */
+      metadata: {
+
+        staticValidation:
+          true,
+
+        generatedCodeExecuted:
+          false,
+
+        dependenciesInstalled:
+          false,
+
+        buildCommandExecuted:
+          false,
+
+        runtimeStarted:
+          false,
+
+        browserSmokeTested:
+          false
+
+      }
 
     };
 
-  }
+    if (success) {
 
-  catch(error){
+      logger.info(
+        `[BuildValidationService] Validation passed ` +
+        `(${duration}ms)`
+      );
+
+    } else {
+
+      logger.error(
+        `[BuildValidationService] Validation failed: ` +
+        `${errors.length} error(s)`
+      );
+    }
+
+    return result;
+
+  } catch (error) {
 
     logger.error(
-      `Build Validation Service Error: ${error.message}`
+      `[BuildValidationService] Service error: ${error.message}`
     );
-
 
     return {
 
-      success:
-        false,
+      success: false,
 
-      status:
-        "failed",
+      status: "failed",
 
       authoritative:
-        false,
+        AUTHORITATIVE,
 
       validationMode:
-        "static",
+        VALIDATION_MODE,
 
       serviceVersion:
         SERVICE_VERSION,
@@ -2621,19 +2505,31 @@ projectData = {}
           projectData.framework
         ),
 
+      packageManager:
+        "npm",
+
+      buildCommand:
+        null,
+
+      startCommand:
+        null,
+
+      sourceHash:
+        null,
+
       errors: [
 
         createIssue({
-
           code:
             "VALIDATION_SERVICE_ERROR",
-
           message:
             error.message,
-
           stage:
-            "service"
-
+            "service",
+          details: {
+            name:
+              error.name
+          }
         })
 
       ],
@@ -2650,13 +2546,33 @@ projectData = {}
 
       },
 
+      metadata: {
+
+        staticValidation:
+          true,
+
+        generatedCodeExecuted:
+          false,
+
+        dependenciesInstalled:
+          false,
+
+        buildCommandExecuted:
+          false,
+
+        runtimeStarted:
+          false,
+
+        browserSmokeTested:
+          false
+
+      },
+
       validatedAt:
         new Date()
 
     };
-
   }
-
 }
 
 
@@ -2665,9 +2581,9 @@ projectData = {}
 ========================================================= */
 
 async function validateFiles(
-files = [],
-options = {}
-){
+  files = [],
+  options = {}
+) {
 
   return validateProject({
 
@@ -2683,7 +2599,6 @@ options = {}
       options.projectName
 
   });
-
 }
 
 
@@ -2692,45 +2607,69 @@ options = {}
 ========================================================= */
 
 function isBuildReady(
-validationResult
-){
+  validationResult
+) {
 
-  if(
+  if (
     !validationResult ||
-    typeof validationResult !==
-      "object"
-  ){
-
+    typeof validationResult !== "object"
+  ) {
     return false;
-
   }
 
-
-  if(
-    validationResult.success !==
-    true
-  ){
-
+  if (
+    validationResult.success !== true
+  ) {
     return false;
-
   }
 
-
-  if(
-    Array.isArray(
-      validationResult.errors
-    ) &&
-    validationResult.errors.length >
-      0
-  ){
-
+  if (
+    Array.isArray(validationResult.errors) &&
+    validationResult.errors.length > 0
+  ) {
     return false;
-
   }
-
 
   return true;
+}
 
+
+/**
+ * Static validation passed, but this does NOT mean
+ * authoritative build success.
+ */
+function isStaticallyValid(
+  validationResult
+) {
+
+  return (
+    Boolean(validationResult) &&
+    validationResult.success === true &&
+    Array.isArray(validationResult.errors) &&
+    validationResult.errors.length === 0
+  );
+}
+
+
+/**
+ * Authoritative build readiness.
+ *
+ * This intentionally requires authoritative === true.
+ *
+ * Therefore static validation alone cannot unlock
+ * production deployment.
+ */
+function isAuthoritativeBuildReady(
+  validationResult
+) {
+
+  return (
+    Boolean(validationResult) &&
+    validationResult.success === true &&
+    validationResult.authoritative === true &&
+    Array.isArray(validationResult.errors) &&
+    validationResult.errors.length === 0
+  );
 }
 
 
@@ -2739,36 +2678,41 @@ validationResult
 ========================================================= */
 
 function createRepairContext(
-validationResult
-){
+  validationResult
+) {
 
-  if(
-    !validationResult
-  ){
+  if (!validationResult) {
 
     return {
 
-      success:
-        false,
+      success: false,
+
+      sourceHash: null,
+
+      framework: "Other",
+
+      packageManager: "npm",
+
+      buildCommand: null,
+
+      affectedFiles: [],
 
       errors: [
 
         {
-
           code:
             "VALIDATION_RESULT_MISSING",
 
           message:
             "Build validation result is missing."
-
         }
 
-      ]
+      ],
+
+      warnings: []
 
     };
-
   }
-
 
   const errors =
     Array.isArray(
@@ -2777,6 +2721,12 @@ validationResult
       ? validationResult.errors
       : [];
 
+  const warnings =
+    Array.isArray(
+      validationResult.warnings
+    )
+      ? validationResult.warnings
+      : [];
 
   const affectedFiles =
     [
@@ -2786,6 +2736,7 @@ validationResult
 
           .map(
             error =>
+              error &&
               error.file
           )
 
@@ -2796,11 +2747,10 @@ validationResult
       )
     ];
 
-
   return {
 
     success:
-      true,
+      validationResult.success === true,
 
     sourceHash:
       validationResult.sourceHash ||
@@ -2818,16 +2768,99 @@ validationResult
       validationResult.buildCommand ||
       null,
 
+    startCommand:
+      validationResult.startCommand ||
+      null,
+
     affectedFiles,
 
     errors,
 
-    warnings:
-      validationResult.warnings ||
-      []
+    warnings,
+
+    validationMode:
+      validationResult.validationMode ||
+      VALIDATION_MODE,
+
+    authoritative:
+      validationResult.authoritative === true
 
   };
+}
 
+
+/* =========================================================
+   VALIDATION SUMMARY
+========================================================= */
+
+function getValidationSummary(
+  validationResult
+) {
+
+  if (
+    !validationResult ||
+    typeof validationResult !== "object"
+  ) {
+
+    return {
+
+      status:
+        "unknown",
+
+      success:
+        false,
+
+      authoritative:
+        false,
+
+      errorCount:
+        1,
+
+      warningCount:
+        0
+
+    };
+  }
+
+  return {
+
+    status:
+      validationResult.status ||
+      (
+        validationResult.success
+          ? "passed"
+          : "failed"
+      ),
+
+    success:
+      validationResult.success === true,
+
+    authoritative:
+      validationResult.authoritative === true,
+
+    validationMode:
+      validationResult.validationMode ||
+      VALIDATION_MODE,
+
+    errorCount:
+      Array.isArray(
+        validationResult.errors
+      )
+        ? validationResult.errors.length
+        : 0,
+
+    warningCount:
+      Array.isArray(
+        validationResult.warnings
+      )
+        ? validationResult.warnings.length
+        : 0,
+
+    sourceHash:
+      validationResult.sourceHash ||
+      null
+
+  };
 }
 
 
@@ -2839,13 +2872,25 @@ module.exports = {
 
   SERVICE_VERSION,
 
+  VALIDATION_MODE,
+
+  AUTHORITATIVE,
+
+  ALLOWED_FRAMEWORKS,
+
   validateProject,
 
   validateFiles,
 
   isBuildReady,
 
+  isStaticallyValid,
+
+  isAuthoritativeBuildReady,
+
   createRepairContext,
+
+  getValidationSummary,
 
   calculateSourceHash,
 
@@ -2853,6 +2898,18 @@ module.exports = {
 
   normalizeFilePath,
 
-  isSafeFilePath
+  isSafeFilePath,
+
+  getFilePath,
+
+  getFileContent,
+
+  getFilesByExtension,
+
+  detectPackageManager,
+
+  detectBuildCommand,
+
+  detectStartCommand
 
 };
