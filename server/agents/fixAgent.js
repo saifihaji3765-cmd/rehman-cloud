@@ -2,7 +2,7 @@
    ZyrionOS FIX AGENT
    Production Project Review + Debugging + Multi-File Repair
 
-   VERSION: 6.0.0
+   VERSION: 7.0.0
 
    RESPONSIBILITIES
    ---------------------------------------------------------
@@ -14,7 +14,8 @@
    - Import/export contract analysis
    - API contract analysis
    - Complete-file repair
-   - Post-repair verification
+   - Static post-repair validation
+   - AI post-repair verification
    - Controlled multi-round repair
 
    ARCHITECTURE
@@ -34,11 +35,13 @@
       ↓
    Repair
       ↓
-   Verification
+   Static Validation
       ↓
-   Rebuild / Revalidate
+   AI Verification
       ↓
    Master Agent
+      ↓
+   Revalidation
 
    IMPORTANT
 
@@ -73,7 +76,7 @@ const {
 
 
 /* =========================================================
-   OPTIONAL BUILD VALIDATION SERVICE
+   BUILD VALIDATION SERVICE
 ========================================================= */
 
 let buildValidationService = null;
@@ -85,12 +88,8 @@ try {
 
 } catch (error) {
 
-  /*
-   * Fix Agent remains usable even if the
-   * validation service is not available.
-   */
-
-  buildValidationService = null;
+  buildValidationService =
+    null;
 
 }
 
@@ -100,7 +99,7 @@ try {
 ========================================================= */
 
 const FIX_AGENT_VERSION =
-  "6.0.0";
+  "7.0.0";
 
 
 /* =========================================================
@@ -123,9 +122,6 @@ const MAX_PROMPT_LENGTH =
   12000;
 
 const MAX_ERROR_LENGTH =
-  16000;
-
-const MAX_LOG_LENGTH =
   16000;
 
 const MAX_FILE_CONTEXT =
@@ -160,14 +156,12 @@ function cleanString(
 ) {
 
   if (
-    typeof value !==
-    "string"
+    typeof value !== "string"
   ) {
 
     return "";
 
   }
-
 
   return value
     .replace(
@@ -184,34 +178,7 @@ function cleanString(
 
 
 /* =========================================================
-   SAFE JSON
-========================================================= */
-
-function safeJson(
-  value
-) {
-
-  try {
-
-    return JSON.stringify(
-      sanitizeForContext(
-        value
-      )
-    );
-
-  } catch (
-    error
-  ) {
-
-    return "{}";
-
-  }
-
-}
-
-
-/* =========================================================
-   SECRET SANITIZATION
+   SECRET KEYS
 ========================================================= */
 
 const SECRET_KEYS =
@@ -237,7 +204,10 @@ const SECRET_KEYS =
     "secret_value",
     "plainValue",
     "encryptedValue",
-    "credentials"
+    "credentials",
+    "authorizationToken",
+    "databaseUrl",
+    "DATABASE_URL"
 
   ]);
 
@@ -252,14 +222,12 @@ function sanitizeForContext(
 ) {
 
   if (
-    depth >
-    7
+    depth > 7
   ) {
 
     return "[truncated]";
 
   }
-
 
   if (
     value === null ||
@@ -270,32 +238,22 @@ function sanitizeForContext(
 
   }
 
-
   if (
-    typeof value ===
-      "string" ||
-    typeof value ===
-      "number" ||
-    typeof value ===
-      "boolean"
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
   ) {
 
     return value;
 
   }
 
-
   if (
-    Array.isArray(
-      value
-    )
+    Array.isArray(value)
   ) {
 
     return value
-      .slice(
-        0,
-        100
-      )
+      .slice(0, 100)
       .map(
         item =>
           sanitizeForContext(
@@ -306,28 +264,21 @@ function sanitizeForContext(
 
   }
 
-
   if (
-    typeof value ===
-    "object"
+    typeof value === "object"
   ) {
 
     const output = {};
-
 
     for (
       const [
         key,
         item
-      ] of Object.entries(
-        value
-      )
+      ] of Object.entries(value)
     ) {
 
       if (
-        SECRET_KEYS.has(
-          key
-        )
+        SECRET_KEYS.has(key)
       ) {
 
         output[key] =
@@ -337,7 +288,6 @@ function sanitizeForContext(
 
       }
 
-
       output[key] =
         sanitizeForContext(
           item,
@@ -346,13 +296,36 @@ function sanitizeForContext(
 
     }
 
-
     return output;
 
   }
 
-
   return "[unsupported]";
+
+}
+
+
+/* =========================================================
+   SAFE JSON
+========================================================= */
+
+function safeJson(
+  value
+) {
+
+  try {
+
+    return JSON.stringify(
+      sanitizeForContext(
+        value
+      )
+    );
+
+  } catch {
+
+    return "{}";
+
+  }
 
 }
 
@@ -366,14 +339,12 @@ function normalizeFilePath(
 ) {
 
   if (
-    typeof value !==
-    "string"
+    typeof value !== "string"
   ) {
 
     return null;
 
   }
-
 
   let filePath =
     value
@@ -383,20 +354,14 @@ function normalizeFilePath(
         "/"
       );
 
-
   while (
-    filePath.startsWith(
-      "./"
-    )
+    filePath.startsWith("./")
   ) {
 
     filePath =
-      filePath.slice(
-        2
-      );
+      filePath.slice(2);
 
   }
-
 
   if (
     !filePath ||
@@ -408,11 +373,8 @@ function normalizeFilePath(
 
   }
 
-
   if (
-    filePath.startsWith(
-      "/"
-    ) ||
+    filePath.startsWith("/") ||
     /^[A-Za-z]:\//.test(
       filePath
     )
@@ -422,34 +384,24 @@ function normalizeFilePath(
 
   }
 
-
   if (
-    filePath.includes(
-      "\0"
-    )
+    filePath.includes("\0")
   ) {
 
     return null;
 
   }
-
 
   const parts =
-    filePath.split(
-      "/"
-    );
-
+    filePath.split("/");
 
   if (
-    parts.includes(
-      ".."
-    )
+    parts.includes("..")
   ) {
 
     return null;
 
   }
-
 
   return filePath;
 
@@ -457,7 +409,7 @@ function normalizeFilePath(
 
 
 /* =========================================================
-   CONTENT NORMALIZATION
+   FILE CONTENT NORMALIZATION
 ========================================================= */
 
 function normalizeFileContent(
@@ -465,14 +417,12 @@ function normalizeFileContent(
 ) {
 
   if (
-    typeof value !==
-    "string"
+    typeof value !== "string"
   ) {
 
     return null;
 
   }
-
 
   if (
     value.length >
@@ -482,7 +432,6 @@ function normalizeFileContent(
     return null;
 
   }
-
 
   return value;
 
@@ -498,43 +447,33 @@ function normalizeFiles(
 ) {
 
   if (
-    !Array.isArray(
-      files
-    )
+    !Array.isArray(files)
   ) {
 
     return {
 
       files: [],
 
-      invalidCount:
-        0,
+      invalidCount: 0,
 
-      duplicateCount:
-        0,
+      duplicateCount: 0,
 
-      totalBytes:
-        0
+      totalBytes: 0
 
     };
 
   }
 
-
-  const normalized =
-    [];
+  const normalized = [];
 
   const seen =
     new Set();
 
-  let invalidCount =
-    0;
+  let invalidCount = 0;
 
-  let duplicateCount =
-    0;
+  let duplicateCount = 0;
 
-  let totalBytes =
-    0;
+  let totalBytes = 0;
 
 
   for (
@@ -543,8 +482,7 @@ function normalizeFiles(
 
     if (
       !file ||
-      typeof file !==
-        "object"
+      typeof file !== "object"
     ) {
 
       invalidCount++;
@@ -553,19 +491,19 @@ function normalizeFiles(
 
     }
 
-
     const filePath =
       normalizeFilePath(
         file.path ||
-        file.name
+        file.name ||
+        file.filePath
       );
-
 
     const content =
       normalizeFileContent(
-        file.content
+        file.content !== undefined
+          ? file.content
+          : file.source
       );
-
 
     if (
       !filePath ||
@@ -578,11 +516,8 @@ function normalizeFiles(
 
     }
 
-
     if (
-      seen.has(
-        filePath
-      )
+      seen.has(filePath)
     ) {
 
       duplicateCount++;
@@ -591,10 +526,9 @@ function normalizeFiles(
 
     }
 
-
     if (
       totalBytes +
-        content.length >
+      content.length >
       MAX_TOTAL_SOURCE_SIZE
     ) {
 
@@ -604,15 +538,12 @@ function normalizeFiles(
 
     }
 
-
     seen.add(
       filePath
     );
 
-
     totalBytes +=
       content.length;
-
 
     normalized.push({
 
@@ -622,7 +553,6 @@ function normalizeFiles(
       content
 
     });
-
 
     if (
       normalized.length >=
@@ -634,7 +564,6 @@ function normalizeFiles(
     }
 
   }
-
 
   return {
 
@@ -662,78 +591,68 @@ function normalizeFixRequest(
 
   const defaults = {
 
-    prompt:
-      "",
+    prompt: "",
 
-    error:
-      "",
+    error: "",
 
-    errorLine:
-      null,
+    errorLine: null,
 
-    errorFile:
-      "",
+    errorFile: "",
 
-    mode:
-      "automatic",
+    mode: "automatic",
 
-    files:
-      [],
+    files: [],
 
-    projectId:
-      "",
+    projectId: "",
 
-    projectName:
-      "",
+    projectName: "",
 
-    framework:
-      "",
+    framework: "",
 
-    planning:
-      null,
+    planning: null,
 
-    architecture:
-      null,
+    architecture: null,
 
-    intent:
-      null,
+    intent: null,
 
-    manifest:
-      null,
+    manifest: null,
 
-    tests:
-      null,
+    tests: null,
 
-    review:
-      null,
+    review: null,
 
-    memoryContext:
-      null,
+    memoryContext: null,
 
-    buildResult:
-      null,
+    buildResult: null,
 
-    buildValidation:
-      null,
+    buildValidation: null,
 
-    runtimeError:
-      null,
+    buildError: "",
 
-    runtimeLogs:
-      null,
+    validationErrors: [],
 
-    testResult:
-      null,
+    validationWarnings: [],
 
-    user:
-      {}
+    repairContext: null,
+
+    repairRound: 0,
+
+    maxRepairRounds:
+      MAX_FIX_ROUNDS,
+
+    runtimeError: null,
+
+    runtimeLogs: null,
+
+    testResult: null,
+
+    user: {}
 
   };
 
 
   if (
-    typeof input ===
-    "string"
+    typeof input === "string"
   ) {
 
     return {
@@ -753,8 +672,7 @@ function normalizeFixRequest(
 
   if (
     !input ||
-    typeof input !==
-      "object"
+    typeof input !== "object"
   ) {
 
     return defaults;
@@ -766,8 +684,7 @@ function normalizeFixRequest(
     cleanString(
       input.mode,
       50
-    )
-      .toLowerCase();
+    ).toLowerCase();
 
 
   const mode =
@@ -881,6 +798,58 @@ function normalizeFixRequest(
       input.buildValidation ||
       null,
 
+    buildError:
+      cleanString(
+        input.buildError,
+        MAX_ERROR_LENGTH
+      ),
+
+    validationErrors:
+      Array.isArray(
+        input.validationErrors
+      )
+        ? input.validationErrors
+        : [],
+
+    validationWarnings:
+      Array.isArray(
+        input.validationWarnings
+      )
+        ? input.validationWarnings
+        : [],
+
+    repairContext:
+      input.repairContext ||
+      null,
+
+    repairRound:
+      Number.isFinite(
+        Number(
+          input.repairRound
+        )
+      )
+        ? Number(
+            input.repairRound
+          )
+        : 0,
+
+    maxRepairRounds:
+      Number.isFinite(
+        Number(
+          input.maxRepairRounds
+        )
+      )
+        ? Math.min(
+            Math.max(
+              Number(
+                input.maxRepairRounds
+              ),
+              1
+            ),
+            MAX_FIX_ROUNDS
+          )
+        : MAX_FIX_ROUNDS,
+
     runtimeError:
       input.runtimeError ||
       null,
@@ -913,7 +882,6 @@ function createFileMap(
   const map =
     new Map();
 
-
   for (
     const file of files
   ) {
@@ -925,14 +893,13 @@ function createFileMap(
 
   }
 
-
   return map;
 
 }
 
 
 /* =========================================================
-   FIND ERROR FILE
+   ERROR FILE FINDER
 ========================================================= */
 
 function findErrorFile(
@@ -951,7 +918,6 @@ function findErrorFile(
           request.errorFile
       );
 
-
     if (
       exact
     ) {
@@ -968,6 +934,8 @@ function findErrorFile(
 
       request.error,
 
+      request.buildError,
+
       typeof request.runtimeError ===
         "string"
         ? request.runtimeError
@@ -975,17 +943,16 @@ function findErrorFile(
             request.runtimeError
           ),
 
-      typeof request.buildValidation ===
-        "string"
-        ? request.buildValidation
-        : safeJson(
-            request.buildValidation
-          )
+      safeJson(
+        request.buildValidation
+      ),
+
+      safeJson(
+        request.validationErrors
+      )
 
     ]
-      .join(
-        "\n"
-      )
+      .join("\n")
       .toLowerCase();
 
 
@@ -1024,102 +991,67 @@ function getFileType(
 
 
   if (
-    lower.endsWith(
-      ".tsx"
-    ) ||
-    lower.endsWith(
-      ".ts"
-    )
+    lower.endsWith(".tsx") ||
+    lower.endsWith(".ts")
   ) {
 
     return "typescript";
 
   }
 
-
   if (
-    lower.endsWith(
-      ".jsx"
-    ) ||
-    lower.endsWith(
-      ".js"
-    ) ||
-    lower.endsWith(
-      ".mjs"
-    ) ||
-    lower.endsWith(
-      ".cjs"
-    )
+    lower.endsWith(".jsx") ||
+    lower.endsWith(".js") ||
+    lower.endsWith(".mjs") ||
+    lower.endsWith(".cjs")
   ) {
 
     return "javascript";
 
   }
 
-
   if (
-    lower.endsWith(
-      ".json"
-    )
+    lower.endsWith(".json")
   ) {
 
     return "json";
 
   }
 
-
   if (
-    lower.endsWith(
-      ".css"
-    ) ||
-    lower.endsWith(
-      ".scss"
-    ) ||
-    lower.endsWith(
-      ".sass"
-    ) ||
-    lower.endsWith(
-      ".less"
-    )
+    lower.endsWith(".css") ||
+    lower.endsWith(".scss") ||
+    lower.endsWith(".sass") ||
+    lower.endsWith(".less")
   ) {
 
     return "style";
 
   }
 
-
   if (
-    lower.endsWith(
-      ".html"
-    )
+    lower.endsWith(".html")
   ) {
 
     return "html";
 
   }
 
-
   if (
-    lower.endsWith(
-      ".py"
-    )
+    lower.endsWith(".py")
   ) {
 
     return "python";
 
   }
 
-
   if (
-    lower.endsWith(
-      ".vue"
-    )
+    lower.endsWith(".vue")
   ) {
 
     return "vue";
 
   }
-
 
   return "other";
 
@@ -1235,9 +1167,7 @@ function prioritizeFiles(
   ];
 
 
-  const priority =
-    [];
-
+  const priority = [];
 
   const add =
     file => {
@@ -1279,6 +1209,10 @@ function prioritizeFiles(
   }
 
 
+  /*
+   * Then include remaining project files.
+   */
+
   for (
     const file of files
   ) {
@@ -1304,9 +1238,7 @@ function chunkFiles(
   size
 ) {
 
-  const chunks =
-    [];
-
+  const chunks = [];
 
   for (
     let i = 0;
@@ -1322,7 +1254,6 @@ function chunkFiles(
     );
 
   }
-
 
   return chunks;
 
@@ -1372,35 +1303,7 @@ function buildFileContext(
 
 
 /* =========================================================
-   BUILD PROJECT CONTEXT
-========================================================= */
-
-function buildProjectContext(
-  files
-) {
-
-  return {
-
-    fileCount:
-      files.length,
-
-    inventory:
-      buildProjectInventory(
-        files
-      ),
-
-    files:
-      buildFileContext(
-        files
-      )
-
-  };
-
-}
-
-
-/* =========================================================
-   BUILD ERROR CONTEXT
+   BUILD FAILURE CONTEXT
 ========================================================= */
 
 function buildFailureContext(
@@ -1417,6 +1320,24 @@ function buildFailureContext(
     buildValidation:
       sanitizeForContext(
         request.buildValidation
+      ),
+
+    buildError:
+      request.buildError,
+
+    validationErrors:
+      sanitizeForContext(
+        request.validationErrors
+      ),
+
+    validationWarnings:
+      sanitizeForContext(
+        request.validationWarnings
+      ),
+
+    repairContext:
+      sanitizeForContext(
+        request.repairContext
       ),
 
     runtimeError:
@@ -1462,7 +1383,7 @@ CORE PRINCIPLE
 
 ERROR LINE != ROOT CAUSE.
 
-A compiler/runtime error may originate from:
+A compiler/runtime/build error may originate from:
 
 - incorrect import
 - incorrect export
@@ -1473,8 +1394,8 @@ A compiler/runtime error may originate from:
 - circular dependency
 - incorrect function contract
 - incorrect component contract
-- stale generated code
 - malformed generated source
+- HTML-escaped JSX/TSX
 - configuration mismatch
 - incorrect framework structure
 - wrong application entrypoint
@@ -1486,54 +1407,36 @@ A compiler/runtime error may originate from:
 Always reason across related files.
 
 ==================================================
-PROJECT REVIEW
-==================================================
-
-When source files are supplied:
-
-1. Inspect project inventory.
-2. Inspect package configuration.
-3. Inspect framework configuration.
-4. Inspect entrypoints.
-5. Inspect reported error.
-6. Trace imports and exports.
-7. Trace function contracts.
-8. Trace component contracts.
-9. Trace API contracts.
-10. Trace dependency usage.
-11. Check generated source consistency.
-12. Check configuration consistency.
-13. Check obvious syntax issues.
-14. Check obvious runtime issues.
-15. Check whether the reported failure originates
-    from another file.
-
-Never invent a problem that is unsupported
-by supplied source or validation evidence.
-
-==================================================
 BUILD VALIDATION EVIDENCE
 ==================================================
 
-If buildValidation, buildResult, runtimeError,
-runtimeLogs or testResult are provided:
+If buildValidation is supplied:
 
-Treat them as execution/validation evidence.
+Treat its errors as concrete validation evidence.
 
-Use the exact error information as a debugging
-signal.
+If validationErrors are supplied:
 
-Do NOT claim that code executed successfully
-unless the supplied execution result proves it.
+Treat them as concrete validation evidence.
 
-Do NOT invent logs.
+If buildError is supplied:
 
-Do NOT invent compiler output.
+Treat it as the immediate failure signal.
 
-Do NOT invent test results.
+If runtimeError/runtimeLogs/testResult are supplied:
+
+Use them as evidence only.
+
+Never invent compiler output.
+
+Never invent runtime output.
+
+Never invent test results.
+
+Never claim that code executed successfully
+unless execution evidence is supplied.
 
 ==================================================
-REPAIR RULES
+SOURCE REPAIR
 ==================================================
 
 Preserve working functionality.
@@ -1556,16 +1459,19 @@ Do not rewrite unrelated files.
 
 Do not modify infrastructure.
 
-Do not modify deployment configuration unless
-the supplied failure proves that configuration
-is part of the source-level repair.
+Do not modify AWS.
+
+Do not modify Docker deployment infrastructure.
+
+Do not modify DNS.
+
+Do not modify SSL.
 
 ==================================================
 COMPLETE FILE CONTRACT
 ==================================================
 
-Every returned repaired file MUST contain
-the COMPLETE file.
+Every repaired file MUST contain the COMPLETE file.
 
 Never return:
 
@@ -1668,6 +1574,9 @@ async function reviewBatch(
     error:
       request.error,
 
+    buildError:
+      request.buildError,
+
     errorFile:
       request.errorFile,
 
@@ -1736,7 +1645,7 @@ Pay special attention to:
 - framework structure
 - generated source
 - malformed JSX/TSX
-- escaped source
+- HTML-escaped JSX/TSX
 - package configuration
 
 Return:
@@ -1842,20 +1751,16 @@ function mergeReviewResults(
   results
 ) {
 
-  const issues =
-    [];
+  const issues = [];
 
-  const relationships =
-    [];
+  const relationships = [];
 
   const repairTargets =
     new Set();
 
-  const providers =
-    [];
+  const providers = [];
 
-  const models =
-    [];
+  const models = [];
 
 
   for (
@@ -1909,9 +1814,20 @@ function mergeReviewResults(
           "string"
         ) {
 
-          repairTargets.add(
-            target
-          );
+          const normalized =
+            normalizeFilePath(
+              target
+            );
+
+          if (
+            normalized
+          ) {
+
+            repairTargets.add(
+              normalized
+            );
+
+          }
 
         }
 
@@ -1989,34 +1905,29 @@ function selectRepairFiles(
       files
     );
 
-  const selected =
-    [];
-
+  const selected = [];
 
   const add =
     file => {
 
       if (
-        !file ||
-        selected.includes(
+        file &&
+        !selected.includes(
           file
         )
       ) {
 
-        return;
+        selected.push(
+          file
+        );
 
       }
-
-
-      selected.push(
-        file
-      );
 
     };
 
 
   /*
-   * Explicit error file first.
+   * 1. Direct error file.
    */
 
   add(
@@ -2028,7 +1939,7 @@ function selectRepairFiles(
 
 
   /*
-   * Explicit AI repair targets.
+   * 2. Explicit AI targets.
    */
 
   for (
@@ -2039,7 +1950,9 @@ function selectRepairFiles(
 
     add(
       map.get(
-        path
+        normalizeFilePath(
+          path
+        )
       )
     );
 
@@ -2047,7 +1960,7 @@ function selectRepairFiles(
 
 
   /*
-   * Files named in issues.
+   * 3. Files named in issues.
    */
 
   for (
@@ -2063,7 +1976,9 @@ function selectRepairFiles(
 
       add(
         map.get(
-          issue.file
+          normalizeFilePath(
+            issue.file
+          )
         )
       );
 
@@ -2073,7 +1988,7 @@ function selectRepairFiles(
 
 
   /*
-   * Related files.
+   * 4. Related files.
    */
 
   for (
@@ -2082,17 +1997,35 @@ function selectRepairFiles(
       []
   ) {
 
-    add(
-      map.get(
-        relationship.from
-      )
-    );
+    if (
+      typeof relationship?.from ===
+      "string"
+    ) {
 
-    add(
-      map.get(
-        relationship.to
-      )
-    );
+      add(
+        map.get(
+          normalizeFilePath(
+            relationship.from
+          )
+        )
+      );
+
+    }
+
+    if (
+      typeof relationship?.to ===
+      "string"
+    ) {
+
+      add(
+        map.get(
+          normalizeFilePath(
+            relationship.to
+          )
+        )
+      );
+
+    }
 
   }
 
@@ -2139,8 +2072,7 @@ async function repairProject(
           review.issues ||
           [],
 
-        fixes:
-          [],
+        fixes: [],
 
         rootCause:
           "",
@@ -2148,8 +2080,7 @@ async function repairProject(
         optimizedCode:
           "",
 
-        files:
-          []
+        files: []
 
       },
 
@@ -2175,6 +2106,9 @@ async function repairProject(
     error:
       request.error,
 
+    buildError:
+      request.buildError,
+
     errorFile:
       request.errorFile,
 
@@ -2191,29 +2125,50 @@ async function repairProject(
       request.projectName,
 
     planning:
-      request.planning,
+      sanitizeForContext(
+        request.planning
+      ),
 
     architecture:
-      request.architecture,
+      sanitizeForContext(
+        request.architecture
+      ),
 
     intent:
-      request.intent,
+      sanitizeForContext(
+        request.intent
+      ),
 
     manifest:
-      request.manifest,
+      sanitizeForContext(
+        request.manifest
+      ),
 
     tests:
-      request.tests,
+      sanitizeForContext(
+        request.tests
+      ),
 
     memoryContext:
-      request.memoryContext,
+      sanitizeForContext(
+        request.memoryContext
+      ),
+
+    repairRound:
+      request.repairRound,
+
+    maxRepairRounds:
+      request.maxRepairRounds,
 
     failureEvidence:
       buildFailureContext(
         request
       ),
 
-    review,
+    review:
+      sanitizeForContext(
+        review
+      ),
 
     sourceFiles:
       buildFileContext(
@@ -2265,6 +2220,12 @@ Ensure:
 - framework structure remains valid
 - reported build/runtime failure is addressed
 
+IMPORTANT:
+
+If build validation specifically reports malformed
+or HTML-escaped source, repair the source itself.
+Do NOT merely describe the problem.
+
 Required JSON:
 
 {
@@ -2307,11 +2268,10 @@ required to make the repair coherent.
           content:
             safeJson(
               repairContext
+            ).slice(
+              0,
+              MAX_TOTAL_CONTEXT
             )
-              .slice(
-                0,
-                MAX_TOTAL_CONTEXT
-              )
 
         }
 
@@ -2412,69 +2372,36 @@ function checkRepairCoverage(
     );
 
 
-  const targets =
-    new Set();
-
-
-  for (
-    const file of
-      repairFiles
-  ) {
-
-    targets.add(
-      file.path
+  const explicitTargets =
+    new Set(
+      (
+        review.repairTargets ||
+        []
+      )
+        .map(
+          normalizeFilePath
+        )
+        .filter(Boolean)
     );
 
-  }
+
+  const missing = [];
 
 
   for (
-    const path of
-      review.repairTargets ||
-      []
-  ) {
-
-    targets.add(
-      path
-    );
-
-  }
-
-
-  const missing =
-    [];
-
-
-  for (
-    const path of
-      targets
+    const target of
+      explicitTargets
   ) {
 
     if (
       !returned.has(
-        path
+        target
       )
     ) {
 
-      /*
-       * Do not force every selected context file
-       * to be rewritten.
-       *
-       * Only explicit repair targets must be
-       * returned.
-       */
-
-      if (
-        review.repairTargets?.includes(
-          path
-        )
-      ) {
-
-        missing.push(
-          path
-        );
-
-      }
+      missing.push(
+        target
+      );
 
     }
 
@@ -2535,25 +2462,45 @@ function applyRepairs(
       repairedFiles
   ) {
 
+    const path =
+      normalizeFilePath(
+        repaired.path
+      );
+
+
+    const content =
+      normalizeFileContent(
+        repaired.content
+      );
+
+
+    if (
+      !path ||
+      content === null
+    ) {
+
+      continue;
+
+    }
+
+
     if (
       indexMap.has(
-        repaired.path
+        path
       )
     ) {
 
       const index =
         indexMap.get(
-          repaired.path
+          path
         );
 
 
       result[index] = {
 
-        path:
-          repaired.path,
+        path,
 
-        content:
-          repaired.content
+        content
 
       };
 
@@ -2571,7 +2518,7 @@ function applyRepairs(
    STATIC REPAIR VALIDATION
 ========================================================= */
 
-function runStaticValidation(
+async function runStaticValidation(
   files,
   request
 ) {
@@ -2593,11 +2540,12 @@ function runStaticValidation(
       authoritative:
         false,
 
-      errors:
-        [],
+      validationMode:
+        "unavailable",
 
-      warnings:
-        [],
+      errors: [],
+
+      warnings: [],
 
       message:
         "Build validation service unavailable."
@@ -2609,21 +2557,56 @@ function runStaticValidation(
 
   try {
 
+    /*
+     * IMPORTANT:
+     *
+     * validateProject may be synchronous OR asynchronous.
+     * Promise.resolve() handles both safely.
+     */
+
     const result =
-      buildValidationService.validateProject({
+      await Promise.resolve(
+        buildValidationService.validateProject({
 
-        projectId:
-          request.projectId,
+          projectId:
+            request.projectId,
 
-        projectName:
-          request.projectName,
+          projectName:
+            request.projectName,
 
-        framework:
-          request.framework,
+          framework:
+            request.framework,
 
-        files
+          files
 
-      });
+        })
+      );
+
+
+    const errors =
+      Array.isArray(
+        result?.errors
+      )
+        ? result.errors
+        : [];
+
+
+    const warnings =
+      Array.isArray(
+        result?.warnings
+      )
+        ? result.warnings
+        : [];
+
+
+    /*
+     * Prefer explicit valid=false.
+     *
+     * Some validators may expose success separately.
+     */
+
+    const valid =
+      result?.valid === true;
 
 
     return {
@@ -2631,29 +2614,23 @@ function runStaticValidation(
       available:
         true,
 
-      valid:
-        result?.valid === true,
+      valid,
 
       authoritative:
         result?.authoritative === true,
 
       validationMode:
         result?.validationMode ||
+        result?.mode ||
         "static",
 
-      errors:
-        Array.isArray(
-          result?.errors
-        )
-          ? result.errors
-          : [],
+      errors,
 
-      warnings:
-        Array.isArray(
-          result?.warnings
-        )
-          ? result.warnings
-          : [],
+      warnings,
+
+      sourceHash:
+        result?.sourceHash ||
+        null,
 
       result
 
@@ -2685,14 +2662,16 @@ function runStaticValidation(
             "validator_exception",
 
           message:
-            error.message
+            cleanString(
+              error.message,
+              5000
+            )
 
         }
 
       ],
 
-      warnings:
-        [],
+      warnings: [],
 
       result:
         null
@@ -2705,7 +2684,7 @@ function runStaticValidation(
 
 
 /* =========================================================
-   BUILD VALIDATION SUMMARY
+   VALIDATION SUMMARY
 ========================================================= */
 
 function getValidationSummary(
@@ -2734,6 +2713,9 @@ function getValidationSummary(
 
     validationMode:
       validation.validationMode,
+
+    sourceHash:
+      validation.sourceHash,
 
     errors:
       validation.errors,
@@ -2777,15 +2759,23 @@ async function verifyRepair(
 
 
   /*
-   * Static validation happens before AI verification.
+   * First run static validation.
    */
 
   const staticValidation =
-    runStaticValidation(
+    await runStaticValidation(
+
       repairedFiles,
+
       request
+
     );
 
+
+  /*
+   * Static validation failure is a hard
+   * verification failure.
+   */
 
   if (
     staticValidation.available &&
@@ -2823,6 +2813,11 @@ async function verifyRepair(
   }
 
 
+  /*
+   * If no files need AI verification,
+   * static validation is enough for this layer.
+   */
+
   if (
     verificationFiles.length ===
     0
@@ -2838,11 +2833,9 @@ async function verifyRepair(
         valid:
           true,
 
-        issues:
-          [],
+        issues: [],
 
-        remainingProblems:
-          []
+        remainingProblems: []
 
       },
 
@@ -2867,6 +2860,9 @@ async function verifyRepair(
     error:
       request.error,
 
+    buildError:
+      request.buildError,
+
     errorFile:
       request.errorFile,
 
@@ -2877,7 +2873,9 @@ async function verifyRepair(
       request.framework,
 
     originalReview:
-      review,
+      sanitizeForContext(
+        review
+      ),
 
     failureEvidence:
       buildFailureContext(
@@ -2957,11 +2955,10 @@ source or validation evidence.
           content:
             safeJson(
               context
+            ).slice(
+              0,
+              MAX_TOTAL_CONTEXT
             )
-              .slice(
-                0,
-                MAX_TOTAL_CONTEXT
-              )
 
         }
 
@@ -2997,8 +2994,7 @@ source or validation evidence.
 
         ],
 
-        remainingProblems:
-          []
+        remainingProblems: []
 
       },
 
@@ -3028,11 +3024,9 @@ source or validation evidence.
         valid:
           false,
 
-        issues:
-          [],
+        issues: [],
 
-        remainingProblems:
-          []
+        remainingProblems: []
 
       },
 
@@ -3060,14 +3054,18 @@ function getChangedFiles(
   repairedFiles
 ) {
 
+  const originalMap =
+    createFileMap(
+      originalFiles
+    );
+
+
   return repairedFiles.filter(
     file => {
 
       const original =
-        originalFiles.find(
-          source =>
-            source.path ===
-            file.path
+        originalMap.get(
+          file.path
         );
 
 
@@ -3079,6 +3077,205 @@ function getChangedFiles(
 
     }
   );
+
+}
+
+
+/* =========================================================
+   BUILD FAILURE EVIDENCE MERGER
+========================================================= */
+
+function enrichReviewWithValidation(
+  review,
+  request
+) {
+
+  const merged = {
+
+    ...review,
+
+    issues: [
+      ...(review.issues || [])
+    ],
+
+    repairTargets: [
+      ...(review.repairTargets || [])
+    ],
+
+    relationships: [
+      ...(review.relationships || [])
+    ]
+
+  };
+
+
+  /*
+   * Direct build error.
+   */
+
+  if (
+    request.buildError
+  ) {
+
+    merged.issues.unshift({
+
+      file:
+        request.errorFile ||
+        null,
+
+      line:
+        request.errorLine,
+
+      severity:
+        "critical",
+
+      type:
+        "build",
+
+      problem:
+        request.buildError,
+
+      evidence:
+        "Reported by Master Agent build validation pipeline."
+
+    });
+
+  }
+
+
+  /*
+   * Validation errors.
+   */
+
+  for (
+    const error of
+      request.validationErrors ||
+      []
+  ) {
+
+    if (
+      !error
+    ) {
+
+      continue;
+
+    }
+
+
+    merged.issues.unshift({
+
+      file:
+        error.file ||
+        error.path ||
+        null,
+
+      line:
+        error.line ||
+        null,
+
+      severity:
+        error.severity ||
+        "critical",
+
+      type:
+        error.type ||
+        "build",
+
+      problem:
+        cleanString(
+          error.message ||
+          error.problem ||
+          safeJson(
+            error
+          ),
+          5000
+        ),
+
+      evidence:
+        "Reported by build validation service."
+
+    });
+
+
+    const target =
+      normalizeFilePath(
+        error.file ||
+        error.path
+      );
+
+
+    if (
+      target &&
+      !merged.repairTargets.includes(
+        target
+      )
+    ) {
+
+      merged.repairTargets.push(
+        target
+      );
+
+    }
+
+  }
+
+
+  /*
+   * Runtime error.
+   */
+
+  if (
+    request.runtimeError
+  ) {
+
+    merged.issues.unshift({
+
+      file:
+        request.errorFile ||
+        null,
+
+      line:
+        request.errorLine,
+
+      severity:
+        "critical",
+
+      type:
+        "runtime",
+
+      problem:
+        typeof request.runtimeError ===
+          "string"
+          ? request.runtimeError
+          : safeJson(
+              request.runtimeError
+            ),
+
+      evidence:
+        "Reported by runtime execution evidence."
+
+    });
+
+  }
+
+
+  /*
+   * De-duplicate repair targets.
+   */
+
+  merged.repairTargets =
+    Array.from(
+      new Set(
+        merged.repairTargets
+          .map(
+            normalizeFilePath
+          )
+          .filter(Boolean)
+      )
+    );
+
+
+  return merged;
 
 }
 
@@ -3116,7 +3313,7 @@ async function fixAgent(
 
 
     /* =====================================================
-       NORMALIZE FILES
+       NORMALIZE SOURCE
     ===================================================== */
 
     currentStage =
@@ -3140,6 +3337,7 @@ async function fixAgent(
     if (
       !request.prompt &&
       !request.error &&
+      !request.buildError &&
       !request.buildValidation &&
       !request.runtimeError &&
       !request.testResult
@@ -3212,8 +3410,7 @@ async function fixAgent(
           optimizedCode:
             "",
 
-          files:
-            []
+          files: []
 
         },
 
@@ -3251,7 +3448,7 @@ async function fixAgent(
 
 
     /* =====================================================
-       SOURCE STRUCTURE VALIDATION
+       INITIAL STATIC VALIDATION
     ===================================================== */
 
     currentStage =
@@ -3259,15 +3456,18 @@ async function fixAgent(
 
 
     const initialStaticValidation =
-      runStaticValidation(
+      await runStaticValidation(
+
         projectFiles,
+
         request
+
       );
 
 
     /*
-     * Initial validation errors are debugging
-     * evidence, not an automatic hard stop.
+     * Validation output becomes explicit debugging
+     * evidence for the AI.
      */
 
     if (
@@ -3275,23 +3475,18 @@ async function fixAgent(
       !initialStaticValidation.valid
     ) {
 
-      const validatorEvidence =
-        safeJson(
-          initialStaticValidation.errors
-        );
-
-
       request.error =
         [
+
           request.error,
 
-          validatorEvidence
+          safeJson(
+            initialStaticValidation.errors
+          )
 
         ]
           .filter(Boolean)
-          .join(
-            "\n"
-          )
+          .join("\n")
           .slice(
             0,
             MAX_ERROR_LENGTH
@@ -3339,8 +3534,7 @@ async function fixAgent(
       );
 
 
-    const reviewResults =
-      [];
+    const reviewResults = [];
 
 
     for (
@@ -3382,15 +3576,29 @@ async function fixAgent(
     }
 
 
-    const mergedReview =
+    let mergedReview =
       mergeReviewResults(
         reviewResults
       );
 
 
     /* =====================================================
-       ADD DIRECT FAILURE EVIDENCE
+       ENRICH WITH MASTER VALIDATION EVIDENCE
     ===================================================== */
+
+    mergedReview =
+      enrichReviewWithValidation(
+
+        mergedReview,
+
+        request
+
+      );
+
+
+    /*
+     * User-provided explicit error.
+     */
 
     if (
       request.error
@@ -3415,67 +3623,9 @@ async function fixAgent(
           request.error,
 
         evidence:
-          "Reported by user/build/runtime validation."
+          "Reported by user or upstream validation."
 
       });
-
-    }
-
-
-    if (
-      request.buildValidation
-    ) {
-
-      const validation =
-        request.buildValidation;
-
-
-      const errors =
-        Array.isArray(
-          validation.errors
-        )
-          ? validation.errors
-          : [];
-
-
-      for (
-        const error of errors
-      ) {
-
-        mergedReview.issues.unshift({
-
-          file:
-            error.file ||
-            null,
-
-          line:
-            error.line ||
-            null,
-
-          severity:
-            error.severity ||
-            "critical",
-
-          type:
-            error.type ||
-            "build",
-
-          problem:
-            cleanString(
-              error.message ||
-              error.problem ||
-              safeJson(
-                error
-              ),
-              5000
-            ),
-
-          evidence:
-            "Reported by build validation service."
-
-        });
-
-      }
 
     }
 
@@ -3501,8 +3651,10 @@ async function fixAgent(
 
 
     /*
-     * If the AI did not identify targets,
-     * use the highest priority files.
+     * If no target was explicitly identified,
+     * use highest-priority files as review context.
+     *
+     * This is NOT permission to rewrite every file.
      */
 
     if (
@@ -3525,16 +3677,28 @@ async function fixAgent(
     }
 
 
+    const repairTargets =
+      mergedReview.repairTargets.length >
+      0
+        ? mergedReview.repairTargets
+        : repairFiles.map(
+            file =>
+              file.path
+          );
+
+
     /*
-     * Make the actual selected repair files
-     * explicit to the repair model.
+     * Only explicit validation/review targets
+     * are required to be returned by the repair model.
      */
 
-    const repairTargets =
-      repairFiles.map(
-        file =>
-          file.path
-      );
+    const repairReview = {
+
+      ...mergedReview,
+
+      repairTargets
+
+    };
 
 
     /* =====================================================
@@ -3552,13 +3716,7 @@ async function fixAgent(
 
         request,
 
-        {
-
-          ...mergedReview,
-
-          repairTargets
-
-        }
+        repairReview
 
       );
 
@@ -3641,21 +3799,10 @@ async function fixAgent(
 
         repairedOutput.files,
 
-        {
-
-          ...mergedReview,
-
-          repairTargets
-
-        }
+        repairReview
 
       );
 
-
-    /*
-     * Missing explicit targets are important.
-     * We do not silently claim a complete repair.
-     */
 
     if (
       !coverage.complete
@@ -3680,7 +3827,7 @@ async function fixAgent(
     ) {
 
       logger.info(
-        "Fix Agent found no safe complete-file repair to apply"
+        "Fix Agent produced no safe complete-file repair."
       );
 
 
@@ -3706,8 +3853,7 @@ async function fixAgent(
             repairResult.data?.optimizedCode ||
             "",
 
-          files:
-            []
+          files: []
 
         },
 
@@ -3756,6 +3902,9 @@ async function fixAgent(
             repairResult.model ||
             null,
 
+          staticValidation:
+            initialStaticValidation,
+
           inventory
 
         }
@@ -3766,7 +3915,7 @@ async function fixAgent(
 
 
     /* =====================================================
-       APPLY REPAIRS
+       APPLY FIRST REPAIR
     ===================================================== */
 
     currentStage =
@@ -3784,7 +3933,7 @@ async function fixAgent(
 
 
     /* =====================================================
-       VERIFY REPAIR
+       VERIFY FIRST REPAIR
     ===================================================== */
 
     currentStage =
@@ -3800,7 +3949,7 @@ async function fixAgent(
 
         {
 
-          ...mergedReview,
+          ...repairReview,
 
           repairTargets:
             repairedOutput.files.map(
@@ -3814,7 +3963,7 @@ async function fixAgent(
 
 
     /* =====================================================
-       OPTIONAL SECOND REPAIR ROUND
+       CONTROLLED SECOND REPAIR ROUND
     ===================================================== */
 
     let fixRound =
@@ -3824,7 +3973,10 @@ async function fixAgent(
     while (
 
       fixRound <
-        MAX_FIX_ROUNDS &&
+        Math.min(
+          request.maxRepairRounds,
+          MAX_FIX_ROUNDS
+        ) &&
 
       verification.success &&
 
@@ -3845,7 +3997,7 @@ async function fixAgent(
 
       logger.warn(
 
-        `Fix Agent starting repair round ${fixRound}/${MAX_FIX_ROUNDS}`
+        `Fix Agent starting repair round ${fixRound}/${request.maxRepairRounds}`
 
       );
 
@@ -3879,11 +4031,11 @@ async function fixAgent(
 
       const followUpReview = {
 
-        ...mergedReview,
+        ...repairReview,
 
         issues: [
 
-          ...(mergedReview.issues ||
+          ...(repairReview.issues ||
             []),
 
           ...(verification.data.issues ||
@@ -3894,10 +4046,44 @@ async function fixAgent(
         ],
 
         repairTargets:
-          repairedOutput.files.map(
-            file =>
-              file.path
+          Array.from(
+            new Set([
+              ...(repairReview.repairTargets ||
+                []),
+
+              ...repairedOutput.files.map(
+                file =>
+                  file.path
+              )
+            ])
           )
+
+      };
+
+
+      const followUpRequest = {
+
+        ...request,
+
+        repairRound:
+          fixRound,
+
+        error:
+          [
+
+            request.error,
+
+            safeJson(
+              verification.data
+            )
+
+          ]
+            .filter(Boolean)
+            .join("\n")
+            .slice(
+              0,
+              MAX_ERROR_LENGTH
+            )
 
       };
 
@@ -3907,7 +4093,7 @@ async function fixAgent(
 
           repairedProject,
 
-          request,
+          followUpRequest,
 
           followUpReview
 
@@ -3947,7 +4133,7 @@ async function fixAgent(
 
           repairedProject,
 
-          request,
+          followUpRequest,
 
           followUpReview
 
@@ -3965,7 +4151,7 @@ async function fixAgent(
 
 
     const finalStaticValidation =
-      runStaticValidation(
+      await runStaticValidation(
 
         repairedProject,
 
@@ -3975,9 +4161,7 @@ async function fixAgent(
 
 
     /*
-     * If the static validator still reports
-     * hard errors, do not mark the repair as
-     * fully verified.
+     * Hard static errors prevent verified=true.
      */
 
     if (
@@ -3988,6 +4172,9 @@ async function fixAgent(
       verification = {
 
         ...verification,
+
+        success:
+          true,
 
         data: {
 
@@ -4040,34 +4227,30 @@ async function fixAgent(
 
 
     /* =====================================================
-       FINAL STATUS
+       FINAL VERIFICATION STATE
     ===================================================== */
 
     const verificationValid =
-      verification.success &&
+      verification.success === true &&
       verification.data?.valid ===
         true;
 
 
-    const finalIssues =
-      Array.isArray(
-        mergedReview.issues
-      )
-        ? mergedReview.issues
-        : [];
+    const finalVerificationStatus =
+      verificationValid
+        ? "passed"
+        : verification.success
+          ? "remaining_issues"
+          : "verification_failed";
 
 
-    const finalFixes =
-      Array.isArray(
-        repairResult.data?.fixes
-      )
-        ? repairResult.data.fixes
-        : [];
+    /* =====================================================
+       FINAL LOG
+    ===================================================== */
 
+    logger.info(
 
-    logger.success(
-
-      `Fix Agent Completed: reviewed=${projectFiles.length} | changed=${finalChangedFiles.length} | verified=${verificationValid} | rounds=${fixRound}`
+      `Fix Agent Completed: reviewed=${projectFiles.length} changed=${finalChangedFiles.length} verified=${verificationValid} rounds=${fixRound}`
 
     );
 
@@ -4084,10 +4267,11 @@ async function fixAgent(
       data: {
 
         issues:
-          finalIssues,
+          mergedReview.issues,
 
         fixes:
-          finalFixes,
+          repairResult.data?.fixes ||
+          [],
 
         rootCause:
           repairResult.data?.rootCause ||
@@ -4096,6 +4280,14 @@ async function fixAgent(
         optimizedCode:
           repairResult.data?.optimizedCode ||
           "",
+
+        /*
+         * IMPORTANT:
+         *
+         * Master Agent expects data.files.
+         *
+         * Return only files that actually changed.
+         */
 
         files:
           finalChangedFiles
@@ -4150,11 +4342,7 @@ async function fixAgent(
           fixRound,
 
         verification:
-          verificationValid
-            ? "passed"
-            : verification.success
-              ? "remaining_issues"
-              : "verification_failed",
+          finalVerificationStatus,
 
         remainingProblems:
           verification.data
@@ -4163,6 +4351,13 @@ async function fixAgent(
 
         staticValidation:
           finalStaticValidation,
+
+        initialStaticValidation,
+
+        authoritative:
+          finalStaticValidation
+            ?.authoritative ===
+          true,
 
         providers:
           mergedReview.providers,
@@ -4284,6 +4479,9 @@ fixAgent.capabilities = [
 fixAgent.contract = {
 
   returnsCompleteFiles:
+    true,
+
+  returnsChangedFilesOnly:
     true,
 
   directProviderAccess:
