@@ -1,7 +1,7 @@
 /* =========================================================
    ZyrionOS BUILDER AGENT
    Production Chunked Code Generation Engine
-   =========================================================
+   Version: 4.0.0
 
    Architecture:
 
@@ -17,7 +17,7 @@
         ↓
    Strict Requested-Path Filtering
         ↓
-   Batch Validation
+   Package / Build Contract Validation
         ↓
    Controlled Repair
         ↓
@@ -39,8 +39,17 @@
    - Missing requested files trigger repair.
    - Duplicate requested files are rejected.
    - Invalid paths/content are rejected.
-   - Final output contains ONLY manifest-approved files.
+   - package.json build scripts are contract-validated.
+   - Long-running server/dev commands are NOT accepted
+     as authoritative build commands.
    - Builder does NOT perform the authoritative build.
+========================================================= */
+
+"use strict";
+
+
+/* =========================================================
+   SERVICES
 ========================================================= */
 
 const logger =
@@ -53,74 +62,243 @@ const {
 
 
 /* =========================================================
+   VERSION
+========================================================= */
+
+const BUILDER_AGENT_VERSION =
+  "4.0.0";
+
+
+/* =========================================================
    LIMITS
 ========================================================= */
 
-const MAX_FILES = 100;
+const MAX_FILES =
+  100;
 
-const MAX_PATH_LENGTH = 300;
+const MAX_PATH_LENGTH =
+  300;
 
-const MAX_FILE_SIZE = 200000;
+const MAX_FILE_SIZE =
+  200000;
 
-const MAX_PROMPT_LENGTH = 12000;
+const MAX_PROMPT_LENGTH =
+  12000;
 
-const MAX_PLAN_SIZE = 100000;
+const MAX_PLAN_SIZE =
+  100000;
 
-const FILES_PER_BATCH = 3;
+const FILES_PER_BATCH =
+  3;
 
-/*
- * Output budget.
+const FILE_BATCH_MAX_TOKENS =
+  6500;
 
- * 5000 was occasionally enough to generate a valid response,
- * but truncated JSON was observed in production.
- *
- * Keep the batch small while giving the model enough room
- * for complete source files.
- */
-const FILE_BATCH_MAX_TOKENS = 6500;
+const MANIFEST_MAX_TOKENS =
+  3500;
 
-const MANIFEST_MAX_TOKENS = 3500;
+const MAX_BATCH_ATTEMPTS =
+  3;
 
-/*
- * More than two attempts are useful because structured JSON
- * generation can fail independently from source correctness.
- */
-const MAX_BATCH_ATTEMPTS = 3;
+const MAX_RAW_BATCH_RESPONSE_FILES =
+  20;
+
+const MAX_MANIFEST_CONTEXT_SIZE =
+  30000;
+
+const MAX_GENERATED_INDEX_SIZE =
+  12000;
 
 
-/*
- * AI may accidentally return files belonging to another
- * nearby batch.
- *
- * We do NOT accept those files into the project.
- *
- * This is only an upper safety bound on the raw response.
- *
- * Example observed production failure:
- *
- * expected = 3
- * returned = 15
- *
- * The old Builder rejected this before filtering.
- *
- * This Builder accepts the response, extracts the 3
- * requested files, and discards the other 12.
- */
-const MAX_RAW_BATCH_RESPONSE_FILES = 20;
+/* =========================================================
+   PACKAGE / BUILD CONTRACT
+========================================================= */
+
+const PACKAGE_JSON_PATH =
+  "package.json";
 
 
 /*
- * Maximum amount of manifest information included in one
- * batch prompt.
+ * Commands that are fundamentally runtime/dev-server
+ * commands and therefore must never be accepted as the
+ * package.json "build" script.
+ *
+ * These are checked by executable tokens rather than
+ * exact full-string equality so variants such as:
+ *
+ *   node ./server.js
+ *   node server.js
+ *   npm start
+ *   next dev
+ *   vite --host
+ *
+ * are rejected.
  */
-const MAX_MANIFEST_CONTEXT_SIZE = 30000;
+const FORBIDDEN_BUILD_COMMAND_PATTERNS = [
+
+  /\bnode(?:js)?\s+(?:\.\/)?(?:server|index|app|main)\.(?:js|cjs|mjs|ts)\b/i,
+
+  /\bnode(?:js)?\s+.*\bserver\b/i,
+
+  /\bnpm\s+(?:start|run\s+start)\b/i,
+
+  /\byarn\s+start\b/i,
+
+  /\bpnpm\s+start\b/i,
+
+  /\bbun\s+start\b/i,
+
+  /\bnpm\s+(?:run\s+dev|dev)\b/i,
+
+  /\byarn\s+(?:dev|start)\b/i,
+
+  /\bpnpm\s+(?:dev|start)\b/i,
+
+  /\bbun\s+(?:dev|start)\b/i,
+
+  /\bnext\s+dev\b/i,
+
+  /\bvite(?:\s+.*)?\s+--host\b/i,
+
+  /\bvite(?:\s+.*)?\s+--port\b/i,
+
+  /\bnodemon\b/i,
+
+  /\bts-node-dev\b/i,
+
+  /\btsx\s+.*\bserver\b/i,
+
+  /\bts-node\s+.*\bserver\b/i,
+
+  /\bwebpack-dev-server\b/i,
+
+  /\bserve\s+-s\b/i
+
+];
 
 
 /*
- * Maximum amount of previously generated path metadata
- * included in one request.
+ * Framework/runtime build expectations.
+ *
+ * These are intentionally conservative.
+ *
+ * We do NOT force one exact command for every project,
+ * because some projects legitimately use custom build
+ * tooling.
  */
-const MAX_GENERATED_INDEX_SIZE = 12000;
+const BUILD_COMMAND_RULES = [
+
+  {
+    name:
+      "next",
+
+    matches:
+      [
+        /next/i
+      ],
+
+    allowed:
+      [
+        /\bnext\s+build\b/i
+      ]
+
+  },
+
+  {
+    name:
+      "vite",
+
+    matches:
+      [
+        /vite/i,
+        /react/i,
+        /vue/i,
+        /svelte/i
+      ],
+
+    allowed:
+      [
+        /\bvite\s+build\b/i
+      ]
+
+  },
+
+  {
+    name:
+      "react",
+
+    matches:
+      [
+        /react/i
+      ],
+
+    allowed:
+      [
+        /\bvite\s+build\b/i,
+        /\breact-scripts\s+build\b/i,
+        /\bwebpack\b.*\bbuild\b/i,
+        /\btsc\b/i,
+        /\btsc\s+--build\b/i
+      ]
+
+  },
+
+  {
+    name:
+      "vue",
+
+    matches:
+      [
+        /vue/i
+      ],
+
+    allowed:
+      [
+        /\bvite\s+build\b/i,
+        /\bvue-cli-service\s+build\b/i
+      ]
+
+  },
+
+  {
+    name:
+      "svelte",
+
+    matches:
+      [
+        /svelte/i
+      ],
+
+    allowed:
+      [
+        /\bvite\s+build\b/i,
+        /\bsvelte-kit\s+build\b/i
+      ]
+
+  },
+
+  {
+    name:
+      "typescript",
+
+    matches:
+      [
+        /typescript/i,
+        /\bnode\b.*typescript/i
+      ],
+
+    allowed:
+      [
+        /\btsc\b/i,
+        /\btsc\s+--build\b/i,
+        /\besbuild\b/i,
+        /\btsup\b/i,
+        /\bswc\b/i
+      ]
+
+  }
+
+];
 
 
 /* =========================================================
@@ -140,7 +318,9 @@ function safeString(
 
   }
 
+
   return value
+    .replace(/\u0000/g, "")
     .trim()
     .slice(
       0,
@@ -166,12 +346,13 @@ function safeJson(
         value ?? null
       );
 
+
     return output.slice(
       0,
       maxLength
     );
 
-  } catch (error) {
+  } catch {
 
     return "{}";
 
@@ -194,11 +375,13 @@ function normalizeProjectName(
       120
     );
 
+
   if (!name) {
 
     return "zyrionos-project";
 
   }
+
 
   return name
     .replace(
@@ -236,8 +419,121 @@ function normalizeFramework(
       100
     );
 
+
   return framework ||
     "React";
+
+}
+
+
+/* =========================================================
+   FRAMEWORK CLASSIFICATION
+========================================================= */
+
+function classifyFramework(
+  framework,
+  packageJson = null
+) {
+
+  const frameworkText =
+    safeString(
+      framework,
+      200
+    ).toLowerCase();
+
+
+  const dependencies = {
+
+    ...(packageJson?.dependencies || {}),
+
+    ...(packageJson?.devDependencies || {})
+
+  };
+
+
+  const dependencyNames =
+    Object.keys(
+      dependencies
+    )
+      .map(
+        item =>
+          item.toLowerCase()
+      );
+
+
+  if (
+    frameworkText.includes("next") ||
+    dependencyNames.includes("next")
+  ) {
+
+    return "next";
+
+  }
+
+
+  if (
+    frameworkText.includes("vue") ||
+    dependencyNames.includes("vue")
+  ) {
+
+    return "vue";
+
+  }
+
+
+  if (
+    frameworkText.includes("svelte") ||
+    dependencyNames.includes("svelte")
+  ) {
+
+    return "svelte";
+
+  }
+
+
+  if (
+    frameworkText.includes("react") ||
+    dependencyNames.includes("react")
+  ) {
+
+    return "react";
+
+  }
+
+
+  if (
+    frameworkText.includes("vite") ||
+    dependencyNames.includes("vite")
+  ) {
+
+    return "vite";
+
+  }
+
+
+  if (
+    frameworkText.includes("typescript") ||
+    dependencyNames.includes("typescript")
+  ) {
+
+    return "typescript";
+
+  }
+
+
+  if (
+    frameworkText.includes("node") ||
+    dependencyNames.includes("express") ||
+    dependencyNames.includes("fastify") ||
+    dependencyNames.includes("koa")
+  ) {
+
+    return "node";
+
+  }
+
+
+  return "generic";
 
 }
 
@@ -264,9 +560,6 @@ function normalizeFilePath(
   }
 
 
-  /*
-   * Normalize Windows separators.
-   */
   filePath =
     filePath.replace(
       /\\/g,
@@ -274,9 +567,6 @@ function normalizeFilePath(
     );
 
 
-  /*
-   * Remove leading slash.
-   */
   filePath =
     filePath.replace(
       /^\/+/,
@@ -284,9 +574,6 @@ function normalizeFilePath(
     );
 
 
-  /*
-   * Reject null bytes.
-   */
   if (
     filePath.includes("\0")
   ) {
@@ -296,9 +583,6 @@ function normalizeFilePath(
   }
 
 
-  /*
-   * Reject traversal.
-   */
   const segments =
     filePath.split("/");
 
@@ -315,9 +599,6 @@ function normalizeFilePath(
   }
 
 
-  /*
-   * Reject dangerous filesystem paths.
-   */
   if (
     filePath.includes(":") ||
     filePath.startsWith("~")
@@ -328,9 +609,6 @@ function normalizeFilePath(
   }
 
 
-  /*
-   * Remove duplicate separators.
-   */
   filePath =
     filePath.replace(
       /\/+/g,
@@ -352,8 +630,7 @@ function normalizeFileContent(
 ) {
 
   if (
-    typeof value !==
-    "string"
+    typeof value !== "string"
   ) {
 
     return null;
@@ -386,8 +663,7 @@ function normalizeFile(
 
   if (
     !file ||
-    typeof file !==
-      "object"
+    typeof file !== "object"
   ) {
 
     return null;
@@ -421,7 +697,7 @@ function normalizeFile(
 
     path,
 
-    content,
+    content
 
   };
 
@@ -572,7 +848,7 @@ function normalizeBuildRequest(
 
     projectId,
 
-    userId,
+    userId
 
   };
 
@@ -600,7 +876,7 @@ function createBuildContext(
       "not specified",
 
     plan:
-      request.plan,
+      request.plan
 
   };
 
@@ -647,7 +923,8 @@ STRICT RULES:
 7. Never use ../ or absolute paths.
 8. Never use Windows drive paths.
 9. Include all files required for the application to run.
-10. Include package.json when dependencies are required.
+10. Include package.json when the project uses npm/pnpm/yarn/bun
+    or has dependencies/build requirements.
 11. Include required configuration files.
 12. Include real application entry points.
 13. Include required components, pages, services and utilities.
@@ -661,6 +938,14 @@ STRICT RULES:
 20. Do not inflate a simple application into an enterprise
     architecture without a requirement for it.
 21. Maximum files: ${MAX_FILES}.
+22. If package.json is included, it MUST contain a finite
+    authoritative build strategy appropriate to the framework.
+23. A build command must compile/package the application.
+24. A build command MUST NOT start a development server,
+    production server, watcher, or long-running process.
+25. NEVER use "node server.js", "npm start", "next dev",
+    "vite", "nodemon", or equivalent runtime commands
+    as the build command.
 `;
 
 }
@@ -720,6 +1005,36 @@ STRICT RULES:
 24. Return complete content for every requested file.
 25. Extra files are unnecessary and will be discarded.
 26. Maximum requested files in this response: ${FILES_PER_BATCH}.
+
+PACKAGE.JSON BUILD CONTRACT:
+
+If package.json is in the current batch:
+
+27. The "scripts.build" field MUST exist when this project
+    requires an authoritative build.
+28. "scripts.build" MUST be a finite build/compile/package
+    command.
+29. "scripts.build" MUST NOT start a server.
+30. "scripts.build" MUST NOT be a dev/watch command.
+31. NEVER use:
+      node server.js
+      node index.js
+      npm start
+      npm run dev
+      next dev
+      vite
+      nodemon
+      ts-node-dev
+    as the build script.
+32. For Vite applications use "vite build".
+33. For Next.js applications use "next build".
+34. For Vue/Vite applications use "vite build".
+35. For TypeScript applications use an appropriate compiler
+    such as "tsc" when the project is configured for it.
+36. Keep "start", "dev", and "preview" separate from "build".
+37. Do not invent a server just to satisfy the build contract.
+38. Do not add unnecessary dependencies merely to create
+    a build command.
 `;
 
 }
@@ -772,6 +1087,24 @@ STRICT RULES:
 16. Do not invent unrelated files.
 17. The requested batch is authoritative.
 18. Return only files required to complete this batch.
+
+PACKAGE.JSON REPAIR RULES:
+
+19. If package.json is invalid because of its build script,
+    replace the build script with a real finite build command.
+20. NEVER use node server.js as the build command.
+21. NEVER use npm start as the build command.
+22. NEVER use a development/watch/server command as the build
+    command.
+23. For Vite applications use "vite build".
+24. For Next.js applications use "next build".
+25. For Vue/Vite applications use "vite build".
+26. For TypeScript applications use "tsc" or the appropriate
+    configured compiler.
+27. Keep runtime commands under "start" or "dev".
+28. Do not introduce unnecessary dependencies.
+29. Do not remove required dependencies merely to make
+    validation pass.
 `;
 
 }
@@ -787,8 +1120,7 @@ function validateManifest(
 
   if (
     !manifest ||
-    typeof manifest !==
-      "object"
+    typeof manifest !== "object"
   ) {
 
     return {
@@ -797,7 +1129,7 @@ function validateManifest(
         false,
 
       error:
-        "Manifest is not an object.",
+        "Manifest is not an object."
 
     };
 
@@ -828,7 +1160,7 @@ function validateManifest(
         false,
 
       error:
-        "Manifest files must be an array.",
+        "Manifest files must be an array."
 
     };
 
@@ -836,8 +1168,7 @@ function validateManifest(
 
 
   if (
-    manifest.files.length ===
-    0
+    manifest.files.length === 0
   ) {
 
     return {
@@ -846,7 +1177,7 @@ function validateManifest(
         false,
 
       error:
-        "Manifest returned no files.",
+        "Manifest returned no files."
 
     };
 
@@ -864,7 +1195,7 @@ function validateManifest(
         false,
 
       error:
-        `Manifest exceeds maximum file count of ${MAX_FILES}.`,
+        `Manifest exceeds maximum file count of ${MAX_FILES}.`
 
     };
 
@@ -878,14 +1209,12 @@ function validateManifest(
 
 
   for (
-    const item of
-      manifest.files
+    const item of manifest.files
   ) {
 
     if (
       !item ||
-      typeof item !==
-        "object"
+      typeof item !== "object"
     ) {
 
       return {
@@ -894,7 +1223,7 @@ function validateManifest(
           false,
 
         error:
-          "Manifest contains an invalid file entry.",
+          "Manifest contains an invalid file entry."
 
       };
 
@@ -915,7 +1244,7 @@ function validateManifest(
           false,
 
         error:
-          "Manifest contains an invalid file path.",
+          "Manifest contains an invalid file path."
 
       };
 
@@ -936,7 +1265,7 @@ function validateManifest(
           false,
 
         error:
-          `Duplicate manifest path: ${path}`,
+          `Duplicate manifest path: ${path}`
 
       };
 
@@ -959,7 +1288,7 @@ function validateManifest(
 
       purpose:
         purpose ||
-        "Required project file",
+        "Required project file"
 
     });
 
@@ -977,9 +1306,560 @@ function validateManifest(
 
       framework,
 
-      files,
+      files
 
-    },
+    }
+
+  };
+
+}
+
+
+/* =========================================================
+   PACKAGE JSON PARSER
+========================================================= */
+
+function parsePackageJson(
+  content
+) {
+
+  if (
+    typeof content !== "string"
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "package.json content is not a string."
+
+    };
+
+  }
+
+
+  try {
+
+    const parsed =
+      JSON.parse(
+        content
+      );
+
+
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+
+      return {
+
+        valid:
+          false,
+
+        error:
+          "package.json must contain a JSON object."
+
+      };
+
+    }
+
+
+    return {
+
+      valid:
+        true,
+
+      data:
+        parsed
+
+    };
+
+  } catch (error) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        `package.json contains invalid JSON: ${
+          error?.message ||
+          "parse error"
+        }`
+
+    };
+
+  }
+
+}
+
+
+/* =========================================================
+   BUILD SCRIPT
+========================================================= */
+
+function getBuildScript(
+  packageJson
+) {
+
+  return safeString(
+    packageJson?.scripts?.build,
+    1000
+  );
+
+}
+
+
+/* =========================================================
+   RUNTIME COMMAND DETECTION
+========================================================= */
+
+function isLongRunningRuntimeCommand(
+  command
+) {
+
+  const normalized =
+    safeString(
+      command,
+      2000
+    );
+
+
+  if (!normalized) {
+
+    return false;
+
+  }
+
+
+  return FORBIDDEN_BUILD_COMMAND_PATTERNS
+    .some(
+      pattern =>
+        pattern.test(
+          normalized
+        )
+    );
+
+}
+
+
+/* =========================================================
+   BUILD COMMAND RULE MATCH
+========================================================= */
+
+function getBuildRule(
+  framework,
+  packageJson
+) {
+
+  const classification =
+    classifyFramework(
+      framework,
+      packageJson
+    );
+
+
+  const matchingRules =
+    BUILD_COMMAND_RULES.filter(
+      rule =>
+        rule.matches.some(
+          pattern =>
+            pattern.test(
+              framework || ""
+            ) ||
+            rule.matches.some(
+              pattern =>
+                pattern.test(
+                  classification
+                )
+            )
+        )
+    );
+
+
+  /*
+   * Prefer the classified framework.
+   */
+  const exact =
+    BUILD_COMMAND_RULES.find(
+      rule =>
+        rule.name ===
+        classification
+    );
+
+
+  return exact ||
+    matchingRules[0] ||
+    null;
+
+}
+
+
+/* =========================================================
+   BUILD CONTRACT VALIDATION
+========================================================= */
+
+function validatePackageBuildContract({
+  packageJson,
+  framework
+}) {
+
+  if (
+    !packageJson ||
+    typeof packageJson !== "object"
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      code:
+        "PACKAGE_JSON_INVALID",
+
+      error:
+        "package.json is not a valid object."
+
+    };
+
+  }
+
+
+  const scripts =
+    packageJson.scripts;
+
+
+  if (
+    !scripts ||
+    typeof scripts !== "object"
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      code:
+        "PACKAGE_SCRIPTS_MISSING",
+
+      error:
+        "package.json is missing a scripts object."
+
+    };
+
+  }
+
+
+  const buildCommand =
+    getBuildScript(
+      packageJson
+    );
+
+
+  if (!buildCommand) {
+
+    return {
+
+      valid:
+        false,
+
+      code:
+        "BUILD_SCRIPT_MISSING",
+
+      error:
+        "package.json is missing scripts.build."
+
+    };
+
+  }
+
+
+  /*
+   * Primary production safety rule.
+   */
+  if (
+    isLongRunningRuntimeCommand(
+      buildCommand
+    )
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      code:
+        "INVALID_BUILD_RUNTIME_COMMAND",
+
+      error:
+        `scripts.build contains a runtime/dev-server command and cannot be used as an authoritative build: ${buildCommand}`,
+
+      buildCommand
+
+    };
+
+  }
+
+
+  /*
+   * Watch-mode detection.
+   */
+  if (
+    /\b--watch\b/i.test(
+      buildCommand
+    ) ||
+    /\bwatch\b/i.test(
+      buildCommand
+    ) &&
+    !/\bwatchman\b/i.test(
+      buildCommand
+    )
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      code:
+        "BUILD_WATCH_MODE_FORBIDDEN",
+
+      error:
+        `scripts.build must be finite and cannot run in watch mode: ${buildCommand}`,
+
+      buildCommand
+
+    };
+
+  }
+
+
+  const rule =
+    getBuildRule(
+      framework,
+      packageJson
+    );
+
+
+  /*
+   * If we know the framework, make sure the build
+   * command resembles an actual build operation.
+   */
+  if (rule) {
+
+    const allowed =
+      rule.allowed.some(
+        pattern =>
+          pattern.test(
+            buildCommand
+          )
+      );
+
+
+    if (!allowed) {
+
+      /*
+       * A custom build command can still be legitimate.
+       *
+       * Accept commands that clearly invoke a compiler/
+       * bundler/build tool rather than a runtime server.
+       */
+      const looksLikeCompiler =
+        /\b(build|compile|tsc|esbuild|tsup|swc|webpack|rollup|parcel)\b/i
+          .test(
+            buildCommand
+          );
+
+
+      if (!looksLikeCompiler) {
+
+        return {
+
+          valid:
+            false,
+
+          code:
+            "FRAMEWORK_BUILD_COMMAND_MISMATCH",
+
+          error:
+            `Build command does not match the detected ${rule.name} build contract: ${buildCommand}`,
+
+          buildCommand,
+
+          expected:
+            rule.name
+
+        };
+
+      }
+
+    }
+
+  }
+
+
+  /*
+   * Runtime commands are allowed to exist under start/dev.
+   * They simply cannot be the build command.
+   */
+  return {
+
+    valid:
+      true,
+
+    code:
+      "BUILD_CONTRACT_VALID",
+
+    buildCommand,
+
+    framework:
+      classifyFramework(
+        framework,
+        packageJson
+      )
+
+  };
+
+}
+
+
+/* =========================================================
+   PACKAGE FILE CONTRACT
+========================================================= */
+
+function validatePackageJsonFile(
+  file,
+  framework
+) {
+
+  const parsed =
+    parsePackageJson(
+      file?.content
+    );
+
+
+  if (!parsed.valid) {
+
+    return {
+
+      valid:
+        false,
+
+      repairable:
+        true,
+
+      code:
+        "PACKAGE_JSON_PARSE_FAILED",
+
+      error:
+        parsed.error,
+
+      file:
+        PACKAGE_JSON_PATH,
+
+      missingFiles: [],
+
+      invalidFiles: [
+        PACKAGE_JSON_PATH
+      ],
+
+      unexpectedFiles: []
+
+    };
+
+  }
+
+
+  const buildContract =
+    validatePackageBuildContract({
+
+      packageJson:
+        parsed.data,
+
+      framework
+
+    });
+
+
+  if (
+    !buildContract.valid
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      repairable:
+        true,
+
+      code:
+        buildContract.code,
+
+      error:
+        buildContract.error,
+
+      file:
+        PACKAGE_JSON_PATH,
+
+      buildCommand:
+        buildContract.buildCommand ||
+        null,
+
+      expected:
+        buildContract.expected ||
+        null,
+
+      packageJson:
+        parsed.data,
+
+      missingFiles: [],
+
+      invalidFiles: [
+        PACKAGE_JSON_PATH
+      ],
+
+      unexpectedFiles: []
+
+    };
+
+  }
+
+
+  return {
+
+    valid:
+      true,
+
+    repairable:
+      false,
+
+    code:
+      "PACKAGE_JSON_VALID",
+
+    error:
+      null,
+
+    file:
+      PACKAGE_JSON_PATH,
+
+    buildCommand:
+      buildContract.buildCommand,
+
+    framework:
+      buildContract.framework,
+
+    packageJson:
+      parsed.data,
+
+    missingFiles: [],
+
+    invalidFiles: [],
+
+    unexpectedFiles: []
 
   };
 
@@ -990,51 +1870,15 @@ function validateManifest(
    BATCH VALIDATION
 ========================================================= */
 
-/*
- * CORE FIX:
- *
- * We validate against the requested-path whitelist.
- *
- * Example:
- *
- * Requested:
- *   App.jsx
- *   main.jsx
- *   App.css
- *
- * AI returns:
- *   App.jsx
- *   main.jsx
- *   App.css
- *   Todo.jsx
- *   Header.jsx
- *   Footer.jsx
- *
- * Result:
- *
- *   App.jsx   → accepted
- *   main.jsx  → accepted
- *   App.css   → accepted
- *
- *   Todo.jsx  → discarded
- *   Header.jsx → discarded
- *   Footer.jsx → discarded
- *
- * The batch succeeds because every requested file exists.
- *
- * The old implementation rejected the response before this
- * filtering because 6 > MAX_BATCH_RESPONSE_FILES.
- */
-
 function validateGeneratedBatch(
   generated,
-  expectedFiles
+  expectedFiles,
+  framework
 ) {
 
   if (
     !generated ||
-    typeof generated !==
-      "object"
+    typeof generated !== "object"
   ) {
 
     return {
@@ -1050,10 +1894,14 @@ function validateGeneratedBatch(
 
       files: [],
 
+      validFiles: [],
+
       missingFiles:
         expectedFiles,
 
       unexpectedFiles: [],
+
+      invalidFiles: []
 
     };
 
@@ -1079,10 +1927,14 @@ function validateGeneratedBatch(
 
       files: [],
 
+      validFiles: [],
+
       missingFiles:
         expectedFiles,
 
       unexpectedFiles: [],
+
+      invalidFiles: []
 
     };
 
@@ -1090,8 +1942,7 @@ function validateGeneratedBatch(
 
 
   if (
-    generated.files.length ===
-    0
+    generated.files.length === 0
   ) {
 
     return {
@@ -1107,21 +1958,20 @@ function validateGeneratedBatch(
 
       files: [],
 
+      validFiles: [],
+
       missingFiles:
         expectedFiles,
 
       unexpectedFiles: [],
+
+      invalidFiles: []
 
     };
 
   }
 
 
-  /*
-   * Hard safety ceiling only.
-   *
-   * This is deliberately larger than the expected batch size.
-   */
   if (
     generated.files.length >
     MAX_RAW_BATCH_RESPONSE_FILES
@@ -1140,26 +1990,26 @@ function validateGeneratedBatch(
 
       files: [],
 
+      validFiles: [],
+
       missingFiles:
         expectedFiles,
 
       unexpectedFiles: [],
+
+      invalidFiles: []
 
     };
 
   }
 
 
-  /*
-   * Requested-path whitelist.
-   */
   const expected =
     new Map();
 
 
   for (
-    const item of
-      expectedFiles
+    const item of expectedFiles
   ) {
 
     const normalizedPath =
@@ -1190,14 +2040,12 @@ function validateGeneratedBatch(
   const unexpectedFiles =
     [];
 
-
   const invalidFiles =
     [];
 
 
   for (
-    const rawFile of
-      generated.files
+    const rawFile of generated.files
   ) {
 
     const file =
@@ -1206,20 +2054,11 @@ function validateGeneratedBatch(
       );
 
 
-    /*
-     * Invalid file:
-     *
-     * Do not allow it into the project.
-     *
-     * If it was requested, it will appear as missing
-     * and trigger repair.
-     */
     if (!file) {
 
       if (
         rawFile &&
-        typeof rawFile ===
-          "object"
+        typeof rawFile === "object"
       ) {
 
         invalidFiles.push(
@@ -1238,17 +2077,9 @@ function validateGeneratedBatch(
 
 
     const key =
-      file.path
-        .toLowerCase();
+      file.path.toLowerCase();
 
 
-    /*
-     * EXTRA FILE:
-     *
-     * Never add it.
-     *
-     * Never fail the batch solely because of it.
-     */
     if (
       !expected.has(key)
     ) {
@@ -1262,9 +2093,6 @@ function validateGeneratedBatch(
     }
 
 
-    /*
-     * Duplicate requested file.
-     */
     if (
       received.has(key)
     ) {
@@ -1285,9 +2113,17 @@ function validateGeneratedBatch(
             received.values()
           ),
 
-        missingFiles: [],
+        validFiles:
+          Array.from(
+            received.values()
+          ),
+
+        missingFiles:
+          [],
 
         unexpectedFiles,
+
+        invalidFiles
 
       };
 
@@ -1302,20 +2138,15 @@ function validateGeneratedBatch(
   }
 
 
-  /*
-   * Find missing requested files.
-   */
   const missingFiles = [];
 
 
   for (
-    const expectedFile of
-      expectedFiles
+    const expectedFile of expectedFiles
   ) {
 
     const key =
-      expectedFile.path
-        .toLowerCase();
+      expectedFile.path.toLowerCase();
 
 
     if (
@@ -1332,15 +2163,74 @@ function validateGeneratedBatch(
 
 
   /*
-   * SUCCESS:
-   *
-   * Every requested file exists.
-   *
-   * Extra files are simply discarded.
+   * Package contract is checked AFTER requested-path
+   * filtering, so unrelated package.json files cannot
+   * influence the result.
    */
+  const packageFile =
+    received.get(
+      PACKAGE_JSON_PATH
+    );
+
+
+  let packageValidation =
+    null;
+
+
+  if (packageFile) {
+
+    packageValidation =
+      validatePackageJsonFile(
+        packageFile,
+        framework
+      );
+
+
+    if (
+      !packageValidation.valid
+    ) {
+
+      return {
+
+        valid:
+          false,
+
+        repairable:
+          true,
+
+        error:
+          packageValidation.error,
+
+        code:
+          packageValidation.code,
+
+        files:
+          Array.from(
+            received.values()
+          ),
+
+        validFiles:
+          Array.from(
+            received.values()
+          ),
+
+        missingFiles,
+
+        unexpectedFiles,
+
+        invalidFiles,
+
+        packageValidation
+
+      };
+
+    }
+
+  }
+
+
   if (
-    missingFiles.length ===
-    0
+    missingFiles.length === 0
   ) {
 
     return {
@@ -1356,22 +2246,24 @@ function validateGeneratedBatch(
           received.values()
         ),
 
+      validFiles:
+        Array.from(
+          received.values()
+        ),
+
       unexpectedFiles,
 
       missingFiles: [],
 
       invalidFiles,
 
+      packageValidation
+
     };
 
   }
 
 
-  /*
-   * REPAIRABLE:
-   *
-   * At least one requested file is missing/invalid.
-   */
   return {
 
     valid:
@@ -1382,10 +2274,18 @@ function validateGeneratedBatch(
 
     error:
       `Missing generated file(s): ${missingFiles
-        .map(file => file.path)
+        .map(
+          file =>
+            file.path
+        )
         .join(", ")}`,
 
     files:
+      Array.from(
+        received.values()
+      ),
+
+    validFiles:
       Array.from(
         received.values()
       ),
@@ -1395,6 +2295,8 @@ function validateGeneratedBatch(
     missingFiles,
 
     invalidFiles,
+
+    packageValidation
 
   };
 
@@ -1449,7 +2351,7 @@ function createGeneratedFileIndex(
         file.path,
 
       size:
-        file.content.length,
+        file.content.length
 
     })
   );
@@ -1473,7 +2375,7 @@ function createManifestContext(
           file.path,
 
         purpose:
-          file.purpose,
+          file.purpose
 
       })
     ),
@@ -1511,7 +2413,7 @@ function createBatchUserMessage({
           file.path,
 
         purpose:
-          file.purpose,
+          file.purpose
 
       })
     );
@@ -1529,15 +2431,6 @@ function createBatchUserMessage({
 
   if (repairContext) {
 
-    /*
-     * FIX:
-     *
-     * The previous Builder used
-     * repairContext.validFiles,
-     * but validation actually returned `files`.
-     *
-     * We now explicitly normalize this.
-     */
     const validFiles =
       Array.isArray(
         repairContext.validFiles
@@ -1554,7 +2447,7 @@ function createBatchUserMessage({
 
 REPAIR MODE
 
-The previous attempt did not satisfy the current batch.
+The previous attempt failed the Builder contract.
 
 VALID FILES ALREADY RECEIVED:
 
@@ -1563,10 +2456,11 @@ ${safeJson(
     file => ({
       path:
         file.path,
+
       size:
         typeof file.content === "string"
           ? file.content.length
-          : undefined,
+          : undefined
     })
   ),
   12000
@@ -1579,6 +2473,13 @@ ${safeJson(
   8000
 )}
 
+INVALID FILES:
+
+${safeJson(
+  repairContext.invalidFiles || [],
+  5000
+)}
+
 UNEXPECTED FILES THAT MUST BE IGNORED:
 
 ${safeJson(
@@ -1586,21 +2487,49 @@ ${safeJson(
   8000
 )}
 
-INVALID FILE PATHS:
+PACKAGE / BUILD CONTRACT:
 
 ${safeJson(
-  repairContext.invalidFiles || [],
-  5000
+  repairContext.packageValidation || {},
+  10000
 )}
 
 PREVIOUS VALIDATION ERROR:
 
 ${safeString(
   repairContext.error || "",
-  2000
+  3000
 )}
 
-Generate the missing/corrected requested files only.
+CURRENT REQUESTED BATCH:
+
+${safeJson(
+  batchDescription,
+  10000
+)}
+
+If package.json is listed in the current batch,
+repair its build contract directly.
+
+The build script must be a finite compile/build/package
+operation.
+
+NEVER use:
+
+- node server.js
+- node index.js
+- npm start
+- npm run dev
+- next dev
+- vite as a dev server
+- nodemon
+- ts-node-dev
+- any watcher
+- any long-running server
+
+as scripts.build.
+
+Generate ONLY the current requested files.
 `;
 
   }
@@ -1659,6 +2588,16 @@ Return complete source code.
 
 Return ONLY JSON.
 
+If package.json is in this batch:
+
+- scripts.build must exist when an authoritative build
+  is required.
+- scripts.build must be finite.
+- scripts.build must compile/package the application.
+- scripts.build must NEVER start a server.
+- scripts.build must NEVER be a dev/watch command.
+- keep start/dev/preview separate from build.
+
 ${repairSection}
 `;
 
@@ -1691,7 +2630,7 @@ async function requestBatchGeneration({
         content:
           repairContext
             ? createBatchRepairSystemPrompt()
-            : createFileBatchSystemPrompt(),
+            : createFileBatchSystemPrompt()
 
       },
 
@@ -1715,11 +2654,11 @@ async function requestBatchGeneration({
 
             generatedFiles,
 
-            repairContext,
+            repairContext
 
-          }),
+          })
 
-      },
+      }
 
     ],
 
@@ -1729,7 +2668,7 @@ async function requestBatchGeneration({
         : 0.2,
 
     maxTokens:
-      FILE_BATCH_MAX_TOKENS,
+      FILE_BATCH_MAX_TOKENS
 
   });
 
@@ -1748,10 +2687,13 @@ function createFailureMetadata({
   failedBatch,
   totalBatches,
   attempts,
-  startedAt,
+  startedAt
 }) {
 
   return {
+
+    builderVersion:
+      BUILDER_AGENT_VERSION,
 
     projectName,
 
@@ -1770,7 +2712,67 @@ function createFailureMetadata({
 
     durationMs:
       Date.now() -
-      startedAt,
+      startedAt
+
+  };
+
+}
+
+
+/* =========================================================
+   FINAL PACKAGE CONTRACT
+========================================================= */
+
+function validateFinalPackageContract(
+  files,
+  framework
+) {
+
+  const packageFile =
+    files.find(
+      file =>
+        file.path.toLowerCase() ===
+        PACKAGE_JSON_PATH
+    );
+
+
+  /*
+   * If there is no package.json, do not invent one.
+   *
+   * Static validation remains responsible for deciding
+   * whether the project requires it.
+   */
+  if (!packageFile) {
+
+    return {
+
+      valid:
+        true,
+
+      skipped:
+        true,
+
+      reason:
+        "package.json not present in manifest."
+
+    };
+
+  }
+
+
+  const validation =
+    validatePackageJsonFile(
+      packageFile,
+      framework
+    );
+
+
+  return {
+
+    ...validation,
+
+    skipped:
+      false
 
   };
 
@@ -1796,7 +2798,7 @@ async function builderAgent(
   try {
 
     logger.info(
-      "Builder Agent Started"
+      `Builder Agent Started | version=${BUILDER_AGENT_VERSION}`
     );
 
 
@@ -1821,7 +2823,7 @@ async function builderAgent(
           "Builder Agent requires a user prompt.",
 
         stage:
-          currentStage,
+          currentStage
 
       };
 
@@ -1839,7 +2841,7 @@ async function builderAgent(
           "Builder Agent requires a planning result.",
 
         stage:
-          currentStage,
+          currentStage
 
       };
 
@@ -1860,7 +2862,7 @@ async function builderAgent(
           "Planning data is too large.",
 
         stage:
-          currentStage,
+          currentStage
 
       };
 
@@ -1877,9 +2879,6 @@ async function builderAgent(
       );
 
 
-    /*
-     * Keep available for future telemetry.
-     */
     void buildContext;
 
 
@@ -1907,7 +2906,7 @@ async function builderAgent(
               "system",
 
             content:
-              createManifestSystemPrompt(),
+              createManifestSystemPrompt()
 
           },
 
@@ -1937,8 +2936,11 @@ Create the smallest complete project manifest
 that satisfies the request.
 
 Do not generate source code yet.
-`,
-          },
+
+If package.json is required, the project must have
+a finite authoritative build strategy.
+`
+          }
 
         ],
 
@@ -1946,15 +2948,14 @@ Do not generate source code yet.
           0.1,
 
         maxTokens:
-          MANIFEST_MAX_TOKENS,
+          MANIFEST_MAX_TOKENS
 
       });
 
 
     if (
       !manifestResult ||
-      manifestResult.success !==
-        true
+      manifestResult.success !== true
     ) {
 
       return {
@@ -1971,11 +2972,14 @@ Do not generate source code yet.
 
         metadata: {
 
+          builderVersion:
+            BUILDER_AGENT_VERSION,
+
           durationMs:
             Date.now() -
-            startedAt,
+            startedAt
 
-        },
+        }
 
       };
 
@@ -2005,11 +3009,14 @@ Do not generate source code yet.
 
         metadata: {
 
+          builderVersion:
+            BUILDER_AGENT_VERSION,
+
           durationMs:
             Date.now() -
-            startedAt,
+            startedAt
 
-        },
+        }
 
       };
 
@@ -2151,7 +3158,7 @@ Do not generate source code yet.
 
               generatedFiles,
 
-              repairContext,
+              repairContext
 
             });
 
@@ -2164,7 +3171,7 @@ Do not generate source code yet.
 
             error:
               error?.message ||
-              "Batch AI request failed.",
+              "Batch AI request failed."
 
           };
 
@@ -2177,8 +3184,7 @@ Do not generate source code yet.
 
         if (
           !batchResult ||
-          batchResult.success !==
-            true
+          batchResult.success !== true
         ) {
 
           logger.warning(
@@ -2201,6 +3207,9 @@ Do not generate source code yet.
               batchResult?.error ||
               "AI batch generation failed.",
 
+            code:
+              "AI_BATCH_GENERATION_FAILED",
+
             files: [],
 
             validFiles: [],
@@ -2211,6 +3220,9 @@ Do not generate source code yet.
             unexpectedFiles: [],
 
             invalidFiles: [],
+
+            packageValidation:
+              null
 
           };
 
@@ -2265,9 +3277,9 @@ Do not generate source code yet.
                 attempts:
                   attempt,
 
-                startedAt,
+                startedAt
 
-              }),
+              })
 
           };
 
@@ -2283,7 +3295,9 @@ Do not generate source code yet.
 
             batchResult.data,
 
-            batch
+            batch,
+
+            manifestFramework
 
           );
 
@@ -2293,7 +3307,7 @@ Do not generate source code yet.
           ...batchValidation,
 
           validFiles:
-            batchValidation.files || [],
+            batchValidation.files || []
 
         };
 
@@ -2338,18 +3352,13 @@ Do not generate source code yet.
           }
 
 
-          /*
-           * ONLY manifest-requested files can enter
-           * generatedFiles.
-           */
           for (
             const file of
               batchValidation.files
           ) {
 
             const key =
-              file.path
-                .toLowerCase();
+              file.path.toLowerCase();
 
 
             if (
@@ -2395,9 +3404,9 @@ Do not generate source code yet.
                     attempts:
                       attempt,
 
-                    startedAt,
+                    startedAt
 
-                  }),
+                  })
 
               };
 
@@ -2431,21 +3440,32 @@ Do not generate source code yet.
 
 
         /* =================================================
-           REPAIRABLE VALIDATION FAILURE
+           CONTRACT FAILURE
         ================================================= */
 
+        logger.warning(
+          `Builder batch ${batchNumber}: validation requires repair | code=${
+            batchValidation.code ||
+            "VALIDATION_FAILED"
+          } | ${
+            batchValidation.error
+          }`
+        );
+
+
+        /*
+         * IMPORTANT:
+         *
+         * We intentionally DO NOT add invalid package.json
+         * or incomplete files to generatedFiles.
+         *
+         * The repair attempt receives the validation context
+         * and regenerates the requested batch.
+         */
         if (
           batchValidation.repairable &&
-          attempt <
-            MAX_BATCH_ATTEMPTS
+          attempt < MAX_BATCH_ATTEMPTS
         ) {
-
-          logger.warning(
-            `Builder batch ${batchNumber}: validation requires repair | ${
-              batchValidation.error
-            }`
-          );
-
 
           continue;
 
@@ -2474,8 +3494,9 @@ Do not generate source code yet.
           stage:
             currentStage,
 
-          metadata:
-            createFailureMetadata({
+          metadata: {
+
+            ...createFailureMetadata({
 
               projectName,
 
@@ -2497,9 +3518,35 @@ Do not generate source code yet.
               attempts:
                 attempt,
 
-              startedAt,
+              startedAt
 
             }),
+
+            validationCode:
+              batchValidation.code ||
+              null,
+
+            repairContext: {
+
+              missingFiles:
+                batchValidation.missingFiles ||
+                [],
+
+              invalidFiles:
+                batchValidation.invalidFiles ||
+                [],
+
+              unexpectedFiles:
+                batchValidation.unexpectedFiles ||
+                [],
+
+              packageValidation:
+                batchValidation.packageValidation ||
+                null
+
+            }
+
+          }
 
         };
 
@@ -2542,9 +3589,9 @@ Do not generate source code yet.
               attempts:
                 MAX_BATCH_ATTEMPTS,
 
-              startedAt,
+              startedAt
 
-            }),
+            })
 
         };
 
@@ -2561,10 +3608,6 @@ Do not generate source code yet.
       "final-project-validation";
 
 
-    /*
-     * The Builder must produce exactly the manifest
-     * coverage.
-     */
     if (
       generatedFiles.length !==
       manifestFiles.length
@@ -2583,6 +3626,9 @@ Do not generate source code yet.
 
         metadata: {
 
+          builderVersion:
+            BUILDER_AGENT_VERSION,
+
           projectName,
 
           framework:
@@ -2596,9 +3642,9 @@ Do not generate source code yet.
 
           durationMs:
             Date.now() -
-            startedAt,
+            startedAt
 
-        },
+        }
 
       };
 
@@ -2633,6 +3679,9 @@ Do not generate source code yet.
 
         metadata: {
 
+          builderVersion:
+            BUILDER_AGENT_VERSION,
+
           projectName,
 
           framework:
@@ -2646,9 +3695,9 @@ Do not generate source code yet.
 
           durationMs:
             Date.now() -
-            startedAt,
+            startedAt
 
-        },
+        }
 
       };
 
@@ -2663,20 +3712,17 @@ Do not generate source code yet.
       new Set(
         finalFiles.map(
           file =>
-            file.path
-              .toLowerCase()
+            file.path.toLowerCase()
         )
       );
 
 
     for (
-      const manifestFile of
-        manifestFiles
+      const manifestFile of manifestFiles
     ) {
 
       const key =
-        manifestFile.path
-          .toLowerCase();
+        manifestFile.path.toLowerCase();
 
 
       if (
@@ -2696,6 +3742,9 @@ Do not generate source code yet.
 
           metadata: {
 
+            builderVersion:
+              BUILDER_AGENT_VERSION,
+
             projectName,
 
             framework:
@@ -2703,9 +3752,9 @@ Do not generate source code yet.
 
             durationMs:
               Date.now() -
-              startedAt,
+              startedAt
 
-          },
+          }
 
         };
 
@@ -2722,20 +3771,17 @@ Do not generate source code yet.
       new Set(
         manifestFiles.map(
           file =>
-            file.path
-              .toLowerCase()
+            file.path.toLowerCase()
         )
       );
 
 
     for (
-      const finalFile of
-        finalFiles
+      const finalFile of finalFiles
     ) {
 
       const key =
-        finalFile.path
-          .toLowerCase();
+        finalFile.path.toLowerCase();
 
 
       if (
@@ -2755,6 +3801,9 @@ Do not generate source code yet.
 
           metadata: {
 
+            builderVersion:
+              BUILDER_AGENT_VERSION,
+
             projectName,
 
             framework:
@@ -2762,13 +3811,79 @@ Do not generate source code yet.
 
             durationMs:
               Date.now() -
-              startedAt,
+              startedAt
 
-          },
+          }
 
         };
 
       }
+
+    }
+
+
+    /* =====================================================
+       FINAL PACKAGE BUILD CONTRACT
+    ===================================================== */
+
+    currentStage =
+      "final-build-contract-validation";
+
+
+    const finalPackageValidation =
+      validateFinalPackageContract(
+        finalFiles,
+        manifestFramework
+      );
+
+
+    if (
+      !finalPackageValidation.valid
+    ) {
+
+      logger.error(
+        `Builder final package contract failed: ${
+          finalPackageValidation.error
+        }`
+      );
+
+
+      return {
+
+        success:
+          false,
+
+        error:
+          finalPackageValidation.error ||
+          "Final package build contract validation failed.",
+
+        stage:
+          currentStage,
+
+        metadata: {
+
+          builderVersion:
+            BUILDER_AGENT_VERSION,
+
+          projectName,
+
+          framework:
+            manifestFramework,
+
+          validationCode:
+            finalPackageValidation.code ||
+            null,
+
+          packageValidation:
+            finalPackageValidation,
+
+          durationMs:
+            Date.now() -
+            startedAt
+
+        }
+
+      };
 
     }
 
@@ -2802,9 +3917,24 @@ Do not generate source code yet.
         files:
           finalFiles,
 
+        manifest: {
+
+          projectName,
+
+          framework:
+            manifestFramework,
+
+          files:
+            manifestFiles
+
+        }
+
       },
 
       metadata: {
+
+        builderVersion:
+          BUILDER_AGENT_VERSION,
 
         architecture:
           "chunked-builder",
@@ -2827,12 +3957,18 @@ Do not generate source code yet.
         extraFilesPolicy:
           "discard-unrequested",
 
+        packageBuildContract:
+          "enforced",
+
+        authoritativeBuild:
+          false,
+
         finalManifestCoverage:
           true,
 
-        durationMs,
+        durationMs
 
-      },
+      }
 
     };
 
@@ -2860,17 +3996,40 @@ Do not generate source code yet.
 
       metadata: {
 
+        builderVersion:
+          BUILDER_AGENT_VERSION,
+
         durationMs:
           Date.now() -
-          startedAt,
+          startedAt
 
-      },
+      }
 
     };
 
   }
 
 }
+
+
+/* =========================================================
+   METADATA
+========================================================= */
+
+builderAgent.version =
+  BUILDER_AGENT_VERSION;
+
+builderAgent.agentName =
+  "builderAgent";
+
+builderAgent.authoritativeBuild =
+  false;
+
+builderAgent.buildContract =
+  "package-json-build-script-enforced";
+
+builderAgent.providerArchitecture =
+  "centralized-ai-provider-service";
 
 
 /* =========================================================
