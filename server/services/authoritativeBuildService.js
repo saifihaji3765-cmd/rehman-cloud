@@ -1,3 +1,77 @@
+"use strict";
+
+/**
+ * =========================================================
+ * ZYRIONOS — AUTHORITATIVE BUILD SERVICE
+ * =========================================================
+ *
+ * Version: 3.0.0
+ *
+ * PURPOSE
+ * ---------------------------------------------------------
+ * This is the REAL build execution boundary.
+ *
+ * Builder Agent
+ *      ↓
+ * BuildValidationService
+ *      ↓
+ * AuthoritativeBuildService
+ *      ↓
+ * Docker
+ *      ↓
+ * Dependency Install
+ *      ↓
+ * Real Build
+ *      ↓
+ * ┌───────────────┐
+ * │               │
+ * PASS           FAIL
+ * │               │
+ * ↓               ↓
+ * Artifact      Fix Agent
+ * │               ↓
+ * ↓            Rebuild
+ * Preview
+ *
+ * IMPORTANT
+ * ---------------------------------------------------------
+ * Generated source is NEVER executed directly inside the
+ * ZyrionOS backend Node.js process.
+ *
+ * All generated application code executes inside Docker.
+ *
+ * This service:
+ *
+ * - validates source boundaries
+ * - creates isolated workspace
+ * - materializes generated files
+ * - detects package manager
+ * - installs dependencies
+ * - executes real build
+ * - captures stdout/stderr
+ * - extracts compiler locations
+ * - classifies failures
+ * - creates repair context
+ * - creates verified artifact
+ * - persists build metadata
+ * - cleans temporary workspace
+ *
+ * This service DOES NOT:
+ *
+ * - deploy
+ * - start preview server
+ * - perform browser smoke tests
+ * - modify source files
+ * - call AI providers
+ *
+ * =========================================================
+ */
+
+
+/* =========================================================
+   PACKAGES
+========================================================= */
+
 const fs = require("fs");
 const fsp = require("fs/promises");
 const os = require("os");
@@ -5,82 +79,99 @@ const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
 
-const ProjectBuild = require("../models/projectBuildModel");
-
-/* =========================================================
-   ZYRION OS — AUTHORITATIVE BUILD SERVICE
-   Enterprise Build Executor + Artifact Producer
-
-   Architecture:
-
-   Builder Agent
-        ↓
-   Static Validation
-        ↓
-   Authoritative Build
-        ↓
-   Verified Artifact
-        ↓
-   ProjectBuild.artifacts[]
-        ↓
-   Preview / Deployment
-
-   IMPORTANT:
-   - This service is the authoritative build boundary.
-   - Generated source is never considered production-ready
-     merely because Builder Agent generated it.
-   - Build executes inside an isolated Docker container.
-   - Successful output becomes an immutable artifact.
-   - Preview must consume this artifact instead of rebuilding
-     source independently.
-   ========================================================= */
+const ProjectBuild =
+  require("../models/projectBuildModel");
 
 
 /* =========================================================
-   SERVICE CONFIG
+   METADATA
 ========================================================= */
 
-const SERVICE_VERSION = "2.0.0";
+const SERVICE_VERSION =
+  "3.0.0";
+
+const VALIDATION_MODE =
+  "authoritative";
+
+const AUTHORITATIVE =
+  true;
+
+
+/* =========================================================
+   LIMITS
+========================================================= */
 
 const MAX_FILES =
-  Number(process.env.AUTH_BUILD_MAX_FILES) || 1000;
+  Number(
+    process.env.AUTH_BUILD_MAX_FILES
+  ) || 1000;
 
 const MAX_FILE_SIZE =
-  Number(process.env.AUTH_BUILD_MAX_FILE_SIZE) ||
-  2 * 1024 * 1024;
+  Number(
+    process.env.AUTH_BUILD_MAX_FILE_SIZE
+  ) || 2 * 1024 * 1024;
 
 const MAX_SOURCE_SIZE =
-  Number(process.env.AUTH_BUILD_MAX_SOURCE_SIZE) ||
-  25 * 1024 * 1024;
+  Number(
+    process.env.AUTH_BUILD_MAX_SOURCE_SIZE
+  ) || 25 * 1024 * 1024;
 
 const MAX_ARTIFACT_SIZE =
-  Number(process.env.AUTH_BUILD_MAX_ARTIFACT_SIZE) ||
-  500 * 1024 * 1024;
+  Number(
+    process.env.AUTH_BUILD_MAX_ARTIFACT_SIZE
+  ) || 500 * 1024 * 1024;
 
 const INSTALL_TIMEOUT_MS =
-  Number(process.env.AUTH_BUILD_INSTALL_TIMEOUT_MS) ||
-  5 * 60 * 1000;
+  Number(
+    process.env.AUTH_BUILD_INSTALL_TIMEOUT_MS
+  ) || 5 * 60 * 1000;
 
 const BUILD_TIMEOUT_MS =
-  Number(process.env.AUTH_BUILD_TIMEOUT_MS) ||
-  5 * 60 * 1000;
+  Number(
+    process.env.AUTH_BUILD_TIMEOUT_MS
+  ) || 5 * 60 * 1000;
 
-const DOCKER_CHECK_TIMEOUT_MS = 5000;
+const DOCKER_CHECK_TIMEOUT_MS =
+  Number(
+    process.env.AUTH_BUILD_DOCKER_CHECK_TIMEOUT_MS
+  ) || 5000;
 
 const CPU_LIMIT =
-  process.env.AUTH_BUILD_CPU_LIMIT || "2";
+  process.env.AUTH_BUILD_CPU_LIMIT ||
+  "2";
 
 const MEMORY_LIMIT =
-  process.env.AUTH_BUILD_MEMORY_LIMIT || "2g";
+  process.env.AUTH_BUILD_MEMORY_LIMIT ||
+  "2g";
 
 const PIDS_LIMIT =
-  Number(process.env.AUTH_BUILD_PIDS_LIMIT) || 256;
+  Number(
+    process.env.AUTH_BUILD_PIDS_LIMIT
+  ) || 256;
 
 const BUILD_NETWORK =
-  process.env.AUTH_BUILD_NETWORK || "none";
+  process.env.AUTH_BUILD_NETWORK ||
+  "none";
 
 const INSTALL_NETWORK =
-  process.env.AUTH_INSTALL_NETWORK || "bridge";
+  process.env.AUTH_INSTALL_NETWORK ||
+  process.env.AUTH_BUILD_INSTALL_NETWORK ||
+  "bridge";
+
+const MAX_OUTPUT_BYTES =
+  Number(
+    process.env.AUTH_BUILD_MAX_OUTPUT_BYTES
+  ) || 5 * 1024 * 1024;
+
+const MAX_ERROR_LOG_BYTES =
+  Number(
+    process.env.AUTH_BUILD_MAX_ERROR_LOG_BYTES
+  ) || 20000;
+
+const MAX_CONCURRENT_BUILDS =
+  Number(
+    process.env.AUTH_BUILD_MAX_CONCURRENCY
+  ) || 2;
 
 const ARTIFACT_ROOT =
   process.env.AUTH_ARTIFACT_ROOT ||
@@ -93,29 +184,38 @@ const ARTIFACT_STORAGE_PREFIX =
   String(
     process.env.AUTH_ARTIFACT_PREFIX ||
       "zyrionos/builds"
-  ).replace(/^\/+|\/+$/g, "");
+  )
+    .replace(
+      /^\/+|\/+$/g,
+      ""
+    );
 
 const ARTIFACT_BUCKET =
-  process.env.AUTH_ARTIFACT_BUCKET || "";
+  process.env.AUTH_ARTIFACT_BUCKET ||
+  "";
 
 const ARTIFACT_REGION =
   process.env.AWS_REGION ||
   "ap-south-1";
 
-const NODE_IMAGES = {
-  "20": "node:20-bookworm-slim",
-  "22": "node:22-bookworm-slim"
-};
+
+/* =========================================================
+   NODE IMAGES
+========================================================= */
+
+const NODE_IMAGES =
+  Object.freeze({
+    "20":
+      "node:20-bookworm-slim",
+
+    "22":
+      "node:22-bookworm-slim"
+  });
 
 
 /* =========================================================
    CONCURRENCY
 ========================================================= */
-
-const MAX_CONCURRENT_BUILDS =
-  Number(
-    process.env.AUTH_BUILD_MAX_CONCURRENCY
-  ) || 2;
 
 let activeBuilds = 0;
 
@@ -123,33 +223,13 @@ const buildQueue = [];
 
 
 /* =========================================================
-   UTILITIES
+   BASIC UTILITIES
 ========================================================= */
 
-function generateBuildId() {
-  return `build_${Date.now()}_${crypto
-    .randomBytes(8)
-    .toString("hex")}`;
-}
-
-
-function sha256Buffer(buffer) {
-  return crypto
-    .createHash("sha256")
-    .update(buffer)
-    .digest("hex");
-}
-
-
-function sha256String(value) {
-  return crypto
-    .createHash("sha256")
-    .update(value)
-    .digest("hex");
-}
-
-
-function safeString(value, max = 10000) {
+function safeString(
+  value,
+  max = 10000
+) {
   if (
     value === null ||
     value === undefined
@@ -157,22 +237,168 @@ function safeString(value, max = 10000) {
     return "";
   }
 
-  return String(value).slice(0, max);
-}
-
-
-function sleep(ms) {
-  return new Promise(
-    (resolve) =>
-      setTimeout(resolve, ms)
+  return String(value).slice(
+    0,
+    max
   );
 }
 
 
-function sanitizeFilePath(filePath) {
+function sleep(
+  ms
+) {
+  return new Promise(
+    resolve =>
+      setTimeout(
+        resolve,
+        ms
+      )
+  );
+}
+
+
+function generateBuildId() {
+  return (
+    `build_${Date.now()}_` +
+    crypto
+      .randomBytes(8)
+      .toString("hex")
+  );
+}
+
+
+function sha256String(
+  value
+) {
+  return crypto
+    .createHash("sha256")
+    .update(value)
+    .digest("hex");
+}
+
+
+function sha256Buffer(
+  value
+) {
+  return crypto
+    .createHash("sha256")
+    .update(value)
+    .digest("hex");
+}
+
+
+/* =========================================================
+   LOGGING
+========================================================= */
+
+function logInfo(
+  message
+) {
+  try {
+    if (
+      global.logger &&
+      typeof global.logger.info ===
+        "function"
+    ) {
+      global.logger.info(
+        message
+      );
+
+      return;
+    }
+
+    console.log(
+      message
+    );
+  } catch {
+    console.log(
+      message
+    );
+  }
+}
+
+
+function logWarn(
+  message
+) {
+  try {
+    if (
+      global.logger &&
+      typeof global.logger.warn ===
+        "function"
+    ) {
+      global.logger.warn(
+        message
+      );
+
+      return;
+    }
+
+    if (
+      global.logger &&
+      typeof global.logger.warning ===
+        "function"
+    ) {
+      global.logger.warning(
+        message
+      );
+
+      return;
+    }
+
+    console.warn(
+      message
+    );
+  } catch {
+    console.warn(
+      message
+    );
+  }
+}
+
+
+function logError(
+  message
+) {
+  try {
+    if (
+      global.logger &&
+      typeof global.logger.error ===
+        "function"
+    ) {
+      global.logger.error(
+        message
+      );
+
+      return;
+    }
+
+    console.error(
+      message
+    );
+  } catch {
+    console.error(
+      message
+    );
+  }
+}
+
+
+/* =========================================================
+   PATH SAFETY
+========================================================= */
+
+function normalizeFilePath(
+  filePath
+) {
   const value =
-    String(filePath || "")
-      .replace(/\\/g, "/")
+    String(
+      filePath || ""
+    )
+      .replace(
+        /\\/g,
+        "/"
+      )
       .trim();
 
   if (!value) {
@@ -181,15 +407,55 @@ function sanitizeFilePath(filePath) {
     );
   }
 
+  return value.replace(
+    /^\.\/+/,
+    ""
+  );
+}
+
+
+function sanitizeFilePath(
+  filePath
+) {
+  const value =
+    normalizeFilePath(
+      filePath
+    );
+
   if (
-    value.startsWith("/") ||
-    value.includes("\0") ||
-    value
-      .split("/")
-      .includes("..")
+    value.startsWith("/")
   ) {
     throw new Error(
-      `Unsafe file path: ${value}`
+      `Unsafe absolute file path: ${value}`
+    );
+  }
+
+  if (
+    /^[A-Za-z]:/.test(
+      value
+    )
+  ) {
+    throw new Error(
+      `Unsafe Windows file path: ${value}`
+    );
+  }
+
+  if (
+    value.includes("\0")
+  ) {
+    throw new Error(
+      "File path contains null byte"
+    );
+  }
+
+  const parts =
+    value.split("/");
+
+  if (
+    parts.includes("..")
+  ) {
+    throw new Error(
+      `Unsafe traversal path: ${value}`
     );
   }
 
@@ -202,11 +468,14 @@ function ensureInside(
   target
 ) {
   const resolvedRoot =
-    path.resolve(root) +
-    path.sep;
+    path.resolve(
+      root
+    ) + path.sep;
 
   const resolvedTarget =
-    path.resolve(target);
+    path.resolve(
+      target
+    );
 
   if (
     !resolvedTarget.startsWith(
@@ -221,17 +490,81 @@ function ensureInside(
 
 
 /* =========================================================
+   FILE ACCESS
+========================================================= */
+
+function getFilePath(
+  file
+) {
+  if (
+    !file ||
+    typeof file !== "object"
+  ) {
+    return "";
+  }
+
+  return sanitizeFilePath(
+    file.path ||
+    file.filePath ||
+    file.name ||
+    ""
+  );
+}
+
+
+function getFileContent(
+  file
+) {
+  if (
+    !file ||
+    typeof file !== "object"
+  ) {
+    return "";
+  }
+
+  if (
+    typeof file.content ===
+      "string"
+  ) {
+    return file.content;
+  }
+
+  if (
+    typeof file.source ===
+      "string"
+  ) {
+    return file.source;
+  }
+
+  if (
+    typeof file.code ===
+      "string"
+  ) {
+    return file.code;
+  }
+
+  return "";
+}
+
+
+/* =========================================================
    SOURCE VALIDATION
 ========================================================= */
 
-function validateFiles(files) {
-  if (!Array.isArray(files)) {
+function validateFiles(
+  files
+) {
+  if (
+    !Array.isArray(files)
+  ) {
     throw new Error(
       "Build files must be an array"
     );
   }
 
-  if (files.length === 0) {
+  if (
+    files.length === 0
+  ) {
     throw new Error(
       "Cannot build project without files"
     );
@@ -246,24 +579,47 @@ function validateFiles(files) {
     );
   }
 
+  const seen =
+    new Set();
+
   let totalSize = 0;
 
-  for (const file of files) {
+
+  for (
+    const file of files
+  ) {
     const filePath =
-      sanitizeFilePath(
-        file.path
+      getFilePath(
+        file
       );
 
     const content =
-      String(
-        file.content || ""
+      getFileContent(
+        file
       );
+
+
+    if (
+      seen.has(
+        filePath
+      )
+    ) {
+      throw new Error(
+        `Duplicate project file: ${filePath}`
+      );
+    }
+
+    seen.add(
+      filePath
+    );
+
 
     const size =
       Buffer.byteLength(
         content,
         "utf8"
       );
+
 
     if (
       size >
@@ -274,8 +630,11 @@ function validateFiles(files) {
       );
     }
 
-    totalSize += size;
+
+    totalSize +=
+      size;
   }
+
 
   if (
     totalSize >
@@ -286,8 +645,11 @@ function validateFiles(files) {
     );
   }
 
+
   return {
-    fileCount: files.length,
+    fileCount:
+      files.length,
+
     totalSize
   };
 }
@@ -301,25 +663,28 @@ function calculateSourceHash(
   files
 ) {
   const normalized =
-    files
-      .map(
-        (file) => ({
-          path:
-            sanitizeFilePath(
-              file.path
-            ),
-          content:
-            String(
-              file.content || ""
-            )
-        })
-      )
-      .sort(
-        (a, b) =>
-          a.path.localeCompare(
-            b.path
+    Array.isArray(files)
+      ? files
+          .map(
+            file => ({
+              path:
+                getFilePath(
+                  file
+                ),
+
+              content:
+                getFileContent(
+                  file
+                )
+            })
           )
-      );
+          .sort(
+            (a, b) =>
+              a.path.localeCompare(
+                b.path
+              )
+          )
+      : [];
 
   return sha256String(
     JSON.stringify(
@@ -338,12 +703,14 @@ function resolveNodeVersion(
 ) {
   const raw =
     String(
-      nodeVersion || "20"
-    );
+      nodeVersion ||
+        "20"
+    )
+      .trim();
 
   const match =
     raw.match(
-      /^(20|22)/
+      /^(20|22)(?:\.\d+)?/
     );
 
   if (!match) {
@@ -360,7 +727,8 @@ function resolveNodeVersion(
 
 function detectPackageManager(
   files,
-  requested
+  requested,
+  packageJson = null
 ) {
   const valid = [
     "npm",
@@ -368,6 +736,7 @@ function detectPackageManager(
     "pnpm",
     "bun"
   ];
+
 
   if (
     valid.includes(
@@ -377,15 +746,17 @@ function detectPackageManager(
     return requested;
   }
 
+
   const paths =
     new Set(
       files.map(
-        (file) =>
-          sanitizeFilePath(
-            file.path
+        file =>
+          getFilePath(
+            file
           )
       )
     );
+
 
   if (
     paths.has(
@@ -395,6 +766,7 @@ function detectPackageManager(
     return "pnpm";
   }
 
+
   if (
     paths.has(
       "yarn.lock"
@@ -402,6 +774,7 @@ function detectPackageManager(
   ) {
     return "yarn";
   }
+
 
   if (
     paths.has(
@@ -413,6 +786,61 @@ function detectPackageManager(
   ) {
     return "bun";
   }
+
+
+  if (
+    paths.has(
+      "package-lock.json"
+    )
+  ) {
+    return "npm";
+  }
+
+
+  const declared =
+    String(
+      packageJson?.packageManager ||
+        ""
+    )
+      .trim()
+      .toLowerCase();
+
+
+  if (
+    declared.startsWith(
+      "pnpm@"
+    )
+  ) {
+    return "pnpm";
+  }
+
+
+  if (
+    declared.startsWith(
+      "yarn@"
+    )
+  ) {
+    return "yarn";
+  }
+
+
+  if (
+    declared.startsWith(
+      "bun@"
+    )
+  ) {
+    return "bun";
+  }
+
+
+  if (
+    declared.startsWith(
+      "npm@"
+    )
+  ) {
+    return "npm";
+  }
+
 
   return "npm";
 }
@@ -427,11 +855,13 @@ function getPackageJson(
 ) {
   const packageFile =
     files.find(
-      (file) =>
-        sanitizeFilePath(
-          file.path
-        ) === "package.json"
+      file =>
+        getFilePath(
+          file
+        ) ===
+        "package.json"
     );
+
 
   if (!packageFile) {
     throw new Error(
@@ -439,17 +869,94 @@ function getPackageJson(
     );
   }
 
-  try {
-    return JSON.parse(
-      String(
-        packageFile.content || ""
-      )
+
+  const raw =
+    getFileContent(
+      packageFile
     );
-  } catch {
+
+
+  try {
+    const parsed =
+      JSON.parse(
+        raw
+      );
+
+
+    if (
+      !parsed ||
+      typeof parsed !==
+        "object" ||
+      Array.isArray(
+        parsed
+      )
+    ) {
+      throw new Error(
+        "package.json root must be an object"
+      );
+    }
+
+
+    return parsed;
+
+  } catch (error) {
     throw new Error(
-      "package.json contains invalid JSON"
+      `package.json contains invalid JSON: ${error.message}`
     );
   }
+}
+
+
+/* =========================================================
+   LOCKFILE
+========================================================= */
+
+function hasLockfile(
+  files,
+  packageManager
+) {
+  const paths =
+    new Set(
+      files.map(
+        file =>
+          getFilePath(
+            file
+          )
+      )
+    );
+
+
+  const lockfiles = {
+    npm: [
+      "package-lock.json",
+      "npm-shrinkwrap.json"
+    ],
+
+    pnpm: [
+      "pnpm-lock.yaml"
+    ],
+
+    yarn: [
+      "yarn.lock"
+    ],
+
+    bun: [
+      "bun.lock",
+      "bun.lockb"
+    ]
+  };
+
+
+  return (
+    lockfiles[
+      packageManager
+    ] || []
+  ).some(
+    file =>
+      paths.has(
+        file
+      )
+  );
 }
 
 
@@ -459,55 +966,1162 @@ function getPackageJson(
 
 function getInstallCommand(
   manager,
-  hasLockfile
+  locked
 ) {
-  switch (manager) {
+  switch (
+    manager
+  ) {
     case "pnpm":
-      return hasLockfile
+      return locked
         ? "corepack pnpm install --frozen-lockfile"
         : "corepack pnpm install";
 
     case "yarn":
-      return hasLockfile
+      return locked
         ? "corepack yarn install --immutable"
         : "corepack yarn install";
 
     case "bun":
-      return hasLockfile
+      return locked
         ? "bun install --frozen-lockfile"
         : "bun install";
 
     case "npm":
     default:
-      return hasLockfile
+      return locked
         ? "npm ci"
         : "npm install";
   }
 }
 
 
+/**
+ * IMPORTANT:
+ *
+ * Build command must respect the selected package manager.
+ *
+ * Old implementation always returned:
+ *
+ *     npm run build
+ *
+ * even for pnpm/yarn/bun.
+ */
 function getBuildCommand(
+  packageManager,
   packageJson
 ) {
   const scripts =
-    packageJson.scripts || {};
+    packageJson?.scripts || {};
+
 
   if (
     typeof scripts.build !==
-    "string" ||
+      "string" ||
     !scripts.build.trim()
   ) {
     throw new Error(
-      "package.json must contain a build script"
+      "package.json must contain a non-empty build script"
     );
   }
 
-  return "npm run build";
+
+  switch (
+    packageManager
+  ) {
+    case "pnpm":
+      return "pnpm run build";
+
+    case "yarn":
+      return "yarn build";
+
+    case "bun":
+      return "bun run build";
+
+    case "npm":
+    default:
+      return "npm run build";
+  }
 }
 
 
 /* =========================================================
-   ARTIFACT FILE FILTER
+   NODE IMAGE
+========================================================= */
+
+function getNodeImage(
+  nodeVersion
+) {
+  const version =
+    resolveNodeVersion(
+      nodeVersion
+    );
+
+  return (
+    NODE_IMAGES[
+      version
+    ] ||
+    NODE_IMAGES["20"]
+  );
+}
+
+
+/* =========================================================
+   OUTPUT COLLECTOR
+========================================================= */
+
+function createOutputCollector() {
+  let stdout = "";
+  let stderr = "";
+
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+
+  let truncated = false;
+
+
+  function append(
+    current,
+    chunk
+  ) {
+    const text =
+      Buffer.isBuffer(chunk)
+        ? chunk.toString(
+            "utf8"
+          )
+        : String(chunk);
+
+
+    const bytes =
+      Buffer.byteLength(
+        text,
+        "utf8"
+      );
+
+
+    return {
+      text,
+      bytes
+    };
+  }
+
+
+  return {
+    appendStdout(
+      chunk
+    ) {
+      const result =
+        append(
+          stdout,
+          chunk
+        );
+
+
+      stdoutBytes +=
+        result.bytes;
+
+
+      if (
+        Buffer.byteLength(
+          stdout,
+          "utf8"
+        ) <
+        MAX_OUTPUT_BYTES
+      ) {
+        stdout +=
+          result.text;
+      }
+
+
+      if (
+        Buffer.byteLength(
+          stdout,
+          "utf8"
+        ) >
+        MAX_OUTPUT_BYTES
+      ) {
+        stdout =
+          stdout.slice(
+            -MAX_OUTPUT_BYTES
+          );
+
+        truncated =
+          true;
+      }
+
+
+      if (
+        stdoutBytes >
+        MAX_OUTPUT_BYTES
+      ) {
+        truncated =
+          true;
+      }
+    },
+
+
+    appendStderr(
+      chunk
+    ) {
+      const result =
+        append(
+          stderr,
+          chunk
+        );
+
+
+      stderrBytes +=
+        result.bytes;
+
+
+      if (
+        Buffer.byteLength(
+          stderr,
+          "utf8"
+        ) <
+        MAX_OUTPUT_BYTES
+      ) {
+        stderr +=
+          result.text;
+      }
+
+
+      if (
+        Buffer.byteLength(
+          stderr,
+          "utf8"
+        ) >
+        MAX_OUTPUT_BYTES
+      ) {
+        stderr =
+          stderr.slice(
+            -MAX_OUTPUT_BYTES
+          );
+
+        truncated =
+          true;
+      }
+
+
+      if (
+        stderrBytes >
+        MAX_OUTPUT_BYTES
+      ) {
+        truncated =
+          true;
+      }
+    },
+
+
+    getResult() {
+      return {
+        stdout,
+        stderr,
+        stdoutBytes,
+        stderrBytes,
+        truncated
+      };
+    }
+  };
+}
+
+
+/* =========================================================
+   OUTPUT SANITIZATION
+========================================================= */
+
+function sanitizeBuildOutput(
+  value
+) {
+  let text =
+    safeString(
+      value,
+      MAX_ERROR_LOG_BYTES
+    );
+
+
+  /*
+   * Avoid returning obvious credential-like
+   * environment values in repair responses.
+   */
+  text =
+    text.replace(
+      /([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASS)[A-Z0-9_]*)\s*=\s*[^\s]+/gi,
+      "$1=[REDACTED]"
+    );
+
+
+  text =
+    text.replace(
+      /(Bearer\s+)[A-Za-z0-9._-]+/gi,
+      "$1[REDACTED]"
+    );
+
+
+  return text;
+}
+
+
+/* =========================================================
+   COMPILER LOCATION PARSER
+========================================================= */
+
+function parseCompilerLocation(
+  output
+) {
+  if (
+    !output
+  ) {
+    return null;
+  }
+
+
+  const text =
+    String(
+      output
+    );
+
+
+  const patterns = [
+
+    /*
+     * file.ts:12:7
+     */
+    /(?:^|\n)\s*(?:[A-Za-z]:)?([^\s():]+(?:\/[^\s():]+)*)\s*:\s*(\d+)\s*:\s*(\d+)/,
+
+    /*
+     * ./src/App.jsx:12:7
+     */
+    /(?:^|\n)\s*(\.?\.?\/?[^\s():]+)\s*:\s*(\d+)\s*:\s*(\d+)/,
+
+    /*
+     * file.ts(12,7)
+     */
+    /(?:^|\n)\s*(\.?\.?\/?[^\s()]+)\((\d+),\s*(\d+)\)/,
+
+    /*
+     * TS-style:
+     * src/App.tsx(12,7): error
+     */
+    /(?:^|\n)\s*(\.?\.?\/?[^\s():]+)\((\d+),\s*(\d+)\)\s*:/,
+
+    /*
+     * webpack / vite:
+     * ./src/App.jsx
+     * 12:7
+     */
+    /(?:^|\n)\s*(\.?\.?\/?[^\s]+)\s*\n\s*(\d+)\s*:\s*(\d+)/
+  ];
+
+
+  for (
+    const pattern of patterns
+  ) {
+    const match =
+      pattern.exec(
+        text
+      );
+
+
+    if (
+      !match
+    ) {
+      continue;
+    }
+
+
+    const file =
+      normalizeCompilerFilePath(
+        match[1]
+      );
+
+
+    const line =
+      Number(
+        match[2]
+      );
+
+
+    const column =
+      Number(
+        match[3]
+      );
+
+
+    if (
+      !file ||
+      !Number.isFinite(
+        line
+      ) ||
+      !Number.isFinite(
+        column
+      )
+    ) {
+      continue;
+    }
+
+
+    return {
+      file,
+      line,
+      column
+    };
+  }
+
+
+  return null;
+}
+
+
+/* =========================================================
+   COMPILER FILE NORMALIZATION
+========================================================= */
+
+function normalizeCompilerFilePath(
+  value
+) {
+  let file =
+    String(
+      value || ""
+    )
+      .trim()
+      .replace(
+        /\\/g,
+        "/"
+      );
+
+
+  file =
+    file.replace(
+      /^file:\/+/,
+      ""
+    );
+
+
+  file =
+    file.replace(
+      /^\/workspace\//,
+      ""
+    );
+
+
+  file =
+    file.replace(
+      /^workspace\//,
+      ""
+    );
+
+
+  file =
+    file.replace(
+      /^\.\//,
+      ""
+    );
+
+
+  /*
+   * Docker absolute paths.
+   */
+  const workspaceIndex =
+    file.indexOf(
+      "/workspace/"
+    );
+
+
+  if (
+    workspaceIndex >= 0
+  ) {
+    file =
+      file.slice(
+        workspaceIndex +
+          "/workspace/"
+            .length
+      );
+  }
+
+
+  return file;
+}
+
+
+/* =========================================================
+   STRUCTURED BUILD ERROR
+========================================================= */
+
+function createBuildError({
+  code,
+  message,
+  step,
+  category,
+  stdout = "",
+  stderr = "",
+  retryable = false
+}) {
+  const combined =
+    `${stderr}\n${stdout}`;
+
+
+  const location =
+    parseCompilerLocation(
+      combined
+    );
+
+
+  return {
+    code:
+      safeString(
+        code,
+        200
+      ),
+
+    message:
+      safeString(
+        message,
+        4000
+      ),
+
+    step:
+      safeString(
+        step,
+        300
+      ),
+
+    stage:
+      safeString(
+        step,
+        300
+      ),
+
+    category:
+      category ||
+      "unknown",
+
+    retryable:
+      Boolean(
+        retryable
+      ),
+
+    file:
+      location?.file ||
+      "",
+
+    line:
+      location?.line ||
+      null,
+
+    column:
+      location?.column ||
+      null,
+
+    stdout:
+      sanitizeBuildOutput(
+        stdout
+      ),
+
+    stderr:
+      sanitizeBuildOutput(
+        stderr
+      )
+  };
+}
+
+
+/* =========================================================
+   FAILURE CLASSIFICATION
+========================================================= */
+
+function classifyFailure({
+  stage,
+  stdout = "",
+  stderr = "",
+  timedOut = false
+}) {
+  if (
+    timedOut
+  ) {
+    return {
+      category:
+        "timeout",
+
+      retryable:
+        true
+    };
+  }
+
+
+  const text =
+    `${stdout}\n${stderr}`
+      .toLowerCase();
+
+
+  if (
+    text.includes(
+      "eacces"
+    ) ||
+    text.includes(
+      "permission denied"
+    )
+  ) {
+    return {
+      category:
+        "permission",
+
+      retryable:
+        false
+    };
+  }
+
+
+  if (
+    text.includes(
+      "network"
+    ) ||
+    text.includes(
+      "getaddrinfo"
+    ) ||
+    text.includes(
+      "fetch failed"
+    ) ||
+    text.includes(
+      "eai_again"
+    )
+  ) {
+    return {
+      category:
+        "network",
+
+      retryable:
+        true
+    };
+  }
+
+
+  if (
+    text.includes(
+      "cannot find module"
+    ) ||
+    text.includes(
+      "module not found"
+    )
+  ) {
+    return {
+      category:
+        "missing-module",
+
+      retryable:
+        false
+    };
+  }
+
+
+  if (
+    text.includes(
+      "syntaxerror"
+    ) ||
+    text.includes(
+      "unexpected token"
+    ) ||
+    text.includes(
+      "parse error"
+    ) ||
+    text.includes(
+      "parsing error"
+    )
+  ) {
+    return {
+      category:
+        "syntax",
+
+      retryable:
+        false
+    };
+  }
+
+
+  if (
+    stage ===
+    "install"
+  ) {
+    return {
+      category:
+        "dependency-install",
+
+      retryable:
+        false
+    };
+  }
+
+
+  if (
+    stage ===
+    "build"
+  ) {
+    return {
+      category:
+        "build",
+
+      retryable:
+        false
+    };
+  }
+
+
+  return {
+    category:
+      "unknown",
+
+    retryable:
+      false
+  };
+}
+
+
+/* =========================================================
+   DOCKER AVAILABILITY
+========================================================= */
+
+async function checkDockerAvailable() {
+  return new Promise(
+    resolve => {
+      let finished =
+        false;
+
+
+      const child =
+        spawn(
+          "docker",
+          [
+            "version",
+            "--format",
+            "{{.Server.Version}}"
+          ],
+          {
+            stdio: [
+              "ignore",
+              "pipe",
+              "pipe"
+            ]
+          }
+        );
+
+
+      const finish =
+        value => {
+          if (
+            finished
+          ) {
+            return;
+          }
+
+          finished =
+            true;
+
+          resolve(
+            value
+          );
+        };
+
+
+      const timer =
+        setTimeout(
+          () => {
+            try {
+              child.kill(
+                "SIGKILL"
+              );
+            } catch {}
+
+            finish(
+              false
+            );
+          },
+          DOCKER_CHECK_TIMEOUT_MS
+        );
+
+
+      child.once(
+        "error",
+        () => {
+          clearTimeout(
+            timer
+          );
+
+          finish(
+            false
+          );
+        }
+      );
+
+
+      child.once(
+        "close",
+        code => {
+          clearTimeout(
+            timer
+          );
+
+          finish(
+            code === 0
+          );
+        }
+      );
+    }
+  );
+}
+
+
+/* =========================================================
+   WORKSPACE
+========================================================= */
+
+async function createWorkspace(
+  buildId
+) {
+  return fsp.mkdtemp(
+    path.join(
+      os.tmpdir(),
+      `zyrionos-build-${buildId}-`
+    )
+  );
+}
+
+
+async function cleanupWorkspace(
+  workspace
+) {
+  if (
+    !workspace
+  ) {
+    return;
+  }
+
+
+  try {
+    await fsp.rm(
+      workspace,
+      {
+        recursive:
+          true,
+
+        force:
+          true
+      }
+    );
+  } catch (error) {
+    logWarn(
+      `[AuthoritativeBuildService] Workspace cleanup failed: ${error.message}`
+    );
+  }
+}
+
+
+/* =========================================================
+   MATERIALIZE SOURCE
+========================================================= */
+
+async function materializeSource(
+  files,
+  workspace
+) {
+  for (
+    const file of files
+  ) {
+    const relativePath =
+      getFilePath(
+        file
+      );
+
+
+    const destination =
+      path.resolve(
+        workspace,
+        relativePath
+      );
+
+
+    ensureInside(
+      workspace,
+      destination
+    );
+
+
+    await fsp.mkdir(
+      path.dirname(
+        destination
+      ),
+      {
+        recursive:
+          true
+      }
+    );
+
+
+    await fsp.writeFile(
+      destination,
+      getFileContent(
+        file
+      ),
+      "utf8"
+    );
+  }
+}
+
+
+/* =========================================================
+   DOCKER COMMAND
+========================================================= */
+
+function runDockerCommand({
+  image,
+  workspace,
+  command,
+  network,
+  timeoutMs,
+  containerName
+}) {
+  return new Promise(
+    resolve => {
+      const collector =
+        createOutputCollector();
+
+
+      const args = [
+        "run",
+
+        "--rm",
+
+        "--name",
+        containerName,
+
+        "--cpus",
+        CPU_LIMIT,
+
+        "--memory",
+        MEMORY_LIMIT,
+
+        "--pids-limit",
+        String(
+          PIDS_LIMIT
+        ),
+
+        "--cap-drop",
+        "ALL",
+
+        "--security-opt",
+        "no-new-privileges",
+
+        "--read-only",
+
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=512m",
+
+        "--tmpfs",
+        "/home/node:rw,nosuid,size=256m",
+
+        "--network",
+        network,
+
+        "-v",
+        `${workspace}:/workspace:rw`,
+
+        "-w",
+        "/workspace",
+
+        /*
+         * Node official images support the node user.
+         */
+        "--user",
+        "node",
+
+        image,
+
+        "sh",
+        "-lc",
+        command
+      ];
+
+
+      const startedAt =
+        Date.now();
+
+
+      let settled =
+        false;
+
+      let timedOut =
+        false;
+
+
+      const child =
+        spawn(
+          "docker",
+          args,
+          {
+            stdio: [
+              "ignore",
+              "pipe",
+              "pipe"
+            ]
+          }
+        );
+
+
+      const finish =
+        result => {
+          if (
+            settled
+          ) {
+            return;
+          }
+
+          settled =
+            true;
+
+          resolve(
+            result
+          );
+        };
+
+
+      child.stdout.on(
+        "data",
+        chunk =>
+          collector.appendStdout(
+            chunk
+          )
+      );
+
+
+      child.stderr.on(
+        "data",
+        chunk =>
+          collector.appendStderr(
+            chunk
+          )
+      );
+
+
+      child.once(
+        "error",
+        error => {
+          finish({
+            success:
+              false,
+
+            timedOut:
+              false,
+
+            exitCode:
+              null,
+
+            signal:
+              null,
+
+            durationMs:
+              Date.now() -
+              startedAt,
+
+            ...collector.getResult(),
+
+            error:
+              error.message
+          });
+        }
+      );
+
+
+      const timer =
+        setTimeout(
+          () => {
+            if (
+              settled
+            ) {
+              return;
+            }
+
+
+            timedOut =
+              true;
+
+
+            try {
+              child.kill(
+                "SIGKILL"
+              );
+            } catch {}
+
+
+            /*
+             * docker run has a unique container name.
+             * Attempt explicit cleanup after killing the
+             * Docker CLI process.
+             */
+            setTimeout(
+              () => {
+                try {
+                  spawn(
+                    "docker",
+                    [
+                      "rm",
+                      "-f",
+                      containerName
+                    ],
+                    {
+                      stdio:
+                        "ignore"
+                    }
+                  );
+                } catch {}
+              },
+              100
+            );
+          },
+          timeoutMs
+        );
+
+
+      child.once(
+        "close",
+        (
+          code,
+          signal
+        ) => {
+          clearTimeout(
+            timer
+          );
+
+
+          finish({
+            success:
+              code === 0 &&
+              !timedOut,
+
+            timedOut,
+
+            exitCode:
+              code,
+
+            signal:
+              signal ||
+              null,
+
+            durationMs:
+              Date.now() -
+              startedAt,
+
+            ...collector.getResult(),
+
+            error:
+              null
+          });
+        }
+      );
+    }
+  );
+}
+
+
+/* =========================================================
+   ARTIFACT FILTER
 ========================================================= */
 
 function shouldExcludeArtifact(
@@ -519,15 +2133,11 @@ function shouldExcludeArtifact(
       "/"
     );
 
+
   const parts =
     normalized.split("/");
 
-  /*
-   * Dependencies are deliberately excluded.
 
-   * Preview/runtime should install runtime dependencies
-   * or consume a future OCI image artifact.
-   */
   if (
     parts.includes(
       "node_modules"
@@ -536,18 +2146,25 @@ function shouldExcludeArtifact(
     return true;
   }
 
-  /*
-   * VCS data.
-   */
+
   if (
-    parts.includes(".git")
+    parts.includes(
+      ".git"
+    )
   ) {
     return true;
   }
 
-  /*
-   * Local environment secrets.
-   */
+
+  if (
+    parts.includes(
+      ".zyrionos"
+    )
+  ) {
+    return true;
+  }
+
+
   if (
     [
       ".env",
@@ -562,9 +2179,7 @@ function shouldExcludeArtifact(
     return true;
   }
 
-  /*
-   * Temporary files.
-   */
+
   if (
     normalized.startsWith(
       ".cache/"
@@ -575,6 +2190,7 @@ function shouldExcludeArtifact(
   ) {
     return true;
   }
+
 
   return false;
 }
@@ -589,6 +2205,7 @@ async function collectArtifactFiles(
 ) {
   const result = [];
 
+
   async function walk(
     directory
   ) {
@@ -596,9 +2213,11 @@ async function collectArtifactFiles(
       await fsp.readdir(
         directory,
         {
-          withFileTypes: true
+          withFileTypes:
+            true
         }
       );
+
 
     for (
       const entry of entries
@@ -608,6 +2227,7 @@ async function collectArtifactFiles(
           directory,
           entry.name
         );
+
 
       const relative =
         path
@@ -620,6 +2240,7 @@ async function collectArtifactFiles(
             "/"
           );
 
+
       if (
         shouldExcludeArtifact(
           relative
@@ -628,14 +2249,17 @@ async function collectArtifactFiles(
         continue;
       }
 
+
       if (
         entry.isDirectory()
       ) {
         await walk(
           absolute
         );
+
         continue;
       }
+
 
       if (
         !entry.isFile()
@@ -643,22 +2267,29 @@ async function collectArtifactFiles(
         continue;
       }
 
+
       const stat =
         await fsp.stat(
           absolute
         );
 
+
       result.push({
         absolute,
+
         relative,
-        size: stat.size
+
+        size:
+          stat.size
       });
     }
   }
 
+
   await walk(
     workspace
   );
+
 
   return result;
 }
@@ -676,15 +2307,20 @@ async function createArtifactManifest(
       workspace
     );
 
-  let totalSize = 0;
+
+  let totalSize =
+    0;
+
 
   const entries = [];
+
 
   for (
     const file of files
   ) {
     totalSize +=
       file.size;
+
 
     if (
       totalSize >
@@ -695,22 +2331,27 @@ async function createArtifactManifest(
       );
     }
 
+
     const content =
       await fsp.readFile(
         file.absolute
       );
 
+
     entries.push({
       path:
         file.relative,
+
       size:
         file.size,
+
       checksum:
         sha256Buffer(
           content
         )
     });
   }
+
 
   entries.sort(
     (a, b) =>
@@ -719,41 +2360,94 @@ async function createArtifactManifest(
       )
   );
 
+
   const manifest = {
-    version: 1,
+    version:
+      1,
+
     createdAt:
       new Date().toISOString(),
+
     fileCount:
       entries.length,
+
     totalSize,
-    files: entries
+
+    files:
+      entries
   };
 
-  const manifestRaw =
-    JSON.stringify(
-      manifest,
-      null,
-      2
-    );
-
-  const artifactChecksum =
-    sha256String(
-      manifestRaw
-    );
 
   return {
     manifest,
-    manifestRaw,
-    artifactChecksum,
+
     fileCount:
       entries.length,
+
     totalSize
   };
 }
 
 
 /* =========================================================
-   TAR COMMAND
+   WRITE ARTIFACT MANIFEST
+========================================================= */
+
+async function writeArtifactManifest(
+  workspace,
+  manifest
+) {
+  const metadataDirectory =
+    path.join(
+      workspace,
+      ".zyrionos"
+    );
+
+
+  await fsp.mkdir(
+    metadataDirectory,
+    {
+      recursive:
+        true
+    }
+  );
+
+
+  const manifestPath =
+    path.join(
+      metadataDirectory,
+      "artifact-manifest.json"
+    );
+
+
+  const raw =
+    JSON.stringify(
+      manifest,
+      null,
+      2
+    );
+
+
+  await fsp.writeFile(
+    manifestPath,
+    raw,
+    "utf8"
+  );
+
+
+  return {
+    manifestPath,
+
+    checksum:
+      sha256String(
+        raw
+      )
+  };
+}
+
+
+/* =========================================================
+   TAR ARTIFACT
 ========================================================= */
 
 async function createTarArtifact(
@@ -765,9 +2459,11 @@ async function createTarArtifact(
       destination
     ),
     {
-      recursive: true
+      recursive:
+        true
     }
   );
+
 
   return new Promise(
     (resolve, reject) => {
@@ -788,6 +2484,7 @@ async function createTarArtifact(
 
             "-C",
             workspace,
+
             "."
           ],
           {
@@ -799,34 +2496,52 @@ async function createTarArtifact(
           }
         );
 
-      let stderr = "";
+
+      let stderr =
+        "";
+
 
       child.stderr.on(
         "data",
-        (chunk) => {
+        chunk => {
           stderr +=
             chunk.toString();
+
+          if (
+            stderr.length >
+            10000
+          ) {
+            stderr =
+              stderr.slice(
+                -10000
+              );
+          }
         }
       );
 
-      child.on(
+
+      child.once(
         "error",
         reject
       );
 
-      child.on(
+
+      child.once(
         "close",
-        (code) => {
+        code => {
           if (
             code !== 0
           ) {
-            return reject(
+            reject(
               new Error(
                 stderr ||
                 `tar exited with code ${code}`
               )
             );
+
+            return;
           }
+
 
           resolve();
         }
@@ -837,7 +2552,7 @@ async function createTarArtifact(
 
 
 /* =========================================================
-   ARTIFACT CHECKSUM
+   CHECKSUM
 ========================================================= */
 
 async function checksumFile(
@@ -848,6 +2563,7 @@ async function checksumFile(
       "sha256"
     );
 
+
   return new Promise(
     (resolve, reject) => {
       const stream =
@@ -855,18 +2571,21 @@ async function checksumFile(
           filePath
         );
 
+
       stream.on(
         "data",
-        (chunk) =>
+        chunk =>
           hash.update(
             chunk
           )
       );
 
+
       stream.on(
         "error",
         reject
       );
+
 
       stream.on(
         "end",
@@ -890,45 +2609,53 @@ async function storeLocalArtifact({
   buildId,
   artifactPath
 }) {
-  const destinationDirectory =
+  const directory =
     path.join(
       ARTIFACT_ROOT,
       buildId
     );
 
+
   await fsp.mkdir(
-    destinationDirectory,
+    directory,
     {
-      recursive: true
+      recursive:
+        true
     }
   );
 
+
   const destination =
     path.join(
-      destinationDirectory,
+      directory,
       "build.tar.gz"
     );
+
 
   await fsp.copyFile(
     artifactPath,
     destination
   );
 
+
   const stat =
     await fsp.stat(
       destination
     );
+
 
   const checksum =
     await checksumFile(
       destination
     );
 
+
   return {
     storageKey:
       `${ARTIFACT_STORAGE_PREFIX}/${buildId}/build.tar.gz`,
 
-    url: "",
+    url:
+      "",
 
     localPath:
       destination,
@@ -936,13 +2663,16 @@ async function storeLocalArtifact({
     size:
       stat.size,
 
-    checksum
+    checksum,
+
+    storageType:
+      "local"
   };
 }
 
 
 /* =========================================================
-   OPTIONAL S3 ARTIFACT STORAGE
+   S3 ARTIFACT STORAGE
 ========================================================= */
 
 async function storeS3Artifact({
@@ -955,14 +2685,17 @@ async function storeS3Artifact({
     return null;
   }
 
+
   let S3Client;
   let PutObjectCommand;
+
 
   try {
     const s3 =
       require(
         "@aws-sdk/client-s3"
       );
+
 
     S3Client =
       s3.S3Client;
@@ -972,9 +2705,10 @@ async function storeS3Artifact({
 
   } catch {
     throw new Error(
-      "AWS S3 artifact storage is configured but @aws-sdk/client-s3 is not installed"
+      "S3 artifact storage is configured but @aws-sdk/client-s3 is not installed"
     );
   }
+
 
   const client =
     new S3Client({
@@ -982,18 +2716,22 @@ async function storeS3Artifact({
         ARTIFACT_REGION
     });
 
+
   const key =
     `${ARTIFACT_STORAGE_PREFIX}/${buildId}/build.tar.gz`;
+
 
   const body =
     fs.createReadStream(
       artifactPath
     );
 
+
   const stat =
     await fsp.stat(
       artifactPath
     );
+
 
   await client.send(
     new PutObjectCommand({
@@ -1014,16 +2752,19 @@ async function storeS3Artifact({
 
       Metadata: {
         buildId,
+
         serviceVersion:
           SERVICE_VERSION
       }
     })
   );
 
+
   const checksum =
     await checksumFile(
       artifactPath
     );
+
 
   return {
     storageKey:
@@ -1035,22 +2776,22 @@ async function storeS3Artifact({
     size:
       stat.size,
 
-    checksum
+    checksum,
+
+    storageType:
+      "s3"
   };
 }
 
 
 /* =========================================================
-   ARTIFACT STORAGE STRATEGY
+   ARTIFACT PERSISTENCE
 ========================================================= */
 
 async function persistArtifact({
   buildId,
   artifactPath
 }) {
-  /*
-   * S3 becomes the durable artifact store when configured.
-   */
   if (
     ARTIFACT_BUCKET
   ) {
@@ -1060,528 +2801,11 @@ async function persistArtifact({
     });
   }
 
-  /*
-   * Local storage is intended for:
-   * - development
-   * - single-node deployments
-   * - initial testing
 
-   * Production multi-worker deployments should use S3
-   * or another durable artifact store.
-   */
   return storeLocalArtifact({
     buildId,
     artifactPath
   });
-}
-
-
-/* =========================================================
-   DOCKER AVAILABILITY
-========================================================= */
-
-async function checkDockerAvailable() {
-  return new Promise(
-    (resolve) => {
-      let finished = false;
-
-      const child =
-        spawn(
-          "docker",
-          [
-            "version",
-            "--format",
-            "{{.Server.Version}}"
-          ],
-          {
-            stdio: [
-              "ignore",
-              "pipe",
-              "pipe"
-            ]
-          }
-        );
-
-      const timer =
-        setTimeout(
-          () => {
-            if (
-              finished
-            ) {
-              return;
-            }
-
-            finished = true;
-
-            try {
-              child.kill(
-                "SIGKILL"
-              );
-            } catch {}
-
-            resolve(false);
-          },
-          DOCKER_CHECK_TIMEOUT_MS
-        );
-
-      child.on(
-        "error",
-        () => {
-          if (
-            finished
-          ) {
-            return;
-          }
-
-          finished = true;
-          clearTimeout(
-            timer
-          );
-
-          resolve(false);
-        }
-      );
-
-      child.on(
-        "close",
-        (code) => {
-          if (
-            finished
-          ) {
-            return;
-          }
-
-          finished = true;
-          clearTimeout(
-            timer
-          );
-
-          resolve(
-            code === 0
-          );
-        }
-      );
-    }
-  );
-}
-
-
-/* =========================================================
-   DOCKER EXECUTION
-========================================================= */
-
-function runDockerCommand({
-  image,
-  workspace,
-  command,
-  network,
-  timeoutMs
-}) {
-  return new Promise(
-    (resolve) => {
-      const args = [
-        "run",
-        "--rm",
-
-        "--cpus",
-        CPU_LIMIT,
-
-        "--memory",
-        MEMORY_LIMIT,
-
-        "--pids-limit",
-        String(
-          PIDS_LIMIT
-        ),
-
-        "--cap-drop",
-        "ALL",
-
-        "--security-opt",
-        "no-new-privileges",
-
-        "--read-only",
-
-        "--tmpfs",
-        "/tmp:rw,noexec,nosuid,size=256m",
-
-        "--tmpfs",
-        "/home/node:rw,nosuid,size=128m",
-
-        "--network",
-        network,
-
-        "-v",
-        `${workspace}:/workspace:rw`,
-
-        "-w",
-        "/workspace",
-
-        image,
-
-        "sh",
-        "-lc",
-        command
-      ];
-
-      const child =
-        spawn(
-          "docker",
-          args,
-          {
-            stdio: [
-              "ignore",
-              "pipe",
-              "pipe"
-            ]
-          }
-        );
-
-      let stdout = "";
-      let stderr = "";
-      let timedOut = false;
-      let settled = false;
-
-      const append =
-        (
-          current,
-          chunk
-        ) => {
-          const next =
-            current +
-            chunk.toString();
-
-          if (
-            Buffer.byteLength(
-              next,
-              "utf8"
-            ) <=
-            2 * 1024 * 1024
-          ) {
-            return next;
-          }
-
-          return next.slice(
-            -2 * 1024 * 1024
-          );
-        };
-
-      child.stdout.on(
-        "data",
-        (chunk) => {
-          stdout =
-            append(
-              stdout,
-              chunk
-            );
-        }
-      );
-
-      child.stderr.on(
-        "data",
-        (chunk) => {
-          stderr =
-            append(
-              stderr,
-              chunk
-            );
-        }
-      );
-
-      const timer =
-        setTimeout(
-          () => {
-            if (
-              settled
-            ) {
-              return;
-            }
-
-            timedOut = true;
-
-            try {
-              child.kill(
-                "SIGKILL"
-              );
-            } catch {}
-          },
-          timeoutMs
-        );
-
-      child.on(
-        "error",
-        (error) => {
-          if (
-            settled
-          ) {
-            return;
-          }
-
-          settled = true;
-          clearTimeout(
-            timer
-          );
-
-          resolve({
-            success: false,
-            timedOut,
-            exitCode: null,
-            signal: null,
-            stdout,
-            stderr:
-              stderr ||
-              error.message
-          });
-        }
-      );
-
-      child.on(
-        "close",
-        (
-          code,
-          signal
-        ) => {
-          if (
-            settled
-          ) {
-            return;
-          }
-
-          settled = true;
-          clearTimeout(
-            timer
-          );
-
-          resolve({
-            success:
-              code === 0 &&
-              !timedOut,
-
-            timedOut,
-
-            exitCode:
-              code,
-
-            signal:
-              signal || null,
-
-            stdout,
-            stderr
-          });
-        }
-      );
-    }
-  );
-}
-
-
-/* =========================================================
-   FAILURE CLASSIFICATION
-========================================================= */
-
-function classifyFailure({
-  stage,
-  stdout = "",
-  stderr = "",
-  timedOut = false
-}) {
-  const text =
-    `${stdout}\n${stderr}`
-      .toLowerCase();
-
-  if (
-    timedOut
-  ) {
-    return {
-      category:
-        "timeout",
-      retryable:
-        true
-    };
-  }
-
-  if (
-    text.includes(
-      "eacces"
-    ) ||
-    text.includes(
-      "permission denied"
-    )
-  ) {
-    return {
-      category:
-        "permission",
-      retryable:
-        false
-    };
-  }
-
-  if (
-    text.includes(
-      "network"
-    ) ||
-    text.includes(
-      "enotfound"
-    ) ||
-    text.includes(
-      "fetch failed"
-    )
-  ) {
-    return {
-      category:
-        "network",
-      retryable:
-        true
-    };
-  }
-
-  if (
-    text.includes(
-      "module not found"
-    ) ||
-    text.includes(
-      "cannot find module"
-    )
-  ) {
-    return {
-      category:
-        "missing-module",
-      retryable:
-        false
-    };
-  }
-
-  if (
-    text.includes(
-      "syntaxerror"
-    ) ||
-    text.includes(
-      "unexpected token"
-    )
-  ) {
-    return {
-      category:
-        "syntax",
-      retryable:
-        false
-    };
-  }
-
-  if (
-    stage ===
-    "install"
-  ) {
-    return {
-      category:
-        "dependency-install",
-      retryable:
-        false
-    };
-  }
-
-  if (
-    stage ===
-    "build"
-  ) {
-    return {
-      category:
-        "build",
-      retryable:
-        false
-    };
-  }
-
-  return {
-    category:
-      "unknown",
-    retryable:
-      false
-  };
-}
-
-
-/* =========================================================
-   TEMP WORKSPACE
-========================================================= */
-
-async function createWorkspace() {
-  return fsp.mkdtemp(
-    path.join(
-      os.tmpdir(),
-      "zyrion-authoritative-build-"
-    )
-  );
-}
-
-
-async function cleanupWorkspace(
-  workspace
-) {
-  if (!workspace) {
-    return;
-  }
-
-  try {
-    await fsp.rm(
-      workspace,
-      {
-        recursive: true,
-        force: true
-      }
-    );
-  } catch (error) {
-    console.error(
-      "[AuthoritativeBuildService] workspace cleanup failed:",
-      error.message
-    );
-  }
-}
-
-
-/* =========================================================
-   MATERIALIZE SOURCE
-========================================================= */
-
-async function materializeSource(
-  files,
-  workspace
-) {
-  for (
-    const file of files
-  ) {
-    const relativePath =
-      sanitizeFilePath(
-        file.path
-      );
-
-    const destination =
-      path.resolve(
-        workspace,
-        relativePath
-      );
-
-    ensureInside(
-      workspace,
-      destination
-    );
-
-    await fsp.mkdir(
-      path.dirname(
-        destination
-      ),
-      {
-        recursive: true
-      }
-    );
-
-    await fsp.writeFile(
-      destination,
-      String(
-        file.content || ""
-      ),
-      "utf8"
-    );
-  }
 }
 
 
@@ -1611,12 +2835,15 @@ async function createBuildRecord({
         projectId
       })
       .sort({
-        buildNumber: -1
+        buildNumber:
+          -1
       })
       .select({
-        buildNumber: 1
+        buildNumber:
+          1
       })
       .lean();
+
 
   const buildNumber =
     latest &&
@@ -1626,36 +2853,46 @@ async function createBuildRecord({
       ? latest.buildNumber + 1
       : 1;
 
+
   return ProjectBuild.create({
     projectId,
+
     userId,
 
     buildId,
+
     buildNumber,
 
     status:
       "queued",
 
     trigger:
-      trigger || "manual",
+      trigger ||
+      "manual",
 
     framework:
-      framework || "",
+      framework ||
+      "",
 
     runtime:
-      runtime || "",
+      runtime ||
+      "",
 
     nodeVersion:
-      nodeVersion || "",
+      nodeVersion ||
+      "",
 
     packageManager:
-      packageManager || "",
+      packageManager ||
+      "",
 
     buildCommand:
-      buildCommand || "",
+      buildCommand ||
+      "",
 
     outputDirectory:
-      outputDirectory || "",
+      outputDirectory ||
+      "",
 
     aiGenerated:
       Boolean(
@@ -1663,10 +2900,12 @@ async function createBuildRecord({
       ),
 
     aiModel:
-      aiModel || "",
+      aiModel ||
+      "",
 
     promptId:
-      promptId || "",
+      promptId ||
+      "",
 
     metadata: {
       serviceVersion:
@@ -1678,14 +2917,14 @@ async function createBuildRecord({
         true,
 
       validationMode:
-        "authoritative"
+        VALIDATION_MODE
     }
   });
 }
 
 
 /* =========================================================
-   UPDATE BUILD
+   BUILD UPDATE
 ========================================================= */
 
 async function updateBuild(
@@ -1704,66 +2943,276 @@ async function updateBuild(
 
 
 /* =========================================================
-   BUILD ERROR OBJECT
+   REPAIR CONTEXT
 ========================================================= */
 
-function createBuildError({
-  code,
-  message,
-  step,
-  category
+function createRepairContext({
+  buildId,
+  sourceHash,
+  packageManager,
+  failureStage,
+  failureCategory,
+  retryable,
+  errors,
+  stdout,
+  stderr,
+  exitCode
 }) {
+  const normalizedErrors =
+    Array.isArray(
+      errors
+    )
+      ? errors
+      : [];
+
+
+  const affectedFiles =
+    [
+      ...new Set(
+        normalizedErrors
+          .map(
+            error =>
+              error?.file
+          )
+          .filter(
+            Boolean
+          )
+      )
+    ];
+
+
   return {
-    code:
-      safeString(
-        code,
-        200
-      ),
+    required:
+      normalizedErrors.length >
+      0,
 
-    message:
-      safeString(
-        message,
-        4000
-      ),
-
-    step:
-      safeString(
-        step,
-        300
-      ),
-
-    file:
-      "",
-
-    line:
+    buildId:
+      buildId ||
       null,
 
-    column:
-      null
+    sourceHash:
+      sourceHash ||
+      null,
+
+    packageManager:
+      packageManager ||
+      "npm",
+
+    failureStage:
+      failureStage ||
+      null,
+
+    failureCategory:
+      failureCategory ||
+      null,
+
+    retryable:
+      Boolean(
+        retryable
+      ),
+
+    affectedFiles,
+
+    errors:
+      normalizedErrors,
+
+    stdout:
+      sanitizeBuildOutput(
+        stdout
+      ),
+
+    stderr:
+      sanitizeBuildOutput(
+        stderr
+      ),
+
+    exitCode:
+      exitCode ??
+      null,
+
+    strategy:
+      affectedFiles.length > 0
+        ? "repair-affected-files"
+        : "analyze-build-output-and-repair"
   };
 }
 
 
 /* =========================================================
-   MAIN BUILD
+   BUILD FAILURE RESULT
+========================================================= */
+
+function createFailureResult({
+  buildId,
+  buildNumber,
+  projectId,
+  projectName,
+  sourceHash,
+  framework,
+  runtime,
+  nodeVersion,
+  packageManager,
+  failureStage,
+  failureCategory,
+  retryable,
+  errors,
+  stdout,
+  stderr,
+  exitCode,
+  signal,
+  timedOut,
+  startedAt,
+  fileCount,
+  totalSize
+}) {
+  const normalizedErrors =
+    Array.isArray(
+      errors
+    )
+      ? errors
+      : [];
+
+
+  return {
+    success:
+      false,
+
+    status:
+      "failed",
+
+    authoritative:
+      AUTHORITATIVE,
+
+    validationMode:
+      VALIDATION_MODE,
+
+    serviceVersion:
+      SERVICE_VERSION,
+
+    buildId,
+
+    buildNumber:
+      buildNumber ||
+      null,
+
+    projectId,
+
+    projectName,
+
+    sourceHash,
+
+    framework,
+
+    runtime,
+
+    nodeVersion,
+
+    packageManager,
+
+    failureStage,
+
+    failureCategory,
+
+    retryable:
+      Boolean(
+        retryable
+      ),
+
+    errors:
+      normalizedErrors,
+
+    warnings: [],
+
+    stdout:
+      sanitizeBuildOutput(
+        stdout
+      ),
+
+    stderr:
+      sanitizeBuildOutput(
+        stderr
+      ),
+
+    exitCode:
+      exitCode ??
+      null,
+
+    signal:
+      signal ||
+      null,
+
+    timedOut:
+      Boolean(
+        timedOut
+      ),
+
+    repairContext:
+      createRepairContext({
+        buildId,
+
+        sourceHash,
+
+        packageManager,
+
+        failureStage,
+
+        failureCategory,
+
+        retryable,
+
+        errors:
+          normalizedErrors,
+
+        stdout,
+
+        stderr,
+
+        exitCode
+      }),
+
+    summary: {
+      durationMs:
+        Date.now() -
+        startedAt,
+
+      fileCount,
+
+      totalSize
+    }
+  };
+}
+
+
+/* =========================================================
+   MAIN EXECUTOR
 ========================================================= */
 
 async function executeBuild(
-  options
+  options = {}
 ) {
   const {
     projectId,
+
     userId,
-    projectName = "",
-    framework = "",
-    runtime = "",
+
+    projectName =
+      "",
+
+    framework =
+      "",
+
+    runtime =
+      "",
+
     files,
 
     nodeVersion:
-      requestedNodeVersion = "20",
+      requestedNodeVersion =
+        "20",
 
     packageManager:
-      requestedPackageManager = "",
+      requestedPackageManager =
+        "",
 
     trigger =
       "manual",
@@ -1779,120 +3228,491 @@ async function executeBuild(
 
     promptId =
       ""
-  } = options || {};
+  } = options;
 
-  if (!projectId) {
-    throw new Error(
-      "projectId is required"
-    );
+
+  const startedAt =
+    Date.now();
+
+
+  const buildId =
+    generateBuildId();
+
+
+  let workspace =
+    null;
+
+  let build =
+    null;
+
+
+  /*
+   * -------------------------------------------------------
+   * INPUT
+   * -------------------------------------------------------
+   */
+
+  if (
+    !projectId
+  ) {
+    return createFailureResult({
+      buildId,
+
+      projectId:
+        null,
+
+      projectName,
+
+      sourceHash:
+        calculateSourceHash(
+          Array.isArray(files)
+            ? files
+            : []
+        ),
+
+      framework,
+
+      runtime,
+
+      nodeVersion:
+        requestedNodeVersion,
+
+      packageManager:
+        requestedPackageManager,
+
+      failureStage:
+        "input",
+
+      failureCategory:
+        "invalid-input",
+
+      retryable:
+        false,
+
+      errors: [
+        {
+          code:
+            "PROJECT_ID_REQUIRED",
+
+          message:
+            "projectId is required",
+
+          step:
+            "input",
+
+          file:
+            "",
+
+          line:
+            null,
+
+          column:
+            null
+        }
+      ],
+
+      stdout:
+        "",
+
+      stderr:
+        "",
+
+      startedAt,
+
+      fileCount:
+        0,
+
+      totalSize:
+        0
+    });
   }
 
-  if (!userId) {
-    throw new Error(
-      "userId is required"
-    );
+
+  if (
+    !userId
+  ) {
+    return createFailureResult({
+      buildId,
+
+      projectId,
+
+      projectName,
+
+      sourceHash:
+        calculateSourceHash(
+          Array.isArray(files)
+            ? files
+            : []
+        ),
+
+      framework,
+
+      runtime,
+
+      nodeVersion:
+        requestedNodeVersion,
+
+      packageManager:
+        requestedPackageManager,
+
+      failureStage:
+        "input",
+
+      failureCategory:
+        "invalid-input",
+
+      retryable:
+        false,
+
+      errors: [
+        {
+          code:
+            "USER_ID_REQUIRED",
+
+          message:
+            "userId is required",
+
+          step:
+            "input",
+
+          file:
+            "",
+
+          line:
+            null,
+
+          column:
+            null
+        }
+      ],
+
+      stdout:
+        "",
+
+      stderr:
+        "",
+
+      startedAt,
+
+      fileCount:
+        0,
+
+      totalSize:
+        0
+    });
   }
 
-  const sourceStats =
-    validateFiles(
-      files
-    );
+
+  let sourceStats;
+
+
+  try {
+    sourceStats =
+      validateFiles(
+        files
+      );
+  } catch (error) {
+    return createFailureResult({
+      buildId,
+
+      projectId,
+
+      projectName,
+
+      sourceHash:
+        calculateSourceHash(
+          Array.isArray(files)
+            ? files
+            : []
+        ),
+
+      framework,
+
+      runtime,
+
+      nodeVersion:
+        requestedNodeVersion,
+
+      packageManager:
+        requestedPackageManager,
+
+      failureStage:
+        "input",
+
+      failureCategory:
+        "invalid-input",
+
+      retryable:
+        false,
+
+      errors: [
+        {
+          code:
+            "INVALID_BUILD_SOURCE",
+
+          message:
+            error.message,
+
+          step:
+            "input",
+
+          file:
+            "",
+
+          line:
+            null,
+
+          column:
+            null
+        }
+      ],
+
+      stdout:
+        "",
+
+      stderr:
+        "",
+
+      startedAt,
+
+      fileCount:
+        Array.isArray(files)
+          ? files.length
+          : 0,
+
+      totalSize:
+        0
+    });
+  }
+
 
   const sourceHash =
     calculateSourceHash(
       files
     );
 
-  const packageJson =
-    getPackageJson(
-      files
-    );
 
-  const nodeVersion =
-    resolveNodeVersion(
-      requestedNodeVersion
-    );
+  let packageJson;
+  let nodeVersion;
+  let packageManager;
+  let buildCommand;
+  let installCommand;
+  let image;
 
-  const packageManager =
-    detectPackageManager(
-      files,
-      requestedPackageManager
-    );
 
-  const image =
-    NODE_IMAGES[
-      nodeVersion
-    ];
+  /*
+   * -------------------------------------------------------
+   * PACKAGE CONFIGURATION
+   * -------------------------------------------------------
+   */
 
-  const buildCommand =
-    getBuildCommand(
-      packageJson
-    );
+  try {
+    packageJson =
+      getPackageJson(
+        files
+      );
 
-  const hasLockfile =
-    files.some(
-      (file) => {
-        const p =
-          sanitizeFilePath(
-            file.path
-          );
 
-        return [
-          "package-lock.json",
-          "npm-shrinkwrap.json",
-          "pnpm-lock.yaml",
-          "yarn.lock",
-          "bun.lock",
-          "bun.lockb"
-        ].includes(p);
-      }
-    );
+    nodeVersion =
+      resolveNodeVersion(
+        requestedNodeVersion
+      );
 
-  const installCommand =
-    getInstallCommand(
-      packageManager,
-      hasLockfile
-    );
 
-  const buildId =
-    generateBuildId();
+    packageManager =
+      detectPackageManager(
+        files,
 
-  let workspace = null;
-  let build = null;
+        requestedPackageManager,
 
-  const startedAt =
-    Date.now();
+        packageJson
+      );
+
+
+    buildCommand =
+      getBuildCommand(
+        packageManager,
+
+        packageJson
+      );
+
+
+    const locked =
+      hasLockfile(
+        files,
+        packageManager
+      );
+
+
+    installCommand =
+      getInstallCommand(
+        packageManager,
+        locked
+      );
+
+
+    image =
+      getNodeImage(
+        nodeVersion
+      );
+
+  } catch (error) {
+    return createFailureResult({
+      buildId,
+
+      projectId,
+
+      projectName,
+
+      sourceHash,
+
+      framework,
+
+      runtime,
+
+      nodeVersion:
+        requestedNodeVersion,
+
+      packageManager:
+        requestedPackageManager,
+
+      failureStage:
+        "configuration",
+
+      failureCategory:
+        "configuration",
+
+      retryable:
+        false,
+
+      errors: [
+        {
+          code:
+            "BUILD_CONFIGURATION_INVALID",
+
+          message:
+            error.message,
+
+          step:
+            "configuration",
+
+          file:
+            "package.json",
+
+          line:
+            null,
+
+          column:
+            null
+        }
+      ],
+
+      stdout:
+        "",
+
+      stderr:
+        "",
+
+      startedAt,
+
+      fileCount:
+        sourceStats.fileCount,
+
+      totalSize:
+        sourceStats.totalSize
+    });
+  }
+
 
   try {
     /*
-     * Docker must be available.
+     * -------------------------------------------------------
+     * DOCKER PREFLIGHT
+     * -------------------------------------------------------
      */
+
     const dockerReady =
       await checkDockerAvailable();
 
-    if (!dockerReady) {
-      throw createBuildError({
-        code:
-          "DOCKER_UNAVAILABLE",
 
-        message:
-          "Docker daemon is unavailable",
+    if (
+      !dockerReady
+    ) {
+      return createFailureResult({
+        buildId,
 
-        step:
-          "preflight",
+        projectId,
 
-        category:
-          "runtime"
+        projectName,
+
+        sourceHash,
+
+        framework,
+
+        runtime,
+
+        nodeVersion,
+
+        packageManager,
+
+        failureStage:
+          "executor",
+
+        failureCategory:
+          "runtime",
+
+        retryable:
+          true,
+
+        errors: [
+          {
+            code:
+              "DOCKER_UNAVAILABLE",
+
+            message:
+              "Docker daemon is unavailable. Authoritative build execution requires Docker.",
+
+            step:
+              "executor",
+
+            file:
+              "",
+
+            line:
+              null,
+
+            column:
+              null
+          }
+        ],
+
+        stdout:
+          "",
+
+        stderr:
+          "",
+
+        startedAt,
+
+        fileCount:
+          sourceStats.fileCount,
+
+        totalSize:
+          sourceStats.totalSize
       });
     }
 
 
     /*
-     * Create DB build record.
+     * -------------------------------------------------------
+     * BUILD RECORD
+     * -------------------------------------------------------
      */
+
     build =
       await createBuildRecord({
         projectId,
+
         userId,
 
         buildId,
@@ -1921,9 +3741,6 @@ async function executeBuild(
       });
 
 
-    /*
-     * Mark running.
-     */
     await updateBuild(
       build,
       {
@@ -1934,7 +3751,8 @@ async function executeBuild(
           new Date(),
 
         metadata: {
-          ...(build.metadata || {}),
+          ...(build.metadata ||
+            {}),
 
           sourceStats,
 
@@ -1949,11 +3767,22 @@ async function executeBuild(
     );
 
 
+    logInfo(
+      `[AuthoritativeBuildService] Build started: ${buildId}`
+    );
+
+
     /*
-     * Workspace.
+     * -------------------------------------------------------
+     * WORKSPACE
+     * -------------------------------------------------------
      */
+
     workspace =
-      await createWorkspace();
+      await createWorkspace(
+        buildId
+      );
+
 
     await materializeSource(
       files,
@@ -1961,21 +3790,39 @@ async function executeBuild(
     );
 
 
-    /* =====================================================
-       INSTALL DEPENDENCIES
-    ===================================================== */
+    /*
+     * -------------------------------------------------------
+     * INSTALL
+     * -------------------------------------------------------
+     */
+
+    const installContainerName =
+      `zyrionos-install-${buildId}`
+        .replace(
+          /[^a-zA-Z0-9_.-]/g,
+          "-"
+        );
+
 
     const installResult =
       await runDockerCommand({
         image,
+
         workspace,
+
         command:
           installCommand,
+
         network:
           INSTALL_NETWORK,
+
         timeoutMs:
-          INSTALL_TIMEOUT_MS
+          INSTALL_TIMEOUT_MS,
+
+        containerName:
+          installContainerName
       });
+
 
     if (
       !installResult.success
@@ -1995,60 +3842,194 @@ async function executeBuild(
             installResult.timedOut
         });
 
+
       const message =
         installResult.timedOut
-          ? "Dependency installation timed out"
+          ? "Dependency installation timed out."
           : (
               installResult.stderr ||
               installResult.stdout ||
-              "Dependency installation failed"
+              "Dependency installation failed."
             );
+
 
       const error =
         createBuildError({
           code:
-            "DEPENDENCY_INSTALL_FAILED",
+            installResult.timedOut
+              ? "DEPENDENCY_INSTALL_TIMEOUT"
+              : "DEPENDENCY_INSTALL_FAILED",
 
           message,
 
           step:
-            "install",
+            "dependency-install",
 
           category:
-            failure.category
+            failure.category,
+
+          stdout:
+            installResult.stdout,
+
+          stderr:
+            installResult.stderr,
+
+          retryable:
+            failure.retryable
         });
 
-      error.stdout =
-        installResult.stdout;
 
-      error.stderr =
-        installResult.stderr;
+      const result =
+        createFailureResult({
+          buildId,
 
-      error.retryable =
-        failure.retryable;
+          buildNumber:
+            build.buildNumber,
 
-      throw error;
+          projectId,
+
+          projectName,
+
+          sourceHash,
+
+          framework,
+
+          runtime,
+
+          nodeVersion,
+
+          packageManager,
+
+          failureStage:
+            "dependency-install",
+
+          failureCategory:
+            failure.category,
+
+          retryable:
+            failure.retryable,
+
+          errors: [
+            error
+          ],
+
+          stdout:
+            installResult.stdout,
+
+          stderr:
+            installResult.stderr,
+
+          exitCode:
+            installResult.exitCode,
+
+          signal:
+            installResult.signal,
+
+          timedOut:
+            installResult.timedOut,
+
+          startedAt,
+
+          fileCount:
+            sourceStats.fileCount,
+
+          totalSize:
+            sourceStats.totalSize
+        });
+
+
+      await updateBuild(
+        build,
+        {
+          status:
+            "failed",
+
+          completedAt:
+            new Date(),
+
+          durationMs:
+            result.summary
+              .durationMs,
+
+          errorMessage:
+            safeString(
+              error.message,
+              4000
+            ),
+
+          errors: [
+            error
+          ],
+
+          metadata: {
+            ...(build.metadata ||
+              {}),
+
+            failureCategory:
+              failure.category,
+
+            retryable:
+              failure.retryable,
+
+            installOutput: {
+              stdout:
+                sanitizeBuildOutput(
+                  installResult.stdout
+                ),
+
+              stderr:
+                sanitizeBuildOutput(
+                  installResult.stderr
+                ),
+
+              exitCode:
+                installResult.exitCode
+            }
+          }
+        }
+      );
+
+
+      return result;
     }
 
 
-    /* =====================================================
-       AUTHORITATIVE BUILD
-    ===================================================== */
+    /*
+     * -------------------------------------------------------
+     * AUTHORITATIVE BUILD
+     * -------------------------------------------------------
+     */
 
-    const buildResult =
+    const buildContainerName =
+      `zyrionos-build-${buildId}`
+        .replace(
+          /[^a-zA-Z0-9_.-]/g,
+          "-"
+        );
+
+
+    const authoritativeResult =
       await runDockerCommand({
         image,
+
         workspace,
+
         command:
           buildCommand,
+
         network:
           BUILD_NETWORK,
+
         timeoutMs:
-          BUILD_TIMEOUT_MS
+          BUILD_TIMEOUT_MS,
+
+        containerName:
+          buildContainerName
       });
 
+
     if (
-      !buildResult.success
+      !authoritativeResult.success
     ) {
       const failure =
         classifyFailure({
@@ -2056,28 +4037,32 @@ async function executeBuild(
             "build",
 
           stdout:
-            buildResult.stdout,
+            authoritativeResult.stdout,
 
           stderr:
-            buildResult.stderr,
+            authoritativeResult.stderr,
 
           timedOut:
-            buildResult.timedOut
+            authoritativeResult.timedOut
         });
 
+
       const message =
-        buildResult.timedOut
-          ? "Authoritative build timed out"
+        authoritativeResult.timedOut
+          ? "Authoritative project build timed out."
           : (
-              buildResult.stderr ||
-              buildResult.stdout ||
-              "Authoritative build failed"
+              authoritativeResult.stderr ||
+              authoritativeResult.stdout ||
+              "Authoritative project build failed."
             );
+
 
       const error =
         createBuildError({
           code:
-            "AUTHORITATIVE_BUILD_FAILED",
+            authoritativeResult.timedOut
+              ? "AUTHORITATIVE_BUILD_TIMEOUT"
+              : "AUTHORITATIVE_BUILD_FAILED",
 
           message,
 
@@ -2085,35 +4070,195 @@ async function executeBuild(
             "build",
 
           category:
-            failure.category
+            failure.category,
+
+          stdout:
+            authoritativeResult.stdout,
+
+          stderr:
+            authoritativeResult.stderr,
+
+          retryable:
+            failure.retryable
         });
 
-      error.stdout =
-        buildResult.stdout;
 
-      error.stderr =
-        buildResult.stderr;
+      const result =
+        createFailureResult({
+          buildId,
 
-      error.retryable =
-        failure.retryable;
+          buildNumber:
+            build.buildNumber,
 
-      throw error;
+          projectId,
+
+          projectName,
+
+          sourceHash,
+
+          framework,
+
+          runtime,
+
+          nodeVersion,
+
+          packageManager,
+
+          failureStage:
+            "build",
+
+          failureCategory:
+            failure.category,
+
+          retryable:
+            failure.retryable,
+
+          errors: [
+            error
+          ],
+
+          stdout:
+            authoritativeResult.stdout,
+
+          stderr:
+            authoritativeResult.stderr,
+
+          exitCode:
+            authoritativeResult.exitCode,
+
+          signal:
+            authoritativeResult.signal,
+
+          timedOut:
+            authoritativeResult.timedOut,
+
+          startedAt,
+
+          fileCount:
+            sourceStats.fileCount,
+
+          totalSize:
+            sourceStats.totalSize
+        });
+
+
+      await updateBuild(
+        build,
+        {
+          status:
+            "failed",
+
+          completedAt:
+            new Date(),
+
+          durationMs:
+            result.summary
+              .durationMs,
+
+          errorMessage:
+            safeString(
+              error.message,
+              4000
+            ),
+
+          errors: [
+            error
+          ],
+
+          metadata: {
+            ...(build.metadata ||
+              {}),
+
+            failureCategory:
+              failure.category,
+
+            retryable:
+              failure.retryable,
+
+            buildOutput: {
+              stdout:
+                sanitizeBuildOutput(
+                  authoritativeResult.stdout
+                ),
+
+              stderr:
+                sanitizeBuildOutput(
+                  authoritativeResult.stderr
+                ),
+
+              exitCode:
+                authoritativeResult.exitCode,
+
+              file:
+                error.file,
+
+              line:
+                error.line,
+
+              column:
+                error.column
+            }
+          }
+        }
+      );
+
+
+      logWarn(
+        `[AuthoritativeBuildService] Build failed: ${buildId} | ${failure.category}`
+      );
+
+
+      return result;
     }
 
 
-    /* =====================================================
-       BUILD OUTPUT MANIFEST
-    ===================================================== */
+    /*
+     * -------------------------------------------------------
+     * ARTIFACT MANIFEST
+     * -------------------------------------------------------
+     */
 
-    const manifest =
+    const manifestResult =
       await createArtifactManifest(
         workspace
       );
 
 
-    /* =====================================================
-       ARTIFACT
-    ===================================================== */
+    /*
+     * Persist manifest inside artifact.
+     */
+    const manifestFile =
+      await writeArtifactManifest(
+        workspace,
+
+        {
+          ...manifestResult.manifest,
+
+          buildId,
+
+          sourceHash,
+
+          framework,
+
+          nodeVersion,
+
+          packageManager,
+
+          outputDirectory:
+            outputDirectory ||
+            "",
+
+          serviceVersion:
+            SERVICE_VERSION
+        }
+      );
+
+
+    /*
+     * -------------------------------------------------------
+     * CREATE TARBALL
+     * -------------------------------------------------------
+     */
 
     const temporaryArtifactPath =
       path.join(
@@ -2121,36 +4266,44 @@ async function executeBuild(
         `${buildId}.tar.gz`
       );
 
+
     await createTarArtifact(
       workspace,
       temporaryArtifactPath
     );
+
 
     const artifactStat =
       await fsp.stat(
         temporaryArtifactPath
       );
 
+
     if (
       artifactStat.size >
       MAX_ARTIFACT_SIZE
     ) {
       throw new Error(
-        `Artifact exceeds maximum allowed size`
+        `Build artifact exceeds maximum allowed size of ${MAX_ARTIFACT_SIZE} bytes`
       );
     }
+
 
     const artifact =
       await persistArtifact({
         buildId,
+
         artifactPath:
           temporaryArtifactPath
       });
 
 
     /*
-     * Add manifest as artifact metadata.
+     * -------------------------------------------------------
+     * ARTIFACT RECORD
+     * -------------------------------------------------------
      */
+
     const artifactRecord = {
       name:
         "build.tar.gz",
@@ -2162,7 +4315,8 @@ async function executeBuild(
         artifact.storageKey,
 
       url:
-        artifact.url || "",
+        artifact.url ||
+        "",
 
       size:
         artifact.size,
@@ -2172,13 +4326,16 @@ async function executeBuild(
     };
 
 
-    /* =====================================================
-       SUCCESS
-    ===================================================== */
+    /*
+     * -------------------------------------------------------
+     * SUCCESS
+     * -------------------------------------------------------
+     */
 
     const durationMs =
       Date.now() -
       startedAt;
+
 
     await updateBuild(
       build,
@@ -2207,7 +4364,8 @@ async function executeBuild(
         durationMs,
 
         metadata: {
-          ...(build.metadata || {}),
+          ...(build.metadata ||
+            {}),
 
           authoritative:
             true,
@@ -2217,57 +4375,69 @@ async function executeBuild(
 
           artifact: {
             manifestVersion:
-              manifest.manifest
+              manifestResult
+                .manifest
                 .version,
 
             fileCount:
-              manifest.fileCount,
+              manifestResult
+                .fileCount,
 
             totalSourceSize:
-              manifest.totalSize,
+              manifestResult
+                .totalSize,
 
             manifestChecksum:
-              manifest.artifactChecksum,
+              manifestFile
+                .checksum,
 
             artifactChecksum:
               artifact.checksum,
 
             storageType:
-              ARTIFACT_BUCKET
-                ? "s3"
-                : "local"
+              artifact.storageType,
+
+            outputDirectory:
+              outputDirectory ||
+              ""
           },
 
-          buildOutput:
-            {
-              stdout:
-                safeString(
-                  buildResult.stdout,
-                  20000
-                ),
+          buildOutput: {
+            stdout:
+              sanitizeBuildOutput(
+                authoritativeResult.stdout
+              ),
 
-              stderr:
-                safeString(
-                  buildResult.stderr,
-                  20000
-                )
-            }
+            stderr:
+              sanitizeBuildOutput(
+                authoritativeResult.stderr
+              ),
+
+            exitCode:
+              authoritativeResult.exitCode
+          }
         }
       }
     );
 
 
     /*
-     * Cleanup temporary tar.
+     * Remove temporary host tar.
      */
     try {
       await fsp.rm(
         temporaryArtifactPath,
         {
-          force: true
+          force:
+            true
         }
       );
     } catch {}
+
+
+    logInfo(
+      `[AuthoritativeBuildService] Build passed: ${buildId}`
+    );
 
 
     return {
@@ -2291,11 +4461,11 @@ async function executeBuild(
       buildNumber:
         build.buildNumber,
 
-      sourceHash,
-
       projectId,
 
       projectName,
+
+      sourceHash,
 
       framework,
 
@@ -2306,6 +4476,12 @@ async function executeBuild(
       packageManager,
 
       buildCommand,
+
+      installCommand,
+
+      outputDirectory:
+        outputDirectory ||
+        "",
 
       artifact: {
         name:
@@ -2326,207 +4502,260 @@ async function executeBuild(
         checksum:
           artifactRecord.checksum,
 
+        storageType:
+          artifact.storageType,
+
         fileCount:
-          manifest.fileCount
+          manifestResult
+            .fileCount
       },
 
-      durationMs,
+      repairContext:
+        null,
 
       errors: [],
 
       warnings: [],
 
+      durationMs,
+
+      metadata: {
+        dependenciesInstalled:
+          true,
+
+        buildCommandExecuted:
+          true,
+
+        generatedCodeExecuted:
+          true,
+
+        dockerIsolated:
+          true,
+
+        artifactCreated:
+          true,
+
+        runtimeStarted:
+          false,
+
+        browserSmokeTested:
+          false
+      },
+
       summary:
-        "Authoritative build completed and verified artifact was created."
+        "Authoritative build completed successfully and a verified artifact was created."
     };
 
   } catch (error) {
 
-    const normalized =
-      error &&
-      error.code
-        ? error
-        : createBuildError({
-            code:
-              "AUTHORITATIVE_BUILD_FAILED",
+    /*
+     * -------------------------------------------------------
+     * FATAL EXECUTOR ERROR
+     * -------------------------------------------------------
+     */
 
-            message:
-              error.message ||
-              "Authoritative build failed",
+    logError(
+      `[AuthoritativeBuildService] Fatal error: ${error.message}`
+    );
 
-            step:
-              "build",
 
-            category:
-              "unknown"
-          });
+    const category =
+      error.category ||
+      "service";
 
-    if (build) {
-      const durationMs =
-        Date.now() -
-        startedAt;
 
-      await updateBuild(
-        build,
-        {
-          status:
-            "failed",
+    const fatalError =
+      createBuildError({
+        code:
+          error.code ||
+          "AUTHORITATIVE_BUILD_SERVICE_ERROR",
 
-          completedAt:
-            new Date(),
+        message:
+          error.message ||
+          "Authoritative build service failed.",
 
-          durationMs,
+        step:
+          error.step ||
+          "executor",
 
-          errorMessage:
-            safeString(
-              normalized.message,
-              4000
-            ),
+        category,
 
-          errors: [
-            {
-              code:
-                safeString(
-                  normalized.code,
-                  200
-                ),
+        stdout:
+          error.stdout ||
+          "",
 
-              message:
-                safeString(
-                  normalized.message,
-                  4000
-                ),
+        stderr:
+          error.stderr ||
+          "",
 
-              step:
-                safeString(
-                  normalized.step ||
-                    "build",
-                  300
-                ),
+        retryable:
+          Boolean(
+            error.retryable
+          )
+      });
 
-              file:
-                safeString(
-                  normalized.file ||
-                    "",
-                  1000
-                ),
 
-              line:
-                normalized.line ||
-                null,
-
-              column:
-                normalized.column ||
-                null
-            }
-          ],
-
-          metadata: {
-            ...(build.metadata || {}),
-
-            failureCategory:
-              normalized.category ||
-              "unknown",
-
-            retryable:
-              Boolean(
-                normalized.retryable
-              )
-          }
-        }
-      );
+    /*
+     * Preserve explicit location if the thrown
+     * error already contained one.
+     */
+    if (
+      error.file
+    ) {
+      fatalError.file =
+        error.file;
     }
 
-    return {
-      success:
-        false,
+    if (
+      Number.isFinite(
+        error.line
+      )
+    ) {
+      fatalError.line =
+        error.line;
+    }
 
-      status:
-        "failed",
+    if (
+      Number.isFinite(
+        error.column
+      )
+    ) {
+      fatalError.column =
+        error.column;
+    }
 
-      authoritative:
-        true,
 
-      validationMode:
-        "authoritative",
+    const result =
+      createFailureResult({
+        buildId,
 
-      serviceVersion:
-        SERVICE_VERSION,
+        buildNumber:
+          build?.buildNumber,
 
-      buildId,
+        projectId,
 
-      buildNumber:
-        build &&
-        build.buildNumber,
+        projectName,
 
-      sourceHash,
+        sourceHash,
 
-      projectId,
+        framework,
 
-      projectName,
+        runtime,
 
-      framework,
+        nodeVersion:
+          nodeVersion ||
+          requestedNodeVersion,
 
-      runtime,
+        packageManager:
+          packageManager ||
+          requestedPackageManager,
 
-      nodeVersion,
+        failureStage:
+          error.step ||
+          "executor",
 
-      packageManager,
+        failureCategory:
+          category,
 
-      failureStage:
-        normalized.step ||
-        "build",
+        retryable:
+          Boolean(
+            error.retryable
+          ),
 
-      failureCategory:
-        normalized.category ||
-        "unknown",
+        errors: [
+          fatalError
+        ],
 
-      retryable:
-        Boolean(
-          normalized.retryable
-        ),
+        stdout:
+          error.stdout ||
+          "",
 
-      errors: [
-        {
-          code:
-            normalized.code ||
-            "AUTHORITATIVE_BUILD_FAILED",
+        stderr:
+          error.stderr ||
+          "",
 
-          message:
-            normalized.message ||
-            "Authoritative build failed",
+        exitCode:
+          error.exitCode,
 
-          step:
-            normalized.step ||
-            "build"
-        }
-      ],
+        signal:
+          error.signal,
 
-      stdout:
-        safeString(
-          normalized.stdout ||
-            "",
-          20000
-        ),
+        timedOut:
+          error.timedOut,
 
-      stderr:
-        safeString(
-          normalized.stderr ||
-            "",
-          20000
-        ),
+        startedAt,
 
-      summary:
-        normalized.message ||
-        "Authoritative build failed."
-    };
+        fileCount:
+          sourceStats.fileCount,
+
+        totalSize:
+          sourceStats.totalSize
+      });
+
+
+    if (
+      build
+    ) {
+      try {
+        await updateBuild(
+          build,
+          {
+            status:
+              "failed",
+
+            completedAt:
+              new Date(),
+
+            durationMs:
+              result.summary
+                .durationMs,
+
+            errorMessage:
+              safeString(
+                fatalError.message,
+                4000
+              ),
+
+            errors: [
+              fatalError
+            ],
+
+            metadata: {
+              ...(build.metadata ||
+                {}),
+
+              failureCategory:
+                category,
+
+              retryable:
+                Boolean(
+                  error.retryable
+                )
+            }
+          }
+        );
+      } catch (dbError) {
+        logError(
+          `[AuthoritativeBuildService] Failed to persist build failure: ${dbError.message}`
+        );
+      }
+    }
+
+
+    return result;
 
   } finally {
+
     /*
+     * -------------------------------------------------------
+     * CLEANUP
+     * -------------------------------------------------------
+     *
      * Source workspace is disposable.
      *
-     * Artifact survives independently.
+     * Artifact is stored independently.
      */
+
     await cleanupWorkspace(
       workspace
     );
@@ -2544,11 +4773,13 @@ function acquireBuildSlot() {
     MAX_CONCURRENT_BUILDS
   ) {
     activeBuilds++;
+
     return Promise.resolve();
   }
 
+
   return new Promise(
-    (resolve) => {
+    resolve => {
       buildQueue.push(
         resolve
       );
@@ -2564,10 +4795,14 @@ function releaseBuildSlot() {
       activeBuilds - 1
     );
 
+
   const next =
     buildQueue.shift();
 
-  if (next) {
+
+  if (
+    next
+  ) {
     activeBuilds++;
     next();
   }
@@ -2583,6 +4818,7 @@ async function buildProject(
 ) {
   await acquireBuildSlot();
 
+
   try {
     return await executeBuild(
       options
@@ -2594,7 +4830,7 @@ async function buildProject(
 
 
 /* =========================================================
-   ARTIFACT VERIFICATION
+   ARTIFACT CHECKSUM VERIFICATION
 ========================================================= */
 
 async function verifyArtifactChecksum(
@@ -2608,18 +4844,22 @@ async function verifyArtifactChecksum(
     return false;
   }
 
-  if (
-    !fs.existsSync(
-      artifactPath
-    )
-  ) {
+
+  try {
+    await fsp.access(
+      artifactPath,
+      fs.constants.F_OK
+    );
+  } catch {
     return false;
   }
+
 
   const actual =
     await checksumFile(
       artifactPath
     );
+
 
   return (
     actual ===
@@ -2629,22 +4869,34 @@ async function verifyArtifactChecksum(
 
 
 /* =========================================================
-   AUTHORITATIVE READY CHECK
+   AUTHORITATIVE BUILD READY
 ========================================================= */
 
 function isAuthoritativeBuildReady(
-  buildResult
+  result
 ) {
   return Boolean(
-    buildResult &&
-    buildResult.success === true &&
-    buildResult.authoritative === true &&
-    buildResult.validationMode ===
+    result &&
+
+    result.success ===
+      true &&
+
+    result.status ===
+      "success" &&
+
+    result.authoritative ===
+      true &&
+
+    result.validationMode ===
       "authoritative" &&
-    buildResult.buildId &&
-    buildResult.artifact &&
-    buildResult.artifact.storageKey &&
-    buildResult.artifact.checksum
+
+    result.buildId &&
+
+    result.artifact &&
+
+    result.artifact.storageKey &&
+
+    result.artifact.checksum
   );
 }
 
@@ -2658,49 +4910,82 @@ async function getBuildArtifact({
   userId,
   buildId
 }) {
-  const build =
-    await ProjectBuild.findOne({
-      projectId,
-      userId,
-      buildId,
-      status:
-        "success"
-    }).lean();
+  if (
+    !projectId ||
+    !userId ||
+    !buildId
+  ) {
+    throw new Error(
+      "projectId, userId and buildId are required"
+    );
+  }
 
-  if (!build) {
+
+  const build =
+    await ProjectBuild
+      .findOne({
+        projectId,
+
+        userId,
+
+        buildId,
+
+        status:
+          "success"
+      })
+      .lean();
+
+
+  if (
+    !build
+  ) {
     throw new Error(
       "Successful authoritative build not found"
     );
   }
 
+
   if (
-    !build.metadata ||
-    build.metadata.authoritative !==
+    build.metadata?.authoritative !==
       true
   ) {
     throw new Error(
-      "Build is not authoritative"
+      "Requested build is not authoritative"
     );
   }
+
+
+  if (
+    build.metadata?.validationMode !==
+      "authoritative"
+  ) {
+    throw new Error(
+      "Requested build is not authoritative"
+    );
+  }
+
 
   if (
     !Array.isArray(
       build.artifacts
     ) ||
-    build.artifacts.length === 0
+    build.artifacts.length ===
+      0
   ) {
     throw new Error(
       "Authoritative build has no artifact"
     );
   }
 
+
   const artifact =
     build.artifacts.find(
-      (item) =>
+      item =>
         item.type ===
         "build"
     ) ||
     build.artifacts[0];
+
 
   if (
     !artifact.storageKey ||
@@ -2710,6 +4995,7 @@ async function getBuildArtifact({
       "Build artifact metadata is incomplete"
     );
   }
+
 
   return {
     buildId:
@@ -2721,9 +5007,25 @@ async function getBuildArtifact({
     projectId:
       build.projectId,
 
+    userId:
+      build.userId,
+
     sourceHash:
       build.metadata
-        .sourceHash || "",
+        ?.sourceHash ||
+      "",
+
+    outputDirectory:
+      build.outputDirectory ||
+      "",
+
+    framework:
+      build.framework ||
+      "",
+
+    packageManager:
+      build.packageManager ||
+      "",
 
     artifact
   };
@@ -2731,11 +5033,15 @@ async function getBuildArtifact({
 
 
 /* =========================================================
-   EXPORT
+   EXPORTS
 ========================================================= */
 
 module.exports = {
   SERVICE_VERSION,
+
+  VALIDATION_MODE,
+
+  AUTHORITATIVE,
 
   buildProject,
 
@@ -2751,5 +5057,15 @@ module.exports = {
 
   validateFiles,
 
-  detectPackageManager
+  detectPackageManager,
+
+  getBuildCommand,
+
+  getInstallCommand,
+
+  resolveNodeVersion,
+
+  normalizeFilePath,
+
+  sanitizeFilePath
 };
