@@ -1,7 +1,7 @@
 /* =========================================================
    ZyrionOS BUILDER AGENT
    Production Chunked Code Generation Engine
-   Version: 4.0.0
+   Version: 5.0.0
 
    Architecture:
 
@@ -31,18 +31,20 @@
 
    IMPORTANT:
 
+   - Builder NEVER executes the project.
+   - Builder NEVER runs npm install.
+   - Builder NEVER runs npm build.
+   - Builder NEVER starts a server.
    - Builder NEVER calls an AI provider directly.
    - All AI calls go through aiProviderService.
-   - No Gemini dependency.
-   - Extra AI-generated files are NEVER allowed into
-     the final project unless they exist in the manifest.
-   - Missing requested files trigger repair.
-   - Duplicate requested files are rejected.
+   - Gemini is NOT used.
+   - Extra AI-generated files are NEVER accepted.
+   - Missing requested files trigger controlled repair.
+   - Duplicate files are rejected.
    - Invalid paths/content are rejected.
-   - package.json build scripts are contract-validated.
-   - Long-running server/dev commands are NOT accepted
-     as authoritative build commands.
-   - Builder does NOT perform the authoritative build.
+   - package.json build scripts are semantically validated.
+   - Runtime/dev/watch commands are NEVER accepted as
+     authoritative build commands.
 ========================================================= */
 
 "use strict";
@@ -66,7 +68,7 @@ const {
 ========================================================= */
 
 const BUILDER_AGENT_VERSION =
-  "4.0.0";
+  "5.0.0";
 
 
 /* =========================================================
@@ -111,194 +113,102 @@ const MAX_GENERATED_INDEX_SIZE =
 
 
 /* =========================================================
-   PACKAGE / BUILD CONTRACT
+   PACKAGE
 ========================================================= */
 
 const PACKAGE_JSON_PATH =
   "package.json";
 
 
-/*
- * Commands that are fundamentally runtime/dev-server
- * commands and therefore must never be accepted as the
- * package.json "build" script.
- *
- * These are checked by executable tokens rather than
- * exact full-string equality so variants such as:
- *
- *   node ./server.js
- *   node server.js
- *   npm start
- *   next dev
- *   vite --host
- *
- * are rejected.
- */
-const FORBIDDEN_BUILD_COMMAND_PATTERNS = [
+/* =========================================================
+   LOGGER COMPATIBILITY
+========================================================= */
 
-  /\bnode(?:js)?\s+(?:\.\/)?(?:server|index|app|main)\.(?:js|cjs|mjs|ts)\b/i,
+function logInfo(message) {
 
-  /\bnode(?:js)?\s+.*\bserver\b/i,
+  if (
+    logger &&
+    typeof logger.info === "function"
+  ) {
 
-  /\bnpm\s+(?:start|run\s+start)\b/i,
-
-  /\byarn\s+start\b/i,
-
-  /\bpnpm\s+start\b/i,
-
-  /\bbun\s+start\b/i,
-
-  /\bnpm\s+(?:run\s+dev|dev)\b/i,
-
-  /\byarn\s+(?:dev|start)\b/i,
-
-  /\bpnpm\s+(?:dev|start)\b/i,
-
-  /\bbun\s+(?:dev|start)\b/i,
-
-  /\bnext\s+dev\b/i,
-
-  /\bvite(?:\s+.*)?\s+--host\b/i,
-
-  /\bvite(?:\s+.*)?\s+--port\b/i,
-
-  /\bnodemon\b/i,
-
-  /\bts-node-dev\b/i,
-
-  /\btsx\s+.*\bserver\b/i,
-
-  /\bts-node\s+.*\bserver\b/i,
-
-  /\bwebpack-dev-server\b/i,
-
-  /\bserve\s+-s\b/i
-
-];
-
-
-/*
- * Framework/runtime build expectations.
- *
- * These are intentionally conservative.
- *
- * We do NOT force one exact command for every project,
- * because some projects legitimately use custom build
- * tooling.
- */
-const BUILD_COMMAND_RULES = [
-
-  {
-    name:
-      "next",
-
-    matches:
-      [
-        /next/i
-      ],
-
-    allowed:
-      [
-        /\bnext\s+build\b/i
-      ]
-
-  },
-
-  {
-    name:
-      "vite",
-
-    matches:
-      [
-        /vite/i,
-        /react/i,
-        /vue/i,
-        /svelte/i
-      ],
-
-    allowed:
-      [
-        /\bvite\s+build\b/i
-      ]
-
-  },
-
-  {
-    name:
-      "react",
-
-    matches:
-      [
-        /react/i
-      ],
-
-    allowed:
-      [
-        /\bvite\s+build\b/i,
-        /\breact-scripts\s+build\b/i,
-        /\bwebpack\b.*\bbuild\b/i,
-        /\btsc\b/i,
-        /\btsc\s+--build\b/i
-      ]
-
-  },
-
-  {
-    name:
-      "vue",
-
-    matches:
-      [
-        /vue/i
-      ],
-
-    allowed:
-      [
-        /\bvite\s+build\b/i,
-        /\bvue-cli-service\s+build\b/i
-      ]
-
-  },
-
-  {
-    name:
-      "svelte",
-
-    matches:
-      [
-        /svelte/i
-      ],
-
-    allowed:
-      [
-        /\bvite\s+build\b/i,
-        /\bsvelte-kit\s+build\b/i
-      ]
-
-  },
-
-  {
-    name:
-      "typescript",
-
-    matches:
-      [
-        /typescript/i,
-        /\bnode\b.*typescript/i
-      ],
-
-    allowed:
-      [
-        /\btsc\b/i,
-        /\btsc\s+--build\b/i,
-        /\besbuild\b/i,
-        /\btsup\b/i,
-        /\bswc\b/i
-      ]
+    return logger.info(message);
 
   }
 
-];
+}
+
+
+function logSuccess(message) {
+
+  if (
+    logger &&
+    typeof logger.success === "function"
+  ) {
+
+    return logger.success(message);
+
+  }
+
+  if (
+    logger &&
+    typeof logger.info === "function"
+  ) {
+
+    return logger.info(
+      `[SUCCESS] ${message}`
+    );
+
+  }
+
+}
+
+
+function logWarning(message) {
+
+  if (
+    logger &&
+    typeof logger.warning === "function"
+  ) {
+
+    return logger.warning(message);
+
+  }
+
+  if (
+    logger &&
+    typeof logger.warn === "function"
+  ) {
+
+    return logger.warn(message);
+
+  }
+
+  if (
+    logger &&
+    typeof logger.info === "function"
+  ) {
+
+    return logger.info(
+      `[WARNING] ${message}`
+    );
+
+  }
+
+}
+
+
+function logError(message) {
+
+  if (
+    logger &&
+    typeof logger.error === "function"
+  ) {
+
+    return logger.error(message);
+
+  }
+
+}
 
 
 /* =========================================================
@@ -331,7 +241,7 @@ function safeString(
 
 
 /* =========================================================
-   SAFE JSON STRINGIFY
+   SAFE JSON
 ========================================================= */
 
 function safeJson(
@@ -454,11 +364,10 @@ function classifyFramework(
   const dependencyNames =
     Object.keys(
       dependencies
-    )
-      .map(
-        item =>
-          item.toLowerCase()
-      );
+    ).map(
+      item =>
+        item.toLowerCase()
+    );
 
 
   if (
@@ -567,13 +476,6 @@ function normalizeFilePath(
     );
 
 
-  filePath =
-    filePath.replace(
-      /^\/+/,
-      ""
-    );
-
-
   if (
     filePath.includes("\0")
   ) {
@@ -581,6 +483,31 @@ function normalizeFilePath(
     return null;
 
   }
+
+
+  if (
+    filePath.includes(":")
+  ) {
+
+    return null;
+
+  }
+
+
+  if (
+    filePath.startsWith("~")
+  ) {
+
+    return null;
+
+  }
+
+
+  filePath =
+    filePath.replace(
+      /^\/+/,
+      ""
+    );
 
 
   const segments =
@@ -599,16 +526,6 @@ function normalizeFilePath(
   }
 
 
-  if (
-    filePath.includes(":") ||
-    filePath.startsWith("~")
-  ) {
-
-    return null;
-
-  }
-
-
   filePath =
     filePath.replace(
       /\/+/g,
@@ -616,7 +533,17 @@ function normalizeFilePath(
     );
 
 
-  return filePath || null;
+  if (
+    filePath === "." ||
+    filePath === ""
+  ) {
+
+    return null;
+
+  }
+
+
+  return filePath;
 
 }
 
@@ -654,7 +581,7 @@ function normalizeFileContent(
 
 
 /* =========================================================
-   NORMALIZE FILE
+   FILE
 ========================================================= */
 
 function normalizeFile(
@@ -705,7 +632,7 @@ function normalizeFile(
 
 
 /* =========================================================
-   NORMALIZE FILES
+   FILES
 ========================================================= */
 
 function normalizeFiles(
@@ -755,8 +682,7 @@ function normalizeFiles(
 
 
     const key =
-      normalizedFile.path
-        .toLowerCase();
+      normalizedFile.path.toLowerCase();
 
 
     if (
@@ -783,7 +709,7 @@ function normalizeFiles(
 
 
 /* =========================================================
-   BUILD REQUEST NORMALIZATION
+   BUILD REQUEST
 ========================================================= */
 
 function normalizeBuildRequest(
@@ -856,27 +782,459 @@ function normalizeBuildRequest(
 
 
 /* =========================================================
-   BUILD CONTEXT
+   PACKAGE JSON PARSER
 ========================================================= */
 
-function createBuildContext(
-  request
+function parsePackageJson(
+  content
 ) {
+
+  if (
+    typeof content !== "string"
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        "package.json content is not a string."
+
+    };
+
+  }
+
+
+  try {
+
+    const parsed =
+      JSON.parse(
+        content
+      );
+
+
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+
+      return {
+
+        valid:
+          false,
+
+        error:
+          "package.json must contain a JSON object."
+
+      };
+
+    }
+
+
+    return {
+
+      valid:
+        true,
+
+      data:
+        parsed
+
+    };
+
+  } catch (error) {
+
+    return {
+
+      valid:
+        false,
+
+      error:
+        `package.json contains invalid JSON: ${
+          error?.message ||
+          "parse error"
+        }`
+
+    };
+
+  }
+
+}
+
+
+/* =========================================================
+   BUILD SCRIPT
+========================================================= */
+
+function getBuildScript(
+  packageJson
+) {
+
+  return safeString(
+    packageJson?.scripts?.build,
+    1000
+  );
+
+}
+
+
+/* =========================================================
+   COMMAND NORMALIZATION
+========================================================= */
+
+function normalizeCommand(
+  command
+) {
+
+  return safeString(
+    command,
+    2000
+  )
+    .replace(
+      /\s+/g,
+      " "
+    )
+    .trim();
+
+}
+
+
+/* =========================================================
+   LONG-RUNNING COMMAND DETECTION
+========================================================= */
+
+/*
+ * These commands are NEVER acceptable as scripts.build.
+ *
+ * The authoritative executor runs:
+ *
+ *     npm run build
+ *
+ * Therefore "build" must terminate.
+ */
+
+const FORBIDDEN_BUILD_COMMAND_PATTERNS = [
+
+  /*
+   * Node servers.
+   */
+
+  /\bnode(?:js)?\s+(?:\.\/)?(?:server|index|app|main)\.(?:js|cjs|mjs|ts)\b/i,
+
+  /\bnode(?:js)?\s+.*(?:server|express|fastify|koa)\b/i,
+
+  /*
+   * Package-manager runtime commands.
+   */
+
+  /\bnpm\s+(?:start|run\s+start)\b/i,
+
+  /\byarn\s+start\b/i,
+
+  /\bpnpm\s+start\b/i,
+
+  /\bbun\s+start\b/i,
+
+  /*
+   * Development commands.
+   */
+
+  /\bnpm\s+(?:run\s+dev|dev)\b/i,
+
+  /\byarn\s+dev\b/i,
+
+  /\bpnpm\s+dev\b/i,
+
+  /\bbun\s+dev\b/i,
+
+  /\bnext\s+dev\b/i,
+
+  /\bvite\s+dev\b/i,
+
+  /*
+   * Dev servers.
+   */
+
+  /\bnodemon\b/i,
+
+  /\bts-node-dev\b/i,
+
+  /\bwebpack-dev-server\b/i,
+
+  /\bhttp-server\b/i,
+
+  /\bserve\s+-s\b/i,
+
+  /*
+   * Watch mode.
+   */
+
+  /\b--watch\b/i,
+
+  /\bwatch\s+--/i,
+
+  /*
+   * Explicit preview servers.
+   */
+
+  /\bvite\s+preview\b/i,
+
+  /\bnext\s+start\b/i
+
+];
+
+
+/* =========================================================
+   KNOWN FINITE BUILD COMMANDS
+========================================================= */
+
+const KNOWN_BUILD_COMMAND_PATTERNS = [
+
+  /\bvite\s+build\b/i,
+
+  /\bnext\s+build\b/i,
+
+  /\breact-scripts\s+build\b/i,
+
+  /\bvue-cli-service\s+build\b/i,
+
+  /\bsvelte-kit\s+build\b/i,
+
+  /\bng\s+build\b/i,
+
+  /\bwebpack\b/i,
+
+  /\brollup\b/i,
+
+  /\bparcel\s+build\b/i,
+
+  /\besbuild\b/i,
+
+  /\besbuild\s+.*--bundle\b/i,
+
+  /\btsc\b/i,
+
+  /\btsup\b/i,
+
+  /\bswc\b/i,
+
+  /\bbabel\b/i,
+
+  /\bastro\s+build\b/i,
+
+  /\bremix\s+build\b/i,
+
+  /\bnuxt\s+build\b/i,
+
+  /\bqwik\s+build\b/i
+
+];
+
+
+/* =========================================================
+   RUNTIME COMMAND DETECTION
+========================================================= */
+
+function isLongRunningRuntimeCommand(
+  command
+) {
+
+  const normalized =
+    normalizeCommand(
+      command
+    );
+
+
+  if (!normalized) {
+
+    return false;
+
+  }
+
+
+  return FORBIDDEN_BUILD_COMMAND_PATTERNS
+    .some(
+      pattern =>
+        pattern.test(
+          normalized
+        )
+    );
+
+}
+
+
+/* =========================================================
+   FINITE BUILD DETECTION
+========================================================= */
+
+function looksLikeFiniteBuildCommand(
+  command
+) {
+
+  const normalized =
+    normalizeCommand(
+      command
+    );
+
+
+  if (!normalized) {
+
+    return false;
+
+  }
+
+
+  if (
+    isLongRunningRuntimeCommand(
+      normalized
+    )
+  ) {
+
+    return false;
+
+  }
+
+
+  return KNOWN_BUILD_COMMAND_PATTERNS
+    .some(
+      pattern =>
+        pattern.test(
+          normalized
+        )
+    );
+
+}
+
+
+/* =========================================================
+   FRAMEWORK BUILD RULES
+========================================================= */
+
+const BUILD_COMMAND_RULES = {
+
+  next: [
+
+    /\bnext\s+build\b/i
+
+  ],
+
+  vite: [
+
+    /\bvite\s+build\b/i
+
+  ],
+
+  react: [
+
+    /\bvite\s+build\b/i,
+
+    /\breact-scripts\s+build\b/i,
+
+    /\bwebpack\b/i,
+
+    /\btsc(?:\s|$)/i,
+
+    /\besbuild\b/i,
+
+    /\btsup\b/i
+
+  ],
+
+  vue: [
+
+    /\bvite\s+build\b/i,
+
+    /\bvue-cli-service\s+build\b/i
+
+  ],
+
+  svelte: [
+
+    /\bvite\s+build\b/i,
+
+    /\bsvelte-kit\s+build\b/i
+
+  ],
+
+  typescript: [
+
+    /\btsc(?:\s|$)/i,
+
+    /\besbuild\b/i,
+
+    /\btsup\b/i,
+
+    /\bswc\b/i
+
+  ],
+
+  node: [
+
+    /\btsc(?:\s|$)/i,
+
+    /\besbuild\b/i,
+
+    /\btsup\b/i,
+
+    /\bswc\b/i,
+
+    /\bwebpack\b/i,
+
+    /\brollup\b/i
+
+  ]
+
+};
+
+
+/* =========================================================
+   FRAMEWORK BUILD MATCH
+========================================================= */
+
+function matchesFrameworkBuildCommand(
+  framework,
+  packageJson,
+  command
+) {
+
+  const classification =
+    classifyFramework(
+      framework,
+      packageJson
+    );
+
+
+  const rules =
+    BUILD_COMMAND_RULES[
+      classification
+    ];
+
+
+  if (
+    !Array.isArray(rules) ||
+    rules.length === 0
+  ) {
+
+    return null;
+
+  }
+
+
+  const matched =
+    rules.some(
+      pattern =>
+        pattern.test(
+          command
+        )
+    );
+
 
   return {
 
-    userPrompt:
-      request.prompt,
+    classification,
 
-    framework:
-      request.framework,
-
-    projectId:
-      request.projectId ||
-      "not specified",
-
-    plan:
-      request.plan
+    matched
 
   };
 
@@ -884,228 +1242,518 @@ function createBuildContext(
 
 
 /* =========================================================
-   MANIFEST SYSTEM PROMPT
+   PACKAGE BUILD CONTRACT
 ========================================================= */
 
-function createManifestSystemPrompt() {
+function validatePackageBuildContract({
+  packageJson,
+  framework
+}) {
 
-  return `
-You are the ZyrionOS Project Architect.
+  if (
+    !packageJson ||
+    typeof packageJson !== "object" ||
+    Array.isArray(packageJson)
+  ) {
 
-Convert the user's software request and planning result
-into a precise, minimal, runnable project file manifest.
+    return {
 
-You are NOT generating source code yet.
+      valid:
+        false,
 
-Return ONLY valid JSON.
+      repairable:
+        true,
 
-Required format:
+      code:
+        "PACKAGE_JSON_INVALID",
 
-{
-  "projectName": "string",
-  "framework": "string",
-  "files": [
-    {
-      "path": "string",
-      "purpose": "string"
+      error:
+        "package.json must contain a valid JSON object."
+
+    };
+
+  }
+
+
+  const scripts =
+    packageJson.scripts;
+
+
+  if (
+    !scripts ||
+    typeof scripts !== "object" ||
+    Array.isArray(scripts)
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      repairable:
+        true,
+
+      code:
+        "PACKAGE_SCRIPTS_MISSING",
+
+      error:
+        "package.json is missing a valid scripts object."
+
+    };
+
+  }
+
+
+  const buildCommand =
+    getBuildScript(
+      packageJson
+    );
+
+
+  if (!buildCommand) {
+
+    return {
+
+      valid:
+        false,
+
+      repairable:
+        true,
+
+      code:
+        "BUILD_SCRIPT_MISSING",
+
+      error:
+        "package.json is missing scripts.build.",
+
+      buildCommand:
+        null
+
+    };
+
+  }
+
+
+  const normalizedCommand =
+    normalizeCommand(
+      buildCommand
+    );
+
+
+  /*
+   * -------------------------------------------------------
+   * HARD RULE #1
+   *
+   * A runtime/server/dev/watch command can NEVER be the
+   * authoritative build command.
+   * -------------------------------------------------------
+   */
+
+  if (
+    isLongRunningRuntimeCommand(
+      normalizedCommand
+    )
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      repairable:
+        true,
+
+      code:
+        "INVALID_BUILD_RUNTIME_COMMAND",
+
+      error:
+        `scripts.build is a runtime/dev/watch command and cannot be used as the authoritative build command: ${normalizedCommand}`,
+
+      buildCommand:
+        normalizedCommand
+
+    };
+
+  }
+
+
+  /*
+   * -------------------------------------------------------
+   * HARD RULE #2
+   *
+   * Build scripts must resemble a finite compiler,
+   * bundler, framework build or packaging operation.
+   * -------------------------------------------------------
+   */
+
+  const finiteBuild =
+    looksLikeFiniteBuildCommand(
+      normalizedCommand
+    );
+
+
+  const frameworkMatch =
+    matchesFrameworkBuildCommand(
+      framework,
+      packageJson,
+      normalizedCommand
+    );
+
+
+  /*
+   * Known framework.
+   */
+
+  if (
+    frameworkMatch &&
+    !frameworkMatch.matched
+  ) {
+
+    /*
+     * Allow clearly finite custom build commands only.
+     *
+     * Example:
+     *
+     *   node scripts/build.mjs
+     *
+     * can be a legitimate custom finite build script.
+     *
+     * But a plain:
+     *
+     *   node server.js
+     *
+     * has already been rejected above.
+     */
+
+    const customFiniteBuild =
+      finiteBuild ||
+      /\b(build|compile|bundle|pack|generate)\b/i
+        .test(
+          normalizedCommand
+        );
+
+
+    if (!customFiniteBuild) {
+
+      return {
+
+        valid:
+          false,
+
+        repairable:
+          true,
+
+        code:
+          "FRAMEWORK_BUILD_COMMAND_MISMATCH",
+
+        error:
+          `scripts.build does not match a recognized finite build strategy for ${frameworkMatch.classification}: ${normalizedCommand}`,
+
+        buildCommand:
+          normalizedCommand,
+
+        expectedFramework:
+          frameworkMatch.classification
+
+      };
+
     }
-  ]
-}
 
-STRICT RULES:
+  }
 
-1. JSON only.
-2. No Markdown.
-3. No code fences.
-4. No explanations.
-5. Every file must have a unique path.
-6. Paths must be relative project paths.
-7. Never use ../ or absolute paths.
-8. Never use Windows drive paths.
-9. Include all files required for the application to run.
-10. Include package.json when the project uses npm/pnpm/yarn/bun
-    or has dependencies/build requirements.
-11. Include required configuration files.
-12. Include real application entry points.
-13. Include required components, pages, services and utilities.
-14. Do not create unnecessary duplicate files.
-15. Do not create binary files.
-16. Never create secrets or credentials.
-17. Do not invent unnecessary external services.
-18. Keep the project within the user's requested scope.
-19. Prefer the smallest complete architecture that satisfies
-    the request.
-20. Do not inflate a simple application into an enterprise
-    architecture without a requirement for it.
-21. Maximum files: ${MAX_FILES}.
-22. If package.json is included, it MUST contain a finite
-    authoritative build strategy appropriate to the framework.
-23. A build command must compile/package the application.
-24. A build command MUST NOT start a development server,
-    production server, watcher, or long-running process.
-25. NEVER use "node server.js", "npm start", "next dev",
-    "vite", "nodemon", or equivalent runtime commands
-    as the build command.
-`;
+
+  /*
+   * Generic project.
+   */
+
+  if (
+    !frameworkMatch &&
+    !finiteBuild
+  ) {
+
+    /*
+     * Generic custom build commands are accepted only if
+     * they explicitly look like a build/compile/bundle
+     * operation.
+     */
+
+    const customBuild =
+      /\b(build|compile|bundle|pack|generate)\b/i
+        .test(
+          normalizedCommand
+        );
+
+
+    if (!customBuild) {
+
+      return {
+
+        valid:
+          false,
+
+        repairable:
+          true,
+
+        code:
+          "BUILD_COMMAND_NOT_FINITE",
+
+        error:
+          `scripts.build does not appear to be a finite build/compile/package command: ${normalizedCommand}`,
+
+        buildCommand:
+          normalizedCommand
+
+      };
+
+    }
+
+  }
+
+
+  /*
+   * -------------------------------------------------------
+   * HARD RULE #3
+   *
+   * start/dev/preview may exist, but build may not alias
+   * directly to them.
+   * -------------------------------------------------------
+   */
+
+  const runtimeScriptNames = [
+    "start",
+    "dev",
+    "preview",
+    "serve"
+  ];
+
+
+  for (
+    const scriptName of runtimeScriptNames
+  ) {
+
+    const scriptValue =
+      safeString(
+        scripts[scriptName],
+        1000
+      );
+
+
+    if (
+      !scriptValue
+    ) {
+
+      continue;
+
+    }
+
+
+    /*
+     * This does NOT reject the runtime script.
+     *
+     * It only prevents build from directly becoming
+     * the same runtime command.
+     */
+
+    if (
+      normalizeCommand(
+        scriptValue
+      ) ===
+      normalizedCommand &&
+      isLongRunningRuntimeCommand(
+        scriptValue
+      )
+    ) {
+
+      return {
+
+        valid:
+          false,
+
+        repairable:
+          true,
+
+        code:
+          "BUILD_ALIASES_RUNTIME_SCRIPT",
+
+        error:
+          `scripts.build directly aliases runtime script "${scriptName}" and cannot be authoritative: ${normalizedCommand}`,
+
+        buildCommand:
+          normalizedCommand
+
+      };
+
+    }
+
+  }
+
+
+  return {
+
+    valid:
+      true,
+
+    repairable:
+      false,
+
+    code:
+      "BUILD_CONTRACT_VALID",
+
+    error:
+      null,
+
+    buildCommand:
+      normalizedCommand,
+
+    framework:
+      classifyFramework(
+        framework,
+        packageJson
+      )
+
+  };
 
 }
 
 
 /* =========================================================
-   FILE BATCH SYSTEM PROMPT
+   PACKAGE FILE VALIDATION
 ========================================================= */
 
-function createFileBatchSystemPrompt() {
+function validatePackageJsonFile(
+  file,
+  framework
+) {
 
-  return `
-You are the ZyrionOS Code Builder.
-
-The project architecture has already been planned.
-
-You are generating ONLY a small batch of requested files.
-
-Return ONLY valid JSON.
-
-Required format:
-
-{
-  "files": [
-    {
-      "path": "string",
-      "content": "complete file content"
-    }
-  ]
-}
-
-STRICT RULES:
-
-1. Return valid JSON only.
-2. No Markdown.
-3. No code fences.
-4. No explanations.
-5. Generate EVERY requested file.
-6. Each requested path must appear exactly once.
-7. Paths must exactly match the requested paths.
-8. Each file must contain complete usable code.
-9. Never use TODO placeholders.
-10. Never use "rest of code".
-11. Never omit code.
-12. Never truncate code.
-13. Never generate fake imports.
-14. Respect the selected framework.
-15. Respect dependency requirements.
-16. Keep files internally consistent.
-17. Never generate secrets.
-18. Use environment variables for secrets.
-19. Do not invent backend endpoints.
-20. Do not rewrite files outside the current batch.
-21. Do not return files from another batch.
-22. Never return an empty files array.
-23. The CURRENT FILE BATCH is authoritative.
-24. Return complete content for every requested file.
-25. Extra files are unnecessary and will be discarded.
-26. Maximum requested files in this response: ${FILES_PER_BATCH}.
-
-PACKAGE.JSON BUILD CONTRACT:
-
-If package.json is in the current batch:
-
-27. The "scripts.build" field MUST exist when this project
-    requires an authoritative build.
-28. "scripts.build" MUST be a finite build/compile/package
-    command.
-29. "scripts.build" MUST NOT start a server.
-30. "scripts.build" MUST NOT be a dev/watch command.
-31. NEVER use:
-      node server.js
-      node index.js
-      npm start
-      npm run dev
-      next dev
-      vite
-      nodemon
-      ts-node-dev
-    as the build script.
-32. For Vite applications use "vite build".
-33. For Next.js applications use "next build".
-34. For Vue/Vite applications use "vite build".
-35. For TypeScript applications use an appropriate compiler
-    such as "tsc" when the project is configured for it.
-36. Keep "start", "dev", and "preview" separate from "build".
-37. Do not invent a server just to satisfy the build contract.
-38. Do not add unnecessary dependencies merely to create
-    a build command.
-`;
-
-}
+  const parsed =
+    parsePackageJson(
+      file?.content
+    );
 
 
-/* =========================================================
-   BATCH REPAIR SYSTEM PROMPT
-========================================================= */
+  if (
+    !parsed.valid
+  ) {
 
-function createBatchRepairSystemPrompt() {
+    return {
 
-  return `
-You are the ZyrionOS Builder Repair Agent.
+      valid:
+        false,
 
-A previous generation attempt for the current file batch
-failed validation.
+      repairable:
+        true,
 
-Repair ONLY the current requested batch.
+      code:
+        "PACKAGE_JSON_PARSE_FAILED",
 
-Return ONLY valid JSON.
+      error:
+        parsed.error,
 
-Required format:
+      file:
+        PACKAGE_JSON_PATH,
 
-{
-  "files": [
-    {
-      "path": "string",
-      "content": "complete file content"
-    }
-  ]
-}
+      missingFiles: [],
 
-STRICT RULES:
+      invalidFiles: [
+        PACKAGE_JSON_PATH
+      ],
 
-1. JSON only.
-2. No Markdown.
-3. No explanations.
-4. Generate every missing requested file.
-5. Every requested path must exactly match.
-6. Never return files outside the current batch.
-7. Never return duplicate paths.
-8. Return complete source code.
-9. Never use placeholders.
-10. Never truncate code.
-11. Preserve project architecture.
-12. Preserve framework requirements.
-13. Preserve dependency requirements.
-14. Fix the validation failure directly.
-15. Never generate secrets.
-16. Do not invent unrelated files.
-17. The requested batch is authoritative.
-18. Return only files required to complete this batch.
+      unexpectedFiles: []
 
-PACKAGE.JSON REPAIR RULES:
+    };
 
-19. If package.json is invalid because of its build script,
-    replace the build script with a real finite build command.
-20. NEVER use node server.js as the build command.
-21. NEVER use npm start as the build command.
-22. NEVER use a development/watch/server command as the build
-    command.
-23. For Vite applications use "vite build".
-24. For Next.js applications use "next build".
-25. For Vue/Vite applications use "vite build".
-26. For TypeScript applications use "tsc" or the appropriate
-    configured compiler.
-27. Keep runtime commands under "start" or "dev".
-28. Do not introduce unnecessary dependencies.
-29. Do not remove required dependencies merely to make
-    validation pass.
-`;
+  }
+
+
+  const buildContract =
+    validatePackageBuildContract({
+
+      packageJson:
+        parsed.data,
+
+      framework
+
+    });
+
+
+  if (
+    !buildContract.valid
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      repairable:
+        true,
+
+      code:
+        buildContract.code,
+
+      error:
+        buildContract.error,
+
+      file:
+        PACKAGE_JSON_PATH,
+
+      buildCommand:
+        buildContract.buildCommand ||
+        null,
+
+      expected:
+        buildContract.expectedFramework ||
+        null,
+
+      packageJson:
+        parsed.data,
+
+      missingFiles: [],
+
+      invalidFiles: [
+        PACKAGE_JSON_PATH
+      ],
+
+      unexpectedFiles: []
+
+    };
+
+  }
+
+
+  return {
+
+    valid:
+      true,
+
+    repairable:
+      false,
+
+    code:
+      "PACKAGE_JSON_VALID",
+
+    error:
+      null,
+
+    file:
+      PACKAGE_JSON_PATH,
+
+    buildCommand:
+      buildContract.buildCommand,
+
+    framework:
+      buildContract.framework,
+
+    packageJson:
+      parsed.data,
+
+    missingFiles: [],
+
+    invalidFiles: [],
+
+    unexpectedFiles: []
+
+  };
 
 }
 
@@ -1316,476 +1964,116 @@ function validateManifest(
 
 
 /* =========================================================
-   PACKAGE JSON PARSER
+   MANIFEST PACKAGE REQUIREMENT
 ========================================================= */
 
-function parsePackageJson(
-  content
+function manifestRequiresPackageJson(
+  manifestFiles,
+  framework,
+  plan
 ) {
 
+  const hasPackage =
+    manifestFiles.some(
+      file =>
+        file.path.toLowerCase() ===
+        PACKAGE_JSON_PATH
+    );
+
+
   if (
-    typeof content !== "string"
+    hasPackage
   ) {
 
-    return {
-
-      valid:
-        false,
-
-      error:
-        "package.json content is not a string."
-
-    };
+    return true;
 
   }
 
 
-  try {
+  const frameworkText =
+    safeString(
+      framework,
+      200
+    ).toLowerCase();
 
-    const parsed =
-      JSON.parse(
-        content
+
+  const planText =
+    safeJson(
+      plan,
+      20000
+    ).toLowerCase();
+
+
+  /*
+   * These project types fundamentally require package
+   * metadata for the current Node-based build pipeline.
+   */
+
+  const frameworkRequiresPackage =
+    [
+      "react",
+      "next",
+      "vue",
+      "svelte",
+      "vite",
+      "typescript",
+      "node"
+    ].some(
+      value =>
+        frameworkText.includes(
+          value
+        )
+    );
+
+
+  const planRequiresPackage =
+    /\b(?:npm|pnpm|yarn|bun|dependencies|package\.json|build command|build script)\b/i
+      .test(
+        planText
       );
 
 
-    if (
-      !parsed ||
-      typeof parsed !== "object" ||
-      Array.isArray(parsed)
-    ) {
-
-      return {
-
-        valid:
-          false,
-
-        error:
-          "package.json must contain a JSON object."
-
-      };
-
-    }
-
-
-    return {
-
-      valid:
-        true,
-
-      data:
-        parsed
-
-    };
-
-  } catch (error) {
-
-    return {
-
-      valid:
-        false,
-
-      error:
-        `package.json contains invalid JSON: ${
-          error?.message ||
-          "parse error"
-        }`
-
-    };
-
-  }
-
-}
-
-
-/* =========================================================
-   BUILD SCRIPT
-========================================================= */
-
-function getBuildScript(
-  packageJson
-) {
-
-  return safeString(
-    packageJson?.scripts?.build,
-    1000
+  return (
+    frameworkRequiresPackage ||
+    planRequiresPackage
   );
 
 }
 
 
 /* =========================================================
-   RUNTIME COMMAND DETECTION
+   MANIFEST CONTRACT
 ========================================================= */
 
-function isLongRunningRuntimeCommand(
-  command
-) {
-
-  const normalized =
-    safeString(
-      command,
-      2000
-    );
-
-
-  if (!normalized) {
-
-    return false;
-
-  }
-
-
-  return FORBIDDEN_BUILD_COMMAND_PATTERNS
-    .some(
-      pattern =>
-        pattern.test(
-          normalized
-        )
-    );
-
-}
-
-
-/* =========================================================
-   BUILD COMMAND RULE MATCH
-========================================================= */
-
-function getBuildRule(
+function validateManifestContract({
+  manifest,
   framework,
-  packageJson
-) {
-
-  const classification =
-    classifyFramework(
-      framework,
-      packageJson
-    );
-
-
-  const matchingRules =
-    BUILD_COMMAND_RULES.filter(
-      rule =>
-        rule.matches.some(
-          pattern =>
-            pattern.test(
-              framework || ""
-            ) ||
-            rule.matches.some(
-              pattern =>
-                pattern.test(
-                  classification
-                )
-            )
-        )
-    );
-
-
-  /*
-   * Prefer the classified framework.
-   */
-  const exact =
-    BUILD_COMMAND_RULES.find(
-      rule =>
-        rule.name ===
-        classification
-    );
-
-
-  return exact ||
-    matchingRules[0] ||
-    null;
-
-}
-
-
-/* =========================================================
-   BUILD CONTRACT VALIDATION
-========================================================= */
-
-function validatePackageBuildContract({
-  packageJson,
-  framework
+  plan
 }) {
 
-  if (
-    !packageJson ||
-    typeof packageJson !== "object"
-  ) {
-
-    return {
-
-      valid:
-        false,
-
-      code:
-        "PACKAGE_JSON_INVALID",
-
-      error:
-        "package.json is not a valid object."
-
-    };
-
-  }
+  const manifestFiles =
+    manifest.files;
 
 
-  const scripts =
-    packageJson.scripts;
-
-
-  if (
-    !scripts ||
-    typeof scripts !== "object"
-  ) {
-
-    return {
-
-      valid:
-        false,
-
-      code:
-        "PACKAGE_SCRIPTS_MISSING",
-
-      error:
-        "package.json is missing a scripts object."
-
-    };
-
-  }
-
-
-  const buildCommand =
-    getBuildScript(
-      packageJson
-    );
-
-
-  if (!buildCommand) {
-
-    return {
-
-      valid:
-        false,
-
-      code:
-        "BUILD_SCRIPT_MISSING",
-
-      error:
-        "package.json is missing scripts.build."
-
-    };
-
-  }
-
-
-  /*
-   * Primary production safety rule.
-   */
-  if (
-    isLongRunningRuntimeCommand(
-      buildCommand
-    )
-  ) {
-
-    return {
-
-      valid:
-        false,
-
-      code:
-        "INVALID_BUILD_RUNTIME_COMMAND",
-
-      error:
-        `scripts.build contains a runtime/dev-server command and cannot be used as an authoritative build: ${buildCommand}`,
-
-      buildCommand
-
-    };
-
-  }
-
-
-  /*
-   * Watch-mode detection.
-   */
-  if (
-    /\b--watch\b/i.test(
-      buildCommand
-    ) ||
-    /\bwatch\b/i.test(
-      buildCommand
-    ) &&
-    !/\bwatchman\b/i.test(
-      buildCommand
-    )
-  ) {
-
-    return {
-
-      valid:
-        false,
-
-      code:
-        "BUILD_WATCH_MODE_FORBIDDEN",
-
-      error:
-        `scripts.build must be finite and cannot run in watch mode: ${buildCommand}`,
-
-      buildCommand
-
-    };
-
-  }
-
-
-  const rule =
-    getBuildRule(
+  const packageRequired =
+    manifestRequiresPackageJson(
+      manifestFiles,
       framework,
-      packageJson
+      plan
     );
 
 
-  /*
-   * If we know the framework, make sure the build
-   * command resembles an actual build operation.
-   */
-  if (rule) {
-
-    const allowed =
-      rule.allowed.some(
-        pattern =>
-          pattern.test(
-            buildCommand
-          )
-      );
-
-
-    if (!allowed) {
-
-      /*
-       * A custom build command can still be legitimate.
-       *
-       * Accept commands that clearly invoke a compiler/
-       * bundler/build tool rather than a runtime server.
-       */
-      const looksLikeCompiler =
-        /\b(build|compile|tsc|esbuild|tsup|swc|webpack|rollup|parcel)\b/i
-          .test(
-            buildCommand
-          );
-
-
-      if (!looksLikeCompiler) {
-
-        return {
-
-          valid:
-            false,
-
-          code:
-            "FRAMEWORK_BUILD_COMMAND_MISMATCH",
-
-          error:
-            `Build command does not match the detected ${rule.name} build contract: ${buildCommand}`,
-
-          buildCommand,
-
-          expected:
-            rule.name
-
-        };
-
-      }
-
-    }
-
-  }
-
-
-  /*
-   * Runtime commands are allowed to exist under start/dev.
-   * They simply cannot be the build command.
-   */
-  return {
-
-    valid:
-      true,
-
-    code:
-      "BUILD_CONTRACT_VALID",
-
-    buildCommand,
-
-    framework:
-      classifyFramework(
-        framework,
-        packageJson
-      )
-
-  };
-
-}
-
-
-/* =========================================================
-   PACKAGE FILE CONTRACT
-========================================================= */
-
-function validatePackageJsonFile(
-  file,
-  framework
-) {
-
-  const parsed =
-    parsePackageJson(
-      file?.content
-    );
-
-
-  if (!parsed.valid) {
-
-    return {
-
-      valid:
-        false,
-
-      repairable:
-        true,
-
-      code:
-        "PACKAGE_JSON_PARSE_FAILED",
-
-      error:
-        parsed.error,
-
-      file:
-        PACKAGE_JSON_PATH,
-
-      missingFiles: [],
-
-      invalidFiles: [
+  const hasPackage =
+    manifestFiles.some(
+      file =>
+        file.path.toLowerCase() ===
         PACKAGE_JSON_PATH
-      ],
-
-      unexpectedFiles: []
-
-    };
-
-  }
-
-
-  const buildContract =
-    validatePackageBuildContract({
-
-      packageJson:
-        parsed.data,
-
-      framework
-
-    });
+    );
 
 
   if (
-    !buildContract.valid
+    packageRequired &&
+    !hasPackage
   ) {
 
     return {
@@ -1793,36 +2081,11 @@ function validatePackageJsonFile(
       valid:
         false,
 
-      repairable:
-        true,
-
       code:
-        buildContract.code,
+        "MANIFEST_PACKAGE_JSON_REQUIRED",
 
       error:
-        buildContract.error,
-
-      file:
-        PACKAGE_JSON_PATH,
-
-      buildCommand:
-        buildContract.buildCommand ||
-        null,
-
-      expected:
-        buildContract.expected ||
-        null,
-
-      packageJson:
-        parsed.data,
-
-      missingFiles: [],
-
-      invalidFiles: [
-        PACKAGE_JSON_PATH
-      ],
-
-      unexpectedFiles: []
+        "The generated manifest requires package.json for the selected project/framework/build architecture."
 
     };
 
@@ -1834,32 +2097,11 @@ function validatePackageJsonFile(
     valid:
       true,
 
-    repairable:
-      false,
-
     code:
-      "PACKAGE_JSON_VALID",
+      "MANIFEST_CONTRACT_VALID",
 
     error:
-      null,
-
-    file:
-      PACKAGE_JSON_PATH,
-
-    buildCommand:
-      buildContract.buildCommand,
-
-    framework:
-      buildContract.framework,
-
-    packageJson:
-      parsed.data,
-
-    missingFiles: [],
-
-    invalidFiles: [],
-
-    unexpectedFiles: []
+      null
 
   };
 
@@ -1867,7 +2109,7 @@ function validatePackageJsonFile(
 
 
 /* =========================================================
-   BATCH VALIDATION
+   FILE BATCH VALIDATION
 ========================================================= */
 
 function validateGeneratedBatch(
@@ -1888,6 +2130,9 @@ function validateGeneratedBatch(
 
       repairable:
         true,
+
+      code:
+        "GENERATED_BATCH_INVALID",
 
       error:
         "Generated batch is not an object.",
@@ -1922,6 +2167,9 @@ function validateGeneratedBatch(
       repairable:
         true,
 
+      code:
+        "GENERATED_FILES_ARRAY_MISSING",
+
       error:
         "Generated batch does not contain a files array.",
 
@@ -1952,6 +2200,9 @@ function validateGeneratedBatch(
 
       repairable:
         true,
+
+      code:
+        "GENERATED_FILES_EMPTY",
 
       error:
         "Generated batch returned no files.",
@@ -1984,6 +2235,9 @@ function validateGeneratedBatch(
 
       repairable:
         true,
+
+      code:
+        "RAW_BATCH_FILE_LIMIT_EXCEEDED",
 
       error:
         `AI response exceeded the raw batch safety limit of ${MAX_RAW_BATCH_RESPONSE_FILES} files.`,
@@ -2035,7 +2289,6 @@ function validateGeneratedBatch(
 
   const received =
     new Map();
-
 
   const unexpectedFiles =
     [];
@@ -2105,6 +2358,9 @@ function validateGeneratedBatch(
         repairable:
           true,
 
+        code:
+          "DUPLICATE_REQUESTED_FILE",
+
         error:
           `Duplicate requested file generated: ${file.path}`,
 
@@ -2118,8 +2374,7 @@ function validateGeneratedBatch(
             received.values()
           ),
 
-        missingFiles:
-          [],
+        missingFiles: [],
 
         unexpectedFiles,
 
@@ -2163,10 +2418,13 @@ function validateGeneratedBatch(
 
 
   /*
-   * Package contract is checked AFTER requested-path
-   * filtering, so unrelated package.json files cannot
-   * influence the result.
+   * -------------------------------------------------------
+   * package.json contract
+   *
+   * It is checked only AFTER requested-path filtering.
+   * -------------------------------------------------------
    */
+
   const packageFile =
     received.get(
       PACKAGE_JSON_PATH
@@ -2177,7 +2435,9 @@ function validateGeneratedBatch(
     null;
 
 
-  if (packageFile) {
+  if (
+    packageFile
+  ) {
 
     packageValidation =
       validatePackageJsonFile(
@@ -2198,11 +2458,11 @@ function validateGeneratedBatch(
         repairable:
           true,
 
-        error:
-          packageValidation.error,
-
         code:
           packageValidation.code,
+
+        error:
+          packageValidation.error,
 
         files:
           Array.from(
@@ -2229,17 +2489,29 @@ function validateGeneratedBatch(
   }
 
 
+  /*
+   * -------------------------------------------------------
+   * Invalid files are never silently accepted.
+   * -------------------------------------------------------
+   */
+
   if (
-    missingFiles.length === 0
+    invalidFiles.length > 0
   ) {
 
     return {
 
       valid:
-        true,
+        false,
 
       repairable:
-        false,
+        true,
+
+      code:
+        "INVALID_GENERATED_FILES",
+
+      error:
+        `One or more generated files are invalid: ${invalidFiles.join(", ")}`,
 
       files:
         Array.from(
@@ -2251,9 +2523,61 @@ function validateGeneratedBatch(
           received.values()
         ),
 
+      missingFiles,
+
       unexpectedFiles,
 
-      missingFiles: [],
+      invalidFiles,
+
+      packageValidation
+
+    };
+
+  }
+
+
+  /*
+   * -------------------------------------------------------
+   * Missing requested files.
+   * -------------------------------------------------------
+   */
+
+  if (
+    missingFiles.length > 0
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      repairable:
+        true,
+
+      code:
+        "MISSING_REQUESTED_FILES",
+
+      error:
+        `Missing generated file(s): ${missingFiles
+          .map(
+            file =>
+              file.path
+          )
+          .join(", ")}`,
+
+      files:
+        Array.from(
+          received.values()
+        ),
+
+      validFiles:
+        Array.from(
+          received.values()
+        ),
+
+      missingFiles,
+
+      unexpectedFiles,
 
       invalidFiles,
 
@@ -2267,18 +2591,16 @@ function validateGeneratedBatch(
   return {
 
     valid:
-      false,
-
-    repairable:
       true,
 
+    repairable:
+      false,
+
+    code:
+      "BATCH_VALID",
+
     error:
-      `Missing generated file(s): ${missingFiles
-        .map(
-          file =>
-            file.path
-        )
-        .join(", ")}`,
+      null,
 
     files:
       Array.from(
@@ -2290,9 +2612,9 @@ function validateGeneratedBatch(
         received.values()
       ),
 
-    unexpectedFiles,
+    missingFiles: [],
 
-    missingFiles,
+    unexpectedFiles,
 
     invalidFiles,
 
@@ -2304,7 +2626,7 @@ function validateGeneratedBatch(
 
 
 /* =========================================================
-   FILE BATCHING
+   BATCHING
 ========================================================= */
 
 function createBatches(
@@ -2360,7 +2682,7 @@ function createGeneratedFileIndex(
 
 
 /* =========================================================
-   COMPACT MANIFEST CONTEXT
+   MANIFEST CONTEXT
 ========================================================= */
 
 function createManifestContext(
@@ -2386,7 +2708,7 @@ function createManifestContext(
 
 
 /* =========================================================
-   BUILD BATCH REQUEST
+   BATCH USER MESSAGE
 ========================================================= */
 
 function createBatchUserMessage({
@@ -2429,41 +2751,36 @@ function createBatchUserMessage({
     "";
 
 
-  if (repairContext) {
+  if (
+    repairContext
+  ) {
 
-    const validFiles =
-      Array.isArray(
-        repairContext.validFiles
-      )
-        ? repairContext.validFiles
-        : Array.isArray(
-            repairContext.files
-          )
-          ? repairContext.files
-          : [];
+    const packageValidation =
+      repairContext.packageValidation ||
+      {};
 
 
     repairSection = `
 
+=========================================================
 REPAIR MODE
+=========================================================
 
-The previous attempt failed the Builder contract.
+The previous generation attempt failed the Builder
+contract.
 
-VALID FILES ALREADY RECEIVED:
+PREVIOUS VALIDATION CODE:
 
-${safeJson(
-  validFiles.map(
-    file => ({
-      path:
-        file.path,
+${safeString(
+  repairContext.code || "",
+  500
+)}
 
-      size:
-        typeof file.content === "string"
-          ? file.content.length
-          : undefined
-    })
-  ),
-  12000
+PREVIOUS VALIDATION ERROR:
+
+${safeString(
+  repairContext.error || "",
+  4000
 )}
 
 MISSING REQUESTED FILES:
@@ -2480,25 +2797,18 @@ ${safeJson(
   5000
 )}
 
-UNEXPECTED FILES THAT MUST BE IGNORED:
+UNEXPECTED FILES:
 
 ${safeJson(
   repairContext.unexpectedFiles || [],
-  8000
+  5000
 )}
 
-PACKAGE / BUILD CONTRACT:
+PACKAGE VALIDATION:
 
 ${safeJson(
-  repairContext.packageValidation || {},
-  10000
-)}
-
-PREVIOUS VALIDATION ERROR:
-
-${safeString(
-  repairContext.error || "",
-  3000
+  packageValidation,
+  12000
 )}
 
 CURRENT REQUESTED BATCH:
@@ -2508,34 +2818,87 @@ ${safeJson(
   10000
 )}
 
-If package.json is listed in the current batch,
-repair its build contract directly.
+IMPORTANT:
 
-The build script must be a finite compile/build/package
-operation.
+If package.json is in the current batch and the previous
+failure concerns scripts.build, repair package.json.
 
-NEVER use:
+The authoritative executor runs:
+
+    npm run build
+
+Therefore scripts.build MUST terminate after performing
+a finite compilation/bundling/build/package operation.
+
+NEVER use as scripts.build:
 
 - node server.js
+- node ./server.js
 - node index.js
+- node ./index.js
 - npm start
+- npm run start
 - npm run dev
+- yarn start
+- pnpm start
+- bun start
 - next dev
-- vite as a dev server
+- next start
+- vite
+- vite dev
+- vite preview
 - nodemon
 - ts-node-dev
+- webpack-dev-server
 - any watcher
 - any long-running server
 
-as scripts.build.
+For Vite:
 
-Generate ONLY the current requested files.
+    "build": "vite build"
+
+For Next.js:
+
+    "build": "next build"
+
+For Vue/Vite:
+
+    "build": "vite build"
+
+For Svelte/Vite:
+
+    "build": "vite build"
+
+For TypeScript:
+
+    "build": "tsc"
+
+or the configured finite compiler/build command.
+
+Keep:
+
+    build
+    dev
+    start
+    preview
+
+as separate concerns.
+
+Do NOT create unnecessary files.
+
+Do NOT change architecture.
+
+Generate ONLY the requested current batch.
 `;
 
   }
 
 
   return `
+=========================================================
+ZYRIONOS BUILDER
+=========================================================
+
 USER REQUEST:
 
 ${request.prompt}
@@ -2548,7 +2911,7 @@ FRAMEWORK:
 
 ${manifestFramework}
 
-PLANNING CONTEXT:
+PLANNING RESULT:
 
 ${request.planString}
 
@@ -2570,33 +2933,99 @@ ${safeJson(
   MAX_GENERATED_INDEX_SIZE
 )}
 
-IMPORTANT BATCH CONTRACT:
+=========================================================
+CURRENT BATCH CONTRACT
+=========================================================
 
-The CURRENT FILE BATCH is the ONLY authoritative
-generation target.
+The CURRENT FILE BATCH is the ONLY generation target.
 
-Generate every file listed under CURRENT FILE BATCH.
+Generate EVERY file listed in CURRENT FILE BATCH.
 
 Each requested path must appear exactly once.
 
 Do NOT generate files from another batch.
 
-If you accidentally think another file is required,
-do NOT return it unless it is listed in CURRENT FILE BATCH.
+Do NOT invent additional architecture.
 
-Return complete source code.
+Do NOT return files merely because you believe they
+might be useful.
 
-Return ONLY JSON.
+Complete source code is required.
 
-If package.json is in this batch:
+Return ONLY valid JSON.
 
-- scripts.build must exist when an authoritative build
-  is required.
-- scripts.build must be finite.
-- scripts.build must compile/package the application.
-- scripts.build must NEVER start a server.
-- scripts.build must NEVER be a dev/watch command.
-- keep start/dev/preview separate from build.
+=========================================================
+PACKAGE.JSON BUILD CONTRACT
+=========================================================
+
+If package.json is included:
+
+1. scripts.build MUST exist when the project requires
+   an authoritative build.
+
+2. scripts.build MUST be finite.
+
+3. scripts.build MUST compile, bundle, package or otherwise
+   produce the project's build output.
+
+4. scripts.build MUST terminate.
+
+5. scripts.build MUST NOT start a server.
+
+6. scripts.build MUST NOT run a development server.
+
+7. scripts.build MUST NOT run a watcher.
+
+8. scripts.build MUST NOT be a preview command.
+
+9. NEVER use:
+
+   node server.js
+   node ./server.js
+   node index.js
+   npm start
+   npm run start
+   npm run dev
+   next dev
+   next start
+   vite
+   vite dev
+   vite preview
+   nodemon
+   ts-node-dev
+   webpack-dev-server
+
+   as scripts.build.
+
+10. Vite applications should normally use:
+
+    "build": "vite build"
+
+11. Next.js applications should normally use:
+
+    "build": "next build"
+
+12. Vue/Vite applications should normally use:
+
+    "build": "vite build"
+
+13. Svelte/Vite applications should normally use:
+
+    "build": "vite build"
+
+14. TypeScript applications should use an appropriate
+    finite compiler/build command.
+
+15. Runtime commands belong under start.
+
+16. Development commands belong under dev.
+
+17. Preview commands belong under preview.
+
+18. Do NOT add a server merely to satisfy the build
+    contract.
+
+19. Do NOT add unnecessary dependencies.
 
 ${repairSection}
 `;
@@ -2605,7 +3034,322 @@ ${repairSection}
 
 
 /* =========================================================
-   REQUEST ONE BATCH
+   MANIFEST SYSTEM PROMPT
+========================================================= */
+
+function createManifestSystemPrompt() {
+
+  return `
+You are the ZyrionOS Project Architect.
+
+Convert the user's software request and planning result
+into a precise, minimal project file manifest.
+
+You are NOT generating source code yet.
+
+Return ONLY valid JSON.
+
+FORMAT:
+
+{
+  "projectName": "string",
+  "framework": "string",
+  "files": [
+    {
+      "path": "string",
+      "purpose": "string"
+    }
+  ]
+}
+
+STRICT RULES:
+
+1. JSON only.
+2. No Markdown.
+3. No code fences.
+4. No explanations.
+5. Every file must have a unique path.
+6. Paths must be relative project paths.
+7. Never use ../.
+8. Never use absolute paths.
+9. Never use Windows drive paths.
+10. Include all files required by the planned application.
+11. Include package.json when the selected framework/build
+    architecture requires it.
+12. Include required configuration files.
+13. Include real application entry points.
+14. Include required components/pages/services/utilities.
+15. Do not create duplicate files.
+16. Do not create binary files.
+17. Never create secrets.
+18. Never create credentials.
+19. Do not invent external services.
+20. Keep the project inside the user's requested scope.
+21. Prefer the smallest complete architecture.
+22. Do not inflate a simple project into enterprise
+    architecture.
+23. Maximum files: ${MAX_FILES}.
+
+BUILD CONTRACT:
+
+24. If package.json is required, it MUST support a finite
+    authoritative build.
+
+25. scripts.build MUST compile, bundle, package or generate
+    build output.
+
+26. scripts.build MUST terminate.
+
+27. scripts.build MUST NEVER start a server.
+
+28. scripts.build MUST NEVER be a development command.
+
+29. scripts.build MUST NEVER be a watcher.
+
+30. scripts.build MUST NEVER be a preview server.
+
+31. NEVER use:
+
+    node server.js
+    node index.js
+    npm start
+    npm run dev
+    next dev
+    vite
+    nodemon
+    ts-node-dev
+
+    as the authoritative build command.
+
+32. Vite normally uses:
+
+    vite build
+
+33. Next.js normally uses:
+
+    next build
+
+34. Vue/Vite normally uses:
+
+    vite build
+
+35. Svelte/Vite normally uses:
+
+    vite build
+
+36. TypeScript normally uses:
+
+    tsc
+
+37. Runtime commands belong under start.
+
+38. Development commands belong under dev.
+
+39. Preview commands belong under preview.
+
+40. Do not create a runtime server solely to satisfy
+    the build contract.
+`;
+
+}
+
+
+/* =========================================================
+   BATCH GENERATION SYSTEM PROMPT
+========================================================= */
+
+function createFileBatchSystemPrompt() {
+
+  return `
+You are the ZyrionOS Code Builder.
+
+The architecture has already been planned.
+
+Generate ONLY the requested file batch.
+
+Return ONLY valid JSON.
+
+FORMAT:
+
+{
+  "files": [
+    {
+      "path": "string",
+      "content": "complete file content"
+    }
+  ]
+}
+
+STRICT RULES:
+
+1. JSON only.
+2. No Markdown.
+3. No code fences.
+4. No explanations.
+5. Generate EVERY requested file.
+6. Every requested path exactly once.
+7. Paths must exactly match requested paths.
+8. Complete usable code.
+9. No TODO placeholders.
+10. No "rest of code".
+11. No truncation.
+12. No fake imports.
+13. Respect framework.
+14. Respect dependencies.
+15. Keep files internally consistent.
+16. Never generate secrets.
+17. Use environment variables for secrets.
+18. Do not invent backend endpoints.
+19. Do not rewrite unrelated files.
+20. Do not generate another batch.
+21. Do not return an empty files array.
+22. Extra files are discarded.
+23. Maximum requested files: ${FILES_PER_BATCH}.
+
+PACKAGE.JSON:
+
+If package.json is included:
+
+24. scripts.build MUST exist when authoritative build is
+    required.
+
+25. scripts.build MUST be finite.
+
+26. scripts.build MUST compile/build/package.
+
+27. scripts.build MUST terminate.
+
+28. scripts.build MUST NOT start a server.
+
+29. scripts.build MUST NOT be dev/watch/preview.
+
+30. NEVER use:
+
+    node server.js
+    node index.js
+    npm start
+    npm run dev
+    next dev
+    next start
+    vite
+    vite dev
+    vite preview
+    nodemon
+    ts-node-dev
+    webpack-dev-server
+
+    as scripts.build.
+
+31. Vite -> vite build.
+
+32. Next.js -> next build.
+
+33. Vue/Vite -> vite build.
+
+34. Svelte/Vite -> vite build.
+
+35. TypeScript -> tsc or the configured finite compiler.
+
+36. Keep start/dev/preview separate from build.
+
+37. Do not add unnecessary dependencies.
+`;
+
+}
+
+
+/* =========================================================
+   REPAIR SYSTEM PROMPT
+========================================================= */
+
+function createBatchRepairSystemPrompt() {
+
+  return `
+You are the ZyrionOS Builder Repair Agent.
+
+A previous generation attempt failed the Builder contract.
+
+Repair ONLY the current requested file batch.
+
+Return ONLY valid JSON.
+
+FORMAT:
+
+{
+  "files": [
+    {
+      "path": "string",
+      "content": "complete file content"
+    }
+  ]
+}
+
+STRICT RULES:
+
+1. JSON only.
+2. No Markdown.
+3. No explanations.
+4. Generate every requested file.
+5. Every requested path exactly matches.
+6. Never return unrelated files.
+7. Never return duplicate paths.
+8. Complete source code only.
+9. Never use placeholders.
+10. Never truncate.
+11. Preserve architecture.
+12. Preserve framework.
+13. Preserve dependencies unless correction is required.
+14. Fix the reported validation failure directly.
+15. Never generate secrets.
+16. Never invent unrelated files.
+17. Current batch is authoritative.
+
+PACKAGE.JSON:
+
+18. If package.json failed because of scripts.build,
+    replace scripts.build with a finite build command.
+
+19. NEVER use node server.js as scripts.build.
+
+20. NEVER use node index.js as scripts.build.
+
+21. NEVER use npm start as scripts.build.
+
+22. NEVER use npm run dev as scripts.build.
+
+23. NEVER use next dev as scripts.build.
+
+24. NEVER use vite as a dev server as scripts.build.
+
+25. NEVER use nodemon as scripts.build.
+
+26. NEVER use ts-node-dev as scripts.build.
+
+27. NEVER use any watcher as scripts.build.
+
+28. Vite -> vite build.
+
+29. Next.js -> next build.
+
+30. Vue/Vite -> vite build.
+
+31. Svelte/Vite -> vite build.
+
+32. TypeScript -> tsc or the configured finite compiler.
+
+33. Keep start/dev/preview separate.
+
+34. Do not introduce unnecessary dependencies.
+
+35. Do not remove required dependencies merely to bypass
+    validation.
+`;
+
+}
+
+
+/* =========================================================
+   AI BATCH REQUEST
 ========================================================= */
 
 async function requestBatchGeneration({
@@ -2676,7 +3420,7 @@ async function requestBatchGeneration({
 
 
 /* =========================================================
-   CREATE FAILURE METADATA
+   FAILURE METADATA
 ========================================================= */
 
 function createFailureMetadata({
@@ -2725,7 +3469,8 @@ function createFailureMetadata({
 
 function validateFinalPackageContract(
   files,
-  framework
+  framework,
+  plan
 ) {
 
   const packageFile =
@@ -2736,13 +3481,43 @@ function validateFinalPackageContract(
     );
 
 
-  /*
-   * If there is no package.json, do not invent one.
-   *
-   * Static validation remains responsible for deciding
-   * whether the project requires it.
-   */
-  if (!packageFile) {
+  if (
+    !packageFile
+  ) {
+
+    const packageRequired =
+      manifestRequiresPackageJson(
+        files,
+        framework,
+        plan
+      );
+
+
+    if (
+      packageRequired
+    ) {
+
+      return {
+
+        valid:
+          false,
+
+        skipped:
+          false,
+
+        repairable:
+          false,
+
+        code:
+          "FINAL_PACKAGE_JSON_MISSING",
+
+        error:
+          "Final project is missing package.json although the selected framework/build architecture requires it."
+
+      };
+
+    }
+
 
     return {
 
@@ -2753,7 +3528,7 @@ function validateFinalPackageContract(
         true,
 
       reason:
-        "package.json not present in manifest."
+        "package.json not required by the final project."
 
     };
 
@@ -2780,6 +3555,61 @@ function validateFinalPackageContract(
 
 
 /* =========================================================
+   FINAL DUPLICATE CHECK
+========================================================= */
+
+function hasDuplicatePaths(
+  files
+) {
+
+  const seen =
+    new Set();
+
+
+  for (
+    const file of files
+  ) {
+
+    const key =
+      file.path.toLowerCase();
+
+
+    if (
+      seen.has(key)
+    ) {
+
+      return {
+
+        duplicate:
+          true,
+
+        path:
+          file.path
+
+      };
+
+    }
+
+
+    seen.add(key);
+
+  }
+
+
+  return {
+
+    duplicate:
+      false,
+
+    path:
+      null
+
+  };
+
+}
+
+
+/* =========================================================
    BUILDER AGENT
 ========================================================= */
 
@@ -2797,7 +3627,7 @@ async function builderAgent(
 
   try {
 
-    logger.info(
+    logInfo(
       `Builder Agent Started | version=${BUILDER_AGENT_VERSION}`
     );
 
@@ -2870,19 +3700,6 @@ async function builderAgent(
 
 
     /* =====================================================
-       BUILD CONTEXT
-    ===================================================== */
-
-    const buildContext =
-      createBuildContext(
-        request
-      );
-
-
-    void buildContext;
-
-
-    /* =====================================================
        MANIFEST GENERATION
     ===================================================== */
 
@@ -2890,32 +3707,37 @@ async function builderAgent(
       "project-manifest";
 
 
-    logger.info(
+    logInfo(
       "Builder generating project manifest"
     );
 
 
-    const manifestResult =
-      await generateJSON({
+    let manifestResult;
 
-        messages: [
 
-          {
+    try {
 
-            role:
-              "system",
+      manifestResult =
+        await generateJSON({
 
-            content:
-              createManifestSystemPrompt()
+          messages: [
 
-          },
+            {
 
-          {
+              role:
+                "system",
 
-            role:
-              "user",
+              content:
+                createManifestSystemPrompt()
 
-            content: `
+            },
+
+            {
+
+              role:
+                "user",
+
+              content: `
 USER REQUEST:
 
 ${request.prompt}
@@ -2937,20 +3759,52 @@ that satisfies the request.
 
 Do not generate source code yet.
 
-If package.json is required, the project must have
-a finite authoritative build strategy.
+If package.json is required, include it.
+
+The package.json must eventually contain a finite
+authoritative build strategy.
 `
-          }
 
-        ],
+            }
 
-        temperature:
-          0.1,
+          ],
 
-        maxTokens:
-          MANIFEST_MAX_TOKENS
+          temperature:
+            0.1,
 
-      });
+          maxTokens:
+            MANIFEST_MAX_TOKENS
+
+        });
+
+    } catch (error) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          error?.message ||
+          "Project manifest generation failed.",
+
+        stage:
+          currentStage,
+
+        metadata: {
+
+          builderVersion:
+            BUILDER_AGENT_VERSION,
+
+          durationMs:
+            Date.now() -
+            startedAt
+
+        }
+
+      };
+
+    }
 
 
     if (
@@ -2985,6 +3839,10 @@ a finite authoritative build strategy.
 
     }
 
+
+    /* =====================================================
+       MANIFEST VALIDATION
+    ===================================================== */
 
     const manifestValidation =
       validateManifest(
@@ -3042,7 +3900,70 @@ a finite authoritative build strategy.
         .files;
 
 
-    logger.success(
+    /* =====================================================
+       MANIFEST CONTRACT
+    ===================================================== */
+
+    const manifestContract =
+      validateManifestContract({
+
+        manifest:
+          manifestValidation.data,
+
+        framework:
+          manifestFramework,
+
+        plan:
+          request.plan
+
+      });
+
+
+    if (
+      !manifestContract.valid
+    ) {
+
+      logError(
+        `Builder manifest contract failed: ${manifestContract.error}`
+      );
+
+
+      return {
+
+        success:
+          false,
+
+        error:
+          manifestContract.error,
+
+        stage:
+          "project-manifest-contract",
+
+        metadata: {
+
+          builderVersion:
+            BUILDER_AGENT_VERSION,
+
+          projectName,
+
+          framework:
+            manifestFramework,
+
+          validationCode:
+            manifestContract.code,
+
+          durationMs:
+            Date.now() -
+            startedAt
+
+        }
+
+      };
+
+    }
+
+
+    logSuccess(
       `Builder manifest created: ${manifestFiles.length} files`
     );
 
@@ -3069,7 +3990,7 @@ a finite authoritative build strategy.
       new Set();
 
 
-    logger.info(
+    logInfo(
       `Builder will generate ${batches.length} file batches`
     );
 
@@ -3096,7 +4017,7 @@ a finite authoritative build strategy.
         `file-generation-batch-${batchNumber}`;
 
 
-      logger.info(
+      logInfo(
         `Builder generating batch ${batchNumber}/${batches.length} (${batch.length} files)`
       );
 
@@ -3123,9 +4044,11 @@ a finite authoritative build strategy.
           attempt > 1;
 
 
-        if (isRepairAttempt) {
+        if (
+          isRepairAttempt
+        ) {
 
-          logger.warning(
+          logWarning(
             `Builder repairing batch ${batchNumber}/${batches.length} | attempt=${attempt}`
           );
 
@@ -3187,7 +4110,7 @@ a finite authoritative build strategy.
           batchResult.success !== true
         ) {
 
-          logger.warning(
+          logWarning(
             `Builder batch ${batchNumber}/${batches.length} AI request failed | attempt=${attempt} | error=${
               batchResult?.error ||
               "unknown"
@@ -3203,12 +4126,12 @@ a finite authoritative build strategy.
             repairable:
               true,
 
+            code:
+              "AI_BATCH_GENERATION_FAILED",
+
             error:
               batchResult?.error ||
               "AI batch generation failed.",
-
-            code:
-              "AI_BATCH_GENERATION_FAILED",
 
             files: [],
 
@@ -3235,11 +4158,6 @@ a finite authoritative build strategy.
             continue;
 
           }
-
-
-          logger.error(
-            `Builder batch ${batchNumber}/${batches.length} failed after ${attempt} attempts`
-          );
 
 
           return {
@@ -3307,7 +4225,8 @@ a finite authoritative build strategy.
           ...batchValidation,
 
           validFiles:
-            batchValidation.files || []
+            batchValidation.files ||
+            []
 
         };
 
@@ -3329,7 +4248,7 @@ a finite authoritative build strategy.
               .length > 0
           ) {
 
-            logger.warning(
+            logWarning(
               `Builder batch ${batchNumber}: discarded unexpected files: ${batchValidation.unexpectedFiles.join(", ")}`
             );
 
@@ -3345,7 +4264,7 @@ a finite authoritative build strategy.
               .length > 0
           ) {
 
-            logger.warning(
+            logWarning(
               `Builder batch ${batchNumber}: discarded invalid files: ${batchValidation.invalidFiles.join(", ")}`
             );
 
@@ -3365,7 +4284,7 @@ a finite authoritative build strategy.
               generatedPaths.has(key)
             ) {
 
-              logger.error(
+              logError(
                 `Builder duplicate project file detected: ${file.path}`
               );
 
@@ -3425,7 +4344,7 @@ a finite authoritative build strategy.
           }
 
 
-          logger.success(
+          logSuccess(
             `Builder batch ${batchNumber}/${batches.length} completed: ${batchValidation.files.length} requested files accepted`
           );
 
@@ -3443,7 +4362,7 @@ a finite authoritative build strategy.
            CONTRACT FAILURE
         ================================================= */
 
-        logger.warning(
+        logWarning(
           `Builder batch ${batchNumber}: validation requires repair | code=${
             batchValidation.code ||
             "VALIDATION_FAILED"
@@ -3454,33 +4373,24 @@ a finite authoritative build strategy.
 
 
         /*
-         * IMPORTANT:
+         * Important:
          *
-         * We intentionally DO NOT add invalid package.json
-         * or incomplete files to generatedFiles.
+         * Invalid package.json is NOT added to the final
+         * project.
          *
-         * The repair attempt receives the validation context
-         * and regenerates the requested batch.
+         * The next repair attempt receives the exact
+         * contract failure.
          */
+
         if (
           batchValidation.repairable &&
-          attempt < MAX_BATCH_ATTEMPTS
+          attempt <
+            MAX_BATCH_ATTEMPTS
         ) {
 
           continue;
 
         }
-
-
-        /* =================================================
-           FINAL BATCH FAILURE
-        ================================================= */
-
-        logger.error(
-          `Builder batch validation failed: ${
-            batchValidation.error
-          }`
-        );
 
 
         return {
@@ -3542,6 +4452,10 @@ a finite authoritative build strategy.
 
               packageValidation:
                 batchValidation.packageValidation ||
+                null,
+
+              error:
+                batchValidation.error ||
                 null
 
             }
@@ -3553,7 +4467,9 @@ a finite authoritative build strategy.
       }
 
 
-      if (!batchCompleted) {
+      if (
+        !batchCompleted
+      ) {
 
         return {
 
@@ -3705,6 +4621,52 @@ a finite authoritative build strategy.
 
 
     /* =====================================================
+       DUPLICATE CHECK
+    ===================================================== */
+
+    const duplicateCheck =
+      hasDuplicatePaths(
+        finalFiles
+      );
+
+
+    if (
+      duplicateCheck.duplicate
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        error:
+          `Final project contains duplicate path: ${duplicateCheck.path}`,
+
+        stage:
+          currentStage,
+
+        metadata: {
+
+          builderVersion:
+            BUILDER_AGENT_VERSION,
+
+          projectName,
+
+          framework:
+            manifestFramework,
+
+          durationMs:
+            Date.now() -
+            startedAt
+
+        }
+
+      };
+
+    }
+
+
+    /* =====================================================
        FINAL MANIFEST COVERAGE
     ===================================================== */
 
@@ -3833,7 +4795,8 @@ a finite authoritative build strategy.
     const finalPackageValidation =
       validateFinalPackageContract(
         finalFiles,
-        manifestFramework
+        manifestFramework,
+        request.plan
       );
 
 
@@ -3841,7 +4804,7 @@ a finite authoritative build strategy.
       !finalPackageValidation.valid
     ) {
 
-      logger.error(
+      logError(
         `Builder final package contract failed: ${
           finalPackageValidation.error
         }`
@@ -3897,7 +4860,7 @@ a finite authoritative build strategy.
       startedAt;
 
 
-    logger.success(
+    logSuccess(
       `Builder Agent Completed: ${finalFiles.length} files generated in ${durationMs}ms`
     );
 
@@ -3963,6 +4926,9 @@ a finite authoritative build strategy.
         authoritativeBuild:
           false,
 
+        buildExecution:
+          "delegated-to-authoritative-build-service",
+
         finalManifestCoverage:
           true,
 
@@ -3974,7 +4940,7 @@ a finite authoritative build strategy.
 
   } catch (error) {
 
-    logger.error(
+    logError(
       `Builder Agent Failed at ${currentStage}: ${
         error?.message ||
         "Unknown error"
@@ -4026,7 +4992,7 @@ builderAgent.authoritativeBuild =
   false;
 
 builderAgent.buildContract =
-  "package-json-build-script-enforced";
+  "finite-package-json-build-required";
 
 builderAgent.providerArchitecture =
   "centralized-ai-provider-service";
