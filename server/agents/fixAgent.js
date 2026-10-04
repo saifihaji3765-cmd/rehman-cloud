@@ -2,7 +2,7 @@
    ZyrionOS FIX AGENT
    Production Project Review + Debugging + Multi-File Repair
 
-   VERSION: 7.0.0
+   VERSION: 7.1.0
 
    RESPONSIBILITIES
    ---------------------------------------------------------
@@ -99,7 +99,7 @@ try {
 ========================================================= */
 
 const FIX_AGENT_VERSION =
-  "7.0.0";
+  "7.1.0";
 
 
 /* =========================================================
@@ -147,6 +147,101 @@ const MAX_FIX_ROUNDS =
 
 
 /* =========================================================
+   LOGGER COMPATIBILITY
+   ---------------------------------------------------------
+   IMPORTANT:
+   loggerService exposes warning(), not warn().
+   These wrappers prevent the Fix Agent from crashing
+   because of logger API differences.
+========================================================= */
+
+function logInfo(message) {
+
+  if (
+    logger &&
+    typeof logger.info ===
+      "function"
+  ) {
+
+    return logger.info(
+      message
+    );
+
+  }
+
+}
+
+
+function logWarning(message) {
+
+  if (
+    logger &&
+    typeof logger.warning ===
+      "function"
+  ) {
+
+    return logger.warning(
+      message
+    );
+
+  }
+
+  /*
+   * Backward compatibility for logger
+   * implementations that still expose warn().
+   */
+
+  if (
+    logger &&
+    typeof logger.warn ===
+      "function"
+  ) {
+
+    return logger.warn(
+      message
+    );
+
+  }
+
+  /*
+   * Last-resort fallback.
+   * Never allow logging itself to crash
+   * the repair pipeline.
+   */
+
+  if (
+    logger &&
+    typeof logger.info ===
+      "function"
+  ) {
+
+    return logger.info(
+      `[WARNING] ${message}`
+    );
+
+  }
+
+}
+
+
+function logError(message) {
+
+  if (
+    logger &&
+    typeof logger.error ===
+      "function"
+  ) {
+
+    return logger.error(
+      message
+    );
+
+  }
+
+}
+
+
+/* =========================================================
    SAFE STRING
 ========================================================= */
 
@@ -156,7 +251,8 @@ function cleanString(
 ) {
 
   if (
-    typeof value !== "string"
+    typeof value !==
+    "string"
   ) {
 
     return "";
@@ -253,7 +349,10 @@ function sanitizeForContext(
   ) {
 
     return value
-      .slice(0, 100)
+      .slice(
+        0,
+        100
+      )
       .map(
         item =>
           sanitizeForContext(
@@ -265,7 +364,8 @@ function sanitizeForContext(
   }
 
   if (
-    typeof value === "object"
+    typeof value ===
+    "object"
   ) {
 
     const output = {};
@@ -274,11 +374,15 @@ function sanitizeForContext(
       const [
         key,
         item
-      ] of Object.entries(value)
+      ] of Object.entries(
+        value
+      )
     ) {
 
       if (
-        SECRET_KEYS.has(key)
+        SECRET_KEYS.has(
+          key
+        )
       ) {
 
         output[key] =
@@ -339,7 +443,8 @@ function normalizeFilePath(
 ) {
 
   if (
-    typeof value !== "string"
+    typeof value !==
+    "string"
   ) {
 
     return null;
@@ -355,11 +460,15 @@ function normalizeFilePath(
       );
 
   while (
-    filePath.startsWith("./")
+    filePath.startsWith(
+      "./"
+    )
   ) {
 
     filePath =
-      filePath.slice(2);
+      filePath.slice(
+        2
+      );
 
   }
 
@@ -374,7 +483,9 @@ function normalizeFilePath(
   }
 
   if (
-    filePath.startsWith("/") ||
+    filePath.startsWith(
+      "/"
+    ) ||
     /^[A-Za-z]:\//.test(
       filePath
     )
@@ -385,7 +496,9 @@ function normalizeFilePath(
   }
 
   if (
-    filePath.includes("\0")
+    filePath.includes(
+      "\0"
+    )
   ) {
 
     return null;
@@ -393,10 +506,14 @@ function normalizeFilePath(
   }
 
   const parts =
-    filePath.split("/");
+    filePath.split(
+      "/"
+    );
 
   if (
-    parts.includes("..")
+    parts.includes(
+      ".."
+    )
   ) {
 
     return null;
@@ -417,7 +534,8 @@ function normalizeFileContent(
 ) {
 
   if (
-    typeof value !== "string"
+    typeof value !==
+    "string"
   ) {
 
     return null;
@@ -447,7 +565,9 @@ function normalizeFiles(
 ) {
 
   if (
-    !Array.isArray(files)
+    !Array.isArray(
+      files
+    )
   ) {
 
     return {
@@ -469,11 +589,14 @@ function normalizeFiles(
   const seen =
     new Set();
 
-  let invalidCount = 0;
+  let invalidCount =
+    0;
 
-  let duplicateCount = 0;
+  let duplicateCount =
+    0;
 
-  let totalBytes = 0;
+  let totalBytes =
+    0;
 
 
   for (
@@ -482,7 +605,8 @@ function normalizeFiles(
 
     if (
       !file ||
-      typeof file !== "object"
+      typeof file !==
+        "object"
     ) {
 
       invalidCount++;
@@ -500,7 +624,8 @@ function normalizeFiles(
 
     const content =
       normalizeFileContent(
-        file.content !== undefined
+        file.content !==
+          undefined
           ? file.content
           : file.source
       );
@@ -517,7 +642,9 @@ function normalizeFiles(
     }
 
     if (
-      seen.has(filePath)
+      seen.has(
+        filePath
+      )
     ) {
 
       duplicateCount++;
@@ -528,7 +655,7 @@ function normalizeFiles(
 
     if (
       totalBytes +
-      content.length >
+        content.length >
       MAX_TOTAL_SOURCE_SIZE
     ) {
 
@@ -652,7 +779,8 @@ function normalizeFixRequest(
 
 
   if (
-    typeof input === "string"
+    typeof input ===
+    "string"
   ) {
 
     return {
@@ -672,7 +800,8 @@ function normalizeFixRequest(
 
   if (
     !input ||
-    typeof input !== "object"
+    typeof input !==
+      "object"
   ) {
 
     return defaults;
@@ -952,7 +1081,9 @@ function findErrorFile(
       )
 
     ]
-      .join("\n")
+      .join(
+        "\n"
+      )
       .toLowerCase();
 
 
@@ -1114,6 +1245,8 @@ function prioritizeFiles(
 
     "bun.lockb",
 
+    "bun.lock",
+
     "vite.config.js",
 
     "vite.config.ts",
@@ -1169,6 +1302,7 @@ function prioritizeFiles(
 
   const priority = [];
 
+
   const add =
     file => {
 
@@ -1208,10 +1342,6 @@ function prioritizeFiles(
 
   }
 
-
-  /*
-   * Then include remaining project files.
-   */
 
   for (
     const file of files
@@ -1728,7 +1858,8 @@ Do not invent errors.
   return {
 
     data:
-      result.data || {},
+      result.data ||
+      {},
 
     provider:
       result.provider ||
@@ -1906,6 +2037,7 @@ function selectRepairFiles(
     );
 
   const selected = [];
+
 
   const add =
     file => {
@@ -2305,7 +2437,8 @@ required to make the repair coherent.
       true,
 
     data:
-      result.data || {},
+      result.data ||
+      {},
 
     provider:
       result.provider ||
@@ -2557,13 +2690,6 @@ async function runStaticValidation(
 
   try {
 
-    /*
-     * IMPORTANT:
-     *
-     * validateProject may be synchronous OR asynchronous.
-     * Promise.resolve() handles both safely.
-     */
-
     const result =
       await Promise.resolve(
         buildValidationService.validateProject({
@@ -2599,12 +2725,6 @@ async function runStaticValidation(
         : [];
 
 
-    /*
-     * Prefer explicit valid=false.
-     *
-     * Some validators may expose success separately.
-     */
-
     const valid =
       result?.valid === true;
 
@@ -2617,7 +2737,8 @@ async function runStaticValidation(
       valid,
 
       authoritative:
-        result?.authoritative === true,
+        result?.authoritative ===
+        true,
 
       validationMode:
         result?.validationMode ||
@@ -2994,7 +3115,11 @@ source or validation evidence.
 
         ],
 
-        remainingProblems: []
+        remainingProblems: [
+
+          "AI verification did not return a valid verification result."
+
+        ]
 
       },
 
@@ -3013,22 +3138,36 @@ source or validation evidence.
   }
 
 
+  const verificationData =
+    result.data || {};
+
+
   return {
 
     success:
       true,
 
-    data:
-      result.data || {
+    data: {
 
-        valid:
-          false,
+      valid:
+        verificationData.valid ===
+        true,
 
-        issues: [],
+      issues:
+        Array.isArray(
+          verificationData.issues
+        )
+          ? verificationData.issues
+          : [],
 
-        remainingProblems: []
+      remainingProblems:
+        Array.isArray(
+          verificationData.remainingProblems
+        )
+          ? verificationData.remainingProblems
+          : []
 
-      },
+    },
 
     staticValidation,
 
@@ -3297,7 +3436,7 @@ async function fixAgent(
 
   try {
 
-    logger.info(
+    logInfo(
       "ZyrionOS Fix Agent Started"
     );
 
@@ -3486,7 +3625,9 @@ async function fixAgent(
 
         ]
           .filter(Boolean)
-          .join("\n")
+          .join(
+            "\n"
+          )
           .slice(
             0,
             MAX_ERROR_LENGTH
@@ -3548,7 +3689,7 @@ async function fixAgent(
         reviewBatches[index];
 
 
-      logger.info(
+      logInfo(
 
         `Fix Agent reviewing project batch ${index + 1}/${reviewBatches.length} (${batch.length} files)`
 
@@ -3687,11 +3828,6 @@ async function fixAgent(
           );
 
 
-    /*
-     * Only explicit validation/review targets
-     * are required to be returned by the repair model.
-     */
-
     const repairReview = {
 
       ...mergedReview,
@@ -3765,7 +3901,7 @@ async function fixAgent(
       0
     ) {
 
-      logger.warn(
+      logWarning(
 
         `Fix Agent rejected ${repairedOutput.invalid} invalid repaired file(s)`
 
@@ -3779,7 +3915,7 @@ async function fixAgent(
       0
     ) {
 
-      logger.warn(
+      logWarning(
 
         `Fix Agent rejected ${repairedOutput.duplicates} duplicate repaired file(s)`
 
@@ -3808,7 +3944,7 @@ async function fixAgent(
       !coverage.complete
     ) {
 
-      logger.warn(
+      logWarning(
 
         `Fix Agent repair output missing explicit targets: ${coverage.missing.join(", ")}`
 
@@ -3826,7 +3962,7 @@ async function fixAgent(
       0
     ) {
 
-      logger.info(
+      logInfo(
         "Fix Agent produced no safe complete-file repair."
       );
 
@@ -3995,7 +4131,7 @@ async function fixAgent(
       fixRound++;
 
 
-      logger.warn(
+      logWarning(
 
         `Fix Agent starting repair round ${fixRound}/${request.maxRepairRounds}`
 
@@ -4055,6 +4191,7 @@ async function fixAgent(
                 file =>
                   file.path
               )
+
             ])
           )
 
@@ -4079,7 +4216,9 @@ async function fixAgent(
 
           ]
             .filter(Boolean)
-            .join("\n")
+            .join(
+              "\n"
+            )
             .slice(
               0,
               MAX_ERROR_LENGTH
@@ -4106,6 +4245,34 @@ async function fixAgent(
           secondRepair.data?.files
 
         );
+
+
+      if (
+        secondOutput.invalid >
+        0
+      ) {
+
+        logWarning(
+
+          `Fix Agent rejected ${secondOutput.invalid} invalid file(s) during repair round ${fixRound}`
+
+        );
+
+      }
+
+
+      if (
+        secondOutput.duplicates >
+        0
+      ) {
+
+        logWarning(
+
+          `Fix Agent rejected ${secondOutput.duplicates} duplicate file(s) during repair round ${fixRound}`
+
+        );
+
+      }
 
 
       if (
@@ -4231,7 +4398,8 @@ async function fixAgent(
     ===================================================== */
 
     const verificationValid =
-      verification.success === true &&
+      verification.success ===
+        true &&
       verification.data?.valid ===
         true;
 
@@ -4248,7 +4416,7 @@ async function fixAgent(
        FINAL LOG
     ===================================================== */
 
-    logger.info(
+    logInfo(
 
       `Fix Agent Completed: reviewed=${projectFiles.length} changed=${finalChangedFiles.length} verified=${verificationValid} rounds=${fixRound}`
 
@@ -4282,11 +4450,10 @@ async function fixAgent(
           "",
 
         /*
-         * IMPORTANT:
-         *
          * Master Agent expects data.files.
          *
-         * Return only files that actually changed.
+         * Only files that actually changed
+         * are returned.
          */
 
         files:
@@ -4390,7 +4557,7 @@ async function fixAgent(
       "Unknown Fix Agent error";
 
 
-    logger.error(
+    logError(
 
       `Fix Agent Failed at ${currentStage}: ${errorMessage}`
 
