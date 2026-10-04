@@ -1,7 +1,6 @@
 /* =========================================================
    ZyrionOS BUILDER AGENT
-   Chunked Project Code Generation
-   Production-Safe Batch Validation + Repair
+   Production Chunked Code Generation Engine
    =========================================================
 
    Architecture:
@@ -12,44 +11,43 @@
         ↓
    Project Manifest
         ↓
-   File Generation Batches
+   Dependency-aware File Batches
+        ↓
+   AI Generation
+        ↓
+   Strict Requested-Path Filtering
         ↓
    Batch Validation
         ↓
-   Batch Repair if required
+   Controlled Repair
         ↓
-   Final Project Validation
+   Final Manifest Coverage Validation
         ↓
    Complete Project
         ↓
-   Master Agent
+   BuildValidationService
+        ↓
+   AuthoritativeBuildService
 
    IMPORTANT:
 
    - Builder NEVER calls an AI provider directly.
    - All AI calls go through aiProviderService.
    - No Gemini dependency.
-   - Large projects are generated in controlled batches.
-   - Unexpected extra files do NOT automatically fail a batch.
-   - Missing requested files trigger controlled repair attempts.
-   - Final return contract remains:
-
-       {
-         success: true,
-         data: {
-           projectName,
-           framework,
-           files: [...]
-         }
-       }
-
+   - Extra AI-generated files are NEVER allowed into
+     the final project unless they exist in the manifest.
+   - Missing requested files trigger repair.
+   - Duplicate requested files are rejected.
+   - Invalid paths/content are rejected.
+   - Final output contains ONLY manifest-approved files.
+   - Builder does NOT perform the authoritative build.
 ========================================================= */
 
 const logger =
   require("../services/loggerService");
 
 const {
-  generateJSON
+  generateJSON,
 } =
   require("../services/ai/aiProviderService");
 
@@ -70,32 +68,59 @@ const MAX_PLAN_SIZE = 100000;
 
 const FILES_PER_BATCH = 3;
 
-const FILE_BATCH_MAX_TOKENS = 5000;
+/*
+ * Output budget.
+
+ * 5000 was occasionally enough to generate a valid response,
+ * but truncated JSON was observed in production.
+ *
+ * Keep the batch small while giving the model enough room
+ * for complete source files.
+ */
+const FILE_BATCH_MAX_TOKENS = 6500;
 
 const MANIFEST_MAX_TOKENS = 3500;
 
 /*
- * Maximum number of attempts for one file batch.
-
- * Attempt 1:
- * normal generation.
-
- * Attempt 2+:
- * repair / correction request.
+ * More than two attempts are useful because structured JSON
+ * generation can fail independently from source correctness.
  */
-const MAX_BATCH_ATTEMPTS = 2;
+const MAX_BATCH_ATTEMPTS = 3;
 
 
 /*
- * Maximum number of files that can be returned
- * by one AI response.
-
- * We allow a small amount of over-generation because
- * some models occasionally return files belonging to
- * another nearby batch.
+ * AI may accidentally return files belonging to another
+ * nearby batch.
+ *
+ * We do NOT accept those files into the project.
+ *
+ * This is only an upper safety bound on the raw response.
+ *
+ * Example observed production failure:
+ *
+ * expected = 3
+ * returned = 15
+ *
+ * The old Builder rejected this before filtering.
+ *
+ * This Builder accepts the response, extracts the 3
+ * requested files, and discards the other 12.
  */
-const MAX_BATCH_RESPONSE_FILES =
-  FILES_PER_BATCH + 3;
+const MAX_RAW_BATCH_RESPONSE_FILES = 20;
+
+
+/*
+ * Maximum amount of manifest information included in one
+ * batch prompt.
+ */
+const MAX_MANIFEST_CONTEXT_SIZE = 30000;
+
+
+/*
+ * Maximum amount of previously generated path metadata
+ * included in one request.
+ */
+const MAX_GENERATED_INDEX_SIZE = 12000;
 
 
 /* =========================================================
@@ -231,6 +256,7 @@ function normalizeFilePath(
       MAX_PATH_LENGTH
     );
 
+
   if (!filePath) {
 
     return null;
@@ -259,6 +285,18 @@ function normalizeFilePath(
 
 
   /*
+   * Reject null bytes.
+   */
+  if (
+    filePath.includes("\0")
+  ) {
+
+    return null;
+
+  }
+
+
+  /*
    * Reject traversal.
    */
   const segments =
@@ -281,7 +319,6 @@ function normalizeFilePath(
    * Reject dangerous filesystem paths.
    */
   if (
-    filePath.includes("\0") ||
     filePath.includes(":") ||
     filePath.startsWith("~")
   ) {
@@ -446,9 +483,6 @@ function normalizeFiles(
         .toLowerCase();
 
 
-    /*
-     * Prevent duplicate paths.
-     */
     if (
       seen.has(key)
     ) {
@@ -546,7 +580,7 @@ function normalizeBuildRequest(
 
 
 /* =========================================================
-   BUILD PLAN SUMMARY
+   BUILD CONTEXT
 ========================================================= */
 
 function createBuildContext(
@@ -582,8 +616,8 @@ function createManifestSystemPrompt() {
   return `
 You are the ZyrionOS Project Architect.
 
-Your job is to convert a user's software request and
-planning result into a precise project file manifest.
+Convert the user's software request and planning result
+into a precise, minimal, runnable project file manifest.
 
 You are NOT generating source code yet.
 
@@ -604,52 +638,29 @@ Required format:
 
 STRICT RULES:
 
-1. Return valid JSON only.
-
-2. Do not use Markdown.
-
-3. Do not use code fences.
-
-4. Do not include explanations outside JSON.
-
+1. JSON only.
+2. No Markdown.
+3. No code fences.
+4. No explanations.
 5. Every file must have a unique path.
-
 6. Paths must be relative project paths.
-
-7. Never use:
-   ../
-   absolute filesystem paths
-   Windows drive paths
-
-8. Keep the project practical and complete.
-
-9. Include all files required for the requested
-   application to actually run.
-
+7. Never use ../ or absolute paths.
+8. Never use Windows drive paths.
+9. Include all files required for the application to run.
 10. Include package.json when dependencies are required.
-
-11. Include configuration files when required.
-
-12. Include application entry points.
-
-13. Include required components, pages, services,
-    API routes and utilities.
-
-14. Do not generate unnecessary duplicate files.
-
-15. Do not generate binary files.
-
-16. Do not generate secrets, API keys or credentials.
-
-17. Do not invent external services unless required
-    by the user's request or planning.
-
-18. The manifest should contain file paths and concise
-    purposes only.
-
-19. Keep the number of files within the requested scope.
-
-20. Maximum project files: ${MAX_FILES}.
+11. Include required configuration files.
+12. Include real application entry points.
+13. Include required components, pages, services and utilities.
+14. Do not create unnecessary duplicate files.
+15. Do not create binary files.
+16. Never create secrets or credentials.
+17. Do not invent unnecessary external services.
+18. Keep the project within the user's requested scope.
+19. Prefer the smallest complete architecture that satisfies
+    the request.
+20. Do not inflate a simple application into an enterprise
+    architecture without a requirement for it.
+21. Maximum files: ${MAX_FILES}.
 `;
 
 }
@@ -664,12 +675,9 @@ function createFileBatchSystemPrompt() {
   return `
 You are the ZyrionOS Code Builder.
 
-You generate production-quality source files for a
-software project.
-
 The project architecture has already been planned.
 
-You will receive a small batch of requested files.
+You are generating ONLY a small batch of requested files.
 
 Return ONLY valid JSON.
 
@@ -687,74 +695,31 @@ Required format:
 STRICT RULES:
 
 1. Return valid JSON only.
-
-2. Do not use Markdown.
-
-3. Do not use code fences.
-
-4. Do not explain your answer outside JSON.
-
+2. No Markdown.
+3. No code fences.
+4. No explanations.
 5. Generate EVERY requested file.
-
-6. Never omit a requested file.
-
-7. Each path must exactly match the requested path.
-
-8. Each file must contain COMPLETE usable code.
-
-9. Never use placeholder comments such as:
-   TODO
-   implement later
-   add code here
-   rest of code
-   omitted
-   same as above
-
-10. Do not truncate code.
-
-11. Do not generate fake imports.
-
-12. Imports must match the project architecture.
-
-13. Respect the specified framework.
-
-14. Respect package/dependency requirements.
-
-15. Keep the generated files internally consistent.
-
-16. Do not generate API keys, passwords, tokens,
-    private credentials or secrets.
-
-17. Use environment variables for secrets.
-
-18. Do not change the requested file paths.
-
-19. Do not generate binary data.
-
-20. If a requested file depends on another file,
-    use the exact path from the project manifest.
-
-21. The final application must be structurally runnable.
-
-22. Do not invent backend endpoints that were not
-    specified by the planning information.
-
-23. Existing generated files are provided only as
-    architectural context. Do not rewrite them unless
-    explicitly requested.
-
-24. Never return an empty files array.
-
-25. Maximum requested files in this response:
-    ${FILES_PER_BATCH}.
-
-26. If you accidentally generate a file that belongs
-    to another project batch, still prioritize returning
-    every requested file correctly.
-
-27. Never replace a requested file with another file.
-
-28. Make sure every requested path appears exactly once.
+6. Each requested path must appear exactly once.
+7. Paths must exactly match the requested paths.
+8. Each file must contain complete usable code.
+9. Never use TODO placeholders.
+10. Never use "rest of code".
+11. Never omit code.
+12. Never truncate code.
+13. Never generate fake imports.
+14. Respect the selected framework.
+15. Respect dependency requirements.
+16. Keep files internally consistent.
+17. Never generate secrets.
+18. Use environment variables for secrets.
+19. Do not invent backend endpoints.
+20. Do not rewrite files outside the current batch.
+21. Do not return files from another batch.
+22. Never return an empty files array.
+23. The CURRENT FILE BATCH is authoritative.
+24. Return complete content for every requested file.
+25. Extra files are unnecessary and will be discarded.
+26. Maximum requested files in this response: ${FILES_PER_BATCH}.
 `;
 
 }
@@ -769,10 +734,10 @@ function createBatchRepairSystemPrompt() {
   return `
 You are the ZyrionOS Builder Repair Agent.
 
-A previous file-generation attempt for a small project
-batch failed validation.
+A previous generation attempt for the current file batch
+failed validation.
 
-Your job is to repair ONLY the current batch.
+Repair ONLY the current requested batch.
 
 Return ONLY valid JSON.
 
@@ -789,44 +754,24 @@ Required format:
 
 STRICT RULES:
 
-1. Return valid JSON only.
-
-2. Do not use Markdown.
-
-3. Do not use code fences.
-
+1. JSON only.
+2. No Markdown.
+3. No explanations.
 4. Generate every missing requested file.
-
 5. Every requested path must exactly match.
-
-6. Do not return files outside the requested batch.
-
-7. Do not omit any requested file.
-
-8. Do not return duplicate paths.
-
-9. Return complete source code.
-
-10. Do not use placeholders.
-
-11. Do not truncate code.
-
-12. Preserve the project architecture.
-
-13. Preserve framework requirements.
-
-14. Preserve dependency requirements.
-
-15. Fix missing or invalid files instead of explaining
-    the previous error.
-
-16. Never generate secrets.
-
-17. If an existing valid file from the previous attempt
-    is supplied, preserve its content unless it must be
-    corrected for consistency.
-
-18. The final response must contain ONLY the repaired files.
+6. Never return files outside the current batch.
+7. Never return duplicate paths.
+8. Return complete source code.
+9. Never use placeholders.
+10. Never truncate code.
+11. Preserve project architecture.
+12. Preserve framework requirements.
+13. Preserve dependency requirements.
+14. Fix the validation failure directly.
+15. Never generate secrets.
+16. Do not invent unrelated files.
+17. The requested batch is authoritative.
+18. Return only files required to complete this batch.
 `;
 
 }
@@ -1046,34 +991,39 @@ function validateManifest(
 ========================================================= */
 
 /*
- * Important behavior:
+ * CORE FIX:
  *
- * The old validator treated ANY extra file as a fatal
- * error.
+ * We validate against the requested-path whitelist.
  *
  * Example:
  *
- * Expected:
- *   App.js
- *   index.js
+ * Requested:
+ *   App.jsx
+ *   main.jsx
  *   App.css
  *
  * AI returns:
- *   App.js
- *   index.js
+ *   App.jsx
+ *   main.jsx
  *   App.css
- *   TodoList.js
+ *   Todo.jsx
+ *   Header.jsx
+ *   Footer.jsx
  *
- * The old Builder failed the entire build.
+ * Result:
  *
- * The new Builder:
+ *   App.jsx   → accepted
+ *   main.jsx  → accepted
+ *   App.css   → accepted
  *
- *   - ignores extra files
- *   - keeps only requested files
- *   - fails only when a requested file is missing
+ *   Todo.jsx  → discarded
+ *   Header.jsx → discarded
+ *   Footer.jsx → discarded
  *
- * This prevents one accidental cross-batch file from
- * destroying an otherwise valid generation.
+ * The batch succeeds because every requested file exists.
+ *
+ * The old implementation rejected the response before this
+ * filtering because 6 > MAX_BATCH_RESPONSE_FILES.
  */
 
 function validateGeneratedBatch(
@@ -1092,8 +1042,18 @@ function validateGeneratedBatch(
       valid:
         false,
 
+      repairable:
+        true,
+
       error:
         "Generated batch is not an object.",
+
+      files: [],
+
+      missingFiles:
+        expectedFiles,
+
+      unexpectedFiles: [],
 
     };
 
@@ -1111,8 +1071,18 @@ function validateGeneratedBatch(
       valid:
         false,
 
+      repairable:
+        true,
+
       error:
-        "Generated batch does not contain files.",
+        "Generated batch does not contain a files array.",
+
+      files: [],
+
+      missingFiles:
+        expectedFiles,
+
+      unexpectedFiles: [],
 
     };
 
@@ -1129,17 +1099,32 @@ function validateGeneratedBatch(
       valid:
         false,
 
+      repairable:
+        true,
+
       error:
         "Generated batch returned no files.",
+
+      files: [],
+
+      missingFiles:
+        expectedFiles,
+
+      unexpectedFiles: [],
 
     };
 
   }
 
 
+  /*
+   * Hard safety ceiling only.
+   *
+   * This is deliberately larger than the expected batch size.
+   */
   if (
     generated.files.length >
-    MAX_BATCH_RESPONSE_FILES
+    MAX_RAW_BATCH_RESPONSE_FILES
   ) {
 
     return {
@@ -1147,14 +1132,27 @@ function validateGeneratedBatch(
       valid:
         false,
 
+      repairable:
+        true,
+
       error:
-        `Generated batch returned too many files: ${generated.files.length}.`,
+        `AI response exceeded the raw batch safety limit of ${MAX_RAW_BATCH_RESPONSE_FILES} files.`,
+
+      files: [],
+
+      missingFiles:
+        expectedFiles,
+
+      unexpectedFiles: [],
 
     };
 
   }
 
 
+  /*
+   * Requested-path whitelist.
+   */
   const expected =
     new Map();
 
@@ -1193,6 +1191,10 @@ function validateGeneratedBatch(
     [];
 
 
+  const invalidFiles =
+    [];
+
+
   for (
     const rawFile of
       generated.files
@@ -1204,14 +1206,32 @@ function validateGeneratedBatch(
       );
 
 
+    /*
+     * Invalid file:
+     *
+     * Do not allow it into the project.
+     *
+     * If it was requested, it will appear as missing
+     * and trigger repair.
+     */
     if (!file) {
 
-      /*
-       * Invalid files are ignored here.
-       *
-       * If that causes a requested file to remain
-       * missing, the repair pass will regenerate it.
-       */
+      if (
+        rawFile &&
+        typeof rawFile ===
+          "object"
+      ) {
+
+        invalidFiles.push(
+          safeString(
+            rawFile.path,
+            MAX_PATH_LENGTH
+          ) ||
+          "unknown"
+        );
+
+      }
+
       continue;
 
     }
@@ -1223,12 +1243,11 @@ function validateGeneratedBatch(
 
 
     /*
-     * Extra file:
+     * EXTRA FILE:
      *
-     * Do NOT kill the whole batch.
+     * Never add it.
      *
-     * It may be a file the model accidentally generated
-     * from the next batch.
+     * Never fail the batch solely because of it.
      */
     if (
       !expected.has(key)
@@ -1255,11 +1274,20 @@ function validateGeneratedBatch(
         valid:
           false,
 
-        error:
-          `Duplicate file generated: ${file.path}`,
-
         repairable:
-          false,
+          true,
+
+        error:
+          `Duplicate requested file generated: ${file.path}`,
+
+        files:
+          Array.from(
+            received.values()
+          ),
+
+        missingFiles: [],
+
+        unexpectedFiles,
 
       };
 
@@ -1304,9 +1332,11 @@ function validateGeneratedBatch(
 
 
   /*
-   * All requested files are present.
+   * SUCCESS:
    *
-   * Extra files are discarded safely.
+   * Every requested file exists.
+   *
+   * Extra files are simply discarded.
    */
   if (
     missingFiles.length ===
@@ -1318,6 +1348,9 @@ function validateGeneratedBatch(
       valid:
         true,
 
+      repairable:
+        false,
+
       files:
         Array.from(
           received.values()
@@ -1327,15 +1360,17 @@ function validateGeneratedBatch(
 
       missingFiles: [],
 
+      invalidFiles,
+
     };
 
   }
 
 
   /*
-   * Requested files are missing.
+   * REPAIRABLE:
    *
-   * Caller can perform a repair attempt.
+   * At least one requested file is missing/invalid.
    */
   return {
 
@@ -1358,6 +1393,8 @@ function validateGeneratedBatch(
     unexpectedFiles,
 
     missingFiles,
+
+    invalidFiles,
 
   };
 
@@ -1421,6 +1458,32 @@ function createGeneratedFileIndex(
 
 
 /* =========================================================
+   COMPACT MANIFEST CONTEXT
+========================================================= */
+
+function createManifestContext(
+  manifestFiles
+) {
+
+  return safeJson(
+    manifestFiles.map(
+      file => ({
+
+        path:
+          file.path,
+
+        purpose:
+          file.purpose,
+
+      })
+    ),
+    MAX_MANIFEST_CONTEXT_SIZE
+  );
+
+}
+
+
+/* =========================================================
    BUILD BATCH REQUEST
 ========================================================= */
 
@@ -1454,38 +1517,80 @@ function createBatchUserMessage({
     );
 
 
+  const manifestContext =
+    createManifestContext(
+      manifestFiles
+    );
+
+
   let repairSection =
     "";
 
 
   if (repairContext) {
 
+    /*
+     * FIX:
+     *
+     * The previous Builder used
+     * repairContext.validFiles,
+     * but validation actually returned `files`.
+     *
+     * We now explicitly normalize this.
+     */
+    const validFiles =
+      Array.isArray(
+        repairContext.validFiles
+      )
+        ? repairContext.validFiles
+        : Array.isArray(
+            repairContext.files
+          )
+          ? repairContext.files
+          : [];
+
+
     repairSection = `
 
-REPAIR MODE:
+REPAIR MODE
 
-The previous generation attempt did not satisfy
-the batch contract.
+The previous attempt did not satisfy the current batch.
 
 VALID FILES ALREADY RECEIVED:
 
 ${safeJson(
-  repairContext.validFiles || [],
-  30000
+  validFiles.map(
+    file => ({
+      path:
+        file.path,
+      size:
+        typeof file.content === "string"
+          ? file.content.length
+          : undefined,
+    })
+  ),
+  12000
 )}
 
 MISSING REQUESTED FILES:
 
 ${safeJson(
   repairContext.missingFiles || [],
-  10000
+  8000
 )}
 
-UNEXPECTED FILES FROM PREVIOUS ATTEMPT:
+UNEXPECTED FILES THAT MUST BE IGNORED:
 
 ${safeJson(
   repairContext.unexpectedFiles || [],
-  10000
+  8000
+)}
+
+INVALID FILE PATHS:
+
+${safeJson(
+  repairContext.invalidFiles || [],
+  5000
 )}
 
 PREVIOUS VALIDATION ERROR:
@@ -1495,9 +1600,7 @@ ${safeString(
   2000
 )}
 
-Generate the missing/corrected requested files now.
-
-Do not repeat the previous validation mistake.
+Generate the missing/corrected requested files only.
 `;
 
   }
@@ -1508,7 +1611,7 @@ USER REQUEST:
 
 ${request.prompt}
 
-PROJECT:
+PROJECT NAME:
 
 ${projectName}
 
@@ -1516,16 +1619,13 @@ FRAMEWORK:
 
 ${manifestFramework}
 
-PLANNING RESULT:
+PLANNING CONTEXT:
 
 ${request.planString}
 
-COMPLETE PROJECT MANIFEST:
+PROJECT FILE MANIFEST:
 
-${safeJson(
-  manifestFiles,
-  50000
-)}
+${manifestContext}
 
 CURRENT FILE BATCH:
 
@@ -1538,18 +1638,26 @@ ALREADY GENERATED FILE INDEX:
 
 ${safeJson(
   generatedIndex,
-  20000
+  MAX_GENERATED_INDEX_SIZE
 )}
 
-Generate ONLY the files in CURRENT FILE BATCH.
+IMPORTANT BATCH CONTRACT:
 
-Every requested path must be returned.
+The CURRENT FILE BATCH is the ONLY authoritative
+generation target.
+
+Generate every file listed under CURRENT FILE BATCH.
+
+Each requested path must appear exactly once.
+
+Do NOT generate files from another batch.
+
+If you accidentally think another file is required,
+do NOT return it unless it is listed in CURRENT FILE BATCH.
 
 Return complete source code.
 
-Do not return explanations.
-Do not return Markdown.
-Do not return files from another batch.
+Return ONLY JSON.
 
 ${repairSection}
 `;
@@ -1624,6 +1732,47 @@ async function requestBatchGeneration({
       FILE_BATCH_MAX_TOKENS,
 
   });
+
+}
+
+
+/* =========================================================
+   CREATE FAILURE METADATA
+========================================================= */
+
+function createFailureMetadata({
+  projectName,
+  framework,
+  manifestFiles,
+  generatedFiles,
+  failedBatch,
+  totalBatches,
+  attempts,
+  startedAt,
+}) {
+
+  return {
+
+    projectName,
+
+    framework,
+
+    totalManifestFiles:
+      manifestFiles,
+
+    generatedFiles,
+
+    failedBatch,
+
+    totalBatches,
+
+    attempts,
+
+    durationMs:
+      Date.now() -
+      startedAt,
+
+  };
 
 }
 
@@ -1729,9 +1878,7 @@ async function builderAgent(
 
 
     /*
-     * Keep this reference intentionally available for
-     * future builder telemetry without changing the
-     * Master Agent contract.
+     * Keep available for future telemetry.
      */
     void buildContext;
 
@@ -1786,7 +1933,9 @@ PROJECT ID:
 
 ${request.projectId || "not specified"}
 
-Create the complete project file manifest.
+Create the smallest complete project manifest
+that satisfies the request.
+
 Do not generate source code yet.
 `,
           },
@@ -1918,6 +2067,10 @@ Do not generate source code yet.
     );
 
 
+    /* =====================================================
+       BATCH LOOP
+    ===================================================== */
+
     for (
       let batchIndex = 0;
       batchIndex < batches.length;
@@ -1928,12 +2081,12 @@ Do not generate source code yet.
         batches[batchIndex];
 
 
-      currentStage =
-        `file-generation-batch-${batchIndex + 1}`;
-
-
       const batchNumber =
         batchIndex + 1;
+
+
+      currentStage =
+        `file-generation-batch-${batchNumber}`;
 
 
       logger.info(
@@ -1948,6 +2101,10 @@ Do not generate source code yet.
       let lastValidation =
         null;
 
+
+      /* ===================================================
+         ATTEMPT LOOP
+      =================================================== */
 
       for (
         let attempt = 1;
@@ -1974,25 +2131,49 @@ Do not generate source code yet.
             : null;
 
 
-        const batchResult =
-          await requestBatchGeneration({
+        let batchResult;
 
-            request,
 
-            projectName,
+        try {
 
-            manifestFramework,
+          batchResult =
+            await requestBatchGeneration({
 
-            manifestFiles,
+              request,
 
-            batch,
+              projectName,
 
-            generatedFiles,
+              manifestFramework,
 
-            repairContext,
+              manifestFiles,
 
-          });
+              batch,
 
+              generatedFiles,
+
+              repairContext,
+
+            });
+
+        } catch (error) {
+
+          batchResult = {
+
+            success:
+              false,
+
+            error:
+              error?.message ||
+              "Batch AI request failed.",
+
+          };
+
+        }
+
+
+        /* =================================================
+           AI REQUEST FAILURE
+        ================================================= */
 
         if (
           !batchResult ||
@@ -2001,7 +2182,10 @@ Do not generate source code yet.
         ) {
 
           logger.warning(
-            `Builder batch ${batchNumber}/${batches.length} AI request failed | attempt=${attempt}`
+            `Builder batch ${batchNumber}/${batches.length} AI request failed | attempt=${attempt} | error=${
+              batchResult?.error ||
+              "unknown"
+            }`
           );
 
 
@@ -2019,10 +2203,14 @@ Do not generate source code yet.
 
             files: [],
 
+            validFiles: [],
+
             missingFiles:
               batch,
 
             unexpectedFiles: [],
+
+            invalidFiles: [],
 
           };
 
@@ -2054,38 +2242,41 @@ Do not generate source code yet.
             stage:
               currentStage,
 
-            metadata: {
+            metadata:
+              createFailureMetadata({
 
-              projectName,
+                projectName,
 
-              framework:
-                manifestFramework,
+                framework:
+                  manifestFramework,
 
-              totalManifestFiles:
-                manifestFiles.length,
+                manifestFiles:
+                  manifestFiles.length,
 
-              generatedFiles:
-                generatedFiles.length,
+                generatedFiles:
+                  generatedFiles.length,
 
-              failedBatch:
-                batchNumber,
+                failedBatch:
+                  batchNumber,
 
-              totalBatches:
-                batches.length,
+                totalBatches:
+                  batches.length,
 
-              attempts:
-                attempt,
+                attempts:
+                  attempt,
 
-              durationMs:
-                Date.now() -
                 startedAt,
 
-            },
+              }),
 
           };
 
         }
 
+
+        /* =================================================
+           BATCH VALIDATION
+        ================================================= */
 
         const batchValidation =
           validateGeneratedBatch(
@@ -2097,17 +2288,20 @@ Do not generate source code yet.
           );
 
 
-        lastValidation =
-          batchValidation;
+        lastValidation = {
+
+          ...batchValidation,
+
+          validFiles:
+            batchValidation.files || [],
+
+        };
 
 
-        /*
-         * SUCCESS:
-         *
-         * All requested files exist.
-         *
-         * Any accidental extra files are ignored.
-         */
+        /* =================================================
+           VALID BATCH
+        ================================================= */
+
         if (
           batchValidation.valid
         ) {
@@ -2122,15 +2316,31 @@ Do not generate source code yet.
           ) {
 
             logger.warning(
-              `Builder batch ${batchNumber}: ignored unexpected files: ${batchValidation.unexpectedFiles.join(", ")}`
+              `Builder batch ${batchNumber}: discarded unexpected files: ${batchValidation.unexpectedFiles.join(", ")}`
+            );
+
+          }
+
+
+          if (
+            Array.isArray(
+              batchValidation.invalidFiles
+            ) &&
+            batchValidation
+              .invalidFiles
+              .length > 0
+          ) {
+
+            logger.warning(
+              `Builder batch ${batchNumber}: discarded invalid files: ${batchValidation.invalidFiles.join(", ")}`
             );
 
           }
 
 
           /*
-           * Add only files belonging to the current
-           * manifest batch.
+           * ONLY manifest-requested files can enter
+           * generatedFiles.
            */
           for (
             const file of
@@ -2146,6 +2356,11 @@ Do not generate source code yet.
               generatedPaths.has(key)
             ) {
 
+              logger.error(
+                `Builder duplicate project file detected: ${file.path}`
+              );
+
+
               return {
 
                 success:
@@ -2157,21 +2372,32 @@ Do not generate source code yet.
                 stage:
                   currentStage,
 
-                metadata: {
+                metadata:
+                  createFailureMetadata({
 
-                  projectName,
+                    projectName,
 
-                  framework:
-                    manifestFramework,
+                    framework:
+                      manifestFramework,
 
-                  failedBatch:
-                    batchNumber,
+                    manifestFiles:
+                      manifestFiles.length,
 
-                  durationMs:
-                    Date.now() -
+                    generatedFiles:
+                      generatedFiles.length,
+
+                    failedBatch:
+                      batchNumber,
+
+                    totalBatches:
+                      batches.length,
+
+                    attempts:
+                      attempt,
+
                     startedAt,
 
-                },
+                  }),
 
               };
 
@@ -2191,7 +2417,7 @@ Do not generate source code yet.
 
 
           logger.success(
-            `Builder batch ${batchNumber}/${batches.length} completed: ${batchValidation.files.length} files`
+            `Builder batch ${batchNumber}/${batches.length} completed: ${batchValidation.files.length} requested files accepted`
           );
 
 
@@ -2204,11 +2430,10 @@ Do not generate source code yet.
         }
 
 
-        /*
-         * REPAIRABLE FAILURE:
-         *
-         * Some requested files are missing.
-         */
+        /* =================================================
+           REPAIRABLE VALIDATION FAILURE
+        ================================================= */
+
         if (
           batchValidation.repairable &&
           attempt <
@@ -2216,7 +2441,9 @@ Do not generate source code yet.
         ) {
 
           logger.warning(
-            `Builder batch ${batchNumber}: missing requested files, starting repair`
+            `Builder batch ${batchNumber}: validation requires repair | ${
+              batchValidation.error
+            }`
           );
 
 
@@ -2225,11 +2452,14 @@ Do not generate source code yet.
         }
 
 
-        /*
-         * Final failed validation.
-         */
+        /* =================================================
+           FINAL BATCH FAILURE
+        ================================================= */
+
         logger.error(
-          `Builder batch validation failed: ${batchValidation.error}`
+          `Builder batch validation failed: ${
+            batchValidation.error
+          }`
         );
 
 
@@ -2244,33 +2474,32 @@ Do not generate source code yet.
           stage:
             currentStage,
 
-          metadata: {
+          metadata:
+            createFailureMetadata({
 
-            projectName,
+              projectName,
 
-            framework:
-              manifestFramework,
+              framework:
+                manifestFramework,
 
-            totalManifestFiles:
-              manifestFiles.length,
+              manifestFiles:
+                manifestFiles.length,
 
-            generatedFiles:
-              generatedFiles.length,
+              generatedFiles:
+                generatedFiles.length,
 
-            failedBatch:
-              batchNumber,
+              failedBatch:
+                batchNumber,
 
-            totalBatches:
-              batches.length,
+              totalBatches:
+                batches.length,
 
-            attempts:
-              attempt,
+              attempts:
+                attempt,
 
-            durationMs:
-              Date.now() -
               startedAt,
 
-          },
+            }),
 
         };
 
@@ -2290,24 +2519,32 @@ Do not generate source code yet.
           stage:
             currentStage,
 
-          metadata: {
+          metadata:
+            createFailureMetadata({
 
-            projectName,
+              projectName,
 
-            framework:
-              manifestFramework,
+              framework:
+                manifestFramework,
 
-            failedBatch:
-              batchNumber,
+              manifestFiles:
+                manifestFiles.length,
 
-            totalBatches:
-              batches.length,
+              generatedFiles:
+                generatedFiles.length,
 
-            durationMs:
-              Date.now() -
+              failedBatch:
+                batchNumber,
+
+              totalBatches:
+                batches.length,
+
+              attempts:
+                MAX_BATCH_ATTEMPTS,
+
               startedAt,
 
-          },
+            }),
 
         };
 
@@ -2324,6 +2561,10 @@ Do not generate source code yet.
       "final-project-validation";
 
 
+    /*
+     * The Builder must produce exactly the manifest
+     * coverage.
+     */
     if (
       generatedFiles.length !==
       manifestFiles.length
@@ -2364,9 +2605,10 @@ Do not generate source code yet.
     }
 
 
-    /*
-     * Final normalization pass.
-     */
+    /* =====================================================
+       FINAL NORMALIZATION
+    ===================================================== */
+
     const finalFiles =
       normalizeFiles(
         generatedFiles
@@ -2414,7 +2656,7 @@ Do not generate source code yet.
 
 
     /* =====================================================
-       FINAL PATH VERIFICATION
+       FINAL MANIFEST COVERAGE
     ===================================================== */
 
     const finalPathSet =
@@ -2448,6 +2690,65 @@ Do not generate source code yet.
 
           error:
             `Final project is missing: ${manifestFile.path}`,
+
+          stage:
+            currentStage,
+
+          metadata: {
+
+            projectName,
+
+            framework:
+              manifestFramework,
+
+            durationMs:
+              Date.now() -
+              startedAt,
+
+          },
+
+        };
+
+      }
+
+    }
+
+
+    /* =====================================================
+       FINAL EXACT PATH CHECK
+    ===================================================== */
+
+    const manifestPathSet =
+      new Set(
+        manifestFiles.map(
+          file =>
+            file.path
+              .toLowerCase()
+        )
+      );
+
+
+    for (
+      const finalFile of
+        finalFiles
+    ) {
+
+      const key =
+        finalFile.path
+          .toLowerCase();
+
+
+      if (
+        !manifestPathSet.has(key)
+      ) {
+
+        return {
+
+          success:
+            false,
+
+          error:
+            `Final project contains a file outside the manifest: ${finalFile.path}`,
 
           stage:
             currentStage,
@@ -2519,6 +2820,15 @@ Do not generate source code yet.
 
         filesPerBatch:
           FILES_PER_BATCH,
+
+        maxBatchAttempts:
+          MAX_BATCH_ATTEMPTS,
+
+        extraFilesPolicy:
+          "discard-unrequested",
+
+        finalManifestCoverage:
+          true,
 
         durationMs,
 
