@@ -1,20 +1,56 @@
 /* =========================================================
    ZYRIONOS PLANNING AGENT
    ---------------------------------------------------------
-   ROLE:
-   Intent → Implementation Blueprint → Builder Contract
+   VERSION:
+   3.0.0
 
-   RESPONSIBILITY:
-   - Convert the user's request into an implementation plan
-   - Decompose large projects into manageable modules
-   - Define implementation phases
-   - Identify technical dependencies
-   - Define frontend/backend/data/auth/deployment needs
-   - Define acceptance criteria
-   - Define validation strategy
-   - Provide Builder with a deterministic blueprint
+   ROLE:
+   Intent → Requirement Analysis → Proportional
+   Implementation Blueprint → Builder Contract
+
+   CORE PRINCIPLE:
+
+       USER REQUEST
+            ↓
+       REQUIREMENT SCOPE
+            ↓
+       PROJECT SCALE
+            ↓
+       COMPLEXITY
+            ↓
+       ONLY REQUIRED MODULES
+            ↓
+       ONLY REQUIRED DEPENDENCIES
+            ↓
+       IMPLEMENTATION PLAN
+            ↓
+       BUILDER
+
+   IMPORTANT:
+
+   The Planning Agent MUST NOT inflate a simple request
+   into an enterprise architecture.
+
+   Example:
+
+   "Build a counter app"
+
+   MUST NOT automatically create:
+
+   - authentication
+   - database
+   - payment
+   - AI
+   - queues
+   - microservices
+   - monitoring
+   - scaling architecture
+   - multiple implementation phases
+
+   Unless the user explicitly requires them.
 
    DOES NOT:
+
    - Generate source code
    - Generate final file contents
    - Execute tools
@@ -33,8 +69,7 @@
              ↓
        Active configured providers
 
-   The Planning Agent MUST NOT hardcode
-   Gemini, OpenAI, Sarvam, Bedrock, etc.
+   No provider is hardcoded here.
 ========================================================= */
 
 
@@ -49,6 +84,14 @@ const {
   generateJSON
 } =
   require("../services/ai/aiProviderService");
+
+
+/* =========================================================
+   VERSION
+========================================================= */
+
+const PLANNING_AGENT_VERSION =
+  "3.0.0";
 
 
 /* =========================================================
@@ -104,9 +147,6 @@ const VALID_PROJECT_SCALES = [
 
 /* =========================================================
    LIMITS
-   ---------------------------------------------------------
-   These limits prevent a planning response from becoming
-   an uncontrolled giant object.
 ========================================================= */
 
 const MAX_PROMPT_LENGTH =
@@ -127,14 +167,13 @@ const MAX_DESCRIPTION_LENGTH =
 const MAX_FRAMEWORK_LENGTH =
   200;
 
-const MAX_ARRAY_ITEMS =
-  300;
-
-const MAX_SHORT_ARRAY_ITEMS =
-  100;
-
 const MAX_STRING_ITEM_LENGTH =
   1000;
+
+
+/* =========================================================
+   GLOBAL SAFETY LIMITS
+========================================================= */
 
 const MAX_MODULES =
   100;
@@ -150,6 +189,184 @@ const MAX_ACCEPTANCE_CRITERIA =
 
 const MAX_RISKS =
   100;
+
+
+/* =========================================================
+   SCOPE LIMITS
+   ---------------------------------------------------------
+   These are intentionally proportional.
+
+   A simple task should NEVER receive the same
+   architectural budget as a large system.
+========================================================= */
+
+const SCOPE_LIMITS = {
+
+  none: {
+
+    modules:
+      0,
+
+    phases:
+      0,
+
+    dependencies:
+      0,
+
+    acceptanceCriteria:
+      10,
+
+    projectStructure:
+      30
+
+  },
+
+
+  task: {
+
+    modules:
+      3,
+
+    phases:
+      1,
+
+    dependencies:
+      5,
+
+    acceptanceCriteria:
+      10,
+
+    projectStructure:
+      30
+
+  },
+
+
+  feature: {
+
+    modules:
+      8,
+
+    phases:
+      2,
+
+    dependencies:
+      15,
+
+    acceptanceCriteria:
+      20,
+
+    projectStructure:
+      60
+
+  },
+
+
+  application: {
+
+    modules:
+      20,
+
+    phases:
+      6,
+
+    dependencies:
+      50,
+
+    acceptanceCriteria:
+      50,
+
+    projectStructure:
+      150
+
+  },
+
+
+  large_project: {
+
+    modules:
+      60,
+
+    phases:
+      20,
+
+    dependencies:
+      150,
+
+    acceptanceCriteria:
+      100,
+
+    projectStructure:
+      500
+
+  },
+
+
+  system: {
+
+    modules:
+      100,
+
+    phases:
+      100,
+
+    dependencies:
+      300,
+
+    acceptanceCriteria:
+      200,
+
+    projectStructure:
+      1000
+
+  }
+
+};
+
+
+/* =========================================================
+   COMPLEXITY WEIGHTS
+========================================================= */
+
+const COMPLEXITY_RANK = {
+
+  low:
+    1,
+
+  medium:
+    2,
+
+  high:
+    3
+
+};
+
+
+/* =========================================================
+   SCALE RANK
+========================================================= */
+
+const SCALE_RANK = {
+
+  none:
+    0,
+
+  task:
+    1,
+
+  feature:
+    2,
+
+  application:
+    3,
+
+  large_project:
+    4,
+
+  system:
+    5
+
+};
 
 
 /* =========================================================
@@ -169,9 +386,16 @@ function cleanString(
 
   }
 
+
   return value
-    .replace(/\u0000/g, "")
+
+    .replace(
+      /\u0000/g,
+      ""
+    )
+
     .trim()
+
     .slice(
       0,
       maxLength
@@ -218,7 +442,7 @@ function safeJson(
 
 function normalizeStringArray(
   value,
-  maxItems = MAX_ARRAY_ITEMS,
+  maxItems = 100,
   maxItemLength = MAX_STRING_ITEM_LENGTH
 ) {
 
@@ -233,50 +457,57 @@ function normalizeStringArray(
 
   const result = [];
 
+  const seen =
+    new Set();
+
 
   for (
     const item of value
   ) {
 
     if (
-      typeof item === "string"
+      typeof item !== "string"
     ) {
 
-      const normalized =
-        cleanString(
-          item,
-          maxItemLength
-        );
-
-
-      if (
-        normalized
-      ) {
-
-        result.push(
-          normalized
-        );
-
-      }
+      continue;
 
     }
 
-    else if (
-      item &&
-      typeof item === "object" &&
-      !Array.isArray(item)
-    ) {
 
-      /*
-       * Preserve structured planning objects.
-       * These are normalized separately where needed.
-       */
-
-      result.push(
-        item
+    const normalized =
+      cleanString(
+        item,
+        maxItemLength
       );
 
+
+    if (
+      !normalized
+    ) {
+
+      continue;
+
     }
+
+
+    const key =
+      normalized.toLowerCase();
+
+
+    if (
+      seen.has(key)
+    ) {
+
+      continue;
+
+    }
+
+
+    seen.add(key);
+
+    result.push(
+      normalized
+    );
 
 
     if (
@@ -320,6 +551,23 @@ function normalizeObject(
 
 
 /* =========================================================
+   NORMALIZE UNIQUE STRINGS
+========================================================= */
+
+function uniqueStrings(
+  values,
+  maxItems = 100
+) {
+
+  return normalizeStringArray(
+    values,
+    maxItems
+  );
+
+}
+
+
+/* =========================================================
    NORMALIZE SIMPLE OBJECT LIST
 ========================================================= */
 
@@ -342,8 +590,14 @@ function normalizeObjectList(
 
 
   for (
-    const item of value
+    let index = 0;
+    index < value.length;
+    index++
   ) {
+
+    const item =
+      value[index];
+
 
     if (
       !item ||
@@ -358,7 +612,8 @@ function normalizeObjectList(
 
     const normalized =
       normalizer(
-        item
+        item,
+        index
       );
 
 
@@ -391,28 +646,121 @@ function normalizeObjectList(
 
 
 /* =========================================================
-   NORMALIZE UNIQUE STRING
+   PROJECT SCALE NORMALIZATION
 ========================================================= */
 
-function uniqueStrings(
-  values,
-  maxItems = MAX_ARRAY_ITEMS
+function normalizeProjectScale(
+  value
 ) {
 
-  const normalized =
-    normalizeStringArray(
-      values,
-      maxItems
-    );
-
-
-  return [
-
-    ...new Set(
-      normalized
+  const scale =
+    cleanString(
+      value,
+      100
     )
+      .toLowerCase();
 
-  ];
+
+  if (
+    VALID_PROJECT_SCALES.includes(
+      scale
+    )
+  ) {
+
+    return scale;
+
+  }
+
+
+  return "application";
+
+}
+
+
+/* =========================================================
+   COMPLEXITY NORMALIZATION
+========================================================= */
+
+function normalizeComplexity(
+  value
+) {
+
+  const complexity =
+    cleanString(
+      value,
+      100
+    )
+      .toLowerCase();
+
+
+  if (
+    VALID_COMPLEXITIES.includes(
+      complexity
+    )
+  ) {
+
+    return complexity;
+
+  }
+
+
+  return "medium";
+
+}
+
+
+/* =========================================================
+   CLAMP SCALE
+========================================================= */
+
+function clampScale(
+  requestedScale,
+  allowedScale
+) {
+
+  const requestedRank =
+    SCALE_RANK[
+      requestedScale
+    ] ??
+    SCALE_RANK.application;
+
+
+  const allowedRank =
+    SCALE_RANK[
+      allowedScale
+    ] ??
+    SCALE_RANK.application;
+
+
+  if (
+    requestedRank >
+    allowedRank
+  ) {
+
+    return allowedScale;
+
+  }
+
+
+  return requestedScale;
+
+}
+
+
+/* =========================================================
+   SCOPE LIMIT
+========================================================= */
+
+function getScopeLimits(
+  projectScale
+) {
+
+  return (
+    SCOPE_LIMITS[
+      projectScale
+    ] ||
+    SCOPE_LIMITS.application
+  );
 
 }
 
@@ -434,7 +782,10 @@ function createDefaultPlan(
   return {
 
     planVersion:
-      2,
+      3,
+
+    agentVersion:
+      PLANNING_AGENT_VERSION,
 
     projectName:
       "ZyrionOS Project",
@@ -540,6 +891,12 @@ function createDefaultPlan(
     risks:
       [],
 
+    explicitNonGoals:
+      [],
+
+    assumptions:
+      [],
+
     buildStrategy: {
 
       mode:
@@ -558,12 +915,6 @@ function createDefaultPlan(
         true
 
     },
-
-    explicitNonGoals:
-      [],
-
-    assumptions:
-      [],
 
     intent:
       intentType
@@ -611,9 +962,8 @@ function normalizeModule(
   }
 
 
-  return {
-
-    id:
+  const normalizedId =
+    (
       id ||
       name
         .toLowerCase()
@@ -625,10 +975,17 @@ function normalizeModule(
           /^-+|-+$/g,
           ""
         )
-        .slice(
-          0,
-          100
-        ),
+    )
+      .slice(
+        0,
+        100
+      );
+
+
+  return {
+
+    id:
+      normalizedId,
 
     name:
       name ||
@@ -725,6 +1082,15 @@ function normalizeDependency(
   }
 
 
+  if (
+    from === to
+  ) {
+
+    return null;
+
+  }
+
+
   return {
 
     from,
@@ -788,6 +1154,12 @@ function normalizeImplementationPhase(
   }
 
 
+  const order =
+    Number(
+      value.order
+    );
+
+
   return {
 
     id,
@@ -802,13 +1174,9 @@ function normalizeImplementationPhase(
 
     order:
       Number.isFinite(
-        Number(
-          value.order
-        )
+        order
       )
-        ? Number(
-            value.order
-          )
+        ? order
         : index + 1,
 
     modules:
@@ -849,18 +1217,12 @@ function normalizeAcceptanceCriterion(
   index
 ) {
 
-  const value =
-    normalizeObject(
-      criterion
-    );
-
-
   if (
     typeof criterion ===
     "string"
   ) {
 
-    const text =
+    const description =
       cleanString(
         criterion,
         1200
@@ -868,7 +1230,7 @@ function normalizeAcceptanceCriterion(
 
 
     if (
-      !text
+      !description
     ) {
 
       return null;
@@ -881,15 +1243,23 @@ function normalizeAcceptanceCriterion(
       id:
         `AC-${index + 1}`,
 
-      description:
-        text,
+      description,
 
       priority:
-        "required"
+        "required",
+
+      verification:
+        ""
 
     };
 
   }
+
+
+  const value =
+    normalizeObject(
+      criterion
+    );
 
 
   const description =
@@ -946,12 +1316,6 @@ function normalizeRisk(
   index
 ) {
 
-  const value =
-    normalizeObject(
-      risk
-    );
-
-
   if (
     typeof risk ===
     "string"
@@ -989,6 +1353,12 @@ function normalizeRisk(
     };
 
   }
+
+
+  const value =
+    normalizeObject(
+      risk
+    );
 
 
   const description =
@@ -1064,6 +1434,90 @@ function normalizePlan(
   }
 
 
+  /*
+   * -------------------------------------------------------
+   * FIRST:
+   * Determine the actual allowed project scope.
+   * -------------------------------------------------------
+   */
+
+  const aiScale =
+    normalizeProjectScale(
+      parsed.projectScale
+    );
+
+
+  const intentScale =
+    normalizeProjectScale(
+      intent?.projectScale
+    );
+
+
+  /*
+   * Intent is stronger than an arbitrary model guess.
+   *
+   * If Intent Agent has already classified a request
+   * as task/feature/application/etc., Planning respects
+   * that classification.
+   */
+
+  let projectScale =
+    intentScale !==
+      "application" ||
+    !parsed.projectScale
+      ? intentScale
+      : aiScale;
+
+
+  /*
+   * If AI tried to inflate the project beyond the
+   * request's known intent, clamp it.
+   */
+
+  if (
+    intentScale &&
+    SCALE_RANK[
+      projectScale
+    ] >
+    SCALE_RANK[
+      intentScale
+    ]
+  ) {
+
+    projectScale =
+      intentScale;
+
+  }
+
+
+  /*
+   * Direct build requests without Intent Agent:
+   *
+   * application is the safe default.
+   */
+
+  if (
+    !VALID_PROJECT_SCALES.includes(
+      projectScale
+    )
+  ) {
+
+    projectScale =
+      "application";
+
+  }
+
+
+  const scope =
+    getScopeLimits(
+      projectScale
+    );
+
+
+  /* =====================================================
+     BASIC OBJECTS
+  ===================================================== */
+
   const frontend =
     normalizeObject(
       parsed.frontend
@@ -1100,6 +1554,71 @@ function normalizePlan(
     );
 
 
+  /* =====================================================
+     COMPLEXITY
+  ===================================================== */
+
+  let complexity =
+    normalizeComplexity(
+      parsed.complexity
+    );
+
+
+  /*
+   * Never allow a low-scope request to become high
+   * complexity just because the AI wrote "high".
+   */
+
+  if (
+    projectScale ===
+    "none" ||
+    projectScale ===
+    "task"
+  ) {
+
+    complexity =
+      "low";
+
+  }
+
+
+  else if (
+    projectScale ===
+    "feature"
+  ) {
+
+    if (
+      COMPLEXITY_RANK[
+        complexity
+      ] >
+      COMPLEXITY_RANK.medium
+    ) {
+
+      complexity =
+        "medium";
+
+    }
+
+  }
+
+
+  else if (
+    projectScale ===
+    "large_project" ||
+    projectScale ===
+    "system"
+  ) {
+
+    complexity =
+      "high";
+
+  }
+
+
+  /* =====================================================
+     BASIC PROJECT FIELDS
+  ===================================================== */
+
   const projectName =
     cleanString(
       parsed.projectName,
@@ -1121,127 +1640,54 @@ function normalizePlan(
     );
 
 
-  let projectScale =
-    cleanString(
-      parsed.projectScale,
-      100
-    )
-      .toLowerCase();
-
-
-  if (
-    !VALID_PROJECT_SCALES.includes(
-      projectScale
-    )
-  ) {
-
-    projectScale =
-      fallback.projectScale;
-
-  }
-
-
-  let complexity =
-    cleanString(
-      parsed.complexity,
-      100
-    )
-      .toLowerCase();
-
-
-  if (
-    !VALID_COMPLEXITIES.includes(
-      complexity
-    )
-  ) {
-
-    complexity =
-      fallback.complexity;
-
-  }
-
-
-  /*
-   * Preserve the Intent Agent's decision.
-   *
-   * Planning may refine implementation details,
-   * but it must not turn a large request into
-   * a small one.
-   */
-
-  const intentScale =
-    cleanString(
-      intent?.projectScale,
-      100
-    )
-      .toLowerCase();
-
-
-  if (
-    intentScale ===
-    "large_project" ||
-    intentScale ===
-    "system"
-  ) {
-
-    projectScale =
-      intentScale;
-
-    complexity =
-      "high";
-
-  }
-
+  /* =====================================================
+     NORMALIZE MODULES
+  ===================================================== */
 
   const modules =
     normalizeObjectList(
       parsed.modules,
-      MAX_MODULES,
+      Math.min(
+        MAX_MODULES,
+        scope.modules
+      ),
       normalizeModule
     );
 
 
+  /* =====================================================
+     NORMALIZE DEPENDENCIES
+  ===================================================== */
+
   const dependencies =
     normalizeObjectList(
       parsed.dependencies,
-      MAX_DEPENDENCIES,
+      Math.min(
+        MAX_DEPENDENCIES,
+        scope.dependencies
+      ),
       normalizeDependency
     );
 
 
+  /* =====================================================
+     NORMALIZE PHASES
+  ===================================================== */
+
   const implementationPhases =
     normalizeObjectList(
       parsed.implementationPhases,
-      MAX_PHASES,
-      (
-        item
-      ) =>
-        normalizeImplementationPhase(
-          item,
-          0
-        )
+      Math.min(
+        MAX_PHASES,
+        scope.phases
+      ),
+      normalizeImplementationPhase
     );
 
 
-  const acceptanceCriteria =
-    normalizeObjectList(
-      parsed.acceptanceCriteria,
-      MAX_ACCEPTANCE_CRITERIA,
-      (
-        item
-      ) =>
-        normalizeAcceptanceCriterion(
-          item,
-          0
-        )
-    );
-
-
-  /*
-   * Object-list normalization above does not
-   * support primitive strings for every section,
-   * so normalize acceptance strings separately.
-   */
+  /* =====================================================
+     ACCEPTANCE CRITERIA
+  ===================================================== */
 
   const rawAcceptance =
     Array.isArray(
@@ -1251,8 +1697,9 @@ function normalizePlan(
       : [];
 
 
-  const normalizedAcceptanceCriteria =
+  const acceptanceCriteria =
     rawAcceptance
+
       .map(
         (
           item,
@@ -1263,12 +1710,21 @@ function normalizePlan(
             index
           )
       )
+
       .filter(Boolean)
+
       .slice(
         0,
-        MAX_ACCEPTANCE_CRITERIA
+        Math.min(
+          MAX_ACCEPTANCE_CRITERIA,
+          scope.acceptanceCriteria
+        )
       );
 
+
+  /* =====================================================
+     RISKS
+  ===================================================== */
 
   const rawRisks =
     Array.isArray(
@@ -1280,6 +1736,7 @@ function normalizePlan(
 
   const risks =
     rawRisks
+
       .map(
         (
           item,
@@ -1290,49 +1747,43 @@ function normalizePlan(
             index
           )
       )
+
       .filter(Boolean)
+
       .slice(
         0,
         MAX_RISKS
       );
 
 
-  const normalizedPhases =
-    (
-      Array.isArray(
-        parsed.implementationPhases
+  /* =====================================================
+     PROJECT STRUCTURE
+  ===================================================== */
+
+  const projectStructure =
+    normalizeStringArray(
+      parsed.projectStructure,
+      Math.min(
+        1000,
+        scope.projectStructure
       )
-        ? parsed.implementationPhases
-        : []
-    )
-      .map(
-        (
-          item,
-          index
-        ) =>
-          normalizeImplementationPhase(
-            item,
-            index
-          )
-      )
-      .filter(Boolean)
-      .slice(
-        0,
-        MAX_PHASES
-      );
+    );
 
 
-  const normalizedModules =
-    modules;
+  /* =====================================================
+     REQUIREMENTS
+  ===================================================== */
+
+  const requirements =
+    normalizeStringArray(
+      parsed.requirements,
+      scope.acceptanceCriteria * 2
+    );
 
 
-  const normalizedDependencies =
-    dependencies;
-
-
-  /*
-   * Build strategy.
-   */
+  /* =====================================================
+     BUILD STRATEGY
+  ===================================================== */
 
   const requestedBatchSize =
     Number(
@@ -1356,12 +1807,65 @@ function normalizePlan(
       : 3;
 
 
+  /* =====================================================
+     SIMPLE PROJECT RULE
+     -----------------------------------------------------
+     These fields must remain empty unless the user
+     actually needs them.
+  ===================================================== */
+
+  const normalizedDatabaseType =
+    cleanString(
+      database.type,
+      MAX_FRAMEWORK_LENGTH
+    );
+
+
+  const normalizedAuthProviders =
+    normalizeStringArray(
+      authentication.providers,
+      10
+    );
+
+
+  const normalizedAiSystems =
+    normalizeStringArray(
+      parsed.aiSystems,
+      10
+    );
+
+
+  const normalizedDeploymentProvider =
+    cleanString(
+      deployment.provider,
+      MAX_FRAMEWORK_LENGTH
+    );
+
+
+  /*
+   * If the request is a small task and AI hallucinated
+   * infrastructure, remove it.
+   */
+
+  const isMinimalScope =
+    projectScale ===
+      "none" ||
+    projectScale ===
+      "task";
+
+
+  const isFeatureScope =
+    projectScale ===
+    "feature";
+
+
   return {
 
     planVersion:
-      Number(
-        parsed.planVersion
-      ) || 2,
+      3,
+
+    agentVersion:
+      PLANNING_AGENT_VERSION,
 
     projectName:
       projectName ||
@@ -1393,7 +1897,7 @@ function normalizePlan(
       pages:
         normalizeStringArray(
           frontend.pages,
-          MAX_SHORT_ARRAY_ITEMS
+          100
         )
 
     },
@@ -1409,7 +1913,7 @@ function normalizePlan(
       routes:
         normalizeStringArray(
           backend.routes,
-          MAX_SHORT_ARRAY_ITEMS
+          100
         )
 
     },
@@ -1417,111 +1921,93 @@ function normalizePlan(
     database: {
 
       type:
-        cleanString(
-          database.type,
-          MAX_FRAMEWORK_LENGTH
-        ),
+        isMinimalScope
+          ? ""
+          : normalizedDatabaseType,
 
       collections:
-        normalizeStringArray(
-          database.collections,
-          MAX_SHORT_ARRAY_ITEMS
-        )
+        isMinimalScope
+          ? []
+          : normalizeStringArray(
+              database.collections,
+              100
+            )
 
     },
 
     authentication: {
 
       providers:
-        normalizeStringArray(
-          authentication.providers,
-          MAX_SHORT_ARRAY_ITEMS
-        )
+        isMinimalScope
+          ? []
+          : normalizedAuthProviders
 
     },
 
     aiSystems:
-      normalizeStringArray(
-        parsed.aiSystems,
-        MAX_SHORT_ARRAY_ITEMS
-      ),
+      isMinimalScope
+        ? []
+        : normalizedAiSystems,
 
     deployment: {
 
       provider:
-        cleanString(
-          deployment.provider,
-          MAX_FRAMEWORK_LENGTH
-        ),
+        isMinimalScope
+          ? ""
+          : normalizedDeploymentProvider,
 
       services:
-        normalizeStringArray(
-          deployment.services,
-          MAX_SHORT_ARRAY_ITEMS
-        )
+        isMinimalScope
+          ? []
+          : normalizeStringArray(
+              deployment.services,
+              100
+            )
 
     },
 
-    /*
-     * BACKWARD-COMPATIBLE BUILDER CONTRACT
-     */
+    projectStructure,
 
-    projectStructure:
-      normalizeStringArray(
-        parsed.projectStructure,
-        MAX_ARRAY_ITEMS
-      ),
-
-    requirements:
-      normalizeStringArray(
-        parsed.requirements,
-        MAX_ARRAY_ITEMS
-      ),
+    requirements,
 
     security:
       normalizeStringArray(
         parsed.security,
-        MAX_SHORT_ARRAY_ITEMS
+        50
       ),
 
     scalability:
-      normalizeStringArray(
-        parsed.scalability,
-        MAX_SHORT_ARRAY_ITEMS
-      ),
+      isMinimalScope
+        ? []
+        : normalizeStringArray(
+            parsed.scalability,
+            50
+          ),
 
     performance:
       normalizeStringArray(
         parsed.performance,
-        MAX_SHORT_ARRAY_ITEMS
+        50
       ),
 
-    /*
-     * NEW ENGINEERING PLAN
-     */
+    modules,
 
-    modules:
-      normalizedModules,
+    dependencies,
 
-    dependencies:
-      normalizedDependencies,
+    implementationPhases,
 
-    implementationPhases:
-      normalizedPhases,
-
-    acceptanceCriteria:
-      normalizedAcceptanceCriteria,
+    acceptanceCriteria,
 
     environmentRequirements:
       normalizeStringArray(
         parsed.environmentRequirements,
-        MAX_SHORT_ARRAY_ITEMS
+        50
       ),
 
     validationStrategy:
       normalizeStringArray(
         parsed.validationStrategy,
-        MAX_SHORT_ARRAY_ITEMS
+        50
       ),
 
     risks,
@@ -1529,13 +2015,13 @@ function normalizePlan(
     explicitNonGoals:
       normalizeStringArray(
         parsed.explicitNonGoals,
-        MAX_SHORT_ARRAY_ITEMS
+        50
       ),
 
     assumptions:
       normalizeStringArray(
         parsed.assumptions,
-        MAX_SHORT_ARRAY_ITEMS
+        50
       ),
 
     buildStrategy: {
@@ -1710,11 +2196,109 @@ function validatePlan(
   }
 
 
+  if (
+    !Array.isArray(
+      plan.implementationPhases
+    )
+  ) {
+
+    errors.push(
+      "implementationPhases must be an array."
+    );
+
+  }
+
+
+  if (
+    !Array.isArray(
+      plan.acceptanceCriteria
+    )
+  ) {
+
+    errors.push(
+      "acceptanceCriteria must be an array."
+    );
+
+  }
+
+
+  /* =====================================================
+     SCOPE PROPORTIONALITY VALIDATION
+  ===================================================== */
+
+  const scope =
+    getScopeLimits(
+      plan.projectScale
+    );
+
+
+  if (
+    plan.modules.length >
+    scope.modules
+  ) {
+
+    errors.push(
+      `Plan exceeds module budget for ${plan.projectScale}.`
+    );
+
+  }
+
+
+  if (
+    plan.dependencies.length >
+    scope.dependencies
+  ) {
+
+    errors.push(
+      `Plan exceeds dependency budget for ${plan.projectScale}.`
+    );
+
+  }
+
+
+  if (
+    plan.implementationPhases.length >
+    scope.phases
+  ) {
+
+    errors.push(
+      `Plan exceeds phase budget for ${plan.projectScale}.`
+    );
+
+  }
+
+
   /*
-   * Large project safety:
-   *
-   * A large project without modules is not
-   * considered a useful implementation plan.
+   * Small tasks should not contain architecture
+   * that implies a distributed system.
+   */
+
+  if (
+    (
+      plan.projectScale ===
+      "none" ||
+      plan.projectScale ===
+      "task"
+    ) &&
+    (
+      plan.modules.length >
+      3 ||
+      plan.dependencies.length >
+      5 ||
+      plan.implementationPhases.length >
+      1
+    )
+  ) {
+
+    errors.push(
+      "Minimal project contains disproportionate architecture."
+    );
+
+  }
+
+
+  /*
+   * Large projects require decomposition.
    */
 
   if (
@@ -1724,7 +2308,8 @@ function validatePlan(
       plan.projectScale ===
       "system"
     ) &&
-    plan.modules.length === 0
+    plan.modules.length ===
+    0
   ) {
 
     errors.push(
@@ -1741,7 +2326,8 @@ function validatePlan(
       plan.projectScale ===
       "system"
     ) &&
-    plan.implementationPhases.length === 0
+    plan.implementationPhases.length ===
+    0
   ) {
 
     errors.push(
@@ -1757,17 +2343,15 @@ function validatePlan(
 
 
 /* =========================================================
-   SYSTEM PROMPT
+   PLANNING SYSTEM PROMPT
 ========================================================= */
 
 const PLANNING_SYSTEM_PROMPT = `
 
-You are the Planning Agent of ZyrionOS,
-an autonomous production AI software system.
+You are the ZyrionOS Planning Agent.
 
-Your job is to transform the CURRENT USER REQUEST
-into a structured implementation blueprint that
-downstream engineering agents can execute.
+Your job is to convert the CURRENT USER REQUEST into
+a precise, proportional implementation blueprint.
 
 You are NOT the Builder.
 
@@ -1781,73 +2365,168 @@ You DO NOT claim that anything succeeded.
 
 You DO NOT create credentials or secrets.
 
-You DO NOT invent resources that the user did not request.
-
 =========================================================
-CORE PRINCIPLE
+MOST IMPORTANT RULE
 =========================================================
 
-The user's request is the source of truth.
+ARCHITECTURE MUST BE PROPORTIONAL TO THE USER REQUEST.
 
-The plan must describe WHAT needs to be built
-and HOW the project should be decomposed.
+Do NOT make a simple request complex.
 
-The Builder later decides exact source-code
-implementation using this plan and the approved
-project manifest.
-
-Do not turn Planning into code generation.
+The requested scope is the source of truth.
 
 =========================================================
-CURRENT INTENT
+SCOPE LEVELS
 =========================================================
 
-The current intent will be provided separately.
+Use these levels:
 
-Respect it.
+none
+task
+feature
+application
+large_project
+system
 
-For BUILD:
-create an implementation blueprint.
+Use the SMALLEST level that completely satisfies
+the request.
 
-For FIX:
-identify affected modules, likely technical
-areas, dependencies and verification strategy.
+Examples:
 
-For DEPLOY:
-describe deployment requirements only.
+"Create a calculator"
+→ task
 
-For MONITOR:
-describe monitoring requirements only.
+"Add dark mode to my dashboard"
+→ feature
 
-For SCALE:
-describe scalability architecture.
+"Build a task management web application"
+→ application
 
-For BILLING/SUBSCRIPTION:
-describe the required application/payment
-architecture without performing transactions.
+"Build a complete SaaS platform with teams,
+billing, analytics and admin"
+→ large_project
 
-For AUTOMATION:
-describe triggers, workflows, workers and
-integrations.
+"Build an autonomous AI company operating system
+with agents, orchestration, deployments, billing,
+memory and infrastructure"
+→ system
 
-For INFRASTRUCTURE:
-describe infrastructure components and
-relationships.
+=========================================================
+ANTI-INFLATION RULE
+=========================================================
 
-For FILE:
-describe the requested file operation.
+Never increase scope just because a technology
+could theoretically be useful.
 
-For THUMBNAIL:
-describe the generation pipeline.
+Do NOT add:
+
+- database
+- authentication
+- AI
+- payments
+- queues
+- microservices
+- Redis
+- monitoring
+- analytics
+- deployment infrastructure
+- admin dashboards
+- background workers
+
+unless:
+
+1. the user explicitly requests it, OR
+2. it is objectively required for the requested
+   functionality to work.
+
+=========================================================
+SIMPLE TASK RULE
+=========================================================
+
+For task-level requests:
+
+- Prefer 1–3 modules.
+- Prefer 0–5 dependencies.
+- Prefer 0–1 implementation phase.
+- Keep project structure small.
+- Do not create unnecessary architecture.
+- Do not create a database unless required.
+- Do not create authentication unless required.
+- Do not create backend services unless required.
+
+Example:
+
+USER:
+"Build a counter app."
+
+GOOD:
+
+projectScale:
+"task"
+
+complexity:
+"low"
+
+modules:
+[
+  "counter-ui"
+]
+
+phases:
+[
+  "implementation"
+]
+
+BAD:
+
+modules:
+[
+  "authentication",
+  "database",
+  "api",
+  "analytics",
+  "monitoring",
+  "deployment",
+  "notification-service"
+]
+
+=========================================================
+FEATURE RULE
+=========================================================
+
+For feature-level requests:
+
+- Focus only on the requested feature.
+- Reuse the existing architecture when possible.
+- Do not redesign unrelated systems.
+- Prefer 1–8 modules.
+- Prefer 0–2 implementation phases.
+
+=========================================================
+APPLICATION RULE
+=========================================================
+
+For application-level requests:
+
+Create a proper but practical architecture.
+
+Identify only the layers actually needed:
+
+- frontend
+- backend
+- data
+- authentication
+- integrations
+
+Do not automatically create microservices.
 
 =========================================================
 LARGE PROJECT RULE
 =========================================================
 
-Never attempt to describe a large software system
-as one giant undivided task.
+Large projects must be decomposed.
 
-Decompose large projects into:
+Use:
 
 1. Modules
 2. Dependencies
@@ -1855,34 +2534,34 @@ Decompose large projects into:
 4. Acceptance criteria
 5. Validation strategy
 
-Example:
-
-Authentication
-    ↓
-User/Data Layer
-    ↓
-Core Services
-    ↓
-Feature Modules
-    ↓
-API Layer
-    ↓
-Frontend
-    ↓
-Integration
-    ↓
-Testing
-    ↓
-Deployment
-
-The exact decomposition must depend on the
-actual user request.
+Each module needs a concrete reason to exist.
 
 =========================================================
-MODULE RULES
+SYSTEM RULE
 =========================================================
 
-Each module should have:
+System-level requests may use deep architecture.
+
+Examples:
+
+- orchestration
+- agents
+- queues
+- workers
+- persistence
+- authentication
+- observability
+- deployment
+- infrastructure
+
+BUT only when the user actually requests a system
+of that scope.
+
+=========================================================
+MODULE RULE
+=========================================================
+
+Each module should contain:
 
 - id
 - name
@@ -1895,199 +2574,199 @@ Each module should have:
 - inputs
 - outputs
 
-Do NOT invent unnecessary modules.
+Do NOT create modules merely to make the plan
+look sophisticated.
 
-Every module must have a reason to exist.
+Every module must have a real responsibility.
 
 =========================================================
-DEPENDENCY RULES
+DEPENDENCY RULE
 =========================================================
 
-Dependencies must describe real relationships.
+Dependencies must represent actual relationships.
 
-Examples:
+Good:
 
 frontend → api
 api → service
 service → database
-feature → authentication
 
-Do not create circular dependencies unless
-the user explicitly requires them and the
-architecture genuinely needs them.
+Bad:
 
-Prefer dependency direction:
+frontend → analytics
+analytics → notifications
+notifications → queue
+queue → redis
 
-foundation
-    ↓
-core
-    ↓
-features
-    ↓
-integration
-    ↓
-entrypoints
+when none of these were requested.
+
+Avoid circular dependencies.
 
 =========================================================
-IMPLEMENTATION PHASE RULES
+PHASE RULE
 =========================================================
 
-Large projects must be divided into phases.
+Do not create phases for a task that can be
+implemented directly.
 
-A phase should contain:
-
-- id
-- name
-- purpose
-- order
-- modules
-- dependencies
-- prerequisites
-- validation
-
-Generation should happen in dependency-aware order.
-
-Do not generate a file before the modules it
-depends on are understood.
+Use multiple phases only when dependencies,
+size or risk justify them.
 
 =========================================================
-FILE RULE
+PROJECT STRUCTURE RULE
 =========================================================
 
-projectStructure must describe ONLY files/folders
-that are justified by the request and architecture.
+projectStructure describes approved files/folders
+needed by the project.
 
-Do not add:
+Do not generate speculative files.
 
-- random demo files
-- unnecessary libraries
-- fake configuration
-- unused components
-- speculative services
-- duplicate modules
+Do not generate:
 
-The final Builder output should contain only
-approved manifest files.
+- demo files
+- duplicate components
+- unused services
+- unused configs
+- fake APIs
+- placeholder infrastructure
 
 =========================================================
 REQUIREMENTS RULE
 =========================================================
 
-requirements should contain concise implementation
-requirements required by the user request.
+requirements must be directly traceable to
+the user request.
 
-Do not invent unrelated features.
+Every requirement should answer:
+
+"What does the application actually need to do?"
+
+=========================================================
+DATABASE RULE
+=========================================================
+
+Use a database ONLY when:
+
+- the user requests persistent data, OR
+- persistent server-side state is objectively
+  required.
+
+A static frontend does NOT need a database.
+
+=========================================================
+AUTHENTICATION RULE
+=========================================================
+
+Use authentication ONLY when:
+
+- the user requests accounts/login, OR
+- private user-specific resources require it.
+
+=========================================================
+AI RULE
+=========================================================
+
+Use AI systems ONLY when:
+
+- the user requests AI functionality, OR
+- AI is objectively required by the requested feature.
+
+Never add AI just because ZyrionOS itself uses AI.
+
+=========================================================
+DEPLOYMENT RULE
+=========================================================
+
+Do not add deployment architecture unless:
+
+- the user requests deployment, OR
+- deployment configuration is explicitly part of
+  the requested application.
+
+=========================================================
+SECURITY RULE
+=========================================================
+
+Security requirements must be relevant.
+
+Examples:
+
+- input validation
+- authorization
+- secret handling
+
+Do not generate an enormous security architecture
+for a static calculator.
+
+=========================================================
+PERFORMANCE RULE
+=========================================================
+
+Only include meaningful performance considerations.
+
+Do not invent arbitrary benchmarks.
 
 =========================================================
 ACCEPTANCE CRITERIA
 =========================================================
 
-Acceptance criteria must describe observable
-conditions that can later be tested.
+Acceptance criteria must be observable and testable.
 
-Examples:
+GOOD:
 
-"Authenticated users can create projects."
+"User can add a task."
 
-"Project data persists after reload."
+"Task remains after page reload."
 
-"Unauthorized users cannot access private routes."
+BAD:
 
-Avoid vague criteria such as:
-
-"Application should be good."
-
-=========================================================
-SECURITY
-=========================================================
-
-Identify concrete requirements such as:
-
-- authentication
-- authorization
-- input validation
-- secret handling
-- access control
-- API protection
-- data protection
-
-Only include requirements relevant to the project.
-
-Never create real credentials.
-
-=========================================================
-SCALABILITY
-=========================================================
-
-For large applications identify relevant
-scalability concerns such as:
-
-- modular services
-- stateless APIs
-- caching
-- queue workers
-- database indexing
-- pagination
-- asynchronous jobs
-- horizontal scaling
-
-Only include what the actual system needs.
-
-=========================================================
-PERFORMANCE
-=========================================================
-
-Identify meaningful performance requirements.
-
-Do not invent arbitrary benchmarks unless
-the user supplied them.
-
-=========================================================
-ENVIRONMENT REQUIREMENTS
-=========================================================
-
-List required environment/configuration variables
-by PURPOSE only.
-
-Never output real secrets.
-
-Example:
-
-"DATABASE_URL"
-"AUTH_SECRET"
-"PAYMENT_PROVIDER_KEY"
-
-Do not provide actual values.
+"Application should be high quality."
 
 =========================================================
 NON-GOALS
 =========================================================
 
-explicitNonGoals should prevent downstream agents
-from adding unrelated functionality.
+Use explicitNonGoals to prevent scope creep.
 
 Example:
 
-"Do not add social login unless requested."
+"Do not add authentication."
+
+"Do not add payment processing."
 
 =========================================================
 ASSUMPTIONS
 =========================================================
 
-If a minor ambiguity exists, make the smallest
-reasonable assumption and record it.
+Make only small assumptions.
 
-Do not silently invent major product requirements.
+Record them explicitly.
+
+Never silently invent major product requirements.
 
 =========================================================
 PROVIDER INDEPENDENCE
 =========================================================
 
-Do not mention or require a specific AI provider
-unless the USER explicitly requested one.
+Never mention a specific AI provider unless
+the USER explicitly requests one.
 
-The central aiProviderService controls which
-AI provider executes this planning request.
+The aiProviderService handles provider selection.
+
+=========================================================
+BUILDER CONTRACT
+=========================================================
+
+The Builder will use this plan to create the
+project manifest and source files.
+
+Therefore:
+
+- keep file structure deterministic
+- keep dependencies explicit
+- keep modules meaningful
+- keep architecture proportional
+- do not generate source code
 
 =========================================================
 OUTPUT
@@ -2095,14 +2774,10 @@ OUTPUT
 
 Return ONLY valid JSON.
 
-No markdown.
-
-No explanation.
-
 Use this exact top-level structure:
 
 {
-  "planVersion": 2,
+  "planVersion": 3,
   "projectName": "",
   "description": "",
   "framework": "",
@@ -2169,23 +2844,24 @@ Use this exact top-level structure:
 }
 
 =========================================================
-IMPORTANT
+FINAL CHECK BEFORE RESPONSE
 =========================================================
 
-Do not generate source code.
+Before returning JSON, ask internally:
 
-Do not generate file contents.
+1. Did I add anything the user did not request?
+2. Can any module be removed without breaking the request?
+3. Can any phase be removed?
+4. Does this require a database?
+5. Does this require authentication?
+6. Does this require AI?
+7. Does this require deployment infrastructure?
+8. Is complexity proportional to the request?
+9. Is projectScale the smallest valid scope?
+10. Can Builder directly use this plan?
 
-Do not claim execution.
-
-Do not claim deployment.
-
-Do not create credentials.
-
-Do not add features not justified by the request.
-
-For large projects, decomposition is more important
-than producing a giant response.
+If the answer to 1 is YES,
+remove the unnecessary feature.
 
 `;
 
@@ -2209,7 +2885,7 @@ async function planningAgent(
   try {
 
     logger.info(
-      "📐 ZyrionOS Planning Agent Started"
+      `📐 ZyrionOS Planning Agent ${PLANNING_AGENT_VERSION} Started`
     );
 
 
@@ -2217,13 +2893,17 @@ async function planningAgent(
        INPUT CONTRACT
     ===================================================== */
 
-    let projectIdea = "";
+    let projectIdea =
+      "";
 
-    let intent = null;
+    let intent =
+      null;
 
-    let user = {};
+    let user =
+      {};
 
-    let memoryContext = null;
+    let memoryContext =
+      null;
 
 
     if (
@@ -2265,7 +2945,7 @@ async function planningAgent(
 
 
     /* =====================================================
-       VALIDATION
+       REQUEST VALIDATION
     ===================================================== */
 
     if (
@@ -2287,6 +2967,9 @@ async function planningAgent(
           currentStage,
 
         metadata: {
+
+          agentVersion:
+            PLANNING_AGENT_VERSION,
 
           durationMs:
             Date.now() -
@@ -2350,12 +3033,14 @@ async function planningAgent(
     }
 
 
-    /*
-     * If Planning is called directly without
-     * Intent Agent output, BUILD remains the
-     * safe default because this agent historically
-     * served the Builder pipeline.
-     */
+    intentData = {
+
+      ...intentData,
+
+      type:
+        normalizedIntent
+
+    };
 
 
     /* =====================================================
@@ -2384,9 +3069,6 @@ async function planningAgent(
 
     /* =====================================================
        SAFE USER CONTEXT
-       -----------------------------------------------------
-       Do not send unnecessary user information
-       to the AI provider.
     ===================================================== */
 
     let userSummary =
@@ -2422,38 +3104,23 @@ async function planningAgent(
 
 
     /* =====================================================
-       PROJECT SCALE HINT
+       REQUESTED SCALE / COMPLEXITY HINTS
     ===================================================== */
 
     const requestedScale =
-      cleanString(
-        intentData.projectScale,
-        100
-      )
-        .toLowerCase();
+      normalizeProjectScale(
+        intentData.projectScale
+      );
 
 
     const requestedComplexity =
-      cleanString(
-        intentData.complexity,
-        100
-      )
-        .toLowerCase();
+      normalizeComplexity(
+        intentData.complexity
+      );
 
 
     /* =====================================================
        AI PLANNING
-       -----------------------------------------------------
-       IMPORTANT:
-
-       No provider is hardcoded.
-
-       aiProviderService controls:
-       - provider selection
-       - provider fallback
-       - retries
-       - cooldowns
-       - structured JSON validation
     ===================================================== */
 
     currentStage =
@@ -2500,13 +3167,11 @@ ${safeJson(
 
 REQUESTED PROJECT SCALE:
 
-${requestedScale ||
-  "not specified"}
+${requestedScale}
 
 REQUESTED COMPLEXITY:
 
-${requestedComplexity ||
-  "not specified"}
+${requestedComplexity}
 
 MEMORY CONTEXT:
 
@@ -2516,18 +3181,16 @@ SAFE USER CONTEXT:
 
 ${userSummary}
 
-Create the implementation blueprint.
+Create the smallest complete implementation
+blueprint that satisfies the request.
 
-Remember:
+Do not add unrelated features.
 
-- The current request is the source of truth.
-- Do not invent unrelated features.
-- Do not generate source code.
-- Large projects must be decomposed.
-- Dependencies must be explicit.
-- Builder must be able to use this plan.
-- Final files must later come from the approved
-  project manifest, not from arbitrary model output.
+Do not generate source code.
+
+Do not generate final file contents.
+
+Do not inflate project complexity.
 
 `
 
@@ -2558,16 +3221,6 @@ Remember:
       );
 
 
-      /*
-       * IMPORTANT:
-       *
-       * Do NOT return success with a fake plan.
-       *
-       * A fake plan would reach Builder and create
-       * a project that does not actually represent
-       * the user's request.
-       */
-
       return {
 
         success:
@@ -2591,6 +3244,9 @@ Remember:
           null,
 
         metadata: {
+
+          agentVersion:
+            PLANNING_AGENT_VERSION,
 
           durationMs:
             Date.now() -
@@ -2652,6 +3308,9 @@ Remember:
 
         metadata: {
 
+          agentVersion:
+            PLANNING_AGENT_VERSION,
+
           durationMs:
             Date.now() -
             startedAt
@@ -2675,14 +3334,7 @@ Remember:
       normalizePlan(
         parsed,
         projectIdea,
-        {
-
-          ...intentData,
-
-          type:
-            normalizedIntent
-
-        }
+        intentData
       );
 
 
@@ -2738,6 +3390,9 @@ Remember:
 
         metadata: {
 
+          agentVersion:
+            PLANNING_AGENT_VERSION,
+
           durationMs:
             Date.now() -
             startedAt,
@@ -2778,6 +3433,132 @@ Remember:
             true
 
         };
+
+    }
+
+
+    /* =====================================================
+       SCOPE SAFETY CHECK
+    ===================================================== */
+
+    currentStage =
+      "scope-validation";
+
+
+    const scope =
+      getScopeLimits(
+        normalizedPlan.projectScale
+      );
+
+
+    /*
+     * Hard final safety check.
+     *
+     * Even if normalization changes later,
+     * the returned plan cannot exceed its scope budget.
+     */
+
+    if (
+      normalizedPlan.modules.length >
+      scope.modules
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        message:
+          "Planning scope exceeded",
+
+        error:
+          `Module count exceeds ${normalizedPlan.projectScale} scope limit.`,
+
+        stage:
+          currentStage,
+
+        metadata: {
+
+          agentVersion:
+            PLANNING_AGENT_VERSION,
+
+          durationMs:
+            Date.now() -
+            startedAt
+
+        }
+
+      };
+
+    }
+
+
+    if (
+      normalizedPlan.dependencies.length >
+      scope.dependencies
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        message:
+          "Planning scope exceeded",
+
+        error:
+          `Dependency count exceeds ${normalizedPlan.projectScale} scope limit.`,
+
+        stage:
+          currentStage,
+
+        metadata: {
+
+          agentVersion:
+            PLANNING_AGENT_VERSION,
+
+          durationMs:
+            Date.now() -
+            startedAt
+
+        }
+
+      };
+
+    }
+
+
+    if (
+      normalizedPlan.implementationPhases.length >
+      scope.phases
+    ) {
+
+      return {
+
+        success:
+          false,
+
+        message:
+          "Planning scope exceeded",
+
+        error:
+          `Phase count exceeds ${normalizedPlan.projectScale} scope limit.`,
+
+        stage:
+          currentStage,
+
+        metadata: {
+
+          agentVersion:
+            PLANNING_AGENT_VERSION,
+
+          durationMs:
+            Date.now() -
+            startedAt
+
+        }
+
+      };
 
     }
 
@@ -2830,8 +3611,7 @@ Remember:
 
 
       if (
-        normalizedPlan.implementationPhases
-          .length ===
+        normalizedPlan.implementationPhases.length ===
         0
       ) {
 
@@ -2865,46 +3645,45 @@ Remember:
 
 
     /* =====================================================
-       SUCCESS LOGGING
+       FINAL TELEMETRY
     ===================================================== */
 
     logger.success(
 
-      `Planning Agent Completed: ` +
+      `Planning Agent ${PLANNING_AGENT_VERSION} Completed: ` +
       `${normalizedPlan.projectName}` +
-      ` | Scale: ${normalizedPlan.projectScale}` +
-      ` | Complexity: ${normalizedPlan.complexity}` +
-      ` | Modules: ${normalizedPlan.modules.length}` +
-      ` | Phases: ${normalizedPlan.implementationPhases.length}` +
-      ` | Dependencies: ${normalizedPlan.dependencies.length}`
+      ` | Intent=${normalizedPlan.intent}` +
+      ` | Scale=${normalizedPlan.projectScale}` +
+      ` | Complexity=${normalizedPlan.complexity}` +
+      ` | Modules=${normalizedPlan.modules.length}` +
+      ` | Phases=${normalizedPlan.implementationPhases.length}` +
+      ` | Dependencies=${normalizedPlan.dependencies.length}`
 
     );
 
 
     logger.info(
 
-      `Planning Agent Provider: ` +
-      `${result.provider || "unknown"}`
+      `Planning Agent Provider: ${
+        result.provider ||
+        "unknown"
+      }`
 
     );
 
 
     logger.info(
 
-      `Planning Agent Model: ` +
-      `${result.model || "unknown"}`
+      `Planning Agent Model: ${
+        result.model ||
+        "unknown"
+      }`
 
     );
 
 
     /* =====================================================
-       RESPONSE
-       -----------------------------------------------------
-       Existing fields are preserved so the current
-       Builder can continue consuming the plan.
-
-       New engineering fields are added for the
-       next pipeline stages.
+       SUCCESS RESPONSE
     ===================================================== */
 
     return {
@@ -2917,6 +3696,12 @@ Remember:
 
       metadata: {
 
+        agent:
+          "planningAgent",
+
+        agentVersion:
+          PLANNING_AGENT_VERSION,
+
         model:
           result.model ||
           null,
@@ -2924,9 +3709,6 @@ Remember:
         provider:
           result.provider ||
           null,
-
-        agent:
-          "planningAgent",
 
         intent:
           normalizedPlan.intent,
@@ -2952,6 +3734,9 @@ Remember:
           normalizedPlan
             .acceptanceCriteria
             .length,
+
+        scopeLimits:
+          scope,
 
         generatedAt:
           new Date(),
@@ -2981,10 +3766,8 @@ Remember:
 
 
     /*
-     * Do not manufacture a successful plan.
-     *
-     * If all configured providers fail,
-     * Builder must not receive fake architecture.
+     * NEVER convert an AI/provider failure into
+     * a fake successful plan.
      */
 
     return {
@@ -3009,6 +3792,9 @@ Remember:
         null,
 
       metadata: {
+
+        agentVersion:
+          PLANNING_AGENT_VERSION,
 
         durationMs:
           Date.now() -
