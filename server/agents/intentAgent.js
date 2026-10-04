@@ -27,26 +27,20 @@
    - Provider fallback/cooldown is handled centrally.
 ========================================================= */
 
-
-/* =========================================================
-   SERVICES
-========================================================= */
-
-const logger =
-  require("../services/loggerService");
+const logger = require("../services/loggerService");
 
 const {
   generateJSON
-} =
-  require("../services/ai/aiProviderService");
+} = require("../services/ai/aiProviderService");
 
 
 /* =========================================================
    CONSTANTS
 ========================================================= */
 
-const VALID_INTENTS = [
+const INTENT_AGENT_VERSION = "4.0.0";
 
+const VALID_INTENTS = [
   "chat",
   "build",
   "deploy",
@@ -59,33 +53,24 @@ const VALID_INTENTS = [
   "automation",
   "infrastructure",
   "thumbnail"
-
 ];
 
-
 const VALID_COMPLEXITIES = [
-
   "low",
   "medium",
   "high"
-
 ];
 
-
 const VALID_PROJECT_SCALES = [
-
   "none",
   "task",
   "feature",
   "application",
   "large_project",
   "system"
-
 ];
 
-
 const VALID_REQUEST_KINDS = [
-
   "question",
   "creation",
   "modification",
@@ -94,31 +79,9 @@ const VALID_REQUEST_KINDS = [
   "planning",
   "inspection",
   "generation"
-
 ];
 
-
-/*
- * IMPORTANT
- * These names must match the actual agents
- * available in server/agents/.
- *
- * Current repository uses:
- *
- * planningAgent.js
- * builderAgent.js
- * deployAgent.js
- * monitoringAgent.js
- * scalingAgent.js
- * billingAgent.js
- * subscriptionAgent.js
- * memoryAgent.js
- * fixAgent.js
- * fileAgent.js
- */
-
 const KNOWN_AGENTS = [
-
   "intentAgent",
   "planningAgent",
   "builderAgent",
@@ -130,53 +93,89 @@ const KNOWN_AGENTS = [
   "memoryAgent",
   "fixAgent",
   "fileAgent"
-
 ];
+
+const MAX_PROMPT_LENGTH = 12000;
+const MAX_MEMORY_LENGTH = 3500;
+const MAX_GOAL_LENGTH = 1500;
+const MAX_SECONDARY_INTENTS = 4;
+const MAX_REQUIRED_AGENTS = 8;
+const MAX_SCOPE_SIGNALS = 20;
 
 
 /* =========================================================
-   LIMITS
+   LOGGER COMPATIBILITY
+   ---------------------------------------------------------
+   Some logger implementations expose warning()
+   while older versions expose warn().
 ========================================================= */
 
-const MAX_PROMPT_LENGTH = 12000;
+function logInfo(message) {
+  try {
+    if (logger && typeof logger.info === "function") {
+      return logger.info(message);
+    }
 
-const MAX_MEMORY_LENGTH = 3500;
+    if (logger && typeof logger.log === "function") {
+      return logger.log(message);
+    }
+  } catch (_) {}
+}
 
-const MAX_GOAL_LENGTH = 1500;
+function logWarning(message) {
+  try {
+    if (logger && typeof logger.warning === "function") {
+      return logger.warning(message);
+    }
 
-const MAX_SECONDARY_INTENTS = 4;
+    if (logger && typeof logger.warn === "function") {
+      return logger.warn(message);
+    }
 
-const MAX_REQUIRED_AGENTS = 8;
+    if (logger && typeof logger.info === "function") {
+      return logger.info(`[WARNING] ${message}`);
+    }
+  } catch (_) {}
+}
 
-const MAX_SCOPE_SIGNALS = 20;
+function logError(message) {
+  try {
+    if (logger && typeof logger.error === "function") {
+      return logger.error(message);
+    }
+
+    if (logger && typeof logger.info === "function") {
+      return logger.info(`[ERROR] ${message}`);
+    }
+  } catch (_) {}
+}
+
+function logSuccess(message) {
+  try {
+    if (logger && typeof logger.success === "function") {
+      return logger.success(message);
+    }
+
+    if (logger && typeof logger.info === "function") {
+      return logger.info(`[SUCCESS] ${message}`);
+    }
+  } catch (_) {}
+}
 
 
 /* =========================================================
    HELPERS
 ========================================================= */
 
-function cleanString(
-  value,
-  maxLength = 4000
-) {
-
-  if (
-    typeof value !== "string"
-  ) {
-
+function cleanString(value, maxLength = 4000) {
+  if (typeof value !== "string") {
     return "";
-
   }
-
 
   return value
     .replace(/\u0000/g, "")
     .trim()
-    .slice(
-      0,
-      maxLength
-    );
-
+    .slice(0, maxLength);
 }
 
 
@@ -184,31 +183,14 @@ function cleanString(
    SAFE JSON
 ========================================================= */
 
-function safeJson(
-  value
-) {
-
+function safeJson(value) {
   try {
-
-    return JSON.stringify(
-      value ?? null
-    );
-
-  }
-
-  catch (
-    error
-  ) {
-
+    return JSON.stringify(value ?? null);
+  } catch (_) {
     return JSON.stringify({
-
-      error:
-        "Unable to serialize context"
-
+      error: "Unable to serialize context"
     });
-
   }
-
 }
 
 
@@ -221,27 +203,17 @@ function normalizeStringArray(
   maxItems = 20,
   maxItemLength = 300
 ) {
-
-  if (
-    !Array.isArray(value)
-  ) {
-
+  if (!Array.isArray(value)) {
     return [];
-
   }
 
-
   return [
-
     ...new Set(
-
       value
-
         .filter(
           (item) =>
             typeof item === "string"
         )
-
         .map(
           (item) =>
             cleanString(
@@ -249,18 +221,10 @@ function normalizeStringArray(
               maxItemLength
             )
         )
-
         .filter(Boolean)
-
-        .slice(
-          0,
-          maxItems
-        )
-
+        .slice(0, maxItems)
     )
-
   ];
-
 }
 
 
@@ -269,91 +233,186 @@ function normalizeStringArray(
 ========================================================= */
 
 function createDefaultIntent() {
-
   return {
-
-    type:
-      "chat",
-
-    goal:
-      "general interaction",
-
-    complexity:
-      "low",
-
-    confidence:
-      50,
-
-    requiredAgents:
-      [],
-
-    secondaryIntents:
-      [],
-
-    projectScale:
-      "none",
-
-    requestKind:
-      "question",
-
-    scopeSignals:
-      [],
-
-    requiresPlanning:
-      false,
-
-    requiresBuild:
-      false,
-
-    requiresExecution:
-      false
-
+    type: "chat",
+    goal: "general interaction",
+    complexity: "low",
+    confidence: 50,
+    requiredAgents: [],
+    secondaryIntents: [],
+    projectScale: "none",
+    requestKind: "question",
+    scopeSignals: [],
+    requiresPlanning: false,
+    requiresBuild: false,
+    requiresExecution: false
   };
+}
 
+
+/* =========================================================
+   SIGNAL MATCHING
+========================================================= */
+
+function hasAnySignal(text, signals) {
+  return signals.some(
+    (signal) =>
+      text.includes(signal)
+  );
+}
+
+function countSignals(text, signals) {
+  return signals.filter(
+    (signal) =>
+      text.includes(signal)
+  ).length;
+}
+
+
+/* =========================================================
+   SIMPLE BUILD DETECTION
+   ---------------------------------------------------------
+   CRITICAL:
+   Small software requests must NOT automatically become
+   feature/application projects.
+========================================================= */
+
+function detectSimpleBuildRequest(text) {
+
+  const simpleBuildSignals = [
+    "calculator",
+    "simple calculator",
+    "basic calculator",
+    "todo",
+    "todo app",
+    "to-do",
+    "to-do app",
+    "counter",
+    "counter app",
+    "timer",
+    "stopwatch",
+    "simple form",
+    "contact form",
+    "login form",
+    "signup form",
+    "landing page",
+    "simple landing page",
+    "portfolio page",
+    "simple portfolio",
+    "button",
+    "component",
+    "ui component",
+    "simple ui",
+    "small ui",
+    "simple website",
+    "simple web page",
+    "simple webpage",
+    "small website",
+    "small web app",
+    "small app",
+    "simple app",
+    "basic app",
+    "basic website",
+    "basic web app",
+    "converter",
+    "unit converter",
+    "age calculator",
+    "percentage calculator",
+    "interest calculator",
+    "bmi calculator",
+    "quiz",
+    "simple quiz",
+    "digital clock",
+    "clock app",
+    "notes app",
+    "simple notes",
+    "password generator",
+    "random number generator",
+    "text generator"
+  ];
+
+  return hasAnySignal(
+    text,
+    simpleBuildSignals
+  );
+}
+
+
+/* =========================================================
+   COMPLEX BUILD DETECTION
+========================================================= */
+
+function detectComplexBuildRequest(text) {
+
+  const complexSignals = [
+    "saas",
+    "platform",
+    "enterprise",
+    "marketplace",
+    "multi tenant",
+    "multi-tenant",
+    "microservice",
+    "microservices",
+    "authentication",
+    "authorization",
+    "database",
+    "payment",
+    "payments",
+    "subscription",
+    "billing system",
+    "admin dashboard",
+    "admin panel",
+    "real time",
+    "realtime",
+    "websocket",
+    "backend",
+    "api",
+    "multiple users",
+    "user management",
+    "role based access",
+    "role-based access",
+    "cloud infrastructure",
+    "production infrastructure",
+    "scalable",
+    "scalable system",
+    "complete system",
+    "complete application",
+    "full stack",
+    "full-stack"
+  ];
+
+  return countSignals(
+    text,
+    complexSignals
+  );
 }
 
 
 /* =========================================================
    DETERMINISTIC INTENT DETECTION
-   ---------------------------------------------------------
-   This is NOT a replacement for AI.
-
-   It is a safety fallback so that a temporary
-   provider failure does not turn a build request
-   into "chat".
 ========================================================= */
 
-function detectDeterministicIntent(
-  prompt
-) {
+function detectDeterministicIntent(prompt) {
 
   const text =
     cleanString(
       prompt,
       MAX_PROMPT_LENGTH
-    )
-      .toLowerCase();
-
+    ).toLowerCase();
 
   const result =
     createDefaultIntent();
 
-
-  if (
-    !text
-  ) {
-
+  if (!text) {
     return result;
-
   }
 
 
-  /*
-   * BUILD
-   */
+  /* =======================================================
+     SIGNALS
+  ======================================================= */
 
   const buildSignals = [
-
     "build",
     "create app",
     "create application",
@@ -374,17 +433,16 @@ function detectDeterministicIntent(
     "add feature",
     "create frontend",
     "create backend",
-    "create api"
-
+    "create api",
+    "create calculator",
+    "build calculator",
+    "make calculator",
+    "create todo",
+    "build todo",
+    "make todo"
   ];
 
-
-  /*
-   * FIX
-   */
-
   const fixSignals = [
-
     "fix",
     "debug",
     "bug",
@@ -399,16 +457,9 @@ function detectDeterministicIntent(
     "runtime error",
     "build error",
     "compile error"
-
   ];
 
-
-  /*
-   * DEPLOY
-   */
-
   const deploySignals = [
-
     "deploy",
     "deployment",
     "publish",
@@ -416,16 +467,9 @@ function detectDeterministicIntent(
     "go live",
     "host",
     "release"
-
   ];
 
-
-  /*
-   * MONITOR
-   */
-
   const monitorSignals = [
-
     "monitor",
     "health",
     "cpu",
@@ -435,16 +479,9 @@ function detectDeterministicIntent(
     "availability",
     "logs",
     "service health"
-
   ];
 
-
-  /*
-   * SCALE
-   */
-
   const scaleSignals = [
-
     "scale",
     "scaling",
     "increase capacity",
@@ -452,16 +489,9 @@ function detectDeterministicIntent(
     "more instances",
     "autoscale",
     "auto scale"
-
   ];
 
-
-  /*
-   * BILLING
-   */
-
   const billingSignals = [
-
     "billing",
     "invoice",
     "charge",
@@ -469,32 +499,18 @@ function detectDeterministicIntent(
     "payment charge",
     "pricing",
     "cost"
-
   ];
 
-
-  /*
-   * SUBSCRIPTION
-   */
-
   const subscriptionSignals = [
-
     "subscription",
     "plan",
     "upgrade plan",
     "downgrade plan",
     "cancel subscription",
     "subscription limit"
-
   ];
 
-
-  /*
-   * FILE
-   */
-
   const fileSignals = [
-
     "file",
     "files",
     "folder",
@@ -503,32 +519,18 @@ function detectDeterministicIntent(
     "modify file",
     "delete file",
     "rename file"
-
   ];
 
-
-  /*
-   * AUTOMATION
-   */
-
   const automationSignals = [
-
     "automation",
     "automate",
     "workflow",
     "automated workflow",
     "scheduled workflow",
     "repeated process"
-
   ];
 
-
-  /*
-   * INFRASTRUCTURE
-   */
-
   const infrastructureSignals = [
-
     "aws",
     "ecs",
     "ec2",
@@ -542,302 +544,180 @@ function detectDeterministicIntent(
     "vpc",
     "cloud architecture",
     "infrastructure"
-
   ];
 
-
-  /*
-   * THUMBNAIL
-   */
-
   const thumbnailSignals = [
-
     "thumbnail",
     "video thumbnail",
     "youtube thumbnail"
-
   ];
 
 
-  function hasSignal(
-    signals
-  ) {
-
-    return signals.some(
-      (signal) =>
-        text.includes(
-          signal
-        )
-    );
-
-  }
-
+  /* =======================================================
+     DETECTION
+  ======================================================= */
 
   const hasBuild =
-    hasSignal(
+    hasAnySignal(
+      text,
       buildSignals
     );
 
-
   const hasFix =
-    hasSignal(
+    hasAnySignal(
+      text,
       fixSignals
     );
 
-
   const hasDeploy =
-    hasSignal(
+    hasAnySignal(
+      text,
       deploySignals
     );
 
-
   const hasMonitor =
-    hasSignal(
+    hasAnySignal(
+      text,
       monitorSignals
     );
 
-
   const hasScale =
-    hasSignal(
+    hasAnySignal(
+      text,
       scaleSignals
     );
 
-
   const hasBilling =
-    hasSignal(
+    hasAnySignal(
+      text,
       billingSignals
     );
 
-
   const hasSubscription =
-    hasSignal(
+    hasAnySignal(
+      text,
       subscriptionSignals
     );
 
-
   const hasFile =
-    hasSignal(
+    hasAnySignal(
+      text,
       fileSignals
     );
 
-
   const hasAutomation =
-    hasSignal(
+    hasAnySignal(
+      text,
       automationSignals
     );
 
-
   const hasInfrastructure =
-    hasSignal(
+    hasAnySignal(
+      text,
       infrastructureSignals
     );
 
-
   const hasThumbnail =
-    hasSignal(
+    hasAnySignal(
+      text,
       thumbnailSignals
     );
 
 
-  /*
-   * Priority:
-   *
-   * Fix > Build > Deploy > Scale >
-   * Monitor > Infrastructure >
-   * Billing > Subscription >
-   * File > Automation > Thumbnail
-   *
-   * This is only a fallback.
-   */
+  /* =======================================================
+     PRIMARY INTENT
+  ======================================================= */
 
-  if (
-    hasFix
-  ) {
+  if (hasFix) {
 
-    result.type =
-      "fix";
+    result.type = "fix";
+    result.requestKind = "repair";
 
-    result.requestKind =
-      "repair";
+  } else if (hasBuild) {
 
-  }
+    result.type = "build";
+    result.requestKind = "creation";
 
-  else if (
-    hasBuild
-  ) {
+  } else if (hasDeploy) {
 
-    result.type =
-      "build";
+    result.type = "deploy";
+    result.requestKind = "operation";
 
-    result.requestKind =
-      "creation";
+  } else if (hasScale) {
 
-  }
+    result.type = "scale";
+    result.requestKind = "operation";
 
-  else if (
-    hasDeploy
-  ) {
+  } else if (hasMonitor) {
 
-    result.type =
-      "deploy";
+    result.type = "monitor";
+    result.requestKind = "inspection";
 
-    result.requestKind =
-      "operation";
+  } else if (hasInfrastructure) {
 
-  }
+    result.type = "infrastructure";
+    result.requestKind = "planning";
 
-  else if (
-    hasScale
-  ) {
+  } else if (hasBilling) {
 
-    result.type =
-      "scale";
+    result.type = "billing";
+    result.requestKind = "question";
 
-    result.requestKind =
-      "operation";
+  } else if (hasSubscription) {
 
-  }
+    result.type = "subscription";
+    result.requestKind = "question";
 
-  else if (
-    hasMonitor
-  ) {
+  } else if (hasFile) {
 
-    result.type =
-      "monitor";
+    result.type = "file";
+    result.requestKind = "operation";
 
-    result.requestKind =
-      "inspection";
+  } else if (hasAutomation) {
 
-  }
+    result.type = "automation";
+    result.requestKind = "creation";
 
-  else if (
-    hasInfrastructure
-  ) {
+  } else if (hasThumbnail) {
 
-    result.type =
-      "infrastructure";
-
-    result.requestKind =
-      "planning";
-
-  }
-
-  else if (
-    hasBilling
-  ) {
-
-    result.type =
-      "billing";
-
-    result.requestKind =
-      "question";
-
-  }
-
-  else if (
-    hasSubscription
-  ) {
-
-    result.type =
-      "subscription";
-
-    result.requestKind =
-      "question";
-
-  }
-
-  else if (
-    hasFile
-  ) {
-
-    result.type =
-      "file";
-
-    result.requestKind =
-      "operation";
-
-  }
-
-  else if (
-    hasAutomation
-  ) {
-
-    result.type =
-      "automation";
-
-    result.requestKind =
-      "creation";
-
-  }
-
-  else if (
-    hasThumbnail
-  ) {
-
-    result.type =
-      "thumbnail";
-
-    result.requestKind =
-      "generation";
-
+    result.type = "thumbnail";
+    result.requestKind = "generation";
   }
 
 
-  /*
-   * Secondary intents
-   */
+  /* =======================================================
+     SECONDARY INTENTS
+  ======================================================= */
 
-  const secondary =
-    [];
-
+  const secondary = [];
 
   if (
     hasBuild &&
     result.type !== "build"
   ) {
-
-    secondary.push(
-      "build"
-    );
-
+    secondary.push("build");
   }
-
 
   if (
     hasDeploy &&
     result.type !== "deploy"
   ) {
-
-    secondary.push(
-      "deploy"
-    );
-
+    secondary.push("deploy");
   }
-
 
   if (
     hasInfrastructure &&
     result.type !== "infrastructure"
   ) {
-
-    secondary.push(
-      "infrastructure"
-    );
-
+    secondary.push("infrastructure");
   }
-
 
   if (
     hasAutomation &&
     result.type !== "automation"
   ) {
-
-    secondary.push(
-      "automation"
-    );
-
+    secondary.push("automation");
   }
-
 
   result.secondaryIntents =
     secondary.slice(
@@ -846,12 +726,139 @@ function detectDeterministicIntent(
     );
 
 
+  /* =======================================================
+     PROJECT SCALE
+  ======================================================= */
+
+  const largeSignals = [
+    "large project",
+    "huge project",
+    "big project",
+    "enterprise application",
+    "enterprise platform",
+    "complete platform",
+    "complete saas",
+    "full platform",
+    "production platform",
+    "entire system",
+    "whole system"
+  ];
+
+  const explicitlyLarge =
+    hasAnySignal(
+      text,
+      largeSignals
+    );
+
+  const complexSignalCount =
+    detectComplexBuildRequest(
+      text
+    );
+
+  const simpleBuild =
+    detectSimpleBuildRequest(
+      text
+    );
+
+
   /*
-   * Large project detection.
+   * HIGHEST PRIORITY:
+   * Explicitly large request.
    */
 
-  const projectSignals = [
+  if (
+    explicitlyLarge ||
+    complexSignalCount >= 6
+  ) {
 
+    result.projectScale =
+      "large_project";
+
+    result.complexity =
+      "high";
+
+  }
+
+  /*
+   * Normal multi-feature application.
+   */
+
+  else if (
+    complexSignalCount >= 2
+  ) {
+
+    result.projectScale =
+      "application";
+
+    result.complexity =
+      "high";
+
+  }
+
+  /*
+   * SIMPLE SOFTWARE REQUEST.
+   *
+   * This is the critical calculator fix.
+   */
+
+  else if (
+    result.type === "build" &&
+    simpleBuild
+  ) {
+
+    result.projectScale =
+      "task";
+
+    result.complexity =
+      "low";
+
+  }
+
+  /*
+   * Small generic build.
+   */
+
+  else if (
+    result.type === "build"
+  ) {
+
+    result.projectScale =
+      "feature";
+
+    result.complexity =
+      "medium";
+
+  }
+
+  else if (
+    result.type === "fix"
+  ) {
+
+    result.projectScale =
+      "task";
+
+    result.complexity =
+      "low";
+
+  }
+
+  else if (
+    result.type !== "chat"
+  ) {
+
+    result.projectScale =
+      "task";
+
+    result.complexity =
+      "low";
+  }
+
+
+  /* =======================================================
+     SCOPE SIGNALS
+  ======================================================= */
+
+  const projectSignals = [
     "saas",
     "platform",
     "enterprise",
@@ -879,87 +886,13 @@ function detectDeterministicIntent(
     "scalable system",
     "complete system",
     "complete application"
-
   ];
-
 
   const matchedProjectSignals =
     projectSignals.filter(
       (signal) =>
-        text.includes(
-          signal
-        )
+        text.includes(signal)
     );
-
-
-  /*
-   * Explicitly large language.
-   */
-
-  const largeSignals = [
-
-    "large project",
-    "huge project",
-    "big project",
-    "enterprise application",
-    "enterprise platform",
-    "complete platform",
-    "complete saas",
-    "full platform",
-    "production platform",
-    "entire system",
-    "whole system"
-
-  ];
-
-
-  const explicitlyLarge =
-    largeSignals.some(
-      (signal) =>
-        text.includes(
-          signal
-        )
-    );
-
-
-  if (
-    explicitlyLarge ||
-    matchedProjectSignals.length >= 5
-  ) {
-
-    result.projectScale =
-      "large_project";
-
-  }
-
-  else if (
-    matchedProjectSignals.length >= 2
-  ) {
-
-    result.projectScale =
-      "application";
-
-  }
-
-  else if (
-    result.type === "build" ||
-    result.type === "fix"
-  ) {
-
-    result.projectScale =
-      "feature";
-
-  }
-
-  else if (
-    result.type !== "chat"
-  ) {
-
-    result.projectScale =
-      "task";
-
-  }
-
 
   result.scopeSignals =
     matchedProjectSignals.slice(
@@ -968,50 +901,9 @@ function detectDeterministicIntent(
     );
 
 
-  /*
-   * Complexity.
-   */
-
-  if (
-    result.projectScale === "large_project"
-  ) {
-
-    result.complexity =
-      "high";
-
-  }
-
-  else if (
-    result.projectScale === "application"
-  ) {
-
-    result.complexity =
-      "high";
-
-  }
-
-  else if (
-    result.type === "build" ||
-    result.type === "fix" ||
-    result.type === "infrastructure"
-  ) {
-
-    result.complexity =
-      "medium";
-
-  }
-
-  else {
-
-    result.complexity =
-      "low";
-
-  }
-
-
-  /*
-   * Agent routing.
-   */
+  /* =======================================================
+     AGENT ROUTING
+  ======================================================= */
 
   result.requiredAgents =
     getFallbackAgents(
@@ -1022,48 +914,38 @@ function detectDeterministicIntent(
 
   result.requiresPlanning =
     [
-
       "build",
       "fix",
       "automation",
       "infrastructure",
       "scale"
-
     ].includes(
       result.type
     );
 
-
   result.requiresBuild =
     result.type === "build";
 
-
   result.requiresExecution =
     [
-
       "deploy",
       "monitor",
       "scale",
       "billing",
       "subscription",
       "file"
-
     ].includes(
       result.type
     );
 
-
-  result.confidence =
-    65;
-
+  result.confidence = 90;
 
   return result;
-
 }
 
 
 /* =========================================================
-   DEFAULT AGENT ROUTING
+   FALLBACK AGENT ROUTING
 ========================================================= */
 
 function getFallbackAgents(
@@ -1071,123 +953,66 @@ function getFallbackAgents(
   projectScale = "none"
 ) {
 
-  switch (
-    type
-  ) {
+  switch (type) {
 
     case "build":
-
-      /*
-       * Requirement/architecture agents are
-       * deliberately NOT added here yet.
-       *
-       * We first audit planningAgent.
-       *
-       * This prevents duplicate architecture logic.
-       */
-
       return [
-
         "planningAgent",
         "builderAgent"
-
       ];
-
 
     case "deploy":
-
       return [
-
         "deployAgent"
-
       ];
-
 
     case "monitor":
-
       return [
-
         "monitoringAgent"
-
       ];
-
 
     case "scale":
-
       return [
-
         "scalingAgent"
-
       ];
-
 
     case "billing":
-
       return [
-
         "billingAgent"
-
       ];
-
 
     case "subscription":
-
       return [
-
         "subscriptionAgent"
-
       ];
-
 
     case "fix":
-
       return [
-
         "fixAgent"
-
       ];
-
 
     case "file":
-
       return [
-
         "fileAgent"
-
       ];
-
 
     case "automation":
-
       return [
-
         "planningAgent"
-
       ];
-
 
     case "infrastructure":
-
       return [
-
         "planningAgent"
-
       ];
 
-
     case "thumbnail":
-
       return [];
 
-    
     case "chat":
-
     default:
-
       return [];
-
   }
-
 }
 
 
@@ -1203,33 +1028,18 @@ function normalizeRequiredAgents(
 
   let normalized = [];
 
-
-  if (
-    Array.isArray(
-      agents
-    )
-  ) {
+  if (Array.isArray(agents)) {
 
     normalized =
       agents
-
         .filter(
           (agent) =>
             typeof agent === "string"
         )
-
         .map(
           (agent) =>
             agent.trim()
         )
-
-        /*
-         * Backward compatibility:
-         *
-         * Old Intent Agent used "plannerAgent".
-         * Actual repository uses planningAgent.js.
-         */
-
         .map(
           (agent) => {
 
@@ -1237,34 +1047,23 @@ function normalizeRequiredAgents(
               agent ===
               "plannerAgent"
             ) {
-
               return "planningAgent";
-
             }
 
             return agent;
-
           }
         )
-
         .filter(
           (agent) =>
             KNOWN_AGENTS.includes(
               agent
             )
         );
-
   }
 
-
   normalized = [
-
-    ...new Set(
-      normalized
-    )
-
+    ...new Set(normalized)
   ];
-
 
   if (
     normalized.length === 0
@@ -1275,21 +1074,12 @@ function normalizeRequiredAgents(
         type,
         projectScale
       );
-
   }
 
-
-  /*
-   * Never let the Intent Agent
-   * create an impossible route.
-   */
-
-  return normalized
-    .slice(
-      0,
-      MAX_REQUIRED_AGENTS
-    );
-
+  return normalized.slice(
+    0,
+    MAX_REQUIRED_AGENTS
+  );
 }
 
 
@@ -1297,33 +1087,23 @@ function normalizeRequiredAgents(
    NORMALIZE CONFIDENCE
 ========================================================= */
 
-function normalizeConfidence(
-  value
-) {
+function normalizeConfidence(value) {
 
   let confidence =
-    Number(
-      value
-    );
-
+    Number(value);
 
   if (
     !Number.isFinite(
       confidence
     )
   ) {
-
-    confidence =
-      70;
-
+    confidence = 70;
   }
-
 
   confidence =
     Math.round(
       confidence
     );
-
 
   return Math.max(
     0,
@@ -1332,7 +1112,6 @@ function normalizeConfidence(
       confidence
     )
   );
-
 }
 
 
@@ -1340,31 +1119,23 @@ function normalizeConfidence(
    NORMALIZE COMPLEXITY
 ========================================================= */
 
-function normalizeComplexity(
-  value
-) {
+function normalizeComplexity(value) {
 
   const complexity =
     cleanString(
       value,
       50
-    )
-      .toLowerCase();
-
+    ).toLowerCase();
 
   if (
     VALID_COMPLEXITIES.includes(
       complexity
     )
   ) {
-
     return complexity;
-
   }
 
-
   return "medium";
-
 }
 
 
@@ -1372,31 +1143,23 @@ function normalizeComplexity(
    NORMALIZE PROJECT SCALE
 ========================================================= */
 
-function normalizeProjectScale(
-  value
-) {
+function normalizeProjectScale(value) {
 
   const scale =
     cleanString(
       value,
       50
-    )
-      .toLowerCase();
-
+    ).toLowerCase();
 
   if (
     VALID_PROJECT_SCALES.includes(
       scale
     )
   ) {
-
     return scale;
-
   }
 
-
   return "none";
-
 }
 
 
@@ -1404,31 +1167,23 @@ function normalizeProjectScale(
    NORMALIZE REQUEST KIND
 ========================================================= */
 
-function normalizeRequestKind(
-  value
-) {
+function normalizeRequestKind(value) {
 
   const kind =
     cleanString(
       value,
       50
-    )
-      .toLowerCase();
-
+    ).toLowerCase();
 
   if (
     VALID_REQUEST_KINDS.includes(
       kind
     )
   ) {
-
     return kind;
-
   }
 
-
   return "question";
-
 }
 
 
@@ -1436,9 +1191,7 @@ function normalizeRequestKind(
    NORMALIZE SECONDARY INTENTS
 ========================================================= */
 
-function normalizeSecondaryIntents(
-  value
-) {
+function normalizeSecondaryIntents(value) {
 
   return normalizeStringArray(
     value,
@@ -1455,7 +1208,6 @@ function normalizeSecondaryIntents(
           item
         )
     );
-
 }
 
 
@@ -1477,13 +1229,9 @@ function normalizeIntent(
   if (
     !parsed ||
     typeof parsed !== "object" ||
-    Array.isArray(
-      parsed
-    )
+    Array.isArray(parsed)
   ) {
-
     return fallback;
-
   }
 
 
@@ -1491,19 +1239,13 @@ function normalizeIntent(
     cleanString(
       parsed.type,
       50
-    )
-      .toLowerCase();
-
+    ).toLowerCase();
 
   if (
-    !VALID_INTENTS.includes(
-      type
-    )
+    !VALID_INTENTS.includes(type)
   ) {
-
     type =
       fallback.type;
-
   }
 
 
@@ -1513,15 +1255,10 @@ function normalizeIntent(
       MAX_GOAL_LENGTH
     );
 
-
-  if (
-    !goal
-  ) {
-
+  if (!goal) {
     goal =
       fallback.goal ||
       "general interaction";
-
   }
 
 
@@ -1530,12 +1267,10 @@ function normalizeIntent(
       parsed.complexity
     );
 
-
   let projectScale =
     normalizeProjectScale(
       parsed.projectScale
     );
-
 
   let requestKind =
     normalizeRequestKind(
@@ -1543,12 +1278,13 @@ function normalizeIntent(
     );
 
 
+  /* =======================================================
+     DETERMINISTIC OVERRIDES
+  ======================================================= */
+
   /*
-   * Deterministic safety overrides.
-   *
-   * If the user clearly asked for a huge
-   * project, the AI cannot downgrade it
-   * to a tiny task.
+   * Explicitly large request can never become
+   * a small task.
    */
 
   if (
@@ -1561,43 +1297,87 @@ function normalizeIntent(
 
     complexity =
       "high";
-
-  }
-
-  else if (
-    fallback.projectScale ===
-    "application" &&
-    projectScale ===
-    "none"
-  ) {
-
-    projectScale =
-      "application";
-
   }
 
 
   /*
-   * Build requests always require
-   * planning before Builder.
+   * Application-level request cannot be
+   * silently downgraded to none/task.
+   */
+
+  else if (
+    fallback.projectScale ===
+    "application"
+  ) {
+
+    if (
+      projectScale === "none" ||
+      projectScale === "task" ||
+      projectScale === "feature"
+    ) {
+
+      projectScale =
+        "application";
+    }
+
+    complexity =
+      "high";
+  }
+
+
+  /*
+   * CRITICAL SIMPLE-BUILD OVERRIDE.
+   *
+   * If deterministic analysis says this is
+   * a simple calculator / todo / timer etc.,
+   * AI cannot inflate it to feature/application.
+   */
+
+  else if (
+    fallback.type === "build" &&
+    fallback.projectScale === "task"
+  ) {
+
+    projectScale =
+      "task";
+
+    complexity =
+      "low";
+  }
+
+
+  /*
+   * Generic build without explicit scale.
+   */
+
+  else if (
+    type === "build" &&
+    projectScale === "none"
+  ) {
+
+    projectScale =
+      fallback.projectScale === "none"
+        ? "feature"
+        : fallback.projectScale;
+  }
+
+
+  /*
+   * Fix requests are normally tasks unless
+   * deterministic analysis proves otherwise.
    */
 
   if (
-    type === "build"
+    type === "fix" &&
+    fallback.projectScale === "task" &&
+    projectScale === "none"
   ) {
 
-    complexity =
-      complexity === "low"
-        ? "medium"
-        : complexity;
-
     projectScale =
-      projectScale === "none"
-        ? fallback.projectScale === "none"
-          ? "feature"
-          : fallback.projectScale
-        : projectScale;
+      "task";
 
+    complexity =
+      "low";
   }
 
 
@@ -1628,13 +1408,11 @@ function normalizeIntent(
       parsed.requiresPlanning
     ) ||
     [
-
       "build",
       "fix",
       "automation",
       "infrastructure",
       "scale"
-
     ].includes(
       type
     );
@@ -1652,17 +1430,39 @@ function normalizeIntent(
       parsed.requiresExecution
     ) ||
     [
-
       "deploy",
       "monitor",
       "scale",
       "billing",
       "subscription",
       "file"
-
     ].includes(
       type
     );
+
+
+  /*
+   * For simple deterministic tasks, trust
+   * deterministic confidence more than an
+   * obviously wrong AI confidence.
+   */
+
+  let confidence =
+    normalizeConfidence(
+      parsed.confidence
+    );
+
+  if (
+    fallback.projectScale === "task" &&
+    fallback.type === type
+  ) {
+
+    confidence =
+      Math.max(
+        confidence,
+        90
+      );
+  }
 
 
   return {
@@ -1673,10 +1473,7 @@ function normalizeIntent(
 
     complexity,
 
-    confidence:
-      normalizeConfidence(
-        parsed.confidence
-      ),
+    confidence,
 
     requiredAgents,
 
@@ -1695,7 +1492,6 @@ function normalizeIntent(
     requiresExecution
 
   };
-
 }
 
 
@@ -1708,10 +1504,8 @@ const INTENT_SYSTEM_PROMPT = `
 You are the Intent Detection Agent
 of ZyrionOS Autonomous AI OS.
 
-YOUR ROLE:
-Classify and route the CURRENT user request.
-
-You are a ROUTER.
+Your ONLY job is to classify and route
+the CURRENT user request.
 
 You are NOT a builder.
 You are NOT a planner.
@@ -1720,18 +1514,11 @@ You are NOT a requirement analyst.
 You are NOT a deployment executor.
 
 Do not generate source code.
-
 Do not generate project files.
-
 Do not create architecture.
-
 Do not create detailed requirements.
-
 Do not execute actions.
-
-Do not claim success.
-
-Your output will be consumed by downstream agents.
+Do not claim completion.
 
 =========================================================
 VALID PRIMARY INTENTS
@@ -1766,87 +1553,92 @@ memoryAgent
 fixAgent
 fileAgent
 
-Never invent an agent name.
-
-=========================================================
-INTENT DEFINITIONS
-=========================================================
-
-chat:
-General conversation, explanation,
-question, advice, or discussion.
-
-build:
-Create, develop, generate, implement,
-or modify software, applications,
-websites, APIs, frontend, backend,
-features, platforms, or SaaS systems.
-
-deploy:
-Deploy, publish, host, release,
-or make an existing project live.
-
-monitor:
-Inspect runtime health, deployment health,
-service health, CPU, RAM, logs,
-availability, or infrastructure metrics.
-
-scale:
-Increase or decrease infrastructure
-or application capacity.
-
-billing:
-Pricing, invoices, charges,
-payment charges, or billing information.
-
-subscription:
-Subscription plans, limits,
-upgrades, downgrades, cancellation,
-or subscription lifecycle.
-
-fix:
-Debug, diagnose, repair, correct,
-or resolve broken software/code.
-
-file:
-Direct file or folder operations.
-
-automation:
-Automated workflows, repeated processes,
-scheduled workflows, or automation logic.
-
-infrastructure:
-Cloud architecture, AWS, containers,
-servers, networking, databases,
-or infrastructure planning.
-
-thumbnail:
-Thumbnail generation specifically.
+Never invent an agent.
 
 =========================================================
 PROJECT SCALE
 =========================================================
 
 none:
-No software project is involved.
+No software project.
 
 task:
-Small operational task.
+A small, self-contained task.
+
+Examples:
+- calculator
+- timer
+- counter
+- simple todo
+- simple form
+- simple landing page
+- small UI component
+- basic converter
+- simple utility
 
 feature:
-A single feature or limited modification.
+A meaningful feature or limited software modification
+that is larger than a simple task.
 
 application:
-A normal application or multi-feature project.
+A normal multi-feature application.
+
+Examples:
+- SaaS dashboard
+- application with authentication/database
+- marketplace
+- multi-feature web application
 
 large_project:
-Large SaaS, platform, enterprise application,
-full-stack system, multi-module application,
-or complex production project.
+Large production platform, enterprise application,
+large SaaS, multi-module system.
 
 system:
-Large interconnected software system
-with multiple major subsystems.
+Large interconnected system with multiple
+major subsystems.
+
+=========================================================
+CRITICAL SCALE RULE
+=========================================================
+
+DO NOT classify every build request as "feature".
+
+A simple calculator is:
+
+projectScale = "task"
+complexity = "low"
+
+A simple todo app is normally:
+
+projectScale = "task"
+complexity = "low"
+
+A simple timer is normally:
+
+projectScale = "task"
+complexity = "low"
+
+A simple landing page is normally:
+
+projectScale = "task"
+complexity = "low"
+
+Only classify as "feature" when the request
+actually requires more than a small self-contained task.
+
+=========================================================
+COMPLEXITY
+=========================================================
+
+low:
+Small self-contained task.
+
+medium:
+Meaningful feature or moderately complex software.
+
+high:
+Application, large project, enterprise system,
+or multiple major subsystems.
 
 =========================================================
 REQUEST KIND
@@ -1862,99 +1654,68 @@ inspection
 generation
 
 =========================================================
-COMPLEXITY
+ROUTING
 =========================================================
 
-low
-medium
-high
+Build software:
+type = build.
 
-A large software project MUST be high complexity.
+Repair broken software:
+type = fix.
 
-=========================================================
-ROUTING RULES
-=========================================================
+Deploy existing project:
+type = deploy.
 
-1. Classify ONLY the CURRENT request.
+Runtime/service inspection:
+type = monitor.
 
-2. Memory is context only.
-   Never let memory override the current request.
+Capacity changes:
+type = scale.
 
-3. Build software:
-   type = build.
+Billing:
+type = billing.
 
-4. Repair broken software:
-   type = fix.
+Subscription lifecycle:
+type = subscription.
 
-5. Deploy an existing project:
-   type = deploy.
+Direct file operation:
+type = file.
 
-6. Runtime/service inspection:
-   type = monitor.
+Automation:
+type = automation.
 
-7. Capacity changes:
-   type = scale.
+Cloud/infrastructure:
+type = infrastructure.
 
-8. Billing charges/invoices/pricing:
-   type = billing.
+Thumbnail generation:
+type = thumbnail.
 
-9. Subscription lifecycle:
-   type = subscription.
+General conversation:
+type = chat.
 
-10. Direct file operations:
-    type = file.
+For build requests:
 
-11. Cloud architecture/resources:
-    type = infrastructure.
+requiredAgents MUST include:
+planningAgent
+builderAgent
 
-12. Automated workflows:
-    type = automation.
-
-13. Thumbnail creation:
-    type = thumbnail.
-
-14. General conversation:
-    type = chat.
-
-15. If a request contains multiple operations,
-    choose the PRIMARY operation as "type"
-    and put other clearly relevant operations
-    inside "secondaryIntents".
-
-16. Never put an agent in requiredAgents
-    unless that agent exists in VALID AGENTS.
-
-17. For build requests:
-    planningAgent must be included.
-
-18. For build requests:
-    builderAgent must be included.
-
-19. Do NOT invent requirementAgent or
-    architectureAgent yet. Those agents will
-    only be added after the existing planning
-    architecture is audited and intentionally
-    introduced.
-
-20. The Intent Agent must NOT decide exact files.
-
-21. The Intent Agent must NOT decide exact
-    architecture.
-
-22. The Intent Agent must NOT decide detailed
-    dependencies.
-
-23. The Intent Agent only identifies the request
-    and routes it.
-
-24. Large project size does NOT mean generating
-    a giant Intent response.
-
-25. Keep output compact and machine-readable.
+Do not invent requirementAgent
+or architectureAgent.
 
 =========================================================
-OUTPUT
+IMPORTANT
 =========================================================
+
+Classify ONLY the current request.
+
+Do not let memory override the current request.
+
+Do not inflate project scope merely because
+the user owns a large platform.
+
+A request to build a small calculator remains
+a small task even if the surrounding platform
+is ZyrionOS.
 
 Return ONLY valid JSON.
 
@@ -1962,15 +1723,15 @@ Required structure:
 
 {
   "type": "build",
-  "goal": "short description of current request",
-  "complexity": "high",
-  "confidence": 0,
+  "goal": "build a simple calculator",
+  "complexity": "low",
+  "confidence": 95,
   "requiredAgents": [
     "planningAgent",
     "builderAgent"
   ],
   "secondaryIntents": [],
-  "projectScale": "large_project",
+  "projectScale": "task",
   "requestKind": "creation",
   "scopeSignals": [],
   "requiresPlanning": true,
@@ -1985,72 +1746,140 @@ No code.
 
 
 /* =========================================================
-   BUILD REQUEST SAFETY
+   BUILD ROUTING SAFETY
 ========================================================= */
 
-function enforceBuildRouting(
-  intent
-) {
+function enforceBuildRouting(intent, prompt = "") {
+
+  const deterministic =
+    detectDeterministicIntent(
+      prompt
+    );
+
+
+  /*
+   * Always guarantee build agents.
+   */
 
   if (
-    intent.type !== "build"
+    intent.type === "build"
   ) {
 
-    return intent;
+    const required =
+      new Set(
+        intent.requiredAgents
+      );
 
+    required.add(
+      "planningAgent"
+    );
+
+    required.add(
+      "builderAgent"
+    );
+
+    intent.requiredAgents =
+      [
+        ...required
+      ].filter(
+        (agent) =>
+          KNOWN_AGENTS.includes(
+            agent
+          )
+      );
+
+
+    intent.requiresPlanning =
+      true;
+
+    intent.requiresBuild =
+      true;
   }
 
 
-  const required =
-    new Set(
-      intent.requiredAgents
-    );
-
-
-  required.add(
-    "planningAgent"
-  );
-
-
-  required.add(
-    "builderAgent"
-  );
-
-
-  intent.requiredAgents =
-    [
-
-      ...required
-
-    ].filter(
-      (agent) =>
-        KNOWN_AGENTS.includes(
-          agent
-        )
-    );
-
-
-  intent.requiresPlanning =
-    true;
-
-
-  intent.requiresBuild =
-    true;
-
+  /*
+   * SIMPLE BUILD HARD CLAMP.
+   *
+   * This is the final safety gate.
+   */
 
   if (
-    intent.projectScale ===
+    deterministic.type === "build" &&
+    deterministic.projectScale === "task"
+  ) {
+
+    intent.type =
+      "build";
+
+    intent.projectScale =
+      "task";
+
+    intent.complexity =
+      "low";
+
+    intent.requiresPlanning =
+      true;
+
+    intent.requiresBuild =
+      true;
+
+    intent.requiredAgents =
+      [
+        "planningAgent",
+        "builderAgent"
+      ];
+
+    intent.scopeSignals =
+      [];
+
+    intent.confidence =
+      Math.max(
+        normalizeConfidence(
+          intent.confidence
+        ),
+        90
+      );
+  }
+
+
+  /*
+   * Large projects cannot be downgraded.
+   */
+
+  if (
+    deterministic.projectScale ===
     "large_project"
   ) {
 
+    intent.projectScale =
+      "large_project";
+
     intent.complexity =
       "high";
+  }
 
+
+  /*
+   * Application-level requests cannot
+   * be reduced to a task.
+   */
+
+  if (
+    deterministic.projectScale ===
+    "application" &&
+    intent.projectScale !==
+      "large_project"
+  ) {
+
+    intent.projectScale =
+      "application";
+
+    intent.complexity =
+      "high";
   }
 
 
   return intent;
-
 }
 
 
@@ -2068,8 +1897,8 @@ async function intentAgent(
 
   try {
 
-    logger.info(
-      "🧠 ZyrionOS Intent Agent Started"
+    logInfo(
+      `🧠 ZyrionOS Intent Agent ${INTENT_AGENT_VERSION} Started`
     );
 
 
@@ -2083,7 +1912,6 @@ async function intentAgent(
         MAX_PROMPT_LENGTH
       );
 
-
     const memoryContext =
       data?.memoryContext ||
       null;
@@ -2093,42 +1921,26 @@ async function intentAgent(
        VALIDATION
     ===================================================== */
 
-    if (
-      !prompt
-    ) {
+    if (!prompt) {
 
       return {
-
-        success:
-          false,
-
-        message:
-          "Prompt required",
-
-        type:
-          "chat",
-
-        data:
-          createDefaultIntent(),
-
+        success: false,
+        message: "Prompt required",
+        type: "chat",
+        data: createDefaultIntent(),
         metadata: {
-
           durationMs:
             Date.now() -
-            startedAt
-
+            startedAt,
+          version:
+            INTENT_AGENT_VERSION
         }
-
       };
-
     }
 
 
     /* =====================================================
        DETERMINISTIC BASELINE
-       -----------------------------------------------------
-       This gives us a safe route even when
-       the AI provider is unavailable.
     ===================================================== */
 
     const deterministicIntent =
@@ -2138,41 +1950,26 @@ async function intentAgent(
 
 
     /* =====================================================
-       MEMORY SUMMARY
+       MEMORY
     ===================================================== */
 
     let memorySummary =
       "No memory context provided.";
 
-
-    if (
-      memoryContext
-    ) {
+    if (memoryContext) {
 
       memorySummary =
         safeJson(
           memoryContext
-        )
-          .slice(
-            0,
-            MAX_MEMORY_LENGTH
-          );
-
+        ).slice(
+          0,
+          MAX_MEMORY_LENGTH
+        );
     }
 
 
     /* =====================================================
        AI REQUEST
-       -----------------------------------------------------
-       IMPORTANT:
-       No provider is specified here.
-
-       aiProviderService is responsible for:
-       - provider routing
-       - fallback
-       - retry
-       - cooldown
-       - structured JSON validation
     ===================================================== */
 
     const result =
@@ -2181,19 +1978,13 @@ async function intentAgent(
         messages: [
 
           {
-
-            role:
-              "system",
-
+            role: "system",
             content:
               INTENT_SYSTEM_PROMPT
-
           },
 
           {
-
-            role:
-              "user",
+            role: "user",
 
             content: `
 
@@ -2205,7 +1996,7 @@ OPTIONAL MEMORY CONTEXT:
 
 ${memorySummary}
 
-DETERMINISTIC ROUTING HINT:
+DETERMINISTIC SAFETY HINT:
 
 Primary intent:
 ${deterministicIntent.type}
@@ -2216,11 +2007,11 @@ ${deterministicIntent.projectScale}
 Complexity:
 ${deterministicIntent.complexity}
 
-These hints are safety signals.
-Use the CURRENT USER REQUEST as the
-actual source of truth.
+This is only a safety hint.
 
-Classify ONLY the current request.
+Classify the CURRENT REQUEST.
+Do not inflate a simple request into
+a larger project.
 
 `
 
@@ -2228,20 +2019,14 @@ Classify ONLY the current request.
 
         ],
 
-        maxTokens:
-          1400,
+        maxTokens: 1400,
 
-        thinkingLevel:
-          "low"
-
+        thinkingLevel: "low"
       });
 
 
     /* =====================================================
-       PROVIDER FAILURE
-       -----------------------------------------------------
-       Do NOT convert a clear build request
-       into chat merely because AI failed.
+       AI FAILURE
     ===================================================== */
 
     if (
@@ -2249,21 +2034,21 @@ Classify ONLY the current request.
       result.success !== true
     ) {
 
-      logger.warn(
+      logWarning(
         "Intent AI provider unavailable. Using deterministic routing fallback."
       );
 
 
       const fallback =
         enforceBuildRouting(
-          deterministicIntent
+          deterministicIntent,
+          prompt
         );
 
 
       return {
 
-        success:
-          true,
+        success: true,
 
         type:
           fallback.type,
@@ -2287,17 +2072,17 @@ Classify ONLY the current request.
             startedAt,
 
           fallback:
-            true
+            true,
 
+          version:
+            INTENT_AGENT_VERSION
         }
-
       };
-
     }
 
 
     /* =====================================================
-       RESPONSE VALIDATION
+       STRUCTURED RESPONSE VALIDATION
     ===================================================== */
 
     if (
@@ -2308,21 +2093,21 @@ Classify ONLY the current request.
       )
     ) {
 
-      logger.warn(
+      logWarning(
         "Intent AI returned invalid structured data. Using deterministic routing fallback."
       );
 
 
       const fallback =
         enforceBuildRouting(
-          deterministicIntent
+          deterministicIntent,
+          prompt
         );
 
 
       return {
 
-        success:
-          true,
+        success: true,
 
         type:
           fallback.type,
@@ -2346,17 +2131,17 @@ Classify ONLY the current request.
             startedAt,
 
           fallback:
-            true
+            true,
 
+          version:
+            INTENT_AGENT_VERSION
         }
-
       };
-
     }
 
 
     /* =====================================================
-       NORMALIZATION
+       NORMALIZE
     ===================================================== */
 
     const normalized =
@@ -2367,12 +2152,13 @@ Classify ONLY the current request.
 
 
     /* =====================================================
-       SAFETY ROUTING
+       FINAL SAFETY ROUTING
     ===================================================== */
 
     const finalIntent =
       enforceBuildRouting(
-        normalized
+        normalized,
+        prompt
       );
 
 
@@ -2380,7 +2166,7 @@ Classify ONLY the current request.
        SUCCESS LOG
     ===================================================== */
 
-    logger.success(
+    logSuccess(
 
       `Intent Detected: ${finalIntent.type}` +
       ` | Complexity: ${finalIntent.complexity}` +
@@ -2399,8 +2185,7 @@ Classify ONLY the current request.
 
     return {
 
-      success:
-        true,
+      success: true,
 
       type:
         finalIntent.type,
@@ -2421,35 +2206,30 @@ Classify ONLY the current request.
           startedAt,
 
         fallback:
-          false
+          false,
 
+        version:
+          INTENT_AGENT_VERSION
       }
 
     };
 
   }
 
-  catch (
-    error
-  ) {
+  catch (error) {
 
     const errorMessage =
       error?.message ||
       "Unknown Intent Agent error";
 
 
-    logger.error(
+    logError(
       `Intent Agent Failed: ${errorMessage}`
     );
 
 
     /*
-     * CRITICAL:
-     *
-     * Even if the AI provider completely fails,
-     * do not destroy the routing decision.
-     *
-     * We run the deterministic classifier again.
+     * FINAL DETERMINISTIC FALLBACK
      */
 
     const prompt =
@@ -2463,14 +2243,14 @@ Classify ONLY the current request.
       enforceBuildRouting(
         detectDeterministicIntent(
           prompt
-        )
+        ),
+        prompt
       );
 
 
     return {
 
-      success:
-        true,
+      success: true,
 
       type:
         fallback.type,
@@ -2494,14 +2274,14 @@ Classify ONLY the current request.
           startedAt,
 
         fallback:
-          true
+          true,
 
+        version:
+          INTENT_AGENT_VERSION
       }
 
     };
-
   }
-
 }
 
 
