@@ -1,5 +1,5 @@
 /* =========================================================
-   ZYRIONOS — AUTHORITATIVE BUILD SERVICE
+   ZYRIONOS — BUILD VALIDATION SERVICE 
    ---------------------------------------------------------
    Version: 1.0.0
 
