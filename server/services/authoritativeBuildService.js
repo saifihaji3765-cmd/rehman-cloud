@@ -5,11 +5,11 @@
  * ZYRIONOS — AUTHORITATIVE BUILD SERVICE
  * =========================================================
  *
- * Version: 3.0.0
+ * Version: 3.1.0
  *
  * PURPOSE
  * ---------------------------------------------------------
- * This is the REAL build execution boundary.
+ * REAL authoritative build execution boundary.
  *
  * Builder Agent
  *      ↓
@@ -21,7 +21,7 @@
  *      ↓
  * Dependency Install
  *      ↓
- * Real Build
+ * REAL BUILD
  *      ↓
  * ┌───────────────┐
  * │               │
@@ -35,14 +35,17 @@
  *
  * IMPORTANT
  * ---------------------------------------------------------
- * Generated source is NEVER executed directly inside the
- * ZyrionOS backend Node.js process.
+ * Generated application code is NEVER executed directly
+ * inside the ZyrionOS backend Node.js process.
  *
- * All generated application code executes inside Docker.
+ * Generated application code is executed only inside Docker.
  *
  * This service:
  *
  * - validates source boundaries
+ * - validates package.json
+ * - validates build script semantics
+ * - rejects runtime/dev/start commands as build commands
  * - creates isolated workspace
  * - materializes generated files
  * - detects package manager
@@ -88,7 +91,7 @@ const ProjectBuild =
 ========================================================= */
 
 const SERVICE_VERSION =
-  "3.0.0";
+  "3.1.0";
 
 const VALIDATION_MODE =
   "authoritative";
@@ -240,19 +243,6 @@ function safeString(
   return String(value).slice(
     0,
     max
-  );
-}
-
-
-function sleep(
-  ms
-) {
-  return new Promise(
-    resolve =>
-      setTimeout(
-        resolve,
-        ms
-      )
   );
 }
 
@@ -995,32 +985,529 @@ function getInstallCommand(
 }
 
 
+/* =========================================================
+   BUILD SCRIPT VALIDATION
+========================================================= */
+
 /**
+ * The authoritative build boundary must NEVER execute
+ * a development server or runtime process.
+ *
+ * Examples that are INVALID build scripts:
+ *
+ * node server.js
+ * node index.js
+ * npm start
+ * npm run dev
+ * next dev
+ * vite
+ * vite preview
+ * nodemon server.js
+ * ts-node-dev server.ts
+ *
+ * These commands are runtime/dev commands, not finite
+ * production build commands.
+ */
+
+function normalizeBuildScript(
+  script
+) {
+  return String(
+    script || ""
+  )
+    .trim()
+    .replace(
+      /\s+/g,
+      " "
+    );
+}
+
+
+function detectForbiddenBuildScript(
+  script
+) {
+  const normalized =
+    normalizeBuildScript(
+      script
+    );
+
+
+  const lower =
+    normalized.toLowerCase();
+
+
+  if (!normalized) {
+    return {
+      invalid:
+        true,
+
+      reason:
+        "Build script is empty."
+    };
+  }
+
+
+  /*
+   * Self-recursive build scripts.
+   */
+  if (
+    /(^|[;&|])\s*(?:npm\s+run\s+build|pnpm\s+run\s+build|yarn\s+build|bun\s+run\s+build)\s*(?:$|[;&|])/i.test(
+      normalized
+    )
+  ) {
+    return {
+      invalid:
+        true,
+
+      reason:
+        "Build script recursively invokes itself."
+    };
+  }
+
+
+  /*
+   * Package-manager start commands.
+   */
+  if (
+    /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?start\b/i.test(
+      normalized
+    )
+  ) {
+    return {
+      invalid:
+        true,
+
+      reason:
+        "Build script starts the application instead of building it."
+    };
+  }
+
+
+  /*
+   * Package-manager development commands.
+   */
+  if (
+    /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?dev\b/i.test(
+      normalized
+    )
+  ) {
+    return {
+      invalid:
+        true,
+
+      reason:
+        "Build script starts a development server."
+    };
+  }
+
+
+  /*
+   * Direct Node runtime entrypoints.
+   *
+   * We intentionally target common runtime filenames,
+   * not every possible node command, because finite build
+   * scripts may legitimately execute node build utilities.
+   */
+  if (
+    /\b(?:node|nodejs)\s+(?:[^\s;&|]+\/)*(?:server|index|app)\.(?:js|mjs|cjs|ts|mts|cts)\b/i.test(
+      normalized
+    )
+  ) {
+    return {
+      invalid:
+        true,
+
+      reason:
+        "Build script executes a runtime server entrypoint."
+    };
+  }
+
+
+  /*
+   * Common development/runtime executors.
+   */
+  const forbiddenPatterns = [
+    /\bnext\s+dev\b/i,
+    /\bvite\s+preview\b/i,
+    /(?:^|[;&|]\s*)vite(?:\s|$)/i,
+    /\bwebpack-dev-server\b/i,
+    /\breact-scripts\s+start\b/i,
+    /\bvue-cli-service\s+serve\b/i,
+    /\bng\s+serve\b/i,
+    /\bng\s+start\b/i,
+    /\bnodemon\b/i,
+    /\bts-node-dev\b/i,
+    /\btsx\s+watch\b/i,
+    /\btsc\s+--watch\b/i,
+    /\bwebpack\s+serve\b/i,
+    /\bpython(?:3)?\s+-m\s+http\.server\b/i,
+    /\bserve\s+-s\b/i
+  ];
+
+
+  for (
+    const pattern of forbiddenPatterns
+  ) {
+    if (
+      pattern.test(
+        normalized
+      )
+    ) {
+      return {
+        invalid:
+          true,
+
+        reason:
+          "Build script contains a development server/watch/preview command."
+      };
+    }
+  }
+
+
+  /*
+   * A plain "start" shell command should never be used.
+   */
+  if (
+    /^(?:start|serve|dev)$/i.test(
+      lower
+    )
+  ) {
+    return {
+      invalid:
+        true,
+
+      reason:
+        "Build script is a runtime/development command."
+    };
+  }
+
+
+  return {
+    invalid:
+      false,
+
+    reason:
+      ""
+  };
+}
+
+
+/**
+ * Framework-aware semantic validation.
+ *
+ * This does NOT force every project into one command.
+ * It only protects the authoritative boundary from the
+ * most common runtime/dev mistakes.
+ */
+function validateBuildScriptForFramework(
+  script,
+  framework
+) {
+  const normalized =
+    normalizeBuildScript(
+      script
+    );
+
+  const lower =
+    normalized.toLowerCase();
+
+  const frameworkName =
+    String(
+      framework || ""
+    )
+      .trim()
+      .toLowerCase();
+
+
+  if (!frameworkName) {
+    return {
+      valid:
+        true,
+
+      reason:
+        ""
+    };
+  }
+
+
+  /*
+   * Next.js
+   */
+  if (
+    frameworkName.includes(
+      "next"
+    )
+  ) {
+    if (
+      !/\bnext\s+build\b/i.test(
+        normalized
+      )
+    ) {
+      return {
+        valid:
+          false,
+
+        reason:
+          "Next.js authoritative builds must use a finite Next.js build command such as `next build`."
+      };
+    }
+  }
+
+
+  /*
+   * Vite / React Vite / Vue Vite / Svelte Vite.
+   */
+  if (
+    frameworkName.includes(
+      "vite"
+    )
+  ) {
+    if (
+      !/\bvite\s+build\b/i.test(
+        normalized
+      )
+    ) {
+      return {
+        valid:
+          false,
+
+        reason:
+          "Vite projects must use a finite `vite build` command."
+      };
+    }
+  }
+
+
+  /*
+   * Angular.
+   */
+  if (
+    frameworkName.includes(
+      "angular"
+    )
+  ) {
+    if (
+      !/\bng\s+build\b/i.test(
+        normalized
+      )
+    ) {
+      return {
+        valid:
+          false,
+
+        reason:
+          "Angular projects must use a finite `ng build` command."
+      };
+    }
+  }
+
+
+  /*
+   * Astro.
+   */
+  if (
+    frameworkName.includes(
+      "astro"
+    )
+  ) {
+    if (
+      !/\bastro\s+build\b/i.test(
+        normalized
+      )
+    ) {
+      return {
+        valid:
+          false,
+
+        reason:
+          "Astro projects must use a finite `astro build` command."
+      };
+    }
+  }
+
+
+  /*
+   * SvelteKit.
+   */
+  if (
+    frameworkName.includes(
+      "sveltekit"
+    )
+  ) {
+    if (
+      !/\b(?:svelte-kit\s+build|vite\s+build)\b/i.test(
+        normalized
+      )
+    ) {
+      return {
+        valid:
+          false,
+
+        reason:
+          "SvelteKit projects must use a finite SvelteKit/Vite build command."
+      };
+    }
+  }
+
+
+  /*
+   * Vue CLI.
+   */
+  if (
+    frameworkName === "vue" ||
+    frameworkName.includes(
+      "vue"
+    )
+  ) {
+    const acceptable =
+      /\bvite\s+build\b/i.test(
+        normalized
+      ) ||
+      /\bvue-cli-service\s+build\b/i.test(
+        normalized
+      );
+
+    if (
+      !acceptable
+    ) {
+      return {
+        valid:
+          false,
+
+        reason:
+          "Vue projects must use a finite Vite/Vue CLI build command."
+      };
+    }
+  }
+
+
+  /*
+   * React.
+   *
+   * React has multiple legitimate build systems, so we
+   * intentionally allow several finite bundlers.
+   */
+  if (
+    frameworkName === "react" ||
+    frameworkName.includes(
+      "react"
+    )
+  ) {
+    const acceptable =
+      /\bvite\s+build\b/i.test(
+        normalized
+      ) ||
+      /\breact-scripts\s+build\b/i.test(
+        normalized
+      ) ||
+      /\bwebpack\b/i.test(
+        normalized
+      ) ||
+      /\bparcel\b/i.test(
+        normalized
+      ) ||
+      /\besbuild\b/i.test(
+        normalized
+      ) ||
+      /\btsup\b/i.test(
+        normalized
+      );
+
+    if (
+      !acceptable
+    ) {
+      return {
+        valid:
+          false,
+
+        reason:
+          "React projects must use a finite production build tool such as Vite, react-scripts, webpack, Parcel, esbuild or tsup."
+      };
+    }
+  }
+
+
+  /*
+   * Generic frontend project.
+   *
+   * We do not reject custom build systems here.
+   */
+  void lower;
+
+  return {
+    valid:
+      true,
+
+    reason:
+      ""
+  };
+}
+
+
+/**
+ * Get the authoritative build command.
+ *
  * IMPORTANT:
- *
- * Build command must respect the selected package manager.
- *
- * Old implementation always returned:
- *
- *     npm run build
- *
- * even for pnpm/yarn/bun.
+ * The command is generated from the package manager,
+ * but the package.json build script is validated before
+ * authoritative execution.
  */
 function getBuildCommand(
   packageManager,
-  packageJson
+  packageJson,
+  framework = ""
 ) {
   const scripts =
     packageJson?.scripts || {};
 
+  const script =
+    scripts.build;
+
 
   if (
-    typeof scripts.build !==
+    typeof script !==
       "string" ||
-    !scripts.build.trim()
+    !script.trim()
   ) {
     throw new Error(
       "package.json must contain a non-empty build script"
+    );
+  }
+
+
+  const forbidden =
+    detectForbiddenBuildScript(
+      script
+    );
+
+
+  if (
+    forbidden.invalid
+  ) {
+    throw new Error(
+      `Invalid authoritative build script: ${forbidden.reason} | script="${safeString(
+        script,
+        1000
+      )}"`
+    );
+  }
+
+
+  const frameworkValidation =
+    validateBuildScriptForFramework(
+      script,
+      framework
+    );
+
+
+  if (
+    !frameworkValidation.valid
+  ) {
+    throw new Error(
+      `Invalid authoritative build script for framework "${framework}": ${frameworkValidation.reason} | script="${safeString(
+        script,
+        1000
+      )}"`
     );
   }
 
@@ -1080,7 +1567,6 @@ function createOutputCollector() {
 
 
   function append(
-    current,
     chunk
   ) {
     const text =
@@ -1111,7 +1597,6 @@ function createOutputCollector() {
     ) {
       const result =
         append(
-          stdout,
           chunk
         );
 
@@ -1120,16 +1605,8 @@ function createOutputCollector() {
         result.bytes;
 
 
-      if (
-        Buffer.byteLength(
-          stdout,
-          "utf8"
-        ) <
-        MAX_OUTPUT_BYTES
-      ) {
-        stdout +=
-          result.text;
-      }
+      stdout +=
+        result.text;
 
 
       if (
@@ -1147,15 +1624,6 @@ function createOutputCollector() {
         truncated =
           true;
       }
-
-
-      if (
-        stdoutBytes >
-        MAX_OUTPUT_BYTES
-      ) {
-        truncated =
-          true;
-      }
     },
 
 
@@ -1164,7 +1632,6 @@ function createOutputCollector() {
     ) {
       const result =
         append(
-          stderr,
           chunk
         );
 
@@ -1173,16 +1640,8 @@ function createOutputCollector() {
         result.bytes;
 
 
-      if (
-        Buffer.byteLength(
-          stderr,
-          "utf8"
-        ) <
-        MAX_OUTPUT_BYTES
-      ) {
-        stderr +=
-          result.text;
-      }
+      stderr +=
+        result.text;
 
 
       if (
@@ -1197,15 +1656,6 @@ function createOutputCollector() {
             -MAX_OUTPUT_BYTES
           );
 
-        truncated =
-          true;
-      }
-
-
-      if (
-        stderrBytes >
-        MAX_OUTPUT_BYTES
-      ) {
         truncated =
           true;
       }
@@ -1239,10 +1689,6 @@ function sanitizeBuildOutput(
     );
 
 
-  /*
-   * Avoid returning obvious credential-like
-   * environment values in repair responses.
-   */
   text =
     text.replace(
       /([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASS)[A-Z0-9_]*)\s*=\s*[^\s]+/gi,
@@ -1283,32 +1729,14 @@ function parseCompilerLocation(
 
   const patterns = [
 
-    /*
-     * file.ts:12:7
-     */
     /(?:^|\n)\s*(?:[A-Za-z]:)?([^\s():]+(?:\/[^\s():]+)*)\s*:\s*(\d+)\s*:\s*(\d+)/,
 
-    /*
-     * ./src/App.jsx:12:7
-     */
     /(?:^|\n)\s*(\.?\.?\/?[^\s():]+)\s*:\s*(\d+)\s*:\s*(\d+)/,
 
-    /*
-     * file.ts(12,7)
-     */
     /(?:^|\n)\s*(\.?\.?\/?[^\s()]+)\((\d+),\s*(\d+)\)/,
 
-    /*
-     * TS-style:
-     * src/App.tsx(12,7): error
-     */
     /(?:^|\n)\s*(\.?\.?\/?[^\s():]+)\((\d+),\s*(\d+)\)\s*:/,
 
-    /*
-     * webpack / vite:
-     * ./src/App.jsx
-     * 12:7
-     */
     /(?:^|\n)\s*(\.?\.?\/?[^\s]+)\s*\n\s*(\d+)\s*:\s*(\d+)/
   ];
 
@@ -1418,9 +1846,6 @@ function normalizeCompilerFilePath(
     );
 
 
-  /*
-   * Docker absolute paths.
-   */
   const workspaceIndex =
     file.indexOf(
       "/workspace/"
@@ -1533,7 +1958,8 @@ function classifyFailure({
   stage,
   stdout = "",
   stderr = "",
-  timedOut = false
+  timedOut = false,
+  signal = null
 }) {
   if (
     timedOut
@@ -1630,6 +2056,24 @@ function classifyFailure({
     return {
       category:
         "syntax",
+
+      retryable:
+        false
+    };
+  }
+
+
+  /*
+   * Explicit SIGTERM without timeout usually means the
+   * process was terminated externally.
+   */
+  if (
+    signal ===
+      "SIGTERM"
+  ) {
+    return {
+      category:
+        "process-terminated",
 
       retryable:
         false
@@ -1926,9 +2370,6 @@ function runDockerCommand({
         "-w",
         "/workspace",
 
-        /*
-         * Node official images support the node user.
-         */
         "--user",
         "node",
 
@@ -2050,11 +2491,6 @@ function runDockerCommand({
             } catch {}
 
 
-            /*
-             * docker run has a unique container name.
-             * Attempt explicit cleanup after killing the
-             * Docker CLI process.
-             */
             setTimeout(
               () => {
                 try {
@@ -2473,6 +2909,7 @@ async function createTarArtifact(
           [
             "--exclude=node_modules",
             "--exclude=.git",
+            "--exclude=.zyrionos",
             "--exclude=.env",
             "--exclude=.env.local",
             "--exclude=.env.production",
@@ -2983,8 +3420,7 @@ function createRepairContext({
 
   return {
     required:
-      normalizedErrors.length >
-      0,
+      true,
 
     buildId:
       buildId ||
@@ -3052,6 +3488,8 @@ function createFailureResult({
   runtime,
   nodeVersion,
   packageManager,
+  buildCommand = "",
+  installCommand = "",
   failureStage,
   failureCategory,
   retryable,
@@ -3108,6 +3546,10 @@ function createFailureResult({
     nodeVersion,
 
     packageManager,
+
+    buildCommand,
+
+    installCommand,
 
     failureStage,
 
@@ -3184,6 +3626,44 @@ function createFailureResult({
 
 
 /* =========================================================
+   AUTHORITATIVE FAILURE LOGGING
+========================================================= */
+
+function logBuildFailure({
+  buildId,
+  stage,
+  category,
+  retryable,
+  command,
+  installCommand,
+  exitCode,
+  signal,
+  timedOut,
+  error,
+  stdout,
+  stderr
+}) {
+  logError(
+    [
+      `[AuthoritativeBuildService] AUTHORITATIVE BUILD FAILURE`,
+      `buildId=${buildId}`,
+      `stage=${stage || "unknown"}`,
+      `category=${category || "unknown"}`,
+      `retryable=${Boolean(retryable)}`,
+      `timedOut=${Boolean(timedOut)}`,
+      `exitCode=${exitCode ?? "null"}`,
+      `signal=${signal || "null"}`,
+      `installCommand=${safeString(installCommand, 1000)}`,
+      `buildCommand=${safeString(command, 1000)}`,
+      `error=${safeString(error?.message || "", 4000)}`,
+      `stderr=${sanitizeBuildOutput(stderr)}`,
+      `stdout=${sanitizeBuildOutput(stdout)}`
+    ].join(" | ")
+  );
+}
+
+
+/* =========================================================
    MAIN EXECUTOR
 ========================================================= */
 
@@ -3246,11 +3726,9 @@ async function executeBuild(
     null;
 
 
-  /*
-   * -------------------------------------------------------
-   * INPUT
-   * -------------------------------------------------------
-   */
+  /* =======================================================
+     INPUT
+  ======================================================= */
 
   if (
     !projectId
@@ -3500,11 +3978,9 @@ async function executeBuild(
   let image;
 
 
-  /*
-   * -------------------------------------------------------
-   * PACKAGE CONFIGURATION
-   * -------------------------------------------------------
-   */
+  /* =======================================================
+     PACKAGE CONFIGURATION
+  ======================================================= */
 
   try {
     packageJson =
@@ -3529,11 +4005,18 @@ async function executeBuild(
       );
 
 
+    /*
+     * CRITICAL:
+     * Framework is passed here so authoritative execution
+     * can reject semantically incorrect build scripts.
+     */
     buildCommand =
       getBuildCommand(
         packageManager,
 
-        packageJson
+        packageJson,
+
+        framework
       );
 
 
@@ -3575,6 +4058,12 @@ async function executeBuild(
 
       packageManager:
         requestedPackageManager,
+
+      buildCommand:
+        "",
+
+      installCommand:
+        "",
 
       failureStage:
         "configuration",
@@ -3624,12 +4113,15 @@ async function executeBuild(
   }
 
 
+  /* =======================================================
+     EXECUTION
+  ======================================================= */
+
   try {
-    /*
-     * -------------------------------------------------------
-     * DOCKER PREFLIGHT
-     * -------------------------------------------------------
-     */
+
+    /* -------------------------------------------------------
+       DOCKER PREFLIGHT
+    ------------------------------------------------------- */
 
     const dockerReady =
       await checkDockerAvailable();
@@ -3654,6 +4146,10 @@ async function executeBuild(
         nodeVersion,
 
         packageManager,
+
+        buildCommand,
+
+        installCommand,
 
         failureStage:
           "executor",
@@ -3703,11 +4199,9 @@ async function executeBuild(
     }
 
 
-    /*
-     * -------------------------------------------------------
-     * BUILD RECORD
-     * -------------------------------------------------------
-     */
+    /* -------------------------------------------------------
+       BUILD RECORD
+    ------------------------------------------------------- */
 
     build =
       await createBuildRecord({
@@ -3768,15 +4262,21 @@ async function executeBuild(
 
 
     logInfo(
-      `[AuthoritativeBuildService] Build started: ${buildId}`
+      [
+        `[AuthoritativeBuildService] Build started`,
+        `buildId=${buildId}`,
+        `framework=${framework || "unknown"}`,
+        `packageManager=${packageManager}`,
+        `nodeVersion=${nodeVersion}`,
+        `installCommand=${installCommand}`,
+        `buildCommand=${buildCommand}`
+      ].join(" | ")
     );
 
 
-    /*
-     * -------------------------------------------------------
-     * WORKSPACE
-     * -------------------------------------------------------
-     */
+    /* -------------------------------------------------------
+       WORKSPACE
+    ------------------------------------------------------- */
 
     workspace =
       await createWorkspace(
@@ -3790,11 +4290,9 @@ async function executeBuild(
     );
 
 
-    /*
-     * -------------------------------------------------------
-     * INSTALL
-     * -------------------------------------------------------
-     */
+    /* -------------------------------------------------------
+       INSTALL
+    ------------------------------------------------------- */
 
     const installContainerName =
       `zyrionos-install-${buildId}`
@@ -3839,7 +4337,10 @@ async function executeBuild(
             installResult.stderr,
 
           timedOut:
-            installResult.timedOut
+            installResult.timedOut,
+
+          signal:
+            installResult.signal
         });
 
 
@@ -3899,6 +4400,10 @@ async function executeBuild(
           nodeVersion,
 
           packageManager,
+
+          buildCommand,
+
+          installCommand,
 
           failureStage:
             "dependency-install",
@@ -3983,22 +4488,59 @@ async function executeBuild(
                 ),
 
               exitCode:
-                installResult.exitCode
+                installResult.exitCode,
+
+              signal:
+                installResult.signal
             }
           }
         }
       );
 
 
+      logBuildFailure({
+        buildId,
+
+        stage:
+          "dependency-install",
+
+        category:
+          failure.category,
+
+        retryable:
+          failure.retryable,
+
+        command:
+          buildCommand,
+
+        installCommand,
+
+        exitCode:
+          installResult.exitCode,
+
+        signal:
+          installResult.signal,
+
+        timedOut:
+          installResult.timedOut,
+
+        error,
+
+        stdout:
+          installResult.stdout,
+
+        stderr:
+          installResult.stderr
+      });
+
+
       return result;
     }
 
 
-    /*
-     * -------------------------------------------------------
-     * AUTHORITATIVE BUILD
-     * -------------------------------------------------------
-     */
+    /* -------------------------------------------------------
+       AUTHORITATIVE BUILD
+    ------------------------------------------------------- */
 
     const buildContainerName =
       `zyrionos-build-${buildId}`
@@ -4043,7 +4585,10 @@ async function executeBuild(
             authoritativeResult.stderr,
 
           timedOut:
-            authoritativeResult.timedOut
+            authoritativeResult.timedOut,
+
+          signal:
+            authoritativeResult.signal
         });
 
 
@@ -4053,6 +4598,7 @@ async function executeBuild(
           : (
               authoritativeResult.stderr ||
               authoritativeResult.stdout ||
+              authoritativeResult.error ||
               "Authoritative project build failed."
             );
 
@@ -4103,6 +4649,10 @@ async function executeBuild(
           nodeVersion,
 
           packageManager,
+
+          buildCommand,
+
+          installCommand,
 
           failureStage:
             "build",
@@ -4189,6 +4739,12 @@ async function executeBuild(
               exitCode:
                 authoritativeResult.exitCode,
 
+              signal:
+                authoritativeResult.signal,
+
+              timedOut:
+                authoritativeResult.timedOut,
+
               file:
                 error.file,
 
@@ -4203,20 +4759,49 @@ async function executeBuild(
       );
 
 
-      logWarn(
-        `[AuthoritativeBuildService] Build failed: ${buildId} | ${failure.category}`
-      );
+      logBuildFailure({
+        buildId,
+
+        stage:
+          "build",
+
+        category:
+          failure.category,
+
+        retryable:
+          failure.retryable,
+
+        command:
+          buildCommand,
+
+        installCommand,
+
+        exitCode:
+          authoritativeResult.exitCode,
+
+        signal:
+          authoritativeResult.signal,
+
+        timedOut:
+          authoritativeResult.timedOut,
+
+        error,
+
+        stdout:
+          authoritativeResult.stdout,
+
+        stderr:
+          authoritativeResult.stderr
+      });
 
 
       return result;
     }
 
 
-    /*
-     * -------------------------------------------------------
-     * ARTIFACT MANIFEST
-     * -------------------------------------------------------
-     */
+    /* -------------------------------------------------------
+       ARTIFACT MANIFEST
+    ------------------------------------------------------- */
 
     const manifestResult =
       await createArtifactManifest(
@@ -4224,9 +4809,6 @@ async function executeBuild(
       );
 
 
-    /*
-     * Persist manifest inside artifact.
-     */
     const manifestFile =
       await writeArtifactManifest(
         workspace,
@@ -4254,11 +4836,9 @@ async function executeBuild(
       );
 
 
-    /*
-     * -------------------------------------------------------
-     * CREATE TARBALL
-     * -------------------------------------------------------
-     */
+    /* -------------------------------------------------------
+       CREATE TARBALL
+    ------------------------------------------------------- */
 
     const temporaryArtifactPath =
       path.join(
@@ -4298,12 +4878,6 @@ async function executeBuild(
       });
 
 
-    /*
-     * -------------------------------------------------------
-     * ARTIFACT RECORD
-     * -------------------------------------------------------
-     */
-
     const artifactRecord = {
       name:
         "build.tar.gz",
@@ -4326,11 +4900,9 @@ async function executeBuild(
     };
 
 
-    /*
-     * -------------------------------------------------------
-     * SUCCESS
-     * -------------------------------------------------------
-     */
+    /* -------------------------------------------------------
+       SUCCESS
+    ------------------------------------------------------- */
 
     const durationMs =
       Date.now() -
@@ -4414,16 +4986,16 @@ async function executeBuild(
               ),
 
             exitCode:
-              authoritativeResult.exitCode
+              authoritativeResult.exitCode,
+
+            signal:
+              authoritativeResult.signal
           }
         }
       }
     );
 
 
-    /*
-     * Remove temporary host tar.
-     */
     try {
       await fsp.rm(
         temporaryArtifactPath,
@@ -4436,7 +5008,13 @@ async function executeBuild(
 
 
     logInfo(
-      `[AuthoritativeBuildService] Build passed: ${buildId}`
+      [
+        `[AuthoritativeBuildService] Build passed`,
+        `buildId=${buildId}`,
+        `buildCommand=${buildCommand}`,
+        `durationMs=${durationMs}`,
+        `artifact=${artifact.storageKey}`
+      ].join(" | ")
     );
 
 
@@ -4548,14 +5126,16 @@ async function executeBuild(
 
   } catch (error) {
 
-    /*
-     * -------------------------------------------------------
-     * FATAL EXECUTOR ERROR
-     * -------------------------------------------------------
-     */
+    /* -------------------------------------------------------
+       FATAL EXECUTOR ERROR
+    ------------------------------------------------------- */
 
     logError(
-      `[AuthoritativeBuildService] Fatal error: ${error.message}`
+      [
+        `[AuthoritativeBuildService] Fatal error`,
+        `buildId=${buildId}`,
+        `message=${safeString(error.message, 4000)}`
+      ].join(" | ")
     );
 
 
@@ -4595,10 +5175,6 @@ async function executeBuild(
       });
 
 
-    /*
-     * Preserve explicit location if the thrown
-     * error already contained one.
-     */
     if (
       error.file
     ) {
@@ -4649,6 +5225,14 @@ async function executeBuild(
         packageManager:
           packageManager ||
           requestedPackageManager,
+
+        buildCommand:
+          buildCommand ||
+          "",
+
+        installCommand:
+          installCommand ||
+          "",
 
         failureStage:
           error.step ||
@@ -4730,7 +5314,15 @@ async function executeBuild(
               retryable:
                 Boolean(
                   error.retryable
-                )
+                ),
+
+              buildCommand:
+                buildCommand ||
+                "",
+
+              installCommand:
+                installCommand ||
+                ""
             }
           }
         );
@@ -4746,15 +5338,9 @@ async function executeBuild(
 
   } finally {
 
-    /*
-     * -------------------------------------------------------
-     * CLEANUP
-     * -------------------------------------------------------
-     *
-     * Source workspace is disposable.
-     *
-     * Artifact is stored independently.
-     */
+    /* -------------------------------------------------------
+       CLEANUP
+    ------------------------------------------------------- */
 
     await cleanupWorkspace(
       workspace
