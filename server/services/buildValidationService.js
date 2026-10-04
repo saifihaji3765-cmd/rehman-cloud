@@ -1,62 +1,56 @@
-/* =========================================================
-   ZYRIONOS — BUILD VALIDATION SERVICE 
-   ---------------------------------------------------------
-   Version: 1.0.0
+"use strict";
 
-   PURPOSE
-   ---------------------------------------------------------
-   This service performs REAL project validation.
-
-   Unlike BuildValidationService, this service:
-
-   - Creates isolated build workspace
-   - Writes generated project files
-   - Detects package manager
-   - Installs dependencies
-   - Executes actual build command
-   - Captures stdout
-   - Captures stderr
-   - Captures exit code
-   - Enforces timeout
-   - Detects install failures
-   - Detects build failures
-   - Produces structured repair context
-   - Generates deterministic build ID
-   - Produces source hash
-   - Cleans temporary workspace
-   - Never exposes host environment secrets
-   - Never deploys
-   - Never modifies production project files
-
-   ARCHITECTURE
-
-   Builder
-      ↓
-   BuildValidationService
-      ↓
-   AuthoritativeBuildService
-      ↓
-   INSTALL
-      ↓
-   BUILD
-      ↓
-   ┌───────────────┐
-   │               │
-   PASS           FAIL
-   │               │
-   ↓               ↓
- Preview        Fix Agent
-                    ↓
-                 Rebuild
-
-   IMPORTANT
-
-   This service uses Docker isolation.
-
-   Generated code MUST NOT be executed directly
-   inside the ZyrionOS backend Node.js process.
-
-========================================================= */
+/**
+ * =========================================================
+ * ZYRIONOS — BUILD VALIDATION SERVICE
+ * =========================================================
+ *
+ * Version: 2.0.0
+ *
+ * PURPOSE
+ * ---------------------------------------------------------
+ * Static pre-build validation only.
+ *
+ * THIS SERVICE MUST NOT:
+ *
+ * - Execute generated application code
+ * - Run Docker
+ * - Install dependencies
+ * - Run npm/yarn/pnpm/bun build
+ * - Start servers
+ * - Create deployment artifacts
+ * - Deploy projects
+ *
+ * ARCHITECTURE
+ * ---------------------------------------------------------
+ *
+ * Builder Agent
+ *      ↓
+ * BuildValidationService
+ *      ↓
+ * AuthoritativeBuildService
+ *      ↓
+ * Docker Install
+ *      ↓
+ * Real Build
+ *      ↓
+ * PASS ─────────────→ Artifact / Preview
+ *      ↓
+ * FAIL
+ *      ↓
+ * Fix Agent
+ *      ↓
+ * Rebuild
+ *
+ * IMPORTANT
+ * ---------------------------------------------------------
+ * Static validation is NEVER authoritative.
+ *
+ * authoritative: false
+ * validationMode: "static"
+ *
+ * =========================================================
+ */
 
 
 /* =========================================================
@@ -64,33 +58,17 @@
 ========================================================= */
 
 const crypto = require("crypto");
-const fs = require("fs");
-const fsp = require("fs/promises");
-const os = require("os");
-const path = require("path");
-const { spawn } = require("child_process");
-
-
-/* =========================================================
-   SERVICES
-========================================================= */
-
-const logger =
-  require("./loggerService");
 
 
 /* =========================================================
    METADATA
 ========================================================= */
 
-const SERVICE_VERSION =
-  "1.0.0";
+const SERVICE_VERSION = "2.0.0";
 
-const VALIDATION_MODE =
-  "authoritative";
+const VALIDATION_MODE = "static";
 
-const AUTHORITATIVE =
-  true;
+const AUTHORITATIVE = false;
 
 
 /* =========================================================
@@ -99,189 +77,69 @@ const AUTHORITATIVE =
 
 const MAX_FILES =
   Number(
-    process.env.AUTH_BUILD_MAX_FILES ||
+    process.env.BUILD_VALIDATION_MAX_FILES ||
     1000
   );
 
 const MAX_FILE_SIZE =
   Number(
-    process.env.AUTH_BUILD_MAX_FILE_SIZE ||
+    process.env.BUILD_VALIDATION_MAX_FILE_SIZE ||
     2 * 1024 * 1024
   );
 
-const MAX_TOTAL_SIZE =
+const MAX_SOURCE_SIZE =
   Number(
-    process.env.AUTH_BUILD_MAX_TOTAL_SIZE ||
-    50 * 1024 * 1024
+    process.env.BUILD_VALIDATION_MAX_SOURCE_SIZE ||
+    25 * 1024 * 1024
   );
 
-const INSTALL_TIMEOUT_MS =
+const MAX_PATH_LENGTH =
   Number(
-    process.env.AUTH_BUILD_INSTALL_TIMEOUT_MS ||
-    5 * 60 * 1000
+    process.env.BUILD_VALIDATION_MAX_PATH_LENGTH ||
+    500
   );
 
-const BUILD_TIMEOUT_MS =
+const MAX_ERRORS =
   Number(
-    process.env.AUTH_BUILD_TIMEOUT_MS ||
-    5 * 60 * 1000
+    process.env.BUILD_VALIDATION_MAX_ERRORS ||
+    100
   );
 
-const TOTAL_TIMEOUT_MS =
+const MAX_WARNINGS =
   Number(
-    process.env.AUTH_BUILD_TOTAL_TIMEOUT_MS ||
-    10 * 60 * 1000
+    process.env.BUILD_VALIDATION_MAX_WARNINGS ||
+    100
   );
 
-const MAX_OUTPUT_BYTES =
+const MAX_IMPORTS_TO_CHECK =
   Number(
-    process.env.AUTH_BUILD_MAX_OUTPUT_BYTES ||
-    5 * 1024 * 1024
-  );
-
-const MAX_CONCURRENT_BUILDS =
-  Number(
-    process.env.AUTH_BUILD_MAX_CONCURRENT ||
-    2
+    process.env.BUILD_VALIDATION_MAX_IMPORTS ||
+    500
   );
 
 
 /* =========================================================
-   PACKAGE MANAGERS
-========================================================= */
-
-const PACKAGE_MANAGERS =
-  Object.freeze({
-
-    npm: {
-
-      lockfiles: [
-        "package-lock.json"
-      ],
-
-      installCommand: [
-        "npm",
-        "ci"
-      ],
-
-      fallbackInstallCommand: [
-        "npm",
-        "install"
-      ],
-
-      buildCommand: [
-        "npm",
-        "run",
-        "build"
-      ]
-
-    },
-
-    pnpm: {
-
-      lockfiles: [
-        "pnpm-lock.yaml"
-      ],
-
-      installCommand: [
-        "pnpm",
-        "install",
-        "--frozen-lockfile"
-      ],
-
-      fallbackInstallCommand: [
-        "pnpm",
-        "install"
-      ],
-
-      buildCommand: [
-        "pnpm",
-        "run",
-        "build"
-      ]
-
-    },
-
-    yarn: {
-
-      lockfiles: [
-        "yarn.lock"
-      ],
-
-      installCommand: [
-        "yarn",
-        "install",
-        "--frozen-lockfile"
-      ],
-
-      fallbackInstallCommand: [
-        "yarn",
-        "install"
-      ],
-
-      buildCommand: [
-        "yarn",
-        "build"
-      ]
-
-    },
-
-    bun: {
-
-      lockfiles: [
-        "bun.lockb",
-        "bun.lock"
-      ],
-
-      installCommand: [
-        "bun",
-        "install",
-        "--frozen-lockfile"
-      ],
-
-      fallbackInstallCommand: [
-        "bun",
-        "install"
-      ],
-
-      buildCommand: [
-        "bun",
-        "run",
-        "build"
-      ]
-
-    }
-
-  });
-
-
-/* =========================================================
-   HELPERS
+   BASIC HELPERS
 ========================================================= */
 
 function toString(
   value,
   fallback = ""
 ) {
-
   if (
     value === null ||
     value === undefined
   ) {
-
     return fallback;
-
   }
 
   return String(value);
-
 }
 
 
 function normalizeFilePath(
   filePath
 ) {
-
   let value =
     toString(filePath)
       .trim()
@@ -290,21 +148,26 @@ function normalizeFilePath(
   while (
     value.startsWith("./")
   ) {
+    value = value.slice(2);
+  }
 
+  while (
+    value.includes("//")
+  ) {
     value =
-      value.slice(2);
-
+      value.replace(
+        /\/+/g,
+        "/"
+      );
   }
 
   return value;
-
 }
 
 
 function isSafeFilePath(
   filePath
 ) {
-
   const normalized =
     normalizeFilePath(filePath);
 
@@ -313,20 +176,31 @@ function isSafeFilePath(
   }
 
   if (
+    normalized.length >
+    MAX_PATH_LENGTH
+  ) {
+    return false;
+  }
+
+  if (
     normalized.startsWith("/") ||
     normalized.startsWith("\\")
   ) {
-
     return false;
+  }
 
+  if (
+    /^[A-Za-z]:/.test(
+      normalized
+    )
+  ) {
+    return false;
   }
 
   if (
     normalized.includes("\0")
   ) {
-
     return false;
-
   }
 
   const segments =
@@ -335,87 +209,136 @@ function isSafeFilePath(
   if (
     segments.includes("..")
   ) {
-
     return false;
-
   }
 
   return true;
-
 }
 
 
 function getFilePath(
   file
 ) {
-
   if (
     !file ||
     typeof file !== "object"
   ) {
-
     return "";
-
   }
 
   return normalizeFilePath(
-
     file.path ||
-
-    file.name ||
-
     file.filePath ||
-
+    file.name ||
+    file.relativePath ||
     ""
-
   );
-
 }
 
 
 function getFileContent(
   file
 ) {
-
   if (
     !file ||
     typeof file !== "object"
   ) {
-
     return "";
-
   }
 
   if (
     typeof file.content === "string"
   ) {
-
     return file.content;
-
   }
 
   if (
     typeof file.source === "string"
   ) {
-
     return file.source;
+  }
 
+  if (
+    typeof file.code === "string"
+  ) {
+    return file.code;
   }
 
   return "";
-
 }
 
 
 function getByteSize(
   content
 ) {
-
   return Buffer.byteLength(
     toString(content),
     "utf8"
   );
+}
 
+
+function getExtension(
+  filePath
+) {
+  const value =
+    normalizeFilePath(
+      filePath
+    );
+
+  const index =
+    value.lastIndexOf(".");
+
+  if (
+    index === -1
+  ) {
+    return "";
+  }
+
+  return value
+    .slice(index)
+    .toLowerCase();
+}
+
+
+function isSourceFile(
+  filePath
+) {
+  return [
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".mjs",
+    ".cjs",
+    ".vue",
+    ".svelte",
+    ".css",
+    ".scss",
+    ".less",
+    ".html",
+    ".json"
+  ].includes(
+    getExtension(filePath)
+  );
+}
+
+
+function isCodeFile(
+  filePath
+) {
+  return [
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".mjs",
+    ".cjs",
+    ".vue",
+    ".svelte"
+  ].includes(
+    getExtension(filePath)
+  );
 }
 
 
@@ -426,7 +349,6 @@ function getByteSize(
 function calculateSourceHash(
   files
 ) {
-
   const hash =
     crypto.createHash(
       "sha256"
@@ -434,16 +356,13 @@ function calculateSourceHash(
 
   const normalized =
     Array.isArray(files)
-
       ? files
           .map(file => ({
-
             path:
               getFilePath(file),
 
             content:
               getFileContent(file)
-
           }))
           .sort(
             (a, b) =>
@@ -451,13 +370,11 @@ function calculateSourceHash(
                 b.path
               )
           )
-
       : [];
 
   for (
     const file of normalized
   ) {
-
     hash.update(
       file.path
     );
@@ -473,75 +390,139 @@ function calculateSourceHash(
     hash.update(
       "\n---FILE---\n"
     );
-
   }
 
   return hash.digest(
     "hex"
   );
-
 }
 
 
 /* =========================================================
-   BUILD ID
+   LOCATION HELPERS
 ========================================================= */
 
-function createBuildId() {
+function getLineColumn(
+  source,
+  offset
+) {
+  if (
+    !source ||
+    !Number.isFinite(offset) ||
+    offset < 0
+  ) {
+    return {
+      line: null,
+      column: null
+    };
+  }
 
-  return (
+  const before =
+    source.slice(
+      0,
+      offset
+    );
 
-    "build_" +
+  const line =
+    before.split("\n").length;
 
-    Date.now().toString(36) +
+  const lastNewLine =
+    before.lastIndexOf("\n");
 
-    "_" +
-
-    crypto
-      .randomBytes(8)
-      .toString("hex")
-
-  );
-
-}
-
-
-/* =========================================================
-   ISSUE FACTORY
-========================================================= */
-
-function createIssue({
-
-  code,
-
-  message,
-
-  stage = "build",
-
-  severity = "error",
-
-  file = null,
-
-  details = null
-
-}) {
+  const column =
+    lastNewLine === -1
+      ? offset + 1
+      : offset - lastNewLine;
 
   return {
-
-    code,
-
-    message,
-
-    stage,
-
-    severity,
-
-    file,
-
-    details
-
+    line,
+    column
   };
+}
 
+
+/* =========================================================
+   ISSUE FACTORIES
+========================================================= */
+
+function createError({
+  code,
+  message,
+  file = "",
+  line = null,
+  column = null,
+  details = null
+}) {
+  return {
+    code,
+    message,
+    severity: "error",
+    stage: "static-validation",
+    file: file || "",
+    line:
+      Number.isFinite(line)
+        ? line
+        : null,
+    column:
+      Number.isFinite(column)
+        ? column
+        : null,
+    details
+  };
+}
+
+
+function createWarning({
+  code,
+  message,
+  file = "",
+  line = null,
+  column = null,
+  details = null
+}) {
+  return {
+    code,
+    message,
+    severity: "warning",
+    stage: "static-validation",
+    file: file || "",
+    line:
+      Number.isFinite(line)
+        ? line
+        : null,
+    column:
+      Number.isFinite(column)
+        ? column
+        : null,
+    details
+  };
+}
+
+
+/* =========================================================
+   NORMALIZATION
+========================================================= */
+
+function normalizeFiles(
+  files
+) {
+  if (
+    !Array.isArray(files)
+  ) {
+    return [];
+  }
+
+  return files.map(
+    file => ({
+      ...file,
+
+      path:
+        getFilePath(file),
+
+      content:
+        getFileContent(file)
+    })
+  );
 }
 
 
@@ -550,66 +531,47 @@ function createIssue({
 ========================================================= */
 
 function validateFiles(
-  files
+  files,
+  errors,
+  warnings
 ) {
-
-  const errors = [];
-
-  let totalSize = 0;
-
   if (
     !Array.isArray(files)
   ) {
-
     errors.push(
-
-      createIssue({
-
+      createError({
         code:
           "FILES_NOT_ARRAY",
 
         message:
-          "Project files must be an array.",
-
-        stage:
-          "input"
-
+          "Project files must be an array."
       })
-
     );
 
     return {
-
-      errors,
-
+      fileCount: 0,
       totalSize: 0
-
     };
-
   }
 
 
   if (
     files.length === 0
   ) {
-
     errors.push(
-
-      createIssue({
-
+      createError({
         code:
           "NO_PROJECT_FILES",
 
         message:
-          "No project files were supplied.",
-
-        stage:
-          "input"
-
+          "No generated project files were supplied."
       })
-
     );
 
+    return {
+      fileCount: 0,
+      totalSize: 0
+    };
   }
 
 
@@ -617,46 +579,35 @@ function validateFiles(
     files.length >
     MAX_FILES
   ) {
-
     errors.push(
-
-      createIssue({
-
+      createError({
         code:
-          "FILE_LIMIT_EXCEEDED",
+          "FILE_COUNT_LIMIT_EXCEEDED",
 
         message:
-          `Project contains ${files.length} files. ` +
-          `Maximum allowed is ${MAX_FILES}.`,
-
-        stage:
-          "input",
+          `Project contains ${files.length} files. Maximum allowed is ${MAX_FILES}.`,
 
         details: {
-
           count:
             files.length,
 
           maximum:
             MAX_FILES
-
         }
-
       })
-
     );
-
   }
 
 
   const seen =
     new Set();
 
+  let totalSize = 0;
+
 
   for (
     const file of files
   ) {
-
     const filePath =
       getFilePath(file);
 
@@ -665,26 +616,17 @@ function validateFiles(
 
 
     if (!filePath) {
-
       errors.push(
-
-        createIssue({
-
+        createError({
           code:
             "FILE_PATH_MISSING",
 
           message:
-            "Generated file is missing a path.",
-
-          stage:
-            "input"
-
+            "Generated file is missing a path."
         })
-
       );
 
       continue;
-
     }
 
 
@@ -693,11 +635,8 @@ function validateFiles(
         filePath
       )
     ) {
-
       errors.push(
-
-        createIssue({
-
+        createError({
           code:
             "UNSAFE_FILE_PATH",
 
@@ -705,17 +644,11 @@ function validateFiles(
             `Unsafe project file path: ${filePath}`,
 
           file:
-            filePath,
-
-          stage:
-            "input"
-
+            filePath
         })
-
       );
 
       continue;
-
     }
 
 
@@ -724,29 +657,19 @@ function validateFiles(
         filePath
       )
     ) {
-
       errors.push(
-
-        createIssue({
-
+        createError({
           code:
             "DUPLICATE_FILE_PATH",
 
           message:
-            `Duplicate project file: ${filePath}`,
+            `Duplicate project file detected: ${filePath}`,
 
           file:
-            filePath,
-
-          stage:
-            "input"
-
+            filePath
         })
-
       );
-
     }
-
 
     seen.add(
       filePath
@@ -758,7 +681,6 @@ function validateFiles(
         content
       );
 
-
     totalSize +=
       size;
 
@@ -767,226 +689,395 @@ function validateFiles(
       size >
       MAX_FILE_SIZE
     ) {
-
       errors.push(
-
-        createIssue({
-
+        createError({
           code:
-            "FILE_SIZE_EXCEEDED",
+            "FILE_SIZE_LIMIT_EXCEEDED",
 
           message:
-            `File exceeds maximum allowed size of ` +
-            `${MAX_FILE_SIZE} bytes.`,
+            `File exceeds the maximum allowed size of ${MAX_FILE_SIZE} bytes.`,
 
           file:
             filePath,
 
-          stage:
-            "input",
-
           details: {
-
             size,
 
             maximum:
               MAX_FILE_SIZE
-
           }
-
         })
-
       );
-
     }
 
+
+    if (
+      isSourceFile(filePath) &&
+      content.trim().length === 0
+    ) {
+      errors.push(
+        createError({
+          code:
+            "EMPTY_SOURCE_FILE",
+
+          message:
+            "Source file is empty.",
+
+          file:
+            filePath
+        })
+      );
+    }
+
+
+    if (
+      content.includes("\0")
+    ) {
+      errors.push(
+        createError({
+          code:
+            "NULL_BYTE_IN_SOURCE",
+
+          message:
+            "Source contains a null byte.",
+
+          file:
+            filePath
+        })
+      );
+    }
   }
 
 
   if (
     totalSize >
-    MAX_TOTAL_SIZE
+    MAX_SOURCE_SIZE
   ) {
-
     errors.push(
-
-      createIssue({
-
+      createError({
         code:
-          "PROJECT_SIZE_EXCEEDED",
+          "SOURCE_SIZE_LIMIT_EXCEEDED",
 
         message:
-          `Project exceeds maximum allowed source size ` +
-          `of ${MAX_TOTAL_SIZE} bytes.`,
-
-        stage:
-          "input",
+          `Project source exceeds the maximum allowed size of ${MAX_SOURCE_SIZE} bytes.`,
 
         details: {
-
           size:
             totalSize,
 
           maximum:
-            MAX_TOTAL_SIZE
-
+            MAX_SOURCE_SIZE
         }
-
       })
-
     );
-
   }
 
 
   return {
-
-    errors,
+    fileCount:
+      files.length,
 
     totalSize
-
   };
-
 }
 
 
 /* =========================================================
-   PACKAGE JSON
+   PACKAGE.JSON
 ========================================================= */
 
-function readPackageJson(
-files
+function findPackageJson(
+  files
 ) {
+  return files.find(
+    file =>
+      getFilePath(file) ===
+      "package.json"
+  );
+}
 
+
+function parsePackageJson(
+  files,
+  errors
+) {
   const packageFile =
-    files.find(
-      file =>
-        getFilePath(file) ===
-        "package.json"
+    findPackageJson(
+      files
     );
 
-
   if (!packageFile) {
-
     return {
+      exists:
+        false,
 
-      packageJson:
-        null,
-
-      error:
-
-        createIssue({
-
-          code:
-            "PACKAGE_JSON_MISSING",
-
-          message:
-            "package.json is required for authoritative Node build execution.",
-
-          file:
-            "package.json",
-
-          stage:
-            "package"
-
-        })
-
+      value:
+        null
     };
-
   }
 
 
-  try {
+  const content =
+    getFileContent(
+      packageFile
+    );
 
-    const packageJson =
+
+  try {
+    const parsed =
       JSON.parse(
-        getFileContent(
-          packageFile
-        )
+        content
       );
 
 
     if (
-      !packageJson ||
-      typeof packageJson !== "object" ||
-      Array.isArray(packageJson)
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
     ) {
+      errors.push(
+        createError({
+          code:
+            "PACKAGE_JSON_INVALID_ROOT",
+
+          message:
+            "package.json must contain a JSON object.",
+
+          file:
+            "package.json"
+        })
+      );
 
       return {
+        exists:
+          true,
 
-        packageJson:
-          null,
-
-        error:
-
-          createIssue({
-
-            code:
-              "INVALID_PACKAGE_JSON",
-
-            message:
-              "package.json must contain a JSON object.",
-
-            file:
-              "package.json",
-
-            stage:
-              "package"
-
-          })
-
+        value:
+          null
       };
-
     }
 
 
     return {
+      exists:
+        true,
 
-      packageJson,
-
-      error:
-        null
-
+      value:
+        parsed
     };
 
-  }
+  } catch (error) {
 
-  catch (error) {
+    const match =
+      /position\s+(\d+)/i.exec(
+        toString(
+          error.message
+        )
+      );
+
+    const position =
+      match
+        ? Number(match[1])
+        : null;
+
+    const location =
+      position !== null
+        ? getLineColumn(
+            content,
+            position
+          )
+        : {
+            line:
+              null,
+
+            column:
+              null
+          };
+
+
+    errors.push(
+      createError({
+        code:
+          "PACKAGE_JSON_INVALID",
+
+        message:
+          `package.json contains invalid JSON: ${toString(
+            error.message
+          )}`,
+
+        file:
+          "package.json",
+
+        line:
+          location.line,
+
+        column:
+          location.column
+      })
+    );
+
 
     return {
+      exists:
+        true,
 
-      packageJson:
-        null,
-
-      error:
-
-        createIssue({
-
-          code:
-            "INVALID_PACKAGE_JSON",
-
-          message:
-            `package.json cannot be parsed: ${error.message}`,
-
-          file:
-            "package.json",
-
-          stage:
-            "package",
-
-          details: {
-
-            name:
-              error.name
-
-          }
-
-        })
-
+      value:
+        null
     };
+  }
+}
 
+
+/* =========================================================
+   PACKAGE VALIDATION
+========================================================= */
+
+function validatePackageJson(
+  packageJson,
+  errors,
+  warnings
+) {
+  if (
+    !packageJson
+  ) {
+    return;
   }
 
+
+  if (
+    packageJson.name !== undefined &&
+    typeof packageJson.name !== "string"
+  ) {
+    errors.push(
+      createError({
+        code:
+          "PACKAGE_NAME_INVALID",
+
+        message:
+          "package.json name must be a string.",
+
+        file:
+          "package.json"
+      })
+    );
+  }
+
+
+  if (
+    packageJson.scripts !== undefined &&
+    (
+      typeof packageJson.scripts !== "object" ||
+      Array.isArray(packageJson.scripts) ||
+      packageJson.scripts === null
+    )
+  ) {
+    errors.push(
+      createError({
+        code:
+          "PACKAGE_SCRIPTS_INVALID",
+
+        message:
+          "package.json scripts must be an object.",
+
+        file:
+          "package.json"
+      })
+    );
+  }
+
+
+  const dependencyGroups = [
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies"
+  ];
+
+
+  for (
+    const group of dependencyGroups
+  ) {
+    if (
+      packageJson[group] !== undefined &&
+      (
+        typeof packageJson[group] !== "object" ||
+        Array.isArray(packageJson[group]) ||
+        packageJson[group] === null
+      )
+    ) {
+      errors.push(
+        createError({
+          code:
+            "DEPENDENCY_SECTION_INVALID",
+
+          message:
+            `package.json ${group} must be an object.`,
+
+          file:
+            "package.json"
+        })
+      );
+    }
+  }
+
+
+  if (
+    packageJson.engines &&
+    typeof packageJson.engines === "object" &&
+    packageJson.engines.node &&
+    typeof packageJson.engines.node !== "string"
+  ) {
+    errors.push(
+      createError({
+        code:
+          "NODE_ENGINE_INVALID",
+
+        message:
+          "package.json engines.node must be a string.",
+
+        file:
+          "package.json"
+      })
+    );
+  }
+
+
+  if (
+    packageJson.private !== undefined &&
+    typeof packageJson.private !== "boolean"
+  ) {
+    errors.push(
+      createError({
+        code:
+          "PACKAGE_PRIVATE_INVALID",
+
+        message:
+          "package.json private must be boolean.",
+
+        file:
+          "package.json"
+      })
+    );
+  }
+
+
+  if (
+    !packageJson.scripts ||
+    typeof packageJson.scripts !== "object"
+  ) {
+    warnings.push(
+      createWarning({
+        code:
+          "NO_SCRIPTS_SECTION",
+
+        message:
+          "package.json does not define a scripts section.",
+
+        file:
+          "package.json"
+      })
+    );
+  }
 }
 
 
@@ -996,17 +1087,14 @@ files
 
 function detectPackageManager(
   files,
-  packageJson
+  packageJson = null
 ) {
-
   const paths =
     new Set(
-
       files.map(
         file =>
           getFilePath(file)
       )
-
     );
 
 
@@ -1015,9 +1103,7 @@ function detectPackageManager(
       "pnpm-lock.yaml"
     )
   ) {
-
     return "pnpm";
-
   }
 
 
@@ -1026,9 +1112,7 @@ function detectPackageManager(
       "yarn.lock"
     )
   ) {
-
     return "yarn";
-
   }
 
 
@@ -1040,9 +1124,7 @@ function detectPackageManager(
       "bun.lock"
     )
   ) {
-
     return "bun";
-
   }
 
 
@@ -1051,1308 +1133,1458 @@ function detectPackageManager(
       "package-lock.json"
     )
   ) {
-
     return "npm";
+  }
 
+
+  const packageManager =
+    packageJson &&
+    typeof packageJson.packageManager ===
+      "string"
+      ? packageJson.packageManager
+      : "";
+
+
+  const normalized =
+    packageManager
+      .trim()
+      .toLowerCase();
+
+
+  if (
+    normalized.startsWith(
+      "pnpm@"
+    )
+  ) {
+    return "pnpm";
   }
 
 
   if (
-    packageJson &&
-    typeof packageJson.packageManager ===
-      "string"
+    normalized.startsWith(
+      "yarn@"
+    )
   ) {
-
-    const value =
-      packageJson.packageManager
-        .trim()
-        .toLowerCase();
+    return "yarn";
+  }
 
 
-    if (
-      value.startsWith(
-        "pnpm"
-      )
-    ) {
-
-      return "pnpm";
-
-    }
+  if (
+    normalized.startsWith(
+      "bun@"
+    )
+  ) {
+    return "bun";
+  }
 
 
-    if (
-      value.startsWith(
-        "yarn"
-      )
-    ) {
-
-      return "yarn";
-
-    }
-
-
-    if (
-      value.startsWith(
-        "bun"
-      )
-    ) {
-
-      return "bun";
-
-    }
-
-
-    if (
-      value.startsWith(
-        "npm"
-      )
-    ) {
-
-      return "npm";
-
-    }
-
+  if (
+    normalized.startsWith(
+      "npm@"
+    )
+  ) {
+    return "npm";
   }
 
 
   return "npm";
-
 }
 
 
 /* =========================================================
-   BUILD SCRIPT
+   FRAMEWORK DETECTION
 ========================================================= */
 
-function hasBuildScript(
-  packageJson
+function detectFramework(
+  packageJson,
+  files
 ) {
-
-  return Boolean(
-
-    packageJson &&
-
-    packageJson.scripts &&
-
-    typeof packageJson.scripts.build ===
-      "string" &&
-
-    packageJson.scripts.build.trim()
-
-  );
-
-}
+  const dependencies = {
+    ...(packageJson?.dependencies || {}),
+    ...(packageJson?.devDependencies || {}),
+    ...(packageJson?.peerDependencies || {})
+  };
 
 
-/* =========================================================
-   COMMAND CONFIGURATION
-========================================================= */
-
-function getPackageManagerConfig(
-  packageManager
-) {
-
-  return (
-    PACKAGE_MANAGERS[
-      packageManager
-    ] ||
-    PACKAGE_MANAGERS.npm
-  );
-
-}
-
-
-/* =========================================================
-   NODE IMAGE
-========================================================= */
-
-function getNodeImage(
-  projectData = {}
-) {
-
-  const requested =
-    toString(
-      projectData.nodeVersion
-    )
-      .trim();
-
-
-  /*
-   * Only allow simple Node major versions.
-   * Never allow arbitrary Docker image names.
-   */
-
-  if (
-    /^20(?:\.\d+)?$/.test(
-      requested
-    )
-  ) {
-
-    return "node:20-bookworm-slim";
-
-  }
-
-
-  if (
-    /^22(?:\.\d+)?$/.test(
-      requested
-    )
-  ) {
-
-    return "node:22-bookworm-slim";
-
-  }
-
-
-  /*
-   * Current production default.
-   */
-  return "node:20-bookworm-slim";
-
-}
-
-
-/* =========================================================
-   DOCKER AVAILABILITY
-========================================================= */
-
-function checkDockerAvailable() {
-
-  return new Promise(
-    resolve => {
-
-      const child =
-        spawn(
-          "docker",
-          [
-            "--version"
-          ],
-          {
-            stdio:
-              [
-                "ignore",
-                "pipe",
-                "pipe"
-              ]
-          }
-        );
-
-
-      let settled =
-        false;
-
-
-      const finish =
-        value => {
-
-          if (
-            settled
-          ) {
-
-            return;
-
-          }
-
-          settled =
-            true;
-
-          resolve(
-            value
-          );
-
-        };
-
-
-      child.once(
-        "error",
-        () =>
-          finish(false)
-      );
-
-
-      child.once(
-        "close",
-        code =>
-          finish(
-            code === 0
-          )
-      );
-
-    }
-  );
-
-}
-
-
-/* =========================================================
-   TEMP DIRECTORY
-========================================================= */
-
-async function createWorkspace(
-  buildId
-) {
-
-  const root =
-    await fsp.mkdtemp(
-
-      path.join(
-        os.tmpdir(),
-        `zyrionos-build-${buildId}-`
-      )
-
+  const paths =
+    files.map(
+      file =>
+        getFilePath(file)
     );
 
 
-  return root;
+  if (
+    dependencies.next
+  ) {
+    return "next";
+  }
 
+
+  if (
+    dependencies.vue
+  ) {
+    return "vue";
+  }
+
+
+  if (
+    dependencies.svelte ||
+    dependencies["@sveltejs/kit"]
+  ) {
+    return "svelte";
+  }
+
+
+  if (
+    dependencies.react ||
+    dependencies["react-dom"]
+  ) {
+    return "react";
+  }
+
+
+  if (
+    dependencies.express ||
+    dependencies.fastify ||
+    dependencies.koa ||
+    dependencies["@nestjs/core"]
+  ) {
+    return "node";
+  }
+
+
+  if (
+    paths.some(
+      file =>
+        file === "index.html"
+    ) &&
+    paths.some(
+      file =>
+        file.startsWith("src/")
+    )
+  ) {
+    return "web";
+  }
+
+
+  return "generic";
 }
 
 
 /* =========================================================
-   WRITE PROJECT
+   REQUIRED FILE VALIDATION
 ========================================================= */
 
-async function writeProjectFiles(
-  workspace,
-  files
+function validateRequiredFiles(
+  files,
+  packageJson,
+  framework,
+  errors,
+  warnings
 ) {
+  const paths =
+    new Set(
+      files.map(
+        file =>
+          getFilePath(file)
+      )
+    );
+
+
+  const hasPackageJson =
+    paths.has(
+      "package.json"
+    );
+
+
+  const requiresPackageJson =
+    Boolean(packageJson) ||
+    [
+      "react",
+      "next",
+      "vue",
+      "svelte",
+      "node"
+    ].includes(
+      framework
+    );
+
+
+  if (
+    requiresPackageJson &&
+    !hasPackageJson
+  ) {
+    errors.push(
+      createError({
+        code:
+          "PACKAGE_JSON_MISSING",
+
+        message:
+          `package.json is required for ${framework} projects.`,
+
+        file:
+          "package.json"
+      })
+    );
+  }
+
+
+  if (
+    framework === "react" ||
+    framework === "web"
+  ) {
+    const hasSource =
+      files.some(
+        file =>
+          /^src\/.+\.(js|jsx|ts|tsx)$/.test(
+            getFilePath(file)
+          )
+      );
+
+
+    if (!hasSource) {
+      warnings.push(
+        createWarning({
+          code:
+            "SOURCE_ENTRY_NOT_DETECTED",
+
+          message:
+            "No conventional src JavaScript/TypeScript source file was detected."
+        })
+      );
+    }
+  }
+
+
+  if (
+    framework === "next"
+  ) {
+    const hasApp =
+      files.some(
+        file =>
+          /^app\/.+\.(js|jsx|ts|tsx)$/.test(
+            getFilePath(file)
+          )
+      );
+
+
+    const hasPages =
+      files.some(
+        file =>
+          /^pages\/.+\.(js|jsx|ts|tsx)$/.test(
+            getFilePath(file)
+          )
+      );
+
+
+    if (
+      !hasApp &&
+      !hasPages
+    ) {
+      errors.push(
+        createError({
+          code:
+            "NEXT_ENTRY_MISSING",
+
+          message:
+            "Next.js project does not contain an app/ or pages/ source tree."
+        })
+      );
+    }
+  }
+
+
+  if (
+    framework === "vue"
+  ) {
+    const hasVue =
+      files.some(
+        file =>
+          getExtension(
+            getFilePath(file)
+          ) === ".vue"
+      );
+
+
+    if (!hasVue) {
+      errors.push(
+        createError({
+          code:
+            "VUE_SOURCE_MISSING",
+
+          message:
+            "Vue project does not contain any .vue source files."
+        })
+      );
+    }
+  }
+
+
+  if (
+    framework === "node"
+  ) {
+    const conventionalEntries = [
+      "server.js",
+      "app.js",
+      "index.js",
+      "main.js",
+      "src/server.js",
+      "src/app.js",
+      "src/index.js",
+      "src/main.js"
+    ];
+
+
+    const hasEntry =
+      conventionalEntries.some(
+        entry =>
+          paths.has(entry)
+      );
+
+
+    if (!hasEntry) {
+      warnings.push(
+        createWarning({
+          code:
+            "NODE_ENTRY_NOT_DETECTED",
+
+          message:
+            "No conventional Node.js server entry file was detected."
+        })
+      );
+    }
+  }
+}
+
+
+/* =========================================================
+   BUILD SCRIPT VALIDATION
+========================================================= */
+
+function validateBuildScript(
+  packageJson,
+  errors,
+  warnings
+) {
+  if (
+    !packageJson
+  ) {
+    return;
+  }
+
+
+  const scripts =
+    packageJson.scripts;
+
+
+  if (
+    !scripts ||
+    typeof scripts !== "object"
+  ) {
+    warnings.push(
+      createWarning({
+        code:
+          "BUILD_SCRIPT_MISSING",
+
+        message:
+          "No build script is defined. Authoritative build may not be possible.",
+
+        file:
+          "package.json"
+      })
+    );
+
+    return;
+  }
+
+
+  if (
+    scripts.build === undefined
+  ) {
+    warnings.push(
+      createWarning({
+        code:
+          "BUILD_SCRIPT_MISSING",
+
+        message:
+          "package.json does not contain a build script. Authoritative build may not be possible.",
+
+        file:
+          "package.json"
+      })
+    );
+
+    return;
+  }
+
+
+  if (
+    typeof scripts.build !== "string" ||
+    !scripts.build.trim()
+  ) {
+    errors.push(
+      createError({
+        code:
+          "BUILD_SCRIPT_INVALID",
+
+        message:
+          "package.json scripts.build must be a non-empty string.",
+
+        file:
+          "package.json"
+      })
+    );
+  }
+}
+
+
+/* =========================================================
+   LOCKFILE VALIDATION
+========================================================= */
+
+function validateLockfiles(
+  files,
+  packageManager,
+  warnings
+) {
+  const paths =
+    new Set(
+      files.map(
+        file =>
+          getFilePath(file)
+      )
+    );
+
+
+  const lockfiles = [
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb"
+  ];
+
+
+  const existing =
+    lockfiles.filter(
+      lockfile =>
+        paths.has(lockfile)
+    );
+
+
+  if (
+    existing.length > 1
+  ) {
+    warnings.push(
+      createWarning({
+        code:
+          "MULTIPLE_LOCKFILES",
+
+        message:
+          `Multiple package-manager lockfiles detected: ${existing.join(
+            ", "
+          )}`,
+
+        details: {
+          detectedPackageManager:
+            packageManager,
+
+          lockfiles:
+            existing
+        }
+      })
+    );
+  }
+}
+
+
+/* =========================================================
+   FRAMEWORK DEPENDENCY VALIDATION
+========================================================= */
+
+function validateFrameworkDependencies(
+  packageJson,
+  framework,
+  errors,
+  warnings
+) {
+  if (
+    !packageJson
+  ) {
+    return;
+  }
+
+
+  const dependencies = {
+    ...(packageJson.dependencies || {}),
+    ...(packageJson.devDependencies || {}),
+    ...(packageJson.peerDependencies || {})
+  };
+
+
+  if (
+    framework === "react" &&
+    !dependencies.react
+  ) {
+    warnings.push(
+      createWarning({
+        code:
+          "REACT_DEPENDENCY_NOT_FOUND",
+
+        message:
+          "React source/dependencies were detected, but react is not declared in package.json.",
+
+        file:
+          "package.json"
+      })
+    );
+  }
+
+
+  if (
+    framework === "next" &&
+    !dependencies.next
+  ) {
+    warnings.push(
+      createWarning({
+        code:
+          "NEXT_DEPENDENCY_NOT_FOUND",
+
+        message:
+          "Next.js structure was detected, but next is not declared in package.json.",
+
+        file:
+          "package.json"
+      })
+    );
+  }
+
+
+  if (
+    framework === "vue" &&
+    !dependencies.vue
+  ) {
+    warnings.push(
+      createWarning({
+        code:
+          "VUE_DEPENDENCY_NOT_FOUND",
+
+        message:
+          "Vue source was detected, but vue is not declared in package.json.",
+
+        file:
+          "package.json"
+      })
+    );
+  }
+
+
+  if (
+    framework === "svelte" &&
+    !(
+      dependencies.svelte ||
+      dependencies["@sveltejs/kit"]
+    )
+  ) {
+    warnings.push(
+      createWarning({
+        code:
+          "SVELTE_DEPENDENCY_NOT_FOUND",
+
+        message:
+          "Svelte source was detected, but no Svelte dependency is declared.",
+
+        file:
+          "package.json"
+      })
+    );
+  }
+}
+
+
+/* =========================================================
+   JSON VALIDATION
+========================================================= */
+
+function validateJsonFiles(
+  files,
+  errors
+) {
+  for (
+    const file of files
+  ) {
+    const filePath =
+      getFilePath(file);
+
+
+    if (
+      getExtension(
+        filePath
+      ) !== ".json" ||
+      filePath === "package.json"
+    ) {
+      continue;
+    }
+
+
+    const content =
+      getFileContent(file);
+
+
+    try {
+      JSON.parse(
+        content
+      );
+    } catch (error) {
+
+      const match =
+        /position\s+(\d+)/i.exec(
+          toString(
+            error.message
+          )
+        );
+
+
+      const position =
+        match
+          ? Number(match[1])
+          : null;
+
+
+      const location =
+        position !== null
+          ? getLineColumn(
+              content,
+              position
+            )
+          : {
+              line:
+                null,
+
+              column:
+                null
+            };
+
+
+      errors.push(
+        createError({
+          code:
+            "INVALID_JSON",
+
+          message:
+            `Invalid JSON: ${toString(
+              error.message
+            )}`,
+
+          file:
+            filePath,
+
+          line:
+            location.line,
+
+          column:
+            location.column
+        })
+      );
+    }
+  }
+}
+
+
+/* =========================================================
+   SOURCE QUALITY
+========================================================= */
+
+function validateSourceQuality(
+  files,
+  warnings
+) {
+  for (
+    const file of files
+  ) {
+    const filePath =
+      getFilePath(file);
+
+    const content =
+      getFileContent(file);
+
+
+    if (
+      !isCodeFile(
+        filePath
+      )
+    ) {
+      continue;
+    }
+
+
+    const trimmed =
+      content.trim();
+
+
+    const suspiciousPatterns = [
+      /\.\.\.\s*$/m,
+      /\/\/\s*rest of code/i,
+      /\/\*\s*rest of code/i,
+      /TODO:\s*IMPLEMENT/i,
+      /IMPLEMENT\s+HERE/i,
+      /YOUR_CODE_HERE/i,
+      /INSERT_CODE_HERE/i
+    ];
+
+
+    for (
+      const pattern of suspiciousPatterns
+    ) {
+      if (
+        pattern.test(
+          trimmed
+        )
+      ) {
+        warnings.push(
+          createWarning({
+            code:
+              "POSSIBLE_INCOMPLETE_SOURCE",
+
+            message:
+              "Source contains a possible placeholder or truncation marker.",
+
+            file:
+              filePath
+          })
+        );
+
+        break;
+      }
+    }
+
+
+    if (
+      /&lt;[A-Za-z]/.test(
+        content
+      ) &&
+      /&gt;/.test(
+        content
+      )
+    ) {
+      warnings.push(
+        createWarning({
+          code:
+            "POSSIBLE_HTML_ESCAPED_SOURCE",
+
+          message:
+            "Source appears to contain HTML-escaped code.",
+
+          file:
+            filePath
+        })
+      );
+    }
+  }
+}
+
+
+/* =========================================================
+   LOCAL IMPORT ANALYSIS
+========================================================= */
+
+function stripImportExtension(
+  value
+) {
+  return value
+    .replace(
+      /[?#].*$/,
+      ""
+    )
+    .replace(
+      /\.(js|jsx|ts|tsx|mjs|cjs|vue|svelte|json)$/,
+      ""
+    );
+}
+
+
+function possibleLocalPaths(
+  importPath,
+  importerPath
+) {
+  let base = "";
+
+
+  const importerDirectory =
+    importerPath.includes("/")
+      ? importerPath.slice(
+          0,
+          importerPath.lastIndexOf("/")
+        )
+      : "";
+
+
+  if (
+    importPath.startsWith("@/")
+  ) {
+    base =
+      importPath.slice(2);
+  } else if (
+    importPath.startsWith("./")
+  ) {
+    base =
+      importerDirectory
+        ? `${importerDirectory}/${importPath.slice(2)}`
+        : importPath.slice(2);
+  } else if (
+    importPath.startsWith("../")
+  ) {
+    const parts =
+      importerDirectory
+        ? importerDirectory.split("/")
+        : [];
+
+
+    const importParts =
+      importPath.split("/");
+
+
+    while (
+      importParts[0] === ".."
+    ) {
+      importParts.shift();
+
+      if (
+        parts.length
+      ) {
+        parts.pop();
+      }
+    }
+
+
+    base =
+      [
+        ...parts,
+        ...importParts
+      ].join("/");
+  } else {
+    return [];
+  }
+
+
+  base =
+    normalizeFilePath(
+      stripImportExtension(
+        base
+      )
+    );
+
+
+  return [
+    base,
+    `${base}.js`,
+    `${base}.jsx`,
+    `${base}.ts`,
+    `${base}.tsx`,
+    `${base}.mjs`,
+    `${base}.cjs`,
+    `${base}.vue`,
+    `${base}.svelte`,
+    `${base}.json`,
+    `${base}/index.js`,
+    `${base}/index.jsx`,
+    `${base}/index.ts`,
+    `${base}/index.tsx`
+  ];
+}
+
+
+function extractImportPaths(
+  content
+) {
+  const imports = [];
+
+
+  const patterns = [
+    /from\s+["']([^"']+)["']/g,
+    /import\s*\(\s*["']([^"']+)["']\s*\)/g,
+    /import\s+["']([^"']+)["']/g,
+    /require\s*\(\s*["']([^"']+)["']\s*\)/g
+  ];
+
+
+  for (
+    const regex of patterns
+  ) {
+    let match;
+
+
+    while (
+      (match =
+        regex.exec(
+          content
+        )) !== null
+    ) {
+      imports.push({
+        value:
+          match[1],
+
+        offset:
+          match.index
+      });
+
+
+      if (
+        imports.length >=
+        MAX_IMPORTS_TO_CHECK
+      ) {
+        return imports;
+      }
+    }
+  }
+
+
+  return imports;
+}
+
+
+function validateLocalImports(
+  files,
+  warnings
+) {
+  const paths =
+    new Set(
+      files.map(
+        file =>
+          getFilePath(file)
+      )
+    );
+
 
   for (
     const file of files
   ) {
-
-    const relativePath =
-      normalizeFilePath(
-        getFilePath(file)
-      );
+    const importer =
+      getFilePath(file);
 
 
     if (
-      !isSafeFilePath(
-        relativePath
+      !isCodeFile(
+        importer
       )
     ) {
-
-      throw new Error(
-        `Unsafe project path: ${relativePath}`
-      );
-
+      continue;
     }
 
 
-    const destination =
-      path.join(
-        workspace,
-        ...relativePath.split("/")
+    const content =
+      getFileContent(file);
+
+
+    const imports =
+      extractImportPaths(
+        content
       );
 
 
-    const relative =
-      path.relative(
-        workspace,
-        destination
-      );
+    for (
+      const item of imports
+    ) {
+      const importPath =
+        item.value;
+
+
+      if (
+        !importPath ||
+        !(
+          importPath.startsWith("./") ||
+          importPath.startsWith("../") ||
+          importPath.startsWith("@/")
+        )
+      ) {
+        continue;
+      }
+
+
+      const candidates =
+        possibleLocalPaths(
+          importPath,
+          importer
+        );
+
+
+      const exists =
+        candidates.some(
+          candidate =>
+            paths.has(
+              candidate
+            )
+        );
+
+
+      if (
+        !exists
+      ) {
+        const location =
+          getLineColumn(
+            content,
+            item.offset
+          );
+
+
+        warnings.push(
+          createWarning({
+            code:
+              "LOCAL_IMPORT_NOT_FOUND",
+
+            message:
+              `Local import "${importPath}" could not be matched to a generated file.`,
+
+            file:
+              importer,
+
+            line:
+              location.line,
+
+            column:
+              location.column,
+
+            details: {
+              importPath,
+
+              candidates
+            }
+          })
+        );
+      }
+    }
+  }
+}
+
+
+/* =========================================================
+   PLAN VALIDATION
+========================================================= */
+
+function extractPlannedPaths(
+  plan
+) {
+  const result =
+    new Set();
+
+
+  if (
+    !plan ||
+    typeof plan !== "object"
+  ) {
+    return result;
+  }
+
+
+  const structure =
+    Array.isArray(
+      plan.projectStructure
+    )
+      ? plan.projectStructure
+      : [];
+
+
+  for (
+    const item of structure
+  ) {
+    if (
+      typeof item === "string"
+    ) {
+      const value =
+        normalizeFilePath(
+          item
+        );
+
+
+      if (
+        value &&
+        !value.endsWith("/")
+      ) {
+        result.add(
+          value
+        );
+      }
+
+
+      continue;
+    }
 
 
     if (
-      relative.startsWith("..") ||
-      path.isAbsolute(relative)
+      item &&
+      typeof item === "object"
     ) {
+      const value =
+        normalizeFilePath(
+          item.path ||
+          item.file ||
+          item.filePath ||
+          ""
+        );
 
-      throw new Error(
-        `Path escapes build workspace: ${relativePath}`
-      );
 
+      if (
+        value &&
+        !value.endsWith("/") &&
+        !value.includes("*")
+      ) {
+        result.add(
+          value
+        );
+      }
     }
-
-
-    await fsp.mkdir(
-      path.dirname(
-        destination
-      ),
-      {
-        recursive:
-          true
-      }
-    );
-
-
-    await fsp.writeFile(
-      destination,
-      getFileContent(file),
-      "utf8"
-    );
-
-  }
-
-}
-
-
-/* =========================================================
-   OUTPUT BUFFER
-========================================================= */
-
-function createOutputCollector() {
-
-  let stdout =
-    "";
-
-  let stderr =
-    "";
-
-  let stdoutBytes =
-    0;
-
-  let stderrBytes =
-    0;
-
-  let truncated =
-    false;
-
-
-  function append(
-    current,
-    chunk
-  ) {
-
-    const text =
-      Buffer.isBuffer(chunk)
-        ? chunk.toString("utf8")
-        : String(chunk);
-
-
-    return {
-
-      text,
-
-      bytes:
-        Buffer.byteLength(
-          text,
-          "utf8"
-        )
-
-    };
-
   }
 
 
-  return {
-
-    appendStdout(chunk) {
-
-      const result =
-        append(
-          stdout,
-          chunk
-        );
-
-
-      stdoutBytes +=
-        result.bytes;
-
-
-      if (
-        stdout.length <
-        MAX_OUTPUT_BYTES
-      ) {
-
-        const remaining =
-          MAX_OUTPUT_BYTES -
-          stdout.length;
-
-
-        stdout +=
-          result.text.slice(
-            0,
-            remaining
-          );
-
-      }
-
-
-      if (
-        stdoutBytes >
-        MAX_OUTPUT_BYTES
-      ) {
-
-        truncated =
-          true;
-
-      }
-
-    },
-
-
-    appendStderr(chunk) {
-
-      const result =
-        append(
-          stderr,
-          chunk
-        );
-
-
-      stderrBytes +=
-        result.bytes;
-
-
-      if (
-        stderr.length <
-        MAX_OUTPUT_BYTES
-      ) {
-
-        const remaining =
-          MAX_OUTPUT_BYTES -
-          stderr.length;
-
-
-        stderr +=
-          result.text.slice(
-            0,
-            remaining
-          );
-
-      }
-
-
-      if (
-        stderrBytes >
-        MAX_OUTPUT_BYTES
-      ) {
-
-        truncated =
-          true;
-
-      }
-
-    },
-
-
-    getResult() {
-
-      return {
-
-        stdout,
-
-        stderr,
-
-        stdoutBytes,
-
-        stderrBytes,
-
-        truncated
-
-      };
-
-    }
-
-  };
-
+  return result;
 }
 
 
-/* =========================================================
-   DOCKER COMMAND
-========================================================= */
-
-function runDockerCommand({
-
-  args,
-
-  timeoutMs,
-
-  stage,
-
-  workspace
-
-}) {
-
-  return new Promise(
-    resolve => {
-
-      const collector =
-        createOutputCollector();
-
-
-      const startedAt =
-        Date.now();
-
-
-      let timedOut =
-        false;
-
-      let settled =
-        false;
-
-
-      const child =
-        spawn(
-          "docker",
-          args,
-          {
-            cwd:
-              workspace,
-
-            stdio:
-              [
-                "ignore",
-                "pipe",
-                "pipe"
-              ]
-          }
-        );
-
-
-      const finish =
-        result => {
-
-          if (
-            settled
-          ) {
-
-            return;
-
-          }
-
-          settled =
-            true;
-
-          resolve(
-            result
-          );
-
-        };
-
-
-      child.stdout.on(
-        "data",
-        chunk =>
-          collector.appendStdout(
-            chunk
-          )
-      );
-
-
-      child.stderr.on(
-        "data",
-        chunk =>
-          collector.appendStderr(
-            chunk
-          )
-      );
-
-
-      child.once(
-        "error",
-        error => {
-
-          finish({
-
-            success:
-              false,
-
-            stage,
-
-            exitCode:
-              null,
-
-            signal:
-              null,
-
-            timedOut:
-              false,
-
-            durationMs:
-              Date.now() -
-              startedAt,
-
-            ...collector.getResult(),
-
-            error:
-              error.message
-
-          });
-
-        }
-      );
-
-
-      const timeout =
-        setTimeout(
-          () => {
-
-            timedOut =
-              true;
-
-
-            try {
-
-              child.kill(
-                "SIGKILL"
-              );
-
-            } catch (_) {}
-
-
-          },
-          timeoutMs
-        );
-
-
-      child.once(
-        "close",
-        (
-          code,
-          signal
-        ) => {
-
-          clearTimeout(
-            timeout
-          );
-
-
-          const output =
-            collector.getResult();
-
-
-          finish({
-
-            success:
-              !timedOut &&
-              code === 0,
-
-            stage,
-
-            exitCode:
-              code,
-
-            signal,
-
-            timedOut,
-
-            durationMs:
-              Date.now() -
-              startedAt,
-
-            ...output,
-
-            error:
-              null
-
-          });
-
-        }
-      );
-
-    }
-  );
-
-}
-
-
-/* =========================================================
-   DOCKER ARGUMENTS
-========================================================= */
-
-function createDockerRunArgs({
-
-  image,
-
-  workspace,
-
-  command,
-
-  network
-
-}) {
-
-  /*
-   * Security model:
-   *
-   * --rm
-   *     Remove container after execution.
-   *
-   * --network
-   *     Network explicitly controlled.
-   *
-   * --cpus
-   *     CPU limit.
-   *
-   * --memory
-   *     Memory limit.
-   *
-   * --pids-limit
-   *     Process limit.
-   *
-   * --read-only
-   *     Read-only container root.
-   *
-   * --tmpfs
-   *     Writable temporary runtime areas.
-   *
-   * --cap-drop ALL
-   *     Drop Linux capabilities.
-   *
-   * --security-opt no-new-privileges
-   *     Prevent privilege escalation.
-   *
-   * --user
-   *     Non-root execution.
-   */
-
-  return [
-
-    "run",
-
-    "--rm",
-
-    "--network",
-    network,
-
-    "--cpus",
-    process.env.AUTH_BUILD_CPU_LIMIT ||
-      "2",
-
-    "--memory",
-    process.env.AUTH_BUILD_MEMORY_LIMIT ||
-      "2g",
-
-    "--pids-limit",
-    process.env.AUTH_BUILD_PIDS_LIMIT ||
-      "256",
-
-    "--cap-drop",
-    "ALL",
-
-    "--security-opt",
-    "no-new-privileges",
-
-    "--read-only",
-
-    "--tmpfs",
-    "/tmp:rw,noexec,nosuid,size=512m",
-
-    "--tmpfs",
-    "/home/node:rw,nosuid,size=512m",
-
-    "-v",
-
-    `${workspace}:/workspace:rw`,
-
-    "-w",
-    "/workspace",
-
-    "--user",
-    "node",
-
-    image,
-
-    ...command
-
-  ];
-
-}
-
-
-/* =========================================================
-   INSTALL
-========================================================= */
-
-async function installDependencies({
-
-  workspace,
-
-  packageManager,
-
-  image
-
-}) {
-
-  const config =
-    getPackageManagerConfig(
-      packageManager
-    );
-
-
-  /*
-   * First attempt:
-   * frozen/CI install.
-   */
-
-  let args =
-    createDockerRunArgs({
-
-      image,
-
-      workspace,
-
-      command:
-        config.installCommand,
-
-      /*
-       * Installation requires network.
-       */
-      network:
-        process.env.AUTH_BUILD_INSTALL_NETWORK ||
-        "bridge"
-
-    });
-
-
-  let result =
-    await runDockerCommand({
-
-      args,
-
-      timeoutMs:
-        INSTALL_TIMEOUT_MS,
-
-      stage:
-        "dependency-install",
-
-      workspace
-
-    });
-
-
-  if (
-    result.success
-  ) {
-
-    return {
-
-      ...result,
-
-      usedFallback:
-        false
-
-    };
-
-  }
-
-
-  /*
-   * Fallback is only attempted for lockfile-related
-   * installation failures.
-   */
-
-  const combined =
-    `${result.stdout}\n${result.stderr}`
-      .toLowerCase();
-
-
-  const fallbackAllowed =
-    combined.includes(
-      "frozen-lockfile"
-    ) ||
-    combined.includes(
-      "package-lock"
-    ) ||
-    combined.includes(
-      "lockfile"
-    );
-
-
-  if (
-    !fallbackAllowed
-  ) {
-
-    return {
-
-      ...result,
-
-      usedFallback:
-        false
-
-    };
-
-  }
-
-
-  args =
-    createDockerRunArgs({
-
-      image,
-
-      workspace,
-
-      command:
-        config.fallbackInstallCommand,
-
-      network:
-        process.env.AUTH_BUILD_INSTALL_NETWORK ||
-        "bridge"
-
-    });
-
-
-  result =
-    await runDockerCommand({
-
-      args,
-
-      timeoutMs:
-        INSTALL_TIMEOUT_MS,
-
-      stage:
-        "dependency-install-fallback",
-
-      workspace
-
-    });
-
-
-  return {
-
-    ...result,
-
-    usedFallback:
-      true
-
-  };
-
-}
-
-
-/* =========================================================
-   BUILD
-========================================================= */
-
-async function executeBuild({
-
-  workspace,
-
-  packageManager,
-
-  image
-
-}) {
-
-  const config =
-    getPackageManagerConfig(
-      packageManager
-    );
-
-
-  const args =
-    createDockerRunArgs({
-
-      image,
-
-      workspace,
-
-      command:
-        config.buildCommand,
-
-      /*
-       * Build runs without network by default.
-       *
-       * Dependencies should already exist from install stage.
-       */
-      network:
-        process.env.AUTH_BUILD_NETWORK ||
-        "none"
-
-    });
-
-
-  return runDockerCommand({
-
-    args,
-
-    timeoutMs:
-      BUILD_TIMEOUT_MS,
-
-    stage:
-      "build",
-
-    workspace
-
-  });
-
-}
-
-
-/* =========================================================
-   PACKAGE SCRIPT VALIDATION
-========================================================= */
-
-function validateBuildScript(
-packageJson
+function validateAgainstPlan(
+  files,
+  plan,
+  errors,
+  warnings
 ) {
-
   if (
-    !packageJson ||
-    !packageJson.scripts
+    !plan ||
+    typeof plan !== "object"
   ) {
-
-    return {
-
-      valid:
-        false,
-
-      issue:
-
-        createIssue({
-
-          code:
-            "BUILD_SCRIPT_MISSING",
-
-          message:
-            "package.json does not define a build script.",
-
-          file:
-            "package.json",
-
-          stage:
-            "build"
-
-        })
-
-    };
-
+    return;
   }
 
 
+  const plannedPaths =
+    extractPlannedPaths(
+      plan
+    );
+
+
   if (
-    typeof packageJson.scripts.build !==
-      "string" ||
-    !packageJson.scripts.build.trim()
+    plannedPaths.size === 0
   ) {
-
-    return {
-
-      valid:
-        false,
-
-      issue:
-
-        createIssue({
-
-          code:
-            "BUILD_SCRIPT_INVALID",
-
-          message:
-            "package.json build script is missing or invalid.",
-
-          file:
-            "package.json",
-
-          stage:
-            "build"
-
-        })
-
-    };
-
+    return;
   }
 
 
-  return {
+  const actualPaths =
+    new Set(
+      files.map(
+        file =>
+          getFilePath(file)
+      )
+    );
 
-    valid:
-      true,
 
-    issue:
-      null
+  for (
+    const plannedPath of plannedPaths
+  ) {
+    if (
+      !actualPaths.has(
+        plannedPath
+      )
+    ) {
+      warnings.push(
+        createWarning({
+          code:
+            "PLANNED_FILE_MISSING",
 
-  };
+          message:
+            `Planned file was not generated: ${plannedPath}`,
 
+          file:
+            plannedPath
+        })
+      );
+    }
+  }
+
+
+  const unplannedFiles =
+    files.filter(
+      file =>
+        !plannedPaths.has(
+          getFilePath(file)
+        )
+    );
+
+
+  const allowedExtraFiles =
+    Math.max(
+      10,
+      Math.ceil(
+        plannedPaths.size *
+        0.5
+      )
+    );
+
+
+  if (
+    unplannedFiles.length >
+    allowedExtraFiles
+  ) {
+    errors.push(
+      createError({
+        code:
+          "EXCESSIVE_UNPLANNED_FILES",
+
+        message:
+          "Builder generated too many files outside the planning blueprint.",
+
+        details: {
+          plannedFiles:
+            plannedPaths.size,
+
+          actualFiles:
+            files.length,
+
+          unplannedFiles:
+            unplannedFiles.length,
+
+          allowedExtraFiles
+        }
+      })
+    );
+  }
 }
 
 
 /* =========================================================
-   ERROR CLASSIFICATION
+   MANIFEST VALIDATION
 ========================================================= */
 
-function classifyFailure({
-
-  stage,
-
-  result
-
-}) {
-
+function validateManifest(
+  files,
+  manifest,
+  errors,
+  warnings
+) {
   if (
-    !result
+    !manifest ||
+    typeof manifest !== "object"
   ) {
-
-    return {
-
-      category:
-        "unknown",
-
-      retryable:
-        false
-
-    };
-
+    return;
   }
 
 
-  if (
-    result.timedOut
-  ) {
-
-    return {
-
-      category:
-        "timeout",
-
-      retryable:
-        false
-
-    };
-
-  }
+  const actualPaths =
+    new Set(
+      files.map(
+        file =>
+          getFilePath(file)
+      )
+    );
 
 
-  const text =
-    `${result.stdout || ""}\n${result.stderr || ""}`
-      .toLowerCase();
-
-
-  if (
-    text.includes(
-      "eacces"
-    ) ||
-    text.includes(
-      "permission denied"
+  const manifestFiles =
+    Array.isArray(
+      manifest.files
     )
+      ? manifest.files
+      : [];
+
+
+  const manifestPaths =
+    new Set();
+
+
+  for (
+    const item of manifestFiles
   ) {
+    const filePath =
+      typeof item === "string"
+        ? normalizeFilePath(
+            item
+          )
+        : normalizeFilePath(
+            item?.path ||
+            item?.file ||
+            item?.filePath ||
+            ""
+          );
 
-    return {
 
-      category:
-        "permission",
+    if (
+      !filePath
+    ) {
+      continue;
+    }
 
-      retryable:
-        false
 
-    };
+    if (
+      manifestPaths.has(
+        filePath
+      )
+    ) {
+      errors.push(
+        createError({
+          code:
+            "MANIFEST_DUPLICATE_PATH",
 
+          message:
+            `Manifest contains duplicate path: ${filePath}`,
+
+          file:
+            filePath
+        })
+      );
+    }
+
+
+    manifestPaths.add(
+      filePath
+    );
+
+
+    if (
+      !actualPaths.has(
+        filePath
+      )
+    ) {
+      errors.push(
+        createError({
+          code:
+            "MANIFEST_FILE_MISSING",
+
+          message:
+            `Manifest references a file that does not exist: ${filePath}`,
+
+          file:
+            filePath
+        })
+      );
+    }
   }
+
+
+  for (
+    const actualPath of actualPaths
+  ) {
+    if (
+      !manifestPaths.has(
+        actualPath
+      )
+    ) {
+      warnings.push(
+        createWarning({
+          code:
+            "FILE_NOT_IN_MANIFEST",
+
+          message:
+            `Generated file is not present in the builder manifest: ${actualPath}`,
+
+          file:
+            actualPath
+        })
+      );
+    }
+  }
+}
+
+
+/* =========================================================
+   SCOPE VALIDATION
+========================================================= */
+
+function validateScope(
+  files,
+  plan,
+  projectData,
+  errors,
+  warnings
+) {
+  const scale =
+    plan?.projectScale ||
+    plan?.scale ||
+    projectData?.projectScale ||
+    projectData?.scale ||
+    "";
 
 
   if (
-    text.includes(
-      "enotfound"
-    ) ||
-    text.includes(
-      "network"
-    ) ||
-    text.includes(
-      "getaddrinfo"
-    )
+    !scale
   ) {
-
-    return {
-
-      category:
-        "network",
-
-      retryable:
-        true
-
-    };
-
+    return;
   }
 
 
-  if (
-    text.includes(
-      "module not found"
-    ) ||
-    text.includes(
-      "cannot find module"
-    )
-  ) {
+  const limits = {
+    none:
+      10,
 
-    return {
+    task:
+      30,
 
-      category:
-        "missing-module",
+    feature:
+      100,
 
-      retryable:
-        false
+    application:
+      300,
 
-    };
+    large_project:
+      700,
 
-  }
-
-
-  if (
-    text.includes(
-      "syntaxerror"
-    ) ||
-    text.includes(
-      "parse error"
-    ) ||
-    text.includes(
-      "unexpected token"
-    )
-  ) {
-
-    return {
-
-      category:
-        "syntax",
-
-      retryable:
-        false
-
-    };
-
-  }
-
-
-  if (
-    stage.includes(
-      "dependency-install"
-    )
-  ) {
-
-    return {
-
-      category:
-        "dependency-install",
-
-      retryable:
-        false
-
-    };
-
-  }
-
-
-  if (
-    stage ===
-      "build"
-  ) {
-
-    return {
-
-      category:
-        "build",
-
-      retryable:
-        false
-
-    };
-
-  }
-
-
-  return {
-
-    category:
-      "unknown",
-
-    retryable:
-      false
-
+    system:
+      1000
   };
 
+
+  const allowed =
+    limits[scale];
+
+
+  if (
+    !allowed
+  ) {
+    return;
+  }
+
+
+  if (
+    files.length >
+    allowed
+  ) {
+    errors.push(
+      createError({
+        code:
+          "SCOPE_FILE_LIMIT_EXCEEDED",
+
+        message:
+          `Generated file count (${files.length}) is disproportionate to project scale "${scale}".`,
+
+        details: {
+          scale,
+
+          fileCount:
+            files.length,
+
+          allowedFiles:
+            allowed
+        }
+      })
+    );
+  }
+
+
+  if (
+    scale === "task" &&
+    files.length > 20
+  ) {
+    warnings.push(
+      createWarning({
+        code:
+          "TASK_SCOPE_EXPANSION",
+
+        message:
+          "Task-level project contains more files than normally expected.",
+
+        details: {
+          fileCount:
+            files.length
+        }
+      })
+    );
+  }
 }
 
 
@@ -2361,1335 +2593,767 @@ function classifyFailure({
 ========================================================= */
 
 function createRepairContext({
-
-  buildResult,
-
+  errors,
+  warnings,
   sourceHash,
-
+  framework,
   packageManager
-
 }) {
-
-  const errors =
-    Array.isArray(
-      buildResult?.errors
-    )
-      ? buildResult.errors
-      : [];
-
-
   const affectedFiles =
-    [
-      ...new Set(
+    new Set();
 
-        errors
 
-          .map(
-            error =>
-              error &&
-              error.file
-          )
+  for (
+    const error of errors
+  ) {
+    if (
+      error &&
+      typeof error.file === "string" &&
+      error.file
+    ) {
+      affectedFiles.add(
+        normalizeFilePath(
+          error.file
+        )
+      );
+    }
+  }
 
-          .filter(
-            Boolean
-          )
 
+  /*
+   * Warnings are included only when they
+   * clearly point to a source file.
+   */
+  for (
+    const warning of warnings
+  ) {
+    if (
+      warning &&
+      typeof warning.file === "string" &&
+      warning.file &&
+      (
+        warning.code ===
+          "LOCAL_IMPORT_NOT_FOUND" ||
+        warning.code ===
+          "POSSIBLE_INCOMPLETE_SOURCE" ||
+        warning.code ===
+          "POSSIBLE_HTML_ESCAPED_SOURCE"
       )
-    ];
+    ) {
+      affectedFiles.add(
+        normalizeFilePath(
+          warning.file
+        )
+      );
+    }
+  }
 
 
   return {
-
-    success:
-      false,
+    required:
+      errors.length > 0,
 
     sourceHash:
-      sourceHash ||
-      null,
+      sourceHash || null,
+
+    framework:
+      framework || "generic",
 
     packageManager:
-      packageManager ||
-      "npm",
+      packageManager || "npm",
 
-    buildId:
-      buildResult?.buildId ||
-      null,
+    affectedFiles:
+      Array.from(
+        affectedFiles
+      ),
 
-    failureStage:
-      buildResult?.failureStage ||
-      null,
+    errors:
+      errors.map(
+        error => ({
+          code:
+            error.code,
 
-    failureCategory:
-      buildResult?.failureCategory ||
-      null,
+          message:
+            error.message,
 
-    affectedFiles,
+          file:
+            error.file || "",
 
-    errors,
+          line:
+            error.line ?? null,
 
-    stdout:
-      buildResult?.stdout ||
-      "",
+          column:
+            error.column ?? null,
 
-    stderr:
-      buildResult?.stderr ||
-      "",
+          stage:
+            error.stage,
 
-    exitCode:
-      buildResult?.exitCode ??
-      null
+          details:
+            error.details || null
+        })
+      ),
 
+    warnings:
+      warnings.map(
+        warning => ({
+          code:
+            warning.code,
+
+          message:
+            warning.message,
+
+          file:
+            warning.file || "",
+
+          line:
+            warning.line ?? null,
+
+          column:
+            warning.column ?? null
+        })
+      ),
+
+    strategy:
+      errors.length > 0
+        ? "repair-static-validation-errors"
+        : "no-repair-required"
   };
-
 }
 
 
 /* =========================================================
-   CONCURRENCY
+   RESULT FACTORY
 ========================================================= */
 
-let activeBuilds =
-  0;
-
-
-/**
- * Acquire build slot.
- */
-async function acquireBuildSlot() {
-
-  if (
-    activeBuilds <
-    MAX_CONCURRENT_BUILDS
-  ) {
-
-    activeBuilds++;
-
-    return;
-
-  }
-
-
-  const started =
-    Date.now();
-
-
-  while (
-    activeBuilds >=
-    MAX_CONCURRENT_BUILDS
-  ) {
-
-    if (
-      Date.now() -
-      started >
-      TOTAL_TIMEOUT_MS
-    ) {
-
-      throw new Error(
-        "Timed out waiting for an available build slot."
-      );
-
-    }
-
-    await new Promise(
-      resolve =>
-        setTimeout(
-          resolve,
-          250
-        )
-    );
-
-  }
-
-
-  activeBuilds++;
-
-}
-
-
-/**
- * Release build slot.
- */
-function releaseBuildSlot() {
-
-  activeBuilds =
-    Math.max(
+function createValidationResult({
+  files,
+  errors,
+  warnings,
+  sourceHash,
+  framework,
+  packageManager,
+  startedAt,
+  totalSize,
+  extraMetadata = {}
+}) {
+  const finalErrors =
+    errors.slice(
       0,
-      activeBuilds - 1
+      MAX_ERRORS
     );
 
+
+  const finalWarnings =
+    warnings.slice(
+      0,
+      MAX_WARNINGS
+    );
+
+
+  const passed =
+    finalErrors.length === 0;
+
+
+  return {
+    success:
+      passed,
+
+    status:
+      passed
+        ? "passed"
+        : "failed",
+
+    /*
+     * CRITICAL CONTRACT
+     *
+     * Static validation is never authoritative.
+     */
+    authoritative:
+      AUTHORITATIVE,
+
+    validationMode:
+      VALIDATION_MODE,
+
+    serviceVersion:
+      SERVICE_VERSION,
+
+    sourceHash,
+
+    errors:
+      finalErrors,
+
+    warnings:
+      finalWarnings,
+
+    repairContext:
+      createRepairContext({
+        errors:
+          finalErrors,
+
+        warnings:
+          finalWarnings,
+
+        sourceHash,
+
+        framework,
+
+        packageManager
+      }),
+
+    summary: {
+      passed,
+
+      errorCount:
+        finalErrors.length,
+
+      warningCount:
+        finalWarnings.length,
+
+      fileCount:
+        files.length,
+
+      sourceSize:
+        totalSize,
+
+      framework,
+
+      packageManager,
+
+      durationMs:
+        Date.now() -
+        startedAt
+    },
+
+    metadata: {
+      validatedAt:
+        new Date().toISOString(),
+
+      durationMs:
+        Date.now() -
+        startedAt,
+
+      framework,
+
+      packageManager,
+
+      limits: {
+        maxFiles:
+          MAX_FILES,
+
+        maxFileSize:
+          MAX_FILE_SIZE,
+
+        maxSourceSize:
+          MAX_SOURCE_SIZE
+      },
+
+      ...extraMetadata
+    }
+  };
 }
 
 
 /* =========================================================
-   MAIN BUILD
+   MAIN STATIC VALIDATION
 ========================================================= */
 
-async function buildProject(
-  projectData = {}
-) {
-
+async function validateProject({
+  files,
+  plan = null,
+  projectData = null,
+  manifest = null
+} = {}) {
   const startedAt =
     Date.now();
 
-  const buildId =
-    createBuildId();
 
-  let workspace =
-    null;
+  const errors = [];
 
-  let dockerAvailable =
-    false;
+  const warnings = [];
 
 
-  try {
-
-    logger.info(
-      `[AuthoritativeBuildService] Build started: ${buildId}`
+  /*
+   * Normalize input without mutating
+   * caller-owned objects.
+   */
+  const normalizedFiles =
+    normalizeFiles(
+      files
     );
 
 
-    /* -----------------------------------------------------
-       1. INPUT
-    ----------------------------------------------------- */
-
-    const files =
-      Array.isArray(
-        projectData.files
-      )
-        ? projectData.files
-        : [];
-
-
-    const fileValidation =
-      validateFiles(
-        files
-      );
-
-
-    if (
-      fileValidation.errors.length >
-      0
-    ) {
-
-      return {
-
-        success:
-          false,
-
-        status:
-          "failed",
-
-        authoritative:
-          AUTHORITATIVE,
-
-        validationMode:
-          VALIDATION_MODE,
-
-        serviceVersion:
-          SERVICE_VERSION,
-
-        buildId,
-
-        sourceHash:
-          calculateSourceHash(
-            files
-          ),
-
-        failureStage:
-          "input",
-
-        failureCategory:
-          "invalid-input",
-
-        errors:
-          fileValidation.errors,
-
-        warnings: [],
-
-        stdout:
-          "",
-
-        stderr:
-          "",
-
-        exitCode:
-          null,
-
-        summary: {
-
-          durationMs:
-            Date.now() -
-            startedAt,
-
-          fileCount:
-            files.length,
-
-          totalSize:
-            fileValidation.totalSize
-
-        },
-
-        repairContext:
-          createRepairContext({
-
-            buildResult: {
-
-              buildId,
-
-              failureStage:
-                "input",
-
-              failureCategory:
-                "invalid-input",
-
-              errors:
-                fileValidation.errors
-
-            },
-
-            sourceHash:
-              calculateSourceHash(
-                files
-              )
-
-          })
-
-      };
-
-    }
-
-
-    /* -----------------------------------------------------
-       2. PACKAGE.JSON
-    ----------------------------------------------------- */
-
-    const packageResult =
-      readPackageJson(
-        files
-      );
-
-
-    if (
-      packageResult.error
-    ) {
-
-      const sourceHash =
-        calculateSourceHash(
-          files
-        );
-
-
-      return {
-
-        success:
-          false,
-
-        status:
-          "failed",
-
-        authoritative:
-          AUTHORITATIVE,
-
-        validationMode:
-          VALIDATION_MODE,
-
-        serviceVersion:
-          SERVICE_VERSION,
-
-        buildId,
-
-        sourceHash,
-
-        failureStage:
-          "package",
-
-        failureCategory:
-          "package",
-
-        errors: [
-          packageResult.error
-        ],
-
-        warnings: [],
-
-        stdout:
-          "",
-
-        stderr:
-          "",
-
-        exitCode:
-          null,
-
-        summary: {
-
-          durationMs:
-            Date.now() -
-            startedAt,
-
-          fileCount:
-            files.length,
-
-          totalSize:
-            fileValidation.totalSize
-
-        },
-
-        repairContext:
-          createRepairContext({
-
-            buildResult: {
-
-              buildId,
-
-              failureStage:
-                "package",
-
-              failureCategory:
-                "package",
-
-              errors: [
-                packageResult.error
-              ]
-
-            },
-
-            sourceHash
-
-          })
-
-      };
-
-    }
-
-
-    const packageJson =
-      packageResult.packageJson;
-
-
-    /* -----------------------------------------------------
-       3. BUILD SCRIPT
-    ----------------------------------------------------- */
-
-    const buildScript =
-      validateBuildScript(
-        packageJson
-      );
-
-
-    if (
-      !buildScript.valid
-    ) {
-
-      const sourceHash =
-        calculateSourceHash(
-          files
-        );
-
-
-      return {
-
-        success:
-          false,
-
-        status:
-          "failed",
-
-        authoritative:
-          AUTHORITATIVE,
-
-        validationMode:
-          VALIDATION_MODE,
-
-        serviceVersion:
-          SERVICE_VERSION,
-
-        buildId,
-
-        sourceHash,
-
-        failureStage:
-          "build",
-
-        failureCategory:
-          "configuration",
-
-        errors: [
-          buildScript.issue
-        ],
-
-        warnings: [],
-
-        stdout:
-          "",
-
-        stderr:
-          "",
-
-        exitCode:
-          null,
-
-        summary: {
-
-          durationMs:
-            Date.now() -
-            startedAt,
-
-          fileCount:
-            files.length,
-
-          totalSize:
-            fileValidation.totalSize
-
-        },
-
-        repairContext:
-          createRepairContext({
-
-            buildResult: {
-
-              buildId,
-
-              failureStage:
-                "build",
-
-              failureCategory:
-                "configuration",
-
-              errors: [
-                buildScript.issue
-              ]
-
-            },
-
-            sourceHash
-
-          })
-
-      };
-
-    }
-
-
-    /* -----------------------------------------------------
-       4. PACKAGE MANAGER
-    ----------------------------------------------------- */
-
-    const packageManager =
-      detectPackageManager(
-        files,
-        packageJson
-      );
-
-
-    /* -----------------------------------------------------
-       5. NODE IMAGE
-    ----------------------------------------------------- */
-
-    const image =
-      getNodeImage(
-        projectData
-      );
-
-
-    /* -----------------------------------------------------
-       6. BUILD SLOT
-    ----------------------------------------------------- */
-
-    await acquireBuildSlot();
-
-
-    try {
-
-      /* ---------------------------------------------------
-         7. DOCKER
-      --------------------------------------------------- */
-
-      dockerAvailable =
-        await checkDockerAvailable();
-
-
-      if (
-        !dockerAvailable
-      ) {
-
-        const error =
-          createIssue({
-
-            code:
-              "DOCKER_UNAVAILABLE",
-
-            message:
-              "Docker is unavailable. Authoritative build execution requires the isolated Docker runtime.",
-
-            stage:
-              "executor"
-
-          });
-
-
-        return {
-
-          success:
-            false,
-
-          status:
-            "failed",
-
-          authoritative:
-            AUTHORITATIVE,
-
-          validationMode:
-            VALIDATION_MODE,
-
-          serviceVersion:
-            SERVICE_VERSION,
-
-          buildId,
-
-          sourceHash:
-            calculateSourceHash(
-              files
-            ),
-
-          packageManager,
-
-          failureStage:
-            "executor",
-
-          failureCategory:
-            "runtime",
-
-          errors: [
-            error
-          ],
-
-          warnings: [],
-
-          stdout:
-            "",
-
-          stderr:
-            "",
-
-          exitCode:
-            null,
-
-          summary: {
-
-            durationMs:
-              Date.now() -
-              startedAt,
-
-            fileCount:
-              files.length,
-
-            totalSize:
-              fileValidation.totalSize
-
-          },
-
-          repairContext:
-            createRepairContext({
-
-              buildResult: {
-
-                buildId,
-
-                failureStage:
-                  "executor",
-
-                failureCategory:
-                  "runtime",
-
-                errors: [
-                  error
-                ]
-
-              },
-
-              sourceHash:
-                calculateSourceHash(
-                  files
-                ),
-
-              packageManager
-
-            })
-
-        };
-
-      }
-
-
-      /* ---------------------------------------------------
-         8. WORKSPACE
-      --------------------------------------------------- */
-
-      workspace =
-        await createWorkspace(
-          buildId
-        );
-
-
-      await writeProjectFiles(
-        workspace,
-        files
-      );
-
-
-      /* ---------------------------------------------------
-         9. INSTALL
-      --------------------------------------------------- */
-
-      const installResult =
-        await installDependencies({
-
-          workspace,
-
-          packageManager,
-
-          image
-
-        });
-
-
-      if (
-        !installResult.success
-      ) {
-
-        const classification =
-          classifyFailure({
-
-            stage:
-              installResult.stage,
-
-            result:
-              installResult
-
-          });
-
-
-        const error =
-          createIssue({
-
-            code:
-              "DEPENDENCY_INSTALL_FAILED",
-
-            message:
-              installResult.timedOut
-
-                ? "Dependency installation timed out."
-
-                : "Dependency installation failed.",
-
-            stage:
-              "dependency-install",
-
-            details: {
-
-              category:
-                classification.category,
-
-              retryable:
-                classification.retryable,
-
-              exitCode:
-                installResult.exitCode,
-
-              signal:
-                installResult.signal,
-
-              durationMs:
-                installResult.durationMs,
-
-              usedFallback:
-                installResult.usedFallback
-
-            }
-
-          });
-
-
-        const sourceHash =
-          calculateSourceHash(
-            files
-          );
-
-
-        const buildResult = {
-
-          success:
-            false,
-
-          status:
-            "failed",
-
-          authoritative:
-            AUTHORITATIVE,
-
-          validationMode:
-            VALIDATION_MODE,
-
-          serviceVersion:
-            SERVICE_VERSION,
-
-          buildId,
-
-          sourceHash,
-
-          packageManager,
-
-          failureStage:
-            "dependency-install",
-
-          failureCategory:
-            classification.category,
-
-          errors: [
-            error
-          ],
-
-          warnings: [],
-
-          stdout:
-            installResult.stdout,
-
-          stderr:
-            installResult.stderr,
-
-          exitCode:
-            installResult.exitCode,
-
-          signal:
-            installResult.signal,
-
-          timedOut:
-            installResult.timedOut,
-
-          summary: {
-
-            durationMs:
-              Date.now() -
-              startedAt,
-
-            installDurationMs:
-              installResult.durationMs,
-
-            fileCount:
-              files.length,
-
-            totalSize:
-              fileValidation.totalSize
-
-          }
-
-        };
-
-
-        buildResult.repairContext =
-          createRepairContext({
-
-            buildResult,
-
-            sourceHash,
-
-            packageManager
-
-          });
-
-
-        return buildResult;
-
-      }
-
-
-      /* ---------------------------------------------------
-         10. BUILD
-      --------------------------------------------------- */
-
-      const buildResult =
-        await executeBuild({
-
-          workspace,
-
-          packageManager,
-
-          image
-
-        });
-
-
-      if (
-        !buildResult.success
-      ) {
-
-        const classification =
-          classifyFailure({
-
-            stage:
-              "build",
-
-            result:
-              buildResult
-
-          });
-
-
-        const error =
-          createIssue({
-
-            code:
-              buildResult.timedOut
-                ? "BUILD_TIMEOUT"
-                : "BUILD_FAILED",
-
-            message:
-              buildResult.timedOut
-
-                ? "Project build timed out."
-
-                : "Project build failed.",
-
-            stage:
-              "build",
-
-            details: {
-
-              category:
-                classification.category,
-
-              retryable:
-                classification.retryable,
-
-              exitCode:
-                buildResult.exitCode,
-
-              signal:
-                buildResult.signal,
-
-              durationMs:
-                buildResult.durationMs
-
-            }
-
-          });
-
-
-        const sourceHash =
-          calculateSourceHash(
-            files
-          );
-
-
-        const finalResult = {
-
-          success:
-            false,
-
-          status:
-            "failed",
-
-          authoritative:
-            AUTHORITATIVE,
-
-          validationMode:
-            VALIDATION_MODE,
-
-          serviceVersion:
-            SERVICE_VERSION,
-
-          buildId,
-
-          sourceHash,
-
-          packageManager,
-
-          failureStage:
-            "build",
-
-          failureCategory:
-            classification.category,
-
-          errors: [
-            error
-          ],
-
-          warnings: [],
-
-          stdout:
-            buildResult.stdout,
-
-          stderr:
-            buildResult.stderr,
-
-          exitCode:
-            buildResult.exitCode,
-
-          signal:
-            buildResult.signal,
-
-          timedOut:
-            buildResult.timedOut,
-
-          outputTruncated:
-            buildResult.truncated,
-
-          summary: {
-
-            durationMs:
-              Date.now() -
-              startedAt,
-
-            buildDurationMs:
-              buildResult.durationMs,
-
-            fileCount:
-              files.length,
-
-            totalSize:
-              fileValidation.totalSize
-
-          }
-
-        };
-
-
-        finalResult.repairContext =
-          createRepairContext({
-
-            buildResult:
-              finalResult,
-
-            sourceHash,
-
-            packageManager
-
-          });
-
-
-        return finalResult;
-
-      }
-
-
-      /* ---------------------------------------------------
-         11. SUCCESS
-      --------------------------------------------------- */
-
-      const sourceHash =
-        calculateSourceHash(
-          files
-        );
-
-
-      logger.info(
-        `[AuthoritativeBuildService] Build passed: ${buildId}`
-      );
-
-
-      return {
-
-        success:
-          true,
-
-        status:
-          "passed",
-
-        authoritative:
-          AUTHORITATIVE,
-
-        validationMode:
-          VALIDATION_MODE,
-
-        serviceVersion:
-          SERVICE_VERSION,
-
-        buildId,
-
-        sourceHash,
-
-        packageManager,
-
-        failureStage:
-          null,
-
-        failureCategory:
-          null,
-
-        errors: [],
-
-        warnings: [],
-
-        stdout:
-          buildResult.stdout,
-
-        stderr:
-          buildResult.stderr,
-
-        exitCode:
-          buildResult.exitCode,
-
-        signal:
-          buildResult.signal,
-
-        timedOut:
-          false,
-
-        outputTruncated:
-          buildResult.truncated,
-
-        summary: {
-
-          durationMs:
-            Date.now() -
-            startedAt,
-
-          buildDurationMs:
-            buildResult.durationMs,
-
-          fileCount:
-            files.length,
-
-          totalSize:
-            fileValidation.totalSize
-
-        },
-
-        metadata: {
-
-          dependenciesInstalled:
-            true,
-
-          buildCommandExecuted:
-            true,
-
-          generatedCodeExecuted:
-            true,
-
-          runtimeStarted:
-            false,
-
-          browserSmokeTested:
-            false,
-
-          dockerIsolated:
-            true
-
-        },
-
-        validatedAt:
-          new Date()
-
-      };
-
-    } finally {
-
-      releaseBuildSlot();
-
-    }
-
-  } catch (error) {
-
-    logger.error(
-      `[AuthoritativeBuildService] Fatal build error: ${error.message}`
+  /*
+   * Validate fundamental input first.
+   */
+  const fileStats =
+    validateFiles(
+      Array.isArray(files)
+        ? normalizedFiles
+        : files,
+
+      errors,
+
+      warnings
     );
 
 
+  /*
+   * If files itself is not an array,
+   * return a proper structured result.
+   */
+  if (
+    !Array.isArray(files)
+  ) {
     const sourceHash =
       calculateSourceHash(
-        Array.isArray(
-          projectData.files
-        )
-          ? projectData.files
-          : []
+        []
       );
 
 
-    const fatalIssue =
-      createIssue({
+    return createValidationResult({
+      files:
+        [],
 
-        code:
-          "AUTHORITATIVE_BUILD_SERVICE_ERROR",
+      errors,
 
-        message:
-          error.message,
-
-        stage:
-          "executor",
-
-        details: {
-
-          name:
-            error.name
-
-        }
-
-      });
-
-
-    const buildResult = {
-
-      success:
-        false,
-
-      status:
-        "failed",
-
-      authoritative:
-        AUTHORITATIVE,
-
-      validationMode:
-        VALIDATION_MODE,
-
-      serviceVersion:
-        SERVICE_VERSION,
-
-      buildId,
+      warnings,
 
       sourceHash,
 
-      failureStage:
-        "executor",
+      framework:
+        "generic",
 
-      failureCategory:
-        "service",
+      packageManager:
+        "npm",
 
-      errors: [
-        fatalIssue
-      ],
+      startedAt,
 
-      warnings: [],
-
-      stdout:
-        "",
-
-      stderr:
-        "",
-
-      exitCode:
-        null,
-
-      summary: {
-
-        durationMs:
-          Date.now() -
-          startedAt
-
-      }
-
-    };
-
-
-    buildResult.repairContext =
-      createRepairContext({
-
-        buildResult,
-
-        sourceHash
-
-      });
-
-
-    return buildResult;
-
-  } finally {
-
-    /* -----------------------------------------------------
-       CLEANUP
-    ----------------------------------------------------- */
-
-    if (
-      workspace
-    ) {
-
-      try {
-
-        await fsp.rm(
-          workspace,
-          {
-            recursive:
-              true,
-            force:
-              true
-          }
-        );
-
-      } catch (cleanupError) {
-
-        logger.error(
-          `[AuthoritativeBuildService] Workspace cleanup failed: ` +
-          cleanupError.message
-        );
-
-      }
-
-    }
-
+      totalSize:
+        0
+    });
   }
 
-}
+
+  /*
+   * No files means there is no useful
+   * deeper validation to perform.
+   */
+  if (
+    normalizedFiles.length === 0
+  ) {
+    const sourceHash =
+      calculateSourceHash(
+        normalizedFiles
+      );
 
 
-/* =========================================================
-   QUICK API
-========================================================= */
+    return createValidationResult({
+      files:
+        normalizedFiles,
 
-async function validateAndBuild(
-  files = [],
-  options = {}
-) {
+      errors,
 
-  return buildProject({
+      warnings,
 
-    files,
+      sourceHash,
 
-    projectId:
-      options.projectId,
+      framework:
+        "generic",
 
-    projectName:
-      options.projectName,
+      packageManager:
+        "npm",
 
-    framework:
-      options.framework,
+      startedAt,
 
-    nodeVersion:
-      options.nodeVersion
+      totalSize:
+        fileStats.totalSize
+    });
+  }
 
+
+  /* -------------------------------------------------------
+     PACKAGE.JSON
+  ------------------------------------------------------- */
+
+  const packageInfo =
+    parsePackageJson(
+      normalizedFiles,
+      errors
+    );
+
+
+  const packageJson =
+    packageInfo.value;
+
+
+  /* -------------------------------------------------------
+     FRAMEWORK
+  ------------------------------------------------------- */
+
+  const framework =
+    detectFramework(
+      packageJson,
+      normalizedFiles
+    );
+
+
+  /* -------------------------------------------------------
+     PACKAGE MANAGER
+  ------------------------------------------------------- */
+
+  const packageManager =
+    detectPackageManager(
+      normalizedFiles,
+      packageJson
+    );
+
+
+  /* -------------------------------------------------------
+     PACKAGE VALIDATION
+  ------------------------------------------------------- */
+
+  validatePackageJson(
+    packageJson,
+    errors,
+    warnings
+  );
+
+
+  /* -------------------------------------------------------
+     JSON VALIDATION
+  ------------------------------------------------------- */
+
+  validateJsonFiles(
+    normalizedFiles,
+    errors
+  );
+
+
+  /* -------------------------------------------------------
+     REQUIRED FILES
+  ------------------------------------------------------- */
+
+  validateRequiredFiles(
+    normalizedFiles,
+    packageJson,
+    framework,
+    errors,
+    warnings
+  );
+
+
+  /* -------------------------------------------------------
+     BUILD SCRIPT
+  ------------------------------------------------------- */
+
+  validateBuildScript(
+    packageJson,
+    errors,
+    warnings
+  );
+
+
+  /* -------------------------------------------------------
+     LOCKFILES
+  ------------------------------------------------------- */
+
+  validateLockfiles(
+    normalizedFiles,
+    packageManager,
+    warnings
+  );
+
+
+  /* -------------------------------------------------------
+     FRAMEWORK DEPENDENCIES
+  ------------------------------------------------------- */
+
+  validateFrameworkDependencies(
+    packageJson,
+    framework,
+    errors,
+    warnings
+  );
+
+
+  /* -------------------------------------------------------
+     SOURCE QUALITY
+  ------------------------------------------------------- */
+
+  validateSourceQuality(
+    normalizedFiles,
+    warnings
+  );
+
+
+  /* -------------------------------------------------------
+     LOCAL IMPORTS
+  ------------------------------------------------------- */
+
+  validateLocalImports(
+    normalizedFiles,
+    warnings
+  );
+
+
+  /* -------------------------------------------------------
+     PLANNING BLUEPRINT
+  ------------------------------------------------------- */
+
+  validateAgainstPlan(
+    normalizedFiles,
+    plan,
+    errors,
+    warnings
+  );
+
+
+  /* -------------------------------------------------------
+     PROJECT SCOPE
+  ------------------------------------------------------- */
+
+  validateScope(
+    normalizedFiles,
+    plan,
+    projectData,
+    errors,
+    warnings
+  );
+
+
+  /* -------------------------------------------------------
+     BUILDER MANIFEST
+  ------------------------------------------------------- */
+
+  if (
+    manifest &&
+    typeof manifest === "object"
+  ) {
+    validateManifest(
+      normalizedFiles,
+      manifest,
+      errors,
+      warnings
+    );
+  }
+
+
+  /* -------------------------------------------------------
+     FINAL RESULT
+  ------------------------------------------------------- */
+
+  const sourceHash =
+    calculateSourceHash(
+      normalizedFiles
+    );
+
+
+  return createValidationResult({
+    files:
+      normalizedFiles,
+
+    errors,
+
+    warnings,
+
+    sourceHash,
+
+    framework,
+
+    packageManager,
+
+    startedAt,
+
+    totalSize:
+      fileStats.totalSize,
+
+    extraMetadata: {
+      staticOnly:
+        true,
+
+      dockerExecuted:
+        false,
+
+      dependenciesInstalled:
+        false,
+
+      buildCommandExecuted:
+        false,
+
+      generatedCodeExecuted:
+        false,
+
+      artifactCreated:
+        false,
+
+      deploymentPerformed:
+        false
+    }
   });
-
 }
 
 
 /* =========================================================
-   BUILD READINESS
+   LIGHTWEIGHT FILE VALIDATION
 ========================================================= */
 
-function isAuthoritativeBuildReady(
+function validateFileSet(
+  files
+) {
+  const errors = [];
+
+  const warnings = [];
+
+
+  const normalizedFiles =
+    normalizeFiles(
+      files
+    );
+
+
+  const stats =
+    validateFiles(
+      Array.isArray(files)
+        ? normalizedFiles
+        : files,
+
+      errors,
+
+      warnings
+    );
+
+
+  return {
+    success:
+      errors.length === 0,
+
+    errors,
+
+    warnings,
+
+    fileCount:
+      stats.fileCount,
+
+    sourceSize:
+      stats.totalSize
+  };
+}
+
+
+/* =========================================================
+   QUICK VALIDATION
+========================================================= */
+
+function quickValidate(
+  files
+) {
+  const startedAt =
+    Date.now();
+
+
+  const result =
+    validateFileSet(
+      files
+    );
+
+
+  const normalizedFiles =
+    normalizeFiles(
+      files
+    );
+
+
+  const sourceHash =
+    calculateSourceHash(
+      normalizedFiles
+    );
+
+
+  return {
+    success:
+      result.success,
+
+    status:
+      result.success
+        ? "passed"
+        : "failed",
+
+    authoritative:
+      AUTHORITATIVE,
+
+    validationMode:
+      VALIDATION_MODE,
+
+    serviceVersion:
+      SERVICE_VERSION,
+
+    sourceHash,
+
+    errors:
+      result.errors,
+
+    warnings:
+      result.warnings,
+
+    summary: {
+      fileCount:
+        result.fileCount,
+
+      sourceSize:
+        result.sourceSize,
+
+      errorCount:
+        result.errors.length,
+
+      warningCount:
+        result.warnings.length,
+
+      durationMs:
+        Date.now() -
+        startedAt
+    }
+  };
+}
+
+
+/* =========================================================
+   STATIC READINESS
+========================================================= */
+
+function isStaticValidationReady(
   result
 ) {
+  if (
+    !result ||
+    typeof result !== "object"
+  ) {
+    return false;
+  }
+
 
   return (
-
-    Boolean(result) &&
-
     result.success === true &&
 
-    result.authoritative === true &&
+    result.status ===
+      "passed" &&
+
+    result.authoritative ===
+      false &&
 
     result.validationMode ===
-      "authoritative" &&
-
-    result.exitCode === 0 &&
+      "static" &&
 
     Array.isArray(
       result.errors
     ) &&
 
-    result.errors.length === 0
+    result.errors.length === 0 &&
 
+    typeof result.sourceHash ===
+      "string" &&
+
+    result.sourceHash.length > 0
   );
-
 }
 
 
@@ -3705,13 +3369,24 @@ module.exports = {
 
   AUTHORITATIVE,
 
-  buildProject,
+  MAX_FILES,
 
-  validateAndBuild,
+  MAX_FILE_SIZE,
 
-  isAuthoritativeBuildReady,
+  MAX_SOURCE_SIZE,
+
+  validateProject,
+
+  validateFiles:
+    validateFileSet,
+
+  quickValidate,
+
+  isStaticValidationReady,
 
   calculateSourceHash,
+
+  detectFramework,
 
   detectPackageManager,
 
