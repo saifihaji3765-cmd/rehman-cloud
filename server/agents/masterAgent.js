@@ -3,73 +3,39 @@
  * ZYRIONOS MASTER AGENT
  * =========================================================
  *
- * Version: 6.2.0
+ * Version: 7.0.0
  *
- * CENTRAL AUTONOMOUS ORCHESTRATOR / CEO CONTROL PLANE
+ * CEO / GLOBAL CONTROL PLANE
  *
- * =========================================================
+ * IMPORTANT:
  *
- * BUILD ARCHITECTURE
+ * Master Agent owns:
+ * - request normalization
+ * - intent routing
+ * - workflow coordination
+ * - cross-domain orchestration
+ * - deployment gates
+ * - final result aggregation
  *
- * User Request
- *      ↓
- * Memory
- *      ↓
- * Intent
- *      ↓
- * Planning
- *      ↓
- * Builder
- *      ↓
- * BuildValidationService
- *      │
- *      ├── FAIL
- *      │     ↓
- *      │   Fix Agent
- *      │     ↓
- *      │   Static Re-validation
- *      │
- *      └── PASS
- *            ↓
- *      AuthoritativeBuildService
- *            │
- *            ├── FAIL
- *            │     ↓
- *            │   Rich Failure Context
- *            │     ↓
- *            │   Fix Agent
- *            │     ↓
- *            │   Static Re-validation
- *            │     ↓
- *            │   Authoritative Rebuild
- *            │
- *            └── PASS
- *                  ↓
- *              Verified Artifact
- *                  ↓
- *            Deployment Gate
- *                  ↓
- *              Deployment
+ * Engineering Orchestrator owns:
+ * - build engineering lifecycle
+ * - execution
+ * - authoritative build
+ * - diagnosis
+ * - repair
+ * - retry
+ * - checkpoint
+ * - rollback
+ * - verification
+ * - promotion
+ * - escalation
  *
- * =========================================================
- *
- * IMPORTANT CONTRACT
- *
- * Master owns orchestration.
- *
- * BuildValidationService owns static validation.
- *
- * AuthoritativeBuildService owns:
- * - real dependency installation
- * - real production build
- * - Docker isolation
- * - authoritative diagnostics
- * - artifact creation
- * - authoritative readiness
- *
- * Fix Agent owns source repair.
- *
- * Master NEVER executes Docker/build commands directly.
+ * Master NEVER directly executes:
+ * - Docker
+ * - npm/pnpm/yarn
+ * - production builds
+ * - runtime processes
+ * - test processes
  *
  * =========================================================
  */
@@ -155,7 +121,7 @@ const deployAgent =
 
 
 /* =========================================================
-   FINANCIAL CONTROL
+   FINANCIAL
 ========================================================= */
 
 const financialControlAgent =
@@ -190,12 +156,6 @@ const whatsappControlAgent =
 const logger =
   require("../services/loggerService");
 
-const buildValidationService =
-  require("../services/buildValidationService");
-
-const authoritativeBuildService =
-  require("../services/authoritativeBuildService");
-
 const {
   generateText
 } =
@@ -203,26 +163,40 @@ const {
 
 
 /* =========================================================
+   ENGINEERING SYSTEM
+========================================================= */
+
+const engineeringOrchestrator =
+  require("../services/engineering/engineeringOrchestrator");
+
+const engineeringState =
+  require("../services/engineering/engineeringState");
+
+const engineeringIntelligence =
+  require("../services/engineering/engineeringIntelligence");
+
+const engineeringExecutor =
+  require("../services/engineering/engineeringExecutor");
+
+
+/* =========================================================
    CONSTANTS
 ========================================================= */
 
 const MASTER_VERSION =
-  "6.2.0";
+  "7.0.0";
 
 const MAX_PROMPT_LENGTH =
   12000;
 
 const MAX_WORKFLOW_STEPS =
-  50;
+  100;
 
 const MAX_AGENT_RESULTS =
-  80;
+  100;
 
 const MAX_FINAL_RESPONSE_TOKENS =
   1800;
-
-const MAX_BUILD_REPAIR_ROUNDS =
-  2;
 
 const MAX_DIAGNOSTIC_ERRORS =
   100;
@@ -241,6 +215,28 @@ const VALID_ENVIRONMENTS =
     "development",
     "preview",
     "production"
+  ]);
+
+
+/* =========================================================
+   ENGINEERING CONTRACT
+========================================================= */
+
+const ENGINEERING_STATES =
+  new Set([
+
+    "CREATED",
+    "ANALYZING",
+    "EXECUTING",
+    "FAILED",
+    "DIAGNOSING",
+    "REPAIRING",
+    "VERIFYING",
+    "PASSED",
+    "ROLLBACK",
+    "ESCALATED",
+    "PROMOTED"
+
   ]);
 
 
@@ -329,13 +325,25 @@ const agentRegistry = {
     emergencyAgent,
 
   whatsappControl:
-    whatsappControlAgent
+    whatsappControlAgent,
+
+  engineeringOrchestrator:
+    engineeringOrchestrator,
+
+  engineeringState:
+    engineeringState,
+
+  engineeringIntelligence:
+    engineeringIntelligence,
+
+  engineeringExecutor:
+    engineeringExecutor
 
 };
 
 
 /* =========================================================
-   SECRET SANITIZATION
+   SECRET KEYS
 ========================================================= */
 
 const SECRET_KEYS =
@@ -886,7 +894,7 @@ function normalizeRequest(
 
 
 /* =========================================================
-   ENVIRONMENT NORMALIZATION
+   ENVIRONMENT
 ========================================================= */
 
 function normalizeEnvironmentName(
@@ -996,27 +1004,23 @@ function createWorkflowState(
     agentResults:
       {},
 
-    buildValidation:
+    engineeringRun:
       null,
 
-    authoritativeBuild:
+    engineeringStatus:
       null,
 
-    buildRepair: {
+    engineeringPromotion:
+      null,
 
-      attempted:
-        false,
+    engineeringVerification:
+      null,
 
-      rounds:
-        0,
+    engineeringFailure:
+      null,
 
-      maxRounds:
-        MAX_BUILD_REPAIR_ROUNDS,
-
-      status:
-        "not_started"
-
-    },
+    engineeringRepair:
+      null,
 
     metrics: {
 
@@ -1418,6 +1422,7 @@ function determineWorkflow(
 
   }
 
+
   if (
     secondary.includes("github") ||
     secondary.includes("repository") ||
@@ -1428,6 +1433,7 @@ function determineWorkflow(
       true;
 
   }
+
 
   if (
     secondary.includes("github-deploy") ||
@@ -1447,6 +1453,7 @@ function determineWorkflow(
 
   }
 
+
   if (
     secondary.includes("deploy")
   ) {
@@ -1455,6 +1462,7 @@ function determineWorkflow(
       true;
 
   }
+
 
   if (
     secondary.includes("environment") ||
@@ -1466,6 +1474,7 @@ function determineWorkflow(
       true;
 
   }
+
 
   if (
     secondary.includes("build")
@@ -1479,6 +1488,7 @@ function determineWorkflow(
 
   }
 
+
   if (
     secondary.includes("fix")
   ) {
@@ -1487,6 +1497,7 @@ function determineWorkflow(
       true;
 
   }
+
 
   if (
     secondary.includes("billing")
@@ -1497,6 +1508,7 @@ function determineWorkflow(
 
   }
 
+
   if (
     secondary.includes("subscription")
   ) {
@@ -1505,6 +1517,7 @@ function determineWorkflow(
       true;
 
   }
+
 
   if (
     secondary.includes("monitor") ||
@@ -1516,6 +1529,7 @@ function determineWorkflow(
 
   }
 
+
   if (
     secondary.includes("scale") ||
     secondary.includes("scaling")
@@ -1526,6 +1540,7 @@ function determineWorkflow(
 
   }
 
+
   if (
     request?.autoDeploy === true
   ) {
@@ -1535,6 +1550,7 @@ function determineWorkflow(
 
   }
 
+
   if (
     request?.afterBuild === "deploy"
   ) {
@@ -1543,6 +1559,7 @@ function determineWorkflow(
       true;
 
   }
+
 
   if (
     request?.environmentName ||
@@ -1555,6 +1572,7 @@ function determineWorkflow(
 
   }
 
+
   if (
     workflow.requiresBuild &&
     workflow.requiresDeploy
@@ -1565,6 +1583,7 @@ function determineWorkflow(
 
   }
 
+
   if (
     workflow.requiresGithubDeployment
   ) {
@@ -1574,13 +1593,14 @@ function determineWorkflow(
 
   }
 
+
   return workflow;
 
 }
 
 
 /* =========================================================
-   PROJECT NAME
+   PROJECT HELPERS
 ========================================================= */
 
 function getProjectName(
@@ -1598,10 +1618,6 @@ function getProjectName(
 }
 
 
-/* =========================================================
-   PLANNING DATA
-========================================================= */
-
 function getPlanningData(
   planning
 ) {
@@ -1614,10 +1630,6 @@ function getPlanningData(
 
 }
 
-
-/* =========================================================
-   PROJECT FILES
-========================================================= */
 
 function getProjectFiles(
   request,
@@ -1635,28 +1647,7 @@ function getProjectFiles(
 
 
 /* =========================================================
-   DEPLOYMENT ID
-========================================================= */
-
-function getDeploymentId(
-  deploymentResult,
-  projectId
-) {
-
-  return (
-    deploymentResult?.deployment?.deploymentId ||
-    deploymentResult?.data?.deploymentId ||
-    deploymentResult?.deploymentId ||
-    deploymentResult?.data?.id ||
-    projectId ||
-    null
-  );
-
-}
-
-
-/* =========================================================
-   BUILD RESULT VALIDATION
+   BUILD CONTRACT
 ========================================================= */
 
 function validateBuildResult(
@@ -1730,116 +1721,94 @@ function validateBuildResult(
 
 
 /* =========================================================
-   FILE PATH
+   ENGINEERING FILE CONTRACT
 ========================================================= */
 
-function getFilePath(
-  file
+function normalizeEngineeringFiles(
+  files
 ) {
 
   if (
-    typeof file === "string"
+    !Array.isArray(files)
   ) {
 
-    return file;
+    return [];
 
   }
 
-  if (
-    !file ||
-    typeof file !== "object"
-  ) {
+  return files
+    .filter(
+      file =>
+        file &&
+        typeof file === "object"
+    )
+    .map(
+      file => {
 
-    return null;
+        const path =
+          file.path ||
+          file.name ||
+          file.filePath ||
+          file.relativePath ||
+          null;
 
-  }
+        const content =
+          typeof file.content === "string"
+            ? file.content
+            : typeof file.source === "string"
+              ? file.source
+              : typeof file.code === "string"
+                ? file.code
+                : null;
 
-  return (
-    file.path ||
-    file.name ||
-    file.filePath ||
-    file.relativePath ||
-    null
-  );
+        return {
+
+          ...file,
+
+          path,
+
+          name:
+            file.name ||
+            path,
+
+          content
+
+        };
+
+      }
+    )
+    .filter(
+      file =>
+        Boolean(
+          file.path
+        ) &&
+        typeof file.content === "string"
+    );
 
 }
 
 
 /* =========================================================
-   FILE CONTENT
+   ENGINEERING RESULT EXTRACTION
 ========================================================= */
 
-function getFileContent(
-  file
-) {
-
-  if (
-    typeof file === "string"
-  ) {
-
-    return null;
-
-  }
-
-  if (
-    !file ||
-    typeof file !== "object"
-  ) {
-
-    return null;
-
-  }
-
-  if (
-    typeof file.content === "string"
-  ) {
-
-    return file.content;
-
-  }
-
-  if (
-    typeof file.source === "string"
-  ) {
-
-    return file.source;
-
-  }
-
-  if (
-    typeof file.code === "string"
-  ) {
-
-    return file.code;
-
-  }
-
-  return null;
-
-}
-
-
-/* =========================================================
-   EXTRACT FIX FILES
-========================================================= */
-
-function extractFilesFromFixResult(
-  fixResult
+function extractEngineeringFiles(
+  result
 ) {
 
   const candidates = [
 
-    fixResult?.data?.files,
+    result?.files,
 
-    fixResult?.data?.changedFiles,
+    result?.data?.files,
 
-    fixResult?.data?.repairedFiles,
+    result?.result?.files,
 
-    fixResult?.files,
+    result?.result?.data?.files,
 
-    fixResult?.changedFiles,
+    result?.artifact?.files,
 
-    fixResult?.repairedFiles
+    result?.verification?.files
 
   ];
 
@@ -1852,7 +1821,9 @@ function extractFilesFromFixResult(
       candidate.length > 0
     ) {
 
-      return candidate;
+      return normalizeEngineeringFiles(
+        candidate
+      );
 
     }
 
@@ -1864,171 +1835,29 @@ function extractFilesFromFixResult(
 
 
 /* =========================================================
-   MERGE FIXED FILES
+   ENGINEERING STATE EXTRACTION
 ========================================================= */
 
-function mergeFixedFiles(
-  originalFiles,
-  fixedFiles
+function extractEngineeringState(
+  result
 ) {
 
   if (
-    !Array.isArray(originalFiles)
+    !result ||
+    typeof result !== "object"
   ) {
 
-    return [];
+    return null;
 
   }
-
-  if (
-    !Array.isArray(fixedFiles) ||
-    fixedFiles.length === 0
-  ) {
-
-    return originalFiles;
-
-  }
-
-  const merged =
-    originalFiles.map(
-      file =>
-        file &&
-        typeof file === "object"
-          ? {
-              ...file
-            }
-          : file
-    );
-
-  const indexByPath =
-    new Map();
-
-  for (
-    let index = 0;
-    index < merged.length;
-    index++
-  ) {
-
-    const path =
-      getFilePath(
-        merged[index]
-      );
-
-    if (path) {
-
-      indexByPath.set(
-        path,
-        index
-      );
-
-    }
-
-  }
-
-  for (
-    const fixedFile of fixedFiles
-  ) {
-
-    const path =
-      getFilePath(
-        fixedFile
-      );
-
-    if (!path) {
-      continue;
-    }
-
-    const content =
-      getFileContent(
-        fixedFile
-      );
-
-    if (
-      typeof content !== "string"
-    ) {
-
-      continue;
-
-    }
-
-    const existingIndex =
-      indexByPath.get(
-        path
-      );
-
-    if (
-      existingIndex !== undefined
-    ) {
-
-      const existing =
-        merged[
-          existingIndex
-        ];
-
-      merged[
-        existingIndex
-      ] = {
-
-        ...existing,
-
-        ...fixedFile,
-
-        path:
-          existing?.path ||
-          fixedFile?.path ||
-          path,
-
-        name:
-          existing?.name ||
-          fixedFile?.name ||
-          path,
-
-        content
-
-      };
-
-    } else {
-
-      merged.push({
-
-        ...fixedFile,
-
-        path,
-
-        name:
-          fixedFile?.name ||
-          path,
-
-        content
-
-      });
-
-      indexByPath.set(
-        path,
-        merged.length - 1
-      );
-
-    }
-
-  }
-
-  return merged;
-
-}
-
-
-/* =========================================================
-   MANIFEST EXTRACTION
-========================================================= */
-
-function getBuilderManifest(
-  buildResult
-) {
 
   return (
-    buildResult?.data?.manifest ||
-    buildResult?.manifest ||
-    buildResult?.metadata?.manifest ||
+    result.state ||
+    result.engineeringState ||
+    result.runState ||
+    result.snapshot ||
+    result.data?.state ||
+    result.data?.engineeringState ||
     null
   );
 
@@ -2036,759 +1865,97 @@ function getBuilderManifest(
 
 
 /* =========================================================
-   STATIC VALIDATION READINESS
+   ENGINEERING FAILURE EXTRACTION
 ========================================================= */
 
-function isStaticReady(
-  validation
+function extractEngineeringFailure(
+  result
 ) {
 
   if (
-    !validation ||
-    typeof validation !== "object"
-  ) {
-
-    return false;
-
-  }
-
-  if (
-    typeof buildValidationService
-      ?.isStaticValidationReady ===
-    "function"
-  ) {
-
-    return buildValidationService
-      .isStaticValidationReady(
-        validation
-      );
-
-  }
-
-  return (
-    validation.success === true &&
-    validation.status ===
-      "passed" &&
-    validation.authoritative ===
-      false &&
-    validation.validationMode ===
-      "static" &&
-    Array.isArray(
-      validation.errors
-    ) &&
-    validation.errors.length === 0 &&
-    typeof validation.sourceHash ===
-      "string" &&
-    validation.sourceHash.length > 0
-  );
-
-}
-
-
-/* =========================================================
-   STATIC BUILD VALIDATION
-========================================================= */
-
-async function validateGeneratedBuild(
-  workflowState,
-  request,
-  planningData,
-  buildResult
-) {
-
-  const basic =
-    validateBuildResult(
-      buildResult
-    );
-
-  if (
-    !basic.valid
-  ) {
-
-    return {
-
-      success:
-        false,
-
-      ready:
-        false,
-
-      authoritative:
-        false,
-
-      mode:
-        "builder-contract",
-
-      validationMode:
-        "static",
-
-      error:
-        basic.error,
-
-      errors: [
-        {
-          code:
-            "BUILDER_CONTRACT_FAILED",
-
-          message:
-            basic.error,
-
-          stage:
-            "builder-contract",
-
-          file:
-            ""
-        }
-      ],
-
-      warnings: []
-
-    };
-
-  }
-
-  const files =
-    basic.files;
-
-  const framework =
-    request.framework ||
-    planningData?.framework ||
-    planningData?.frontend?.framework ||
-    "React";
-
-  try {
-
-    if (
-      typeof buildValidationService
-        ?.validateProject !==
-      "function"
-    ) {
-
-      return {
-
-        success:
-          false,
-
-        ready:
-          false,
-
-        authoritative:
-          false,
-
-        mode:
-          "validator-unavailable",
-
-        validationMode:
-          "static",
-
-        error:
-          "Build validation service is unavailable.",
-
-        errors: [
-          {
-            code:
-              "VALIDATOR_UNAVAILABLE",
-
-            message:
-              "Build validation service is unavailable.",
-
-            stage:
-              "static-validation",
-
-            file:
-              ""
-          }
-        ],
-
-        warnings: []
-
-      };
-
-    }
-
-    const validation =
-      await buildValidationService
-        .validateProject({
-
-          files,
-
-          plan:
-            planningData,
-
-          projectData: {
-
-            projectId:
-              workflowState.projectId,
-
-            projectName:
-              getProjectName(
-                request,
-                planningData
-              ),
-
-            framework,
-
-            projectScale:
-              planningData?.projectScale ||
-              planningData?.scale ||
-              null
-
-          },
-
-          manifest:
-            getBuilderManifest(
-              buildResult
-            )
-
-        });
-
-    const ready =
-      isStaticReady(
-        validation
-      );
-
-    return {
-
-      success:
-        validation?.success === true,
-
-      ready,
-
-      authoritative:
-        validation?.authoritative === true,
-
-      mode:
-        validation?.validationMode ||
-        validation?.mode ||
-        "static",
-
-      validationMode:
-        validation?.validationMode ||
-        "static",
-
-      framework,
-
-      packageManager:
-        validation?.summary
-          ?.packageManager ||
-        validation?.metadata
-          ?.packageManager ||
-        null,
-
-      nodeVersion:
-        validation?.summary
-          ?.nodeVersion ||
-        validation?.metadata
-          ?.nodeVersion ||
-        planningData?.nodeVersion ||
-        null,
-
-      buildCommand:
-        validation?.summary
-          ?.buildCommand ||
-        validation?.metadata
-          ?.buildCommand ||
-        null,
-
-      installCommand:
-        validation?.summary
-          ?.installCommand ||
-        validation?.metadata
-          ?.installCommand ||
-        null,
-
-      outputDirectory:
-        validation?.summary
-          ?.outputDirectory ||
-        validation?.metadata
-          ?.outputDirectory ||
-        planningData?.outputDirectory ||
-        null,
-
-      fileCount:
-        files.length,
-
-      sourceHash:
-        validation?.sourceHash ||
-        null,
-
-      errors:
-        Array.isArray(
-          validation?.errors
-        )
-          ? validation.errors
-          : [],
-
-      warnings:
-        Array.isArray(
-          validation?.warnings
-        )
-          ? validation.warnings
-          : [],
-
-      repairContext:
-        validation?.repairContext ||
-        null,
-
-      validation
-
-    };
-
-  } catch (
-    error
-  ) {
-
-    const normalized =
-      normalizeError(
-        error
-      );
-
-    return {
-
-      success:
-        false,
-
-      ready:
-        false,
-
-      authoritative:
-        false,
-
-      mode:
-        "validator-exception",
-
-      validationMode:
-        "static",
-
-      error:
-        normalized.message,
-
-      errors: [
-        {
-          code:
-            normalized.code ||
-            "STATIC_VALIDATION_EXCEPTION",
-
-          message:
-            normalized.message,
-
-          stage:
-            "static-validation",
-
-          file:
-            ""
-        }
-      ],
-
-      warnings: []
-
-    };
-
-  }
-
-}
-
-
-/* =========================================================
-   AUTHORITATIVE RAW RESULT
-========================================================= */
-
-function getAuthoritativeRawResult(
-  authoritativeBuild
-) {
-
-  if (
-    !authoritativeBuild ||
-    typeof authoritativeBuild !== "object"
-  ) {
-
-    return {};
-
-  }
-
-  /*
-   * Master wraps the direct service result inside
-   * normalized.result.
-   *
-   * This helper intentionally supports BOTH:
-   *
-   * 1. normalized.result
-   * 2. direct authoritativeBuild result
-   *
-   * so the contract remains forward-compatible.
-   */
-
-  return (
-    authoritativeBuild.result &&
-    typeof authoritativeBuild.result === "object"
-      ? authoritativeBuild.result
-      : authoritativeBuild
-  );
-
-}
-
-
-/* =========================================================
-   AUTHORITATIVE REPAIR CONTEXT EXTRACTION
-========================================================= */
-
-function getAuthoritativeRepairContext(
-  authoritativeBuild
-) {
-
-  if (
-    !authoritativeBuild ||
-    typeof authoritativeBuild !== "object"
+    !result ||
+    typeof result !== "object"
   ) {
 
     return null;
 
   }
 
-  const raw =
-    getAuthoritativeRawResult(
-      authoritativeBuild
-    );
-
-  const candidates = [
-
-    raw?.repairContext,
-
-    authoritativeBuild?.repairContext,
-
-    raw?.data?.repairContext,
-
-    authoritativeBuild?.data?.repairContext,
-
-    raw?.errorDetails?.repairContext,
-
-    raw?.details?.repairContext
-
-  ];
-
-  for (
-    const candidate of candidates
-  ) {
-
-    if (
-      candidate &&
-      typeof candidate === "object"
-    ) {
-
-      return candidate;
-
-    }
-
-  }
-
-  return null;
+  return (
+    result.failure ||
+    result.failureRecord ||
+    result.repairContext ||
+    result.errorDetails ||
+    result.data?.failure ||
+    result.data?.failureRecord ||
+    result.data?.repairContext ||
+    null
+  );
 
 }
 
 
 /* =========================================================
-   AUTHORITATIVE FAILURE DETAILS
+   ENGINEERING VERIFICATION
 ========================================================= */
 
-function getAuthoritativeFailureDetails(
-  authoritativeBuild
+function extractEngineeringVerification(
+  result
 ) {
 
-  const empty = {
-
-    category:
-      null,
-
-    failureStage:
-      null,
-
-    retryable:
-      false,
-
-    affectedFiles:
-      [],
-
-    errors:
-      [],
-
-    stdout:
-      "",
-
-    stderr:
-      "",
-
-    exitCode:
-      null,
-
-    signal:
-      null,
-
-    timedOut:
-      false,
-
-    strategy:
-      null,
-
-    buildCommand:
-      null,
-
-    installCommand:
-      null,
-
-    buildId:
-      null,
-
-    sourceHash:
-      null,
-
-    nodeVersion:
-      null,
-
-    packageManager:
-      null,
-
-    outputDirectory:
-      null
-
-  };
-
   if (
-    !authoritativeBuild ||
-    typeof authoritativeBuild !== "object"
+    !result ||
+    typeof result !== "object"
   ) {
 
-    return empty;
+    return null;
 
   }
 
-  const raw =
-    getAuthoritativeRawResult(
-      authoritativeBuild
-    );
-
-  const repairContext =
-    getAuthoritativeRepairContext(
-      authoritativeBuild
-    ) ||
-    {};
-
-  const rawErrors =
-    Array.isArray(
-      repairContext.errors
-    )
-      ? repairContext.errors
-      : (
-          Array.isArray(raw.errors)
-            ? raw.errors
-            : (
-                Array.isArray(
-                  raw.data?.errors
-                )
-                  ? raw.data.errors
-                  : []
-              )
-        );
-
-  const affectedFiles =
-    Array.isArray(
-      repairContext.affectedFiles
-    )
-      ? repairContext.affectedFiles
-      : (
-          Array.isArray(
-            raw.affectedFiles
-          )
-            ? raw.affectedFiles
-            : []
-        );
-
-  const stdout =
-    cleanString(
-      repairContext.stdout ||
-      raw.stdout ||
-      raw.data?.stdout ||
-      "",
-      MAX_STDOUT_LENGTH
-    );
-
-  const stderr =
-    cleanString(
-      repairContext.stderr ||
-      raw.stderr ||
-      raw.data?.stderr ||
-      "",
-      MAX_STDERR_LENGTH
-    );
-
-  const exitCode =
-    repairContext.exitCode ??
-    raw.exitCode ??
-    raw.data?.exitCode ??
-    null;
-
-  const signal =
-    cleanString(
-      repairContext.signal ||
-      raw.signal ||
-      raw.data?.signal ||
-      "",
-      100
-    ) ||
-    null;
-
-  const timedOut =
-    repairContext.timedOut === true ||
-    raw.timedOut === true ||
-    raw.data?.timedOut === true;
-
-  const category =
-    cleanString(
-      repairContext.failureCategory ||
-      repairContext.category ||
-      raw.failureCategory ||
-      raw.category ||
-      raw.data?.failureCategory ||
-      raw.data?.category ||
-      "",
-      200
-    ) ||
-    null;
-
-  const failureStage =
-    cleanString(
-      repairContext.failureStage ||
-      repairContext.stage ||
-      raw.failureStage ||
-      raw.stage ||
-      raw.data?.failureStage ||
-      raw.data?.stage ||
-      "authoritative-build",
-      200
-    );
-
-  const strategy =
-    cleanString(
-      repairContext.strategy ||
-      raw.strategy ||
-      raw.data?.strategy ||
-      "",
-      4000
-    ) ||
-    null;
-
-  const retryable =
-    repairContext.retryable === true ||
-    raw.retryable === true ||
-    raw.data?.retryable === true;
-
-  const buildCommand =
-    cleanString(
-      repairContext.buildCommand ||
-      raw.buildCommand ||
-      raw.data?.buildCommand ||
-      "",
-      2000
-    ) ||
-    null;
-
-  const installCommand =
-    cleanString(
-      repairContext.installCommand ||
-      raw.installCommand ||
-      raw.data?.installCommand ||
-      "",
-      2000
-    ) ||
-    null;
-
-  const buildId =
-    repairContext.buildId ||
-    raw.buildId ||
-    raw.data?.buildId ||
-    null;
-
-  const sourceHash =
-    repairContext.sourceHash ||
-    raw.sourceHash ||
-    raw.data?.sourceHash ||
-    null;
-
-  const nodeVersion =
-    repairContext.nodeVersion ||
-    raw.nodeVersion ||
-    raw.data?.nodeVersion ||
-    null;
-
-  const packageManager =
-    repairContext.packageManager ||
-    raw.packageManager ||
-    raw.data?.packageManager ||
-    null;
-
-  const outputDirectory =
-    repairContext.outputDirectory ||
-    raw.outputDirectory ||
-    raw.data?.outputDirectory ||
-    null;
-
-  return {
-
-    category,
-
-    failureStage,
-
-    retryable,
-
-    affectedFiles:
-      affectedFiles
-        .slice(
-          0,
-          MAX_AFFECTED_FILES
-        ),
-
-    errors:
-      rawErrors
-        .slice(
-          0,
-          MAX_DIAGNOSTIC_ERRORS
-        ),
-
-    stdout,
-
-    stderr,
-
-    exitCode,
-
-    signal,
-
-    timedOut,
-
-    strategy,
-
-    buildCommand,
-
-    installCommand,
-
-    buildId,
-
-    sourceHash,
-
-    nodeVersion,
-
-    packageManager,
-
-    outputDirectory
-
-  };
+  return (
+    result.verification ||
+    result.verificationRecord ||
+    result.data?.verification ||
+    result.data?.verificationRecord ||
+    null
+  );
 
 }
 
 
 /* =========================================================
-   AUTHORITATIVE READINESS
+   ENGINEERING PROMOTION
 ========================================================= */
 
-function isAuthoritativeReady(
+function extractEngineeringPromotion(
+  result
+) {
+
+  if (
+    !result ||
+    typeof result !== "object"
+  ) {
+
+    return null;
+
+  }
+
+  return (
+    result.promotion ||
+    result.promotionRecord ||
+    result.data?.promotion ||
+    result.data?.promotionRecord ||
+    null
+  );
+
+}
+
+
+/* =========================================================
+   STRICT ENGINEERING SUCCESS
+========================================================= */
+
+function isEngineeringPromoted(
   result
 ) {
 
@@ -2801,102 +1968,81 @@ function isAuthoritativeReady(
 
   }
 
-  /*
-   * FIRST CHOICE:
-   *
-   * The AuthoritativeBuildService owns authoritative
-   * readiness semantics.
-   *
-   * Never duplicate its artifact/readiness rules in Master
-   * when the official service contract is available.
-   */
+  const state =
+    String(
+      result.state ||
+      result.engineeringState ||
+      result.status ||
+      result.data?.state ||
+      ""
+    )
+      .toUpperCase();
 
-  if (
-    typeof authoritativeBuildService
-      ?.isAuthoritativeBuildReady ===
-    "function"
-  ) {
+  const promotion =
+    extractEngineeringPromotion(
+      result
+    );
 
-    try {
-
-      return Boolean(
-        authoritativeBuildService
-          .isAuthoritativeBuildReady(
-            result
-          )
-      );
-
-    } catch (
-      error
-    ) {
-
-      logWarn(
-        "Authoritative readiness service check failed; using strict local contract.",
-        {
-          error:
-            error?.message ||
-            "Unknown readiness error"
-        }
-      );
-
-    }
-
-  }
-
-  /*
-   * STRICT FALLBACK.
-   *
-   * buildId alone is NEVER enough.
-   */
+  const verification =
+    extractEngineeringVerification(
+      result
+    );
 
   const authoritative =
-    result.authoritative === true;
+    result.authoritative === true ||
+    result.data?.authoritative === true ||
+    result.verification?.authoritative === true ||
+    verification?.authoritative === true;
 
-  const success =
-    result.success === true;
+  const verified =
+    result.verified === true ||
+    result.data?.verified === true ||
+    verification?.verified === true ||
+    verification?.success === true;
 
-  const validationMode =
-    result.validationMode ||
-    result.mode ||
-    "";
-
-  const status =
-    result.status ||
-    "";
+  const promoted =
+    result.promoted === true ||
+    result.data?.promoted === true ||
+    promotion?.promoted === true ||
+    state === "PROMOTED";
 
   const artifact =
     result.artifact ||
     result.data?.artifact ||
+    verification?.artifact ||
     null;
 
   const artifactReady =
     Boolean(
       artifact &&
       typeof artifact === "object" &&
-      artifact.storageKey &&
-      artifact.checksum
+      (
+        artifact.storageKey ||
+        artifact.path ||
+        artifact.checksum
+      )
     );
 
-  return (
-    success &&
+  return Boolean(
+    result.success === true &&
+    promoted &&
     authoritative &&
-    validationMode === "authoritative" &&
+    verified &&
     (
-      status === "passed" ||
-      status === "success" ||
-      status === "completed"
-    ) &&
-    artifactReady
+      artifactReady ||
+      result.buildId ||
+      result.data?.buildId
+    )
   );
 
 }
 
 
 /* =========================================================
-   AUTHORITATIVE BUILD CONTRACT
+   ENGINEERING FAILURE
 ========================================================= */
 
-function validateAuthoritativeBuildResult(
+function isEngineeringFailure(
   result
 ) {
 
@@ -2905,791 +2051,71 @@ function validateAuthoritativeBuildResult(
     typeof result !== "object"
   ) {
 
-    return {
-
-      ready:
-        false,
-
-      success:
-        false,
-
-      authoritative:
-        false,
-
-      status:
-        "invalid",
-
-      buildId:
-        null,
-
-      error:
-        "Authoritative build service returned no result."
-
-    };
+    return true;
 
   }
-
-  const raw =
-    result;
-
-  const success =
-    raw.success === true;
-
-  const authoritative =
-    raw.authoritative === true;
-
-  const status =
-    raw.status ||
-    "";
-
-  const buildId =
-    raw.buildId ||
-    raw.id ||
-    null;
-
-  /*
-   * IMPORTANT:
-   *
-   * Readiness is delegated to the authoritative service.
-   * This prevents Master from declaring a build ready only
-   * because a buildId exists.
-   */
-
-  const ready =
-    isAuthoritativeReady(
-      raw
-    );
-
-  return {
-
-    ready,
-
-    success,
-
-    authoritative,
-
-    status,
-
-    buildId,
-
-    error:
-      ready
-        ? null
-        : (
-            raw.error ||
-            raw.message ||
-            raw.data?.error ||
-            "Authoritative build failed or did not produce a verified artifact."
-          )
-
-  };
-
-}
-
-
-/* =========================================================
-   AUTHORITATIVE FAILURE SUMMARY
-========================================================= */
-
-function createAuthoritativeFailureSummary(
-  authoritativeBuild
-) {
-
-  const details =
-    getAuthoritativeFailureDetails(
-      authoritativeBuild
-    );
-
-  const raw =
-    getAuthoritativeRawResult(
-      authoritativeBuild
-    );
-
-  return {
-
-    status:
-      authoritativeBuild?.status ||
-      raw?.status ||
-      "failed",
-
-    buildId:
-      details.buildId ||
-      authoritativeBuild?.buildId ||
-      raw?.buildId ||
-      null,
-
-    error:
-      cleanString(
-        authoritativeBuild?.error ||
-        raw?.error ||
-        raw?.message ||
-        "Authoritative build failed.",
-        4000
-      ),
-
-    category:
-      details.category,
-
-    failureStage:
-      details.failureStage,
-
-    retryable:
-      details.retryable,
-
-    exitCode:
-      details.exitCode,
-
-    signal:
-      details.signal,
-
-    timedOut:
-      details.timedOut,
-
-    buildCommand:
-      details.buildCommand,
-
-    installCommand:
-      details.installCommand,
-
-    affectedFiles:
-      details.affectedFiles,
-
-    errors:
-      details.errors,
-
-    stdout:
-      details.stdout,
-
-    stderr:
-      details.stderr,
-
-    strategy:
-      details.strategy,
-
-    sourceHash:
-      details.sourceHash,
-
-    nodeVersion:
-      details.nodeVersion,
-
-    packageManager:
-      details.packageManager,
-
-    outputDirectory:
-      details.outputDirectory
-
-  };
-
-}
-
-
-/* =========================================================
-   AUTHORITATIVE BUILD
-========================================================= */
-
-async function executeAuthoritativeBuild(
-  workflowState,
-  request,
-  planningData,
-  buildResult,
-  buildValidation
-) {
 
   if (
-    typeof authoritativeBuildService
-      ?.executeBuild !==
-    "function"
+    result.success === false
   ) {
 
-    return {
-
-      success:
-        false,
-
-      ready:
-        false,
-
-      authoritative:
-        true,
-
-      status:
-        "service_unavailable",
-
-      validationMode:
-        "authoritative",
-
-      error:
-        "AuthoritativeBuildService.executeBuild is unavailable.",
-
-      repairContext: {
-
-        required:
-          true,
-
-        failureStage:
-          "service",
-
-        failureCategory:
-          "service",
-
-        retryable:
-          false,
-
-        affectedFiles:
-          [],
-
-        errors: [
-          {
-            code:
-              "AUTHORITATIVE_SERVICE_UNAVAILABLE",
-
-            message:
-              "AuthoritativeBuildService.executeBuild is unavailable.",
-
-            stage:
-              "service",
-
-            category:
-              "service",
-
-            retryable:
-              false,
-
-            file:
-              "",
-            
-            line:
-              null,
-
-            column:
-              null
-
-          }
-        ],
-
-        stdout:
-          "",
-
-        stderr:
-          "",
-
-        exitCode:
-          null,
-
-        signal:
-          null,
-
-        timedOut:
-          false,
-
-        strategy:
-          "service_unavailable"
-
-      }
-
-    };
+    return true;
 
   }
 
-  const files =
-    getProjectFiles(
-      request,
-      buildResult
-    );
-
-  const framework =
-    request.framework ||
-    planningData?.framework ||
-    planningData?.frontend?.framework ||
-    buildValidation?.framework ||
-    "React";
-
-  const packageManager =
-    buildValidation?.packageManager ||
-    planningData?.packageManager ||
-    "npm";
-
-  /*
-   * Resolve authoritative build configuration from the
-   * static validation / planning contract.
-   *
-   * AuthoritativeBuildService remains the final owner of
-   * actual command validation and execution.
-   */
-
-  const nodeVersion =
-    buildValidation?.nodeVersion ||
-    planningData?.nodeVersion ||
-    planningData?.runtime?.nodeVersion ||
-    null;
-
-  const buildCommand =
-    buildValidation?.buildCommand ||
-    planningData?.buildCommand ||
-    planningData?.scripts?.build ||
-    null;
-
-  const installCommand =
-    buildValidation?.installCommand ||
-    planningData?.installCommand ||
-    null;
-
-  const outputDirectory =
-    buildValidation?.outputDirectory ||
-    planningData?.outputDirectory ||
-    planningData?.build?.outputDirectory ||
-    null;
-
-  try {
-
-    logInfo(
-      "Master → Authoritative Build",
-      {
-
-        workflowId:
-          workflowState.workflowId,
-
-        projectId:
-          workflowState.projectId,
-
-        fileCount:
-          files.length,
-
-        framework,
-
-        packageManager,
-
-        nodeVersion,
-
-        buildCommand,
-
-        installCommand,
-
-        outputDirectory
-
-      }
-    );
-
-    /*
-     * IMPORTANT:
-     *
-     * Keep the call as executeBuild().
-     *
-     * Do not wrap its returned contract here before
-     * validating it.
-     */
-
-    const result =
-      await authoritativeBuildService
-        .executeBuild({
-
-          projectId:
-            workflowState.projectId,
-
-          userId:
-            workflowState.userId,
-
-          projectName:
-            workflowState.projectName ||
-            getProjectName(
-              request,
-              planningData
-            ),
-
-          framework,
-
-          packageManager,
-
-          nodeVersion,
-
-          buildCommand,
-
-          installCommand,
-
-          outputDirectory,
-
-          files,
-
-          plan:
-            planningData,
-
-          sourceHash:
-            buildValidation?.sourceHash ||
-            null,
-
-          workflowId:
-            workflowState.workflowId,
-
-          requestId:
-            workflowState.requestId
-
-        });
-
-    const contract =
-      validateAuthoritativeBuildResult(
-        result
-      );
-
-    const normalized = {
-
-      success:
-        contract.success,
-
-      ready:
-        contract.ready,
-
-      authoritative:
-        contract.authoritative,
-
-      status:
-        contract.status,
-
-      buildId:
-        contract.buildId,
-
-      error:
-        contract.error,
-
-      /*
-       * Keep the original authoritative service result
-       * intact so repairContext/artifact/diagnostics are
-       * never lost.
-       */
-      result:
-
-        result &&
-        typeof result === "object"
-          ? result
-          : null
-
-    };
-
-    workflowState.authoritativeBuild =
-      sanitizeForContext(
-        normalized
-      );
-
-    recordStage(
-      workflowState,
-      "authoritative-build",
-      normalized,
-      normalized.ready
-        ? "completed"
-        : "failed"
-    );
-
-    if (
-      normalized.ready
-    ) {
-
-      logSuccess(
-        "Authoritative Build Passed",
-        {
-
-          workflowId:
-            workflowState.workflowId,
-
-          buildId:
-            normalized.buildId,
-
-          artifact:
-            Boolean(
-              result?.artifact ||
-              result?.data?.artifact
-            )
-
-        }
-      );
-
-    } else {
-
-      const failureSummary =
-        createAuthoritativeFailureSummary(
-          normalized
-        );
-
-      logError(
-        "Authoritative Build Failed",
-        {
-
-          workflowId:
-            workflowState.workflowId,
-
-          buildId:
-            normalized.buildId,
-
-          error:
-            normalized.error,
-
-          category:
-            failureSummary.category,
-
-          failureStage:
-            failureSummary.failureStage,
-
-          exitCode:
-            failureSummary.exitCode,
-
-          signal:
-            failureSummary.signal,
-
-          timedOut:
-            failureSummary.timedOut,
-
-          buildCommand:
-            failureSummary.buildCommand,
-
-          installCommand:
-            failureSummary.installCommand,
-
-          affectedFiles:
-            failureSummary.affectedFiles,
-
-          retryable:
-            failureSummary.retryable,
-
-          stderr:
-            failureSummary.stderr,
-
-          stdout:
-            failureSummary.stdout
-
-        }
-      );
-
-    }
-
-    return normalized;
-
-  } catch (
-    error
-  ) {
-
-    const normalized =
-      normalizeError(
-        error
-      );
-
-    const failure = {
-
-      success:
-        false,
-
-      ready:
-        false,
-
-      /*
-       * The authoritative boundary was entered, therefore
-       * this is still an authoritative-stage failure.
-       */
-      authoritative:
-        true,
-
-      status:
-        "exception",
-
-      validationMode:
-        "authoritative",
-
-      buildId:
-        null,
-
-      error:
-        normalized.message,
-
-      code:
-        normalized.code,
-
-      result: {
-
-        success:
-          false,
-
-        authoritative:
-          true,
-
-        status:
-          "exception",
-
-        validationMode:
-          "authoritative",
-
-        error:
-          normalized.message,
-
-        code:
-          normalized.code,
-
-        buildCommand,
-
-        installCommand,
-
-        outputDirectory,
-
-        repairContext: {
-
-          required:
-            true,
-
-          buildId:
-            null,
-
-          sourceHash:
-            buildValidation?.sourceHash ||
-            null,
-
-          packageManager,
-
-          failureStage:
-            "service",
-
-          failureCategory:
-            "service",
-
-          retryable:
-            false,
-
-          affectedFiles:
-            [],
-
-          errors: [
-            {
-              code:
-                normalized.code ||
-                "AUTHORITATIVE_BUILD_EXCEPTION",
-
-              message:
-                normalized.message,
-
-              step:
-                "executeBuild",
-
-              stage:
-                "service",
-
-              category:
-                "service",
-
-              retryable:
-                false,
-
-              file:
-                "",
-
-              line:
-                null,
-
-              column:
-                null
-
-            }
-          ],
-
-          stdout:
-            "",
-
-          stderr:
-            "",
-
-          exitCode:
-            null,
-
-          signal:
-            null,
-
-          timedOut:
-            false,
-
-          buildCommand,
-
-          installCommand,
-
-          strategy:
-            "master_service_exception"
-
-        }
-
-      }
-
-    };
-
-    workflowState.authoritativeBuild =
-      sanitizeForContext(
-        failure
-      );
-
-    recordStage(
-      workflowState,
-      "authoritative-build",
-      failure,
-      "failed"
-    );
-
-    logError(
-      "Authoritative Build Exception",
-      {
-
-        workflowId:
-          workflowState.workflowId,
-
-        error:
-          normalized.message
-
-      }
-    );
-
-    return failure;
-
-  }
+  const state =
+    String(
+      result.state ||
+      result.engineeringState ||
+      result.status ||
+      ""
+    )
+      .toUpperCase();
+
+  return (
+    state === "FAILED" ||
+    state === "ESCALATED" ||
+    state === "ROLLBACK"
+  );
 
 }
 
 
 /* =========================================================
-   BUILD REPAIR CONTEXT
+   ENGINEERING PAYLOAD
 ========================================================= */
 
-function createBuildRepairContext(
+function createEngineeringJob(
   workflowState,
   request,
+  normalizedUser,
   intent,
   planningData,
   buildResult,
-  buildValidation,
-  authoritativeBuild
+  memoryContext
 ) {
 
-  const isAuthoritativeFailure =
-    Boolean(
-      authoritativeBuild
+  const files =
+    normalizeEngineeringFiles(
+      getProjectFiles(
+        request,
+        buildResult
+      )
     );
 
-  const authoritativeRepairContext =
-    isAuthoritativeFailure
-      ? getAuthoritativeRepairContext(
-          authoritativeBuild
-        )
-      : null;
-
-  const authoritativeFailure =
-    isAuthoritativeFailure
-      ? createAuthoritativeFailureSummary(
-          authoritativeBuild
-        )
-      : null;
-
   return {
+
+    jobType:
+      "build",
+
+    operation:
+      "autonomous-engineering-build",
 
     source:
       "masterAgent",
 
-    version:
+    masterVersion:
       MASTER_VERSION,
-
-    trigger:
-      isAuthoritativeFailure
-        ? "authoritative_build_failure"
-        : "static_validation_failure",
 
     workflowId:
       workflowState.workflowId,
@@ -3716,11 +2142,10 @@ function createBuildRepairContext(
         MAX_PROMPT_LENGTH
       ),
 
-    framework:
-      request.framework ||
-      planningData?.framework ||
-      planningData?.frontend?.framework ||
-      null,
+    user:
+      sanitizeForContext(
+        normalizedUser
+      ),
 
     intent:
       sanitizeForContext(
@@ -3732,118 +2157,61 @@ function createBuildRepairContext(
         planningData
       ),
 
-    buildResult:
+    memoryContext:
       sanitizeForContext(
-        buildResult
+        memoryContext
       ),
 
-    buildValidation:
-      sanitizeForContext(
-        buildValidation
-      ),
+    files,
 
-    authoritativeBuild:
-      sanitizeForContext(
-        authoritativeBuild
-      ),
-
-    staticErrors:
-      sanitizeForContext(
-        buildValidation?.errors ||
-        []
-      ),
-
-    staticWarnings:
-      sanitizeForContext(
-        buildValidation?.warnings ||
-        []
-      ),
-
-    staticRepairContext:
-      sanitizeForContext(
-        buildValidation?.repairContext ||
-        null
-      ),
-
-    authoritativeRepairContext:
-      sanitizeForContext(
-        authoritativeRepairContext
-      ),
-
-    authoritativeFailure:
-      sanitizeForContext(
-        authoritativeFailure
-      ),
-
-    authoritativeErrors:
-      sanitizeForContext(
-        authoritativeFailure?.errors ||
-        []
-      ),
-
-    affectedFiles:
-      sanitizeForContext(
-        authoritativeFailure?.affectedFiles ||
-        []
-      ),
-
-    failureCategory:
-      authoritativeFailure?.category ||
+    framework:
+      request.framework ||
+      planningData?.framework ||
+      planningData?.frontend?.framework ||
       null,
 
-    failureStage:
-      authoritativeFailure?.failureStage ||
-      (
-        isAuthoritativeFailure
-          ? "authoritative-build"
-          : "static-validation"
-      ),
-
-    retryable:
-      authoritativeFailure?.retryable === true,
-
-    exitCode:
-      authoritativeFailure?.exitCode ??
+    packageManager:
+      planningData?.packageManager ||
       null,
 
-    signal:
-      authoritativeFailure?.signal ||
+    nodeVersion:
+      planningData?.nodeVersion ||
+      planningData?.runtime?.nodeVersion ||
       null,
-
-    timedOut:
-      authoritativeFailure?.timedOut === true,
 
     buildCommand:
-      authoritativeFailure?.buildCommand ||
-      buildValidation?.buildCommand ||
+      planningData?.buildCommand ||
+      planningData?.scripts?.build ||
       null,
 
     installCommand:
-      authoritativeFailure?.installCommand ||
-      buildValidation?.installCommand ||
+      planningData?.installCommand ||
       null,
 
-    stdout:
-      sanitizeForContext(
-        authoritativeFailure?.stdout ||
-        ""
-      ),
+    outputDirectory:
+      planningData?.outputDirectory ||
+      planningData?.build?.outputDirectory ||
+      null,
 
-    stderr:
-      sanitizeForContext(
-        authoritativeFailure?.stderr ||
-        ""
-      ),
+    projectScale:
+      getIntentData(
+        intent
+      ).projectScale ||
+      planningData?.projectScale ||
+      planningData?.scale ||
+      null,
 
-    repairStrategy:
-      sanitizeForContext(
-        authoritativeFailure?.strategy ||
-        null
-      ),
+    complexity:
+      getIntentData(
+        intent
+      ).complexity ||
+      planningData?.complexity ||
+      null,
 
-    repairRound:
-      workflowState.buildRepair?.rounds ||
-      0
+    environmentName:
+      workflowState.environmentName ||
+      request.environmentName ||
+      null
 
   };
 
@@ -3851,951 +2219,527 @@ function createBuildRepairContext(
 
 
 /* =========================================================
-   BUILD → STATIC → AUTHORITATIVE → FIX LOOP
+   ENGINEERING ORCHESTRATOR ADAPTER
 ========================================================= */
 
-async function validateAndRepairBuild(
+async function executeEngineeringWorkflow(
   workflowState,
   request,
   normalizedUser,
   intent,
   planningData,
-  initialBuildResult
+  buildResult,
+  memoryContext
 ) {
 
-  let buildResult =
-    initialBuildResult;
+  workflowState.currentStage =
+    "engineering-orchestration";
 
-  let buildValidation =
-    null;
+  const job =
+    createEngineeringJob(
 
-  let authoritativeBuild =
-    null;
-
-  let lastFixResult =
-    null;
-
-  for (
-    let round = 0;
-    round <= MAX_BUILD_REPAIR_ROUNDS;
-    round++
-  ) {
-
-    workflowState.buildRepair.rounds =
-      round;
-
-
-    /* =====================================================
-       STATIC VALIDATION
-    ===================================================== */
-
-    workflowState.currentStage =
-      "build-validation";
-
-    buildValidation =
-      await validateGeneratedBuild(
-
-        workflowState,
-
-        request,
-
-        planningData,
-
-        buildResult
-
-      );
-
-    workflowState.buildValidation =
-      sanitizeForContext(
-        buildValidation
-      );
-
-    recordStage(
       workflowState,
 
-      round === 0
-        ? "build-validation"
-        : `build-validation-${round}`,
+      request,
 
-      buildValidation,
+      normalizedUser,
 
-      buildValidation.ready
-        ? "completed"
-        : "failed"
+      intent,
+
+      planningData,
+
+      buildResult,
+
+      memoryContext
 
     );
 
 
-    /* =====================================================
-       STATIC FAILURE
-    ===================================================== */
+  recordStage(
+    workflowState,
+    "engineering-job-created",
+    {
+      projectId:
+        workflowState.projectId,
 
-    if (
-      !buildValidation.ready
-    ) {
+      workflowId:
+        workflowState.workflowId,
 
-      if (
-        round >=
-        MAX_BUILD_REPAIR_ROUNDS
-      ) {
+      fileCount:
+        job.files.length,
 
-        workflowState.buildRepair.status =
-          "exhausted";
+      framework:
+        job.framework,
 
-        return {
+      projectScale:
+        job.projectScale,
 
-          success:
-            false,
+      complexity:
+        job.complexity
+    },
+    "completed"
+  );
 
-          buildResult,
 
-          buildValidation,
+  if (
+    !engineeringOrchestrator
+  ) {
 
-          authoritativeBuild,
+    const failure = {
 
-          fixResult:
-            lastFixResult,
+      success:
+        false,
 
-          repaired:
-            round > 0,
+      state:
+        "ESCALATED",
 
-          repairRounds:
-            round,
+      status:
+        "service_unavailable",
 
-          error:
-            buildValidation.error ||
-            "Static build validation failed after maximum repair rounds."
+      error:
+        "Engineering Orchestrator is unavailable."
 
-        };
+    };
 
-      }
+    workflowState.engineeringStatus =
+      "ESCALATED";
 
-      workflowState.buildRepair.attempted =
-        true;
+    workflowState.engineeringFailure =
+      failure;
 
-      workflowState.buildRepair.status =
-        "repairing";
+    recordStage(
+      workflowState,
+      "engineering-orchestration",
+      failure,
+      "failed"
+    );
 
-      const repairContext =
-        createBuildRepairContext(
+    return failure;
 
-          workflowState,
+  }
 
-          request,
 
-          intent,
+  try {
 
-          planningData,
-
-          buildResult,
-
-          buildValidation,
-
-          null
-
-        );
-
-      const repairPayload = {
-
-        prompt:
-          request.prompt,
-
-        user:
-          normalizedUser,
-
-        userId:
-          workflowState.userId,
-
-        intent,
-
-        planning:
-          planningData,
-
-        memoryContext:
-          null,
-
-        projectId:
-          workflowState.projectId,
-
-        projectName:
-          workflowState.projectName ||
-          getProjectName(
-            request,
-            planningData
-          ),
+    logInfo(
+      "Master → Engineering Orchestrator",
+      {
 
         workflowId:
           workflowState.workflowId,
 
-        requestId:
-          workflowState.requestId,
+        projectId:
+          workflowState.projectId,
 
-        files:
-          getProjectFiles(
-            request,
-            buildResult
-          ),
+        fileCount:
+          job.files.length
 
-        buildResult:
-          sanitizeForContext(
-            buildResult
-          ),
+      }
+    );
 
-        buildValidation:
-          sanitizeForContext(
-            buildValidation
-          ),
 
-        buildError:
-          buildValidation.error ||
-          "Static build validation failed.",
+    /*
+     * Canonical entrypoint:
+     *
+     * engineeringOrchestrator.run(job)
+     *
+     * A small compatibility resolver is retained so the
+     * Master remains safe if the module exports a callable
+     * orchestrator rather than an object.
+     */
 
-        validationErrors:
-          sanitizeForContext(
-            buildValidation.errors ||
-            []
-          ),
+    let result = null;
 
-        validationWarnings:
-          sanitizeForContext(
-            buildValidation.warnings ||
-            []
-          ),
+    if (
+      typeof engineeringOrchestrator.run ===
+      "function"
+    ) {
 
-        repairContext:
-          sanitizeForContext(
-            repairContext
-          ),
+      result =
+        await engineeringOrchestrator.run(
+          job
+        );
 
-        repairRound:
-          round + 1,
+    } else if (
+      typeof engineeringOrchestrator.execute ===
+      "function"
+    ) {
 
-        maxRepairRounds:
-          MAX_BUILD_REPAIR_ROUNDS,
+      result =
+        await engineeringOrchestrator.execute(
+          job
+        );
 
-        source:
-          "masterAgent",
+    } else if (
+      typeof engineeringOrchestrator.build ===
+      "function"
+    ) {
 
-        trigger:
-          "build_validation_failure"
+      result =
+        await engineeringOrchestrator.build(
+          job
+        );
+
+    } else if (
+      typeof engineeringOrchestrator ===
+      "function"
+    ) {
+
+      result =
+        await engineeringOrchestrator(
+          job
+        );
+
+    } else {
+
+      result = {
+
+        success:
+          false,
+
+        state:
+          "ESCALATED",
+
+        status:
+          "service_unavailable",
+
+        error:
+          "Engineering Orchestrator exposes no supported execution entrypoint."
 
       };
 
-      lastFixResult =
-        await runAgent(
+    }
 
-          workflowState,
 
-          `build-fix-static-${round + 1}`,
+    const engineeringStateSnapshot =
+      extractEngineeringState(
+        result
+      );
 
-          fixAgent,
+    const engineeringFailure =
+      extractEngineeringFailure(
+        result
+      );
 
-          repairPayload
+    const engineeringVerification =
+      extractEngineeringVerification(
+        result
+      );
 
+    const engineeringPromotion =
+      extractEngineeringPromotion(
+        result
+      );
+
+
+    workflowState.engineeringRun =
+      sanitizeForContext(
+        result
+      );
+
+    workflowState.engineeringStatus =
+      String(
+        result?.state ||
+        result?.engineeringState ||
+        result?.status ||
+        engineeringStateSnapshot?.state ||
+        "UNKNOWN"
+      )
+        .toUpperCase();
+
+    workflowState.engineeringFailure =
+      sanitizeForContext(
+        engineeringFailure
+      );
+
+    workflowState.engineeringVerification =
+      sanitizeForContext(
+        engineeringVerification
+      );
+
+    workflowState.engineeringPromotion =
+      sanitizeForContext(
+        engineeringPromotion
+      );
+
+
+    if (
+      isEngineeringPromoted(
+        result
+      )
+    ) {
+
+      const files =
+        extractEngineeringFiles(
+          result
         );
 
       if (
-        !isSuccessful(
-          lastFixResult
-        )
+        files.length > 0
       ) {
 
-        workflowState.buildRepair.status =
-          "failed";
+        buildResult = {
 
-        return {
+          ...buildResult,
 
           success:
-            false,
+            true,
 
-          buildResult,
+          data: {
 
-          buildValidation,
+            ...(buildResult?.data || {}),
 
-          authoritativeBuild,
+            files
 
-          fixResult:
-            lastFixResult,
+          },
 
-          repaired:
-            round > 0,
+          files,
 
-          repairRounds:
-            round + 1,
-
-          error:
-            getAgentError(
-              lastFixResult
+          engineering:
+            sanitizeForContext(
+              result
             )
 
         };
 
       }
 
-      const fixedFiles =
-        extractFilesFromFixResult(
-          lastFixResult
-        );
-
-      if (
-        fixedFiles.length === 0
-      ) {
-
-        workflowState.buildRepair.status =
-          "failed_no_files";
-
-        return {
-
-          success:
-            false,
-
-          buildResult,
-
-          buildValidation,
-
-          authoritativeBuild,
-
-          fixResult:
-            lastFixResult,
-
-          repaired:
-            false,
-
-          repairRounds:
-            round + 1,
-
-          error:
-            "Fix Agent completed without returning repaired files."
-
-        };
-
-      }
-
-      const mergedFiles =
-        mergeFixedFiles(
-
-          getProjectFiles(
-            request,
-            buildResult
-          ),
-
-          fixedFiles
-
-        );
-
-      buildResult = {
-
-        ...buildResult,
-
-        success:
-          true,
-
-        data: {
-
-          ...(buildResult?.data || {}),
-
-          files:
-            mergedFiles
-
-        },
-
-        files:
-          mergedFiles,
-
-        metadata: {
-
-          ...(buildResult?.metadata || {}),
-
-          repaired:
-            true,
-
-          repairRound:
-            round + 1,
-
-          repairedBy:
-            "fixAgent"
-
-        }
-
-      };
 
       recordStage(
         workflowState,
-
-        `build-fix-static-${round + 1}`,
-
+        "engineering-orchestration",
         {
-
           success:
             true,
 
-          round:
-            round + 1,
+          state:
+            workflowState.engineeringStatus,
 
-          changedFileCount:
-            fixedFiles.length,
+          promoted:
+            true,
 
-          totalFileCount:
-            mergedFiles.length
+          verified:
+            true,
+
+          authoritative:
+            true,
+
+          buildId:
+            result?.buildId ||
+            result?.data?.buildId ||
+            result?.verification?.buildId ||
+            null
 
         },
-
         "completed"
-
-      );
-
-      continue;
-
-    }
-
-
-    /* =====================================================
-       STATIC PASS
-    ===================================================== */
-
-    workflowState.buildRepair.status =
-      "static_passed";
-
-    logSuccess(
-      "Static Build Validation Passed",
-      {
-
-        workflowId:
-          workflowState.workflowId,
-
-        sourceHash:
-          buildValidation.sourceHash,
-
-        fileCount:
-          buildValidation.fileCount,
-
-        warnings:
-          buildValidation.warnings?.length || 0
-
-      }
-    );
-
-
-    /* =====================================================
-       AUTHORITATIVE BUILD
-    ===================================================== */
-
-    workflowState.currentStage =
-      "authoritative-build";
-
-    authoritativeBuild =
-      await executeAuthoritativeBuild(
-
-        workflowState,
-
-        request,
-
-        planningData,
-
-        buildResult,
-
-        buildValidation
-
-      );
-
-    workflowState.authoritativeBuild =
-      sanitizeForContext(
-        authoritativeBuild
       );
 
 
-    /* =====================================================
-       AUTHORITATIVE PASS
-    ===================================================== */
+      logSuccess(
+        "Master ← Engineering Orchestrator PROMOTED",
+        {
 
-    if (
-      authoritativeBuild.ready
-    ) {
+          workflowId:
+            workflowState.workflowId,
 
-      workflowState.buildRepair.status =
-        workflowState.buildRepair.attempted
-          ? "repaired"
-          : "not_required";
+          projectId:
+            workflowState.projectId,
+
+          state:
+            workflowState.engineeringStatus,
+
+          buildId:
+            result?.buildId ||
+            result?.data?.buildId ||
+            null
+
+        }
+      );
+
 
       return {
+
+        ...result,
 
         success:
           true,
 
-        buildResult,
+        promoted:
+          true,
 
-        buildValidation,
+        verified:
+          true,
 
-        authoritativeBuild,
+        authoritative:
+          true,
 
-        fixResult:
-          lastFixResult,
+        state:
+          "PROMOTED",
 
-        repaired:
-          workflowState.buildRepair.attempted,
-
-        repairRounds:
-          round
-
-      };
-
-    }
-
-
-    /* =====================================================
-       AUTHORITATIVE FAILURE
-    ===================================================== */
-
-    if (
-      round >=
-      MAX_BUILD_REPAIR_ROUNDS
-    ) {
-
-      workflowState.buildRepair.status =
-        "exhausted";
-
-      return {
-
-        success:
-          false,
-
-        buildResult,
-
-        buildValidation,
-
-        authoritativeBuild,
-
-        fixResult:
-          lastFixResult,
-
-        repaired:
-          workflowState.buildRepair.attempted,
-
-        repairRounds:
-          round,
-
-        error:
-          authoritativeBuild.error ||
-          "Authoritative build failed after maximum repair rounds."
+        buildResult
 
       };
 
     }
 
-    workflowState.buildRepair.attempted =
-      true;
 
-    workflowState.buildRepair.status =
-      "repairing";
-
-
-    /* =====================================================
-       RICH AUTHORITATIVE REPAIR CONTEXT
-    ===================================================== */
-
-    const authoritativeRepairContext =
-      createBuildRepairContext(
-
-        workflowState,
-
-        request,
-
-        intent,
-
-        planningData,
-
-        buildResult,
-
-        buildValidation,
-
-        authoritativeBuild
-
-      );
-
-
-    const authoritativeFailure =
-      createAuthoritativeFailureSummary(
-        authoritativeBuild
-      );
-
-
-    const authoritativeRepairPayload = {
-
-      prompt:
-        request.prompt,
-
-      user:
-        normalizedUser,
-
-      userId:
-        workflowState.userId,
-
-      intent,
-
-      planning:
-        planningData,
-
-      memoryContext:
-        null,
-
-      projectId:
-        workflowState.projectId,
-
-      projectName:
-        workflowState.projectName ||
-        getProjectName(
-          request,
-          planningData
-        ),
-
-      workflowId:
-        workflowState.workflowId,
-
-      requestId:
-        workflowState.requestId,
-
-      files:
-        getProjectFiles(
-          request,
-          buildResult
-        ),
-
-      buildResult:
-        sanitizeForContext(
-          buildResult
-        ),
-
-      buildValidation:
-        sanitizeForContext(
-          buildValidation
-        ),
-
-      authoritativeBuild:
-        sanitizeForContext(
-          authoritativeBuild
-        ),
-
-      buildError:
-        authoritativeBuild.error ||
-        "Authoritative Docker build failed.",
-
-      authoritativeFailure:
-        sanitizeForContext(
-          authoritativeFailure
-        ),
-
-      authoritativeRepairContext:
-        sanitizeForContext(
-          getAuthoritativeRepairContext(
-            authoritativeBuild
-          )
-        ),
-
-      validationErrors:
-        sanitizeForContext(
-          buildValidation.errors ||
-          []
-        ),
-
-      validationWarnings:
-        sanitizeForContext(
-          buildValidation.warnings ||
-          []
-        ),
-
-      repairContext:
-        sanitizeForContext(
-          authoritativeRepairContext
-        ),
-
-      repairRound:
-        round + 1,
-
-      maxRepairRounds:
-        MAX_BUILD_REPAIR_ROUNDS,
-
-      source:
-        "masterAgent",
-
-      trigger:
-        "authoritative_build_failure"
-
-    };
-
-
-    /* =====================================================
-       LOG EXACT FAILURE SUMMARY BEFORE FIX
-    ===================================================== */
-
-    logError(
-      "Authoritative Build Failure Context → Fix Agent",
-      {
-
-        workflowId:
-          workflowState.workflowId,
-
-        repairRound:
-          round + 1,
-
-        category:
-          authoritativeFailure.category,
-
-        failureStage:
-          authoritativeFailure.failureStage,
-
-        exitCode:
-          authoritativeFailure.exitCode,
-
-        signal:
-          authoritativeFailure.signal,
-
-        timedOut:
-          authoritativeFailure.timedOut,
-
-        buildCommand:
-          authoritativeFailure.buildCommand,
-
-        installCommand:
-          authoritativeFailure.installCommand,
-
-        affectedFiles:
-          authoritativeFailure.affectedFiles,
-
-        retryable:
-          authoritativeFailure.retryable,
-
-        errors:
-          authoritativeFailure.errors,
-
-        stderr:
-          authoritativeFailure.stderr,
-
-        stdout:
-          authoritativeFailure.stdout
-
-      }
-    );
-
-
-    lastFixResult =
-      await runAgent(
-
-        workflowState,
-
-        `build-fix-authoritative-${round + 1}`,
-
-        fixAgent,
-
-        authoritativeRepairPayload
-
-      );
-
-
-    if (
-      !isSuccessful(
-        lastFixResult
-      )
-    ) {
-
-      workflowState.buildRepair.status =
-        "failed";
-
-      return {
-
-        success:
-          false,
-
-        buildResult,
-
-        buildValidation,
-
-        authoritativeBuild,
-
-        fixResult:
-          lastFixResult,
-
-        repaired:
-          round > 0,
-
-        repairRounds:
-          round + 1,
-
-        error:
-          getAgentError(
-            lastFixResult
-          )
-
-      };
-
-    }
-
-
-    const authoritativeFixedFiles =
-      extractFilesFromFixResult(
-        lastFixResult
-      );
-
-
-    if (
-      authoritativeFixedFiles.length === 0
-    ) {
-
-      workflowState.buildRepair.status =
-        "failed_no_files";
-
-      return {
-
-        success:
-          false,
-
-        buildResult,
-
-        buildValidation,
-
-        authoritativeBuild,
-
-        fixResult:
-          lastFixResult,
-
-        repaired:
-          false,
-
-        repairRounds:
-          round + 1,
-
-        error:
-          "Fix Agent completed without returning repaired files."
-
-      };
-
-    }
-
-
-    const repairedFiles =
-      mergeFixedFiles(
-
-        getProjectFiles(
-          request,
-          buildResult
-        ),
-
-        authoritativeFixedFiles
-
-      );
-
-
-    buildResult = {
-
-      ...buildResult,
+    /*
+     * IMPORTANT:
+     *
+     * Engineering failure is never converted into success.
+     */
+
+    const failureResult = {
+
+      ...(
+        result &&
+        typeof result === "object"
+          ? result
+          : {}
+      ),
 
       success:
-        true,
+        false,
 
-      data: {
+      state:
+        workflowState.engineeringStatus ||
+        "ESCALATED",
 
-        ...(buildResult?.data || {}),
+      failure:
+        engineeringFailure ||
+        result?.failure ||
+        result?.errorDetails ||
+        null,
 
-        files:
-          repairedFiles
-
-      },
-
-      files:
-        repairedFiles,
-
-      metadata: {
-
-        ...(buildResult?.metadata || {}),
-
-        repaired:
-          true,
-
-        repairRound:
-          round + 1,
-
-        repairedBy:
-          "fixAgent",
-
-        previousAuthoritativeBuildId:
-          authoritativeBuild.buildId ||
-          null
-
-      }
+      error:
+        result?.error ||
+        result?.message ||
+        "Engineering workflow did not reach PROMOTED state."
 
     };
 
 
     recordStage(
       workflowState,
-
-      `build-fix-authoritative-${round + 1}`,
-
-      {
-
-        success:
-          true,
-
-        round:
-          round + 1,
-
-        changedFileCount:
-          authoritativeFixedFiles.length,
-
-        totalFileCount:
-          repairedFiles.length,
-
-        trigger:
-          "authoritative_build_failure"
-
-      },
-
-      "completed"
-
+      "engineering-orchestration",
+      failureResult,
+      "failed"
     );
 
+
+    logError(
+      "Master ← Engineering Orchestrator FAILED",
+      {
+
+        workflowId:
+          workflowState.workflowId,
+
+        projectId:
+          workflowState.projectId,
+
+        state:
+          workflowState.engineeringStatus,
+
+        error:
+          failureResult.error,
+
+        failure:
+          engineeringFailure
+
+      }
+    );
+
+
+    return failureResult;
+
+  } catch (
+    error
+  ) {
+
+    const normalized =
+      normalizeError(
+        error
+      );
+
+    const failure = {
+
+      success:
+        false,
+
+      state:
+        "ESCALATED",
+
+      status:
+        "exception",
+
+      error:
+        normalized.message,
+
+      code:
+        normalized.code,
+
+      engineeringBoundary:
+        true
+
+    };
+
+    workflowState.engineeringStatus =
+      "ESCALATED";
+
+    workflowState.engineeringFailure =
+      failure;
+
+    recordStage(
+      workflowState,
+      "engineering-orchestration",
+      failure,
+      "failed"
+    );
+
+    logError(
+      "Engineering Orchestrator Exception",
+      {
+
+        workflowId:
+          workflowState.workflowId,
+
+        error:
+          normalized.message
+
+      }
+    );
+
+    return failure;
+
   }
-
-
-  workflowState.buildRepair.status =
-    "exhausted";
-
-  return {
-
-    success:
-      false,
-
-    buildResult,
-
-    buildValidation,
-
-    authoritativeBuild,
-
-    fixResult:
-      lastFixResult,
-
-    repaired:
-      true,
-
-    repairRounds:
-      MAX_BUILD_REPAIR_ROUNDS,
-
-    error:
-      "Build pipeline exhausted all repair rounds."
-
-  };
 
 }
 
 
 /* =========================================================
-   DEPLOYMENT BUILD GATE
+   DEPLOYMENT HELPERS
 ========================================================= */
 
-function canDeployAfterBuild(
+function getDeploymentId(
+  deploymentResult,
+  projectId
+) {
+
+  return (
+    deploymentResult?.deployment?.deploymentId ||
+    deploymentResult?.data?.deploymentId ||
+    deploymentResult?.deploymentId ||
+    deploymentResult?.data?.id ||
+    projectId ||
+    null
+  );
+
+}
+
+
+function canDeployAfterEngineering(
   workflow,
-  buildResult,
-  buildValidation,
-  authoritativeBuild
+  engineeringResult
 ) {
 
   if (
@@ -4808,15 +2752,31 @@ function canDeployAfterBuild(
         true,
 
       reason:
-        "Deployment does not require a new build."
+        "Deployment does not require a new engineering build."
 
     };
 
   }
 
   if (
-    !isSuccessful(
-      buildResult
+    !engineeringResult
+  ) {
+
+    return {
+
+      allowed:
+        false,
+
+      reason:
+        "Deployment blocked because Engineering Orchestrator returned no result."
+
+    };
+
+  }
+
+  if (
+    !isEngineeringPromoted(
+      engineeringResult
     )
   ) {
 
@@ -4826,72 +2786,7 @@ function canDeployAfterBuild(
         false,
 
       reason:
-        "Deployment blocked because builder failed."
-
-    };
-
-  }
-
-  if (
-    !buildValidation ||
-    buildValidation.ready !== true
-  ) {
-
-    return {
-
-      allowed:
-        false,
-
-      reason:
-        "Deployment blocked because static build validation did not pass."
-
-    };
-
-  }
-
-  /*
-   * Re-check authoritative readiness through the same
-   * authoritative service contract.
-   *
-   * Do not trust only buildId/status here.
-   */
-
-  if (
-    !authoritativeBuild ||
-    authoritativeBuild.ready !== true ||
-    authoritativeBuild.authoritative !== true
-  ) {
-
-    return {
-
-      allowed:
-        false,
-
-      reason:
-        "Deployment blocked because the authoritative Docker build did not produce a verified artifact."
-
-    };
-
-  }
-
-  const raw =
-    getAuthoritativeRawResult(
-      authoritativeBuild
-    );
-
-  if (
-    !isAuthoritativeReady(
-      raw
-    )
-  ) {
-
-    return {
-
-      allowed:
-        false,
-
-      reason:
-        "Deployment blocked because authoritative artifact readiness could not be verified."
+        "Deployment blocked because Engineering Orchestrator did not produce a verified PROMOTED build."
 
     };
 
@@ -4903,7 +2798,7 @@ function canDeployAfterBuild(
       true,
 
     reason:
-      "Static validation and authoritative artifact build gates passed."
+      "Engineering build reached verified PROMOTED state."
 
   };
 
@@ -4979,6 +2874,7 @@ async function checkEnvironmentGate(
 
     );
 
+
   if (
     !isSuccessful(result)
   ) {
@@ -4992,7 +2888,9 @@ async function checkEnvironmentGate(
         environmentName,
 
       reason:
-        getAgentError(result),
+        getAgentError(
+          result
+        ),
 
       result
 
@@ -5000,10 +2898,12 @@ async function checkEnvironmentGate(
 
   }
 
+
   const readiness =
     result.readiness ||
     result.data?.readiness ||
     null;
+
 
   if (
     readiness &&
@@ -5027,6 +2927,7 @@ async function checkEnvironmentGate(
     };
 
   }
+
 
   return {
 
@@ -5110,7 +3011,7 @@ async function createEnvironmentSnapshot(
 
 
 /* =========================================================
-   MARK ENVIRONMENT DEPLOYED
+   ENVIRONMENT DEPLOYED
 ========================================================= */
 
 async function markEnvironmentDeployed(
@@ -5193,107 +3094,6 @@ async function markEnvironmentDeployed(
     }
 
   );
-
-}
-
-
-/* =========================================================
-   PAYMENT CONTEXT
-========================================================= */
-
-function getPaymentContext(
-  request
-) {
-
-  return {
-
-    paymentId:
-      request?.paymentId ||
-      null,
-
-    paymentConfirmed:
-      request?.paymentConfirmed === true,
-
-    paymentProvider:
-      request?.paymentProvider ||
-      null,
-
-    providerCustomerId:
-      request?.providerCustomerId ||
-      null,
-
-    providerSubscriptionId:
-      request?.providerSubscriptionId ||
-      null,
-
-    billingCycle:
-      request?.billingCycle ||
-      null,
-
-    plan:
-      request?.plan ||
-      request?.subscriptionPlan ||
-      null
-
-  };
-
-}
-
-
-/* =========================================================
-   SUBSCRIPTION GATE
-========================================================= */
-
-function canProcessSubscription(
-  request
-) {
-
-  const payment =
-    getPaymentContext(
-      request
-    );
-
-  if (
-    request?.operation === "status"
-  ) {
-
-    return {
-
-      allowed:
-        true,
-
-      reason:
-        "Subscription status operation."
-
-    };
-
-  }
-
-  if (
-    payment.paymentConfirmed
-  ) {
-
-    return {
-
-      allowed:
-        true,
-
-      reason:
-        "Payment confirmation supplied; Subscription Agent must verify authoritative state."
-
-    };
-
-  }
-
-  return {
-
-    allowed:
-      true,
-
-    reason:
-      "Subscription Agent may inspect authoritative entitlement/payment state."
-
-  };
 
 }
 
@@ -5513,6 +3313,107 @@ function getGithubDeploymentContext(
 
 
 /* =========================================================
+   PAYMENT
+========================================================= */
+
+function getPaymentContext(
+  request
+) {
+
+  return {
+
+    paymentId:
+      request?.paymentId ||
+      null,
+
+    paymentConfirmed:
+      request?.paymentConfirmed === true,
+
+    paymentProvider:
+      request?.paymentProvider ||
+      null,
+
+    providerCustomerId:
+      request?.providerCustomerId ||
+      null,
+
+    providerSubscriptionId:
+      request?.providerSubscriptionId ||
+      null,
+
+    billingCycle:
+      request?.billingCycle ||
+      null,
+
+    plan:
+      request?.plan ||
+      request?.subscriptionPlan ||
+      null
+
+  };
+
+}
+
+
+/* =========================================================
+   SUBSCRIPTION
+========================================================= */
+
+function canProcessSubscription(
+  request
+) {
+
+  const payment =
+    getPaymentContext(
+      request
+    );
+
+  if (
+    request?.operation === "status"
+  ) {
+
+    return {
+
+      allowed:
+        true,
+
+      reason:
+        "Subscription status operation."
+
+    };
+
+  }
+
+  if (
+    payment.paymentConfirmed
+  ) {
+
+    return {
+
+      allowed:
+        true,
+
+      reason:
+        "Payment confirmation supplied; Subscription Agent must verify authoritative state."
+
+    };
+
+  }
+
+  return {
+
+    allowed:
+      true,
+
+    reason:
+      "Subscription Agent may inspect authoritative entitlement/payment state."
+
+  };
+
+}
+
+
+/* =========================================================
    DEPLOYMENT ERROR
 ========================================================= */
 
@@ -5579,7 +3480,7 @@ function getDeploymentErrorDetails(
 
 
 /* =========================================================
-   AUTO FIX FROM DEPLOYMENT FAILURE
+   DEPLOYMENT AUTO FIX
 ========================================================= */
 
 async function triggerAutoFixFromDeploymentFailure(
@@ -5597,7 +3498,9 @@ async function triggerAutoFixFromDeploymentFailure(
       workflowState.projectId
     );
 
-  if (!deploymentId) {
+  if (
+    !deploymentId
+  ) {
 
     return {
 
@@ -5611,10 +3514,7 @@ async function triggerAutoFixFromDeploymentFailure(
         false,
 
       error:
-        "DEPLOYMENT_ID_MISSING",
-
-      message:
-        "Auto Fix skipped because deployment ID is missing."
+        "DEPLOYMENT_ID_MISSING"
 
     };
 
@@ -5665,8 +3565,11 @@ async function triggerAutoFixFromDeploymentFailure(
 
       );
 
+
     if (
-      !isSuccessful(logResult)
+      !isSuccessful(
+        logResult
+      )
     ) {
 
       return {
@@ -5685,14 +3588,12 @@ async function triggerAutoFixFromDeploymentFailure(
         error:
           getAgentError(
             logResult
-          ),
-
-        message:
-          "Deployment failed and error logging could not establish Auto Fix eligibility."
+          )
 
       };
 
     }
+
 
     const autoFixResult =
       await runAgent(
@@ -5800,11 +3701,13 @@ async function triggerAutoFixFromDeploymentFailure(
 
       );
 
+
     const triggered =
       autoFixResult?.triggered === true ||
       autoFixResult?.data?.triggered === true ||
       autoFixResult?.autoFixTriggered === true ||
       autoFixResult?.data?.autoFixTriggered === true;
+
 
     return {
 
@@ -6069,10 +3972,7 @@ async function masterAgent(
   let buildResult =
     null;
 
-  let buildValidation =
-    null;
-
-  let authoritativeBuild =
+  let engineeringResult =
     null;
 
   let fixResult =
@@ -6115,7 +4015,10 @@ async function masterAgent(
       "ZyrionOS Master Agent Started",
       {
         version:
-          MASTER_VERSION
+          MASTER_VERSION,
+
+        engineeringSystem:
+          "enabled"
       }
     );
 
@@ -6152,6 +4055,7 @@ async function masterAgent(
 
     }
 
+
     const normalizedUser =
       normalizedRequest.user ||
       {};
@@ -6168,6 +4072,7 @@ async function masterAgent(
 
     normalizedRequest.projectId =
       projectId;
+
 
     workflowState =
       createWorkflowState(
@@ -6255,6 +4160,7 @@ async function masterAgent(
 
       );
 
+
     if (
       !isSuccessful(intent)
     ) {
@@ -6316,6 +4222,7 @@ async function masterAgent(
 
     }
 
+
     if (
       normalizedRequest.type === "deploy"
     ) {
@@ -6341,6 +4248,7 @@ async function masterAgent(
       };
 
     }
+
 
     if (
       normalizedRequest.type === "environment"
@@ -6382,6 +4290,7 @@ async function masterAgent(
         normalizedRequest
       );
 
+
     workflowState.primaryIntent =
       workflow.type;
 
@@ -6403,6 +4312,7 @@ async function masterAgent(
         null
       );
 
+
     if (
       workflow.requiresDeploy &&
       !workflowState.environmentName
@@ -6412,6 +4322,7 @@ async function masterAgent(
         "production";
 
     }
+
 
     logInfo(
       "Master workflow selected",
@@ -6437,7 +4348,7 @@ async function masterAgent(
 
 
     /* =====================================================
-       ENVIRONMENT OPERATION
+       ENVIRONMENT
     ===================================================== */
 
     if (
@@ -6486,6 +4397,7 @@ async function masterAgent(
           }
 
         );
+
 
       if (
         !isSuccessful(
@@ -6561,6 +4473,7 @@ async function masterAgent(
           )
 
         );
+
 
       if (
         !isSuccessful(
@@ -6645,6 +4558,7 @@ async function masterAgent(
 
         );
 
+
       if (
         !isSuccessful(
           planning
@@ -6681,6 +4595,7 @@ async function masterAgent(
 
       }
 
+
       planningData =
         getPlanningData(
           planning
@@ -6690,7 +4605,7 @@ async function masterAgent(
 
 
     /* =====================================================
-       GITHUB DEPLOYMENT
+       GITHUB DEPLOYMENT PREPARATION
     ===================================================== */
 
     if (
@@ -6726,6 +4641,7 @@ async function masterAgent(
           )
 
         );
+
 
       if (
         !isSuccessful(
@@ -6767,7 +4683,7 @@ async function masterAgent(
 
 
     /* =====================================================
-       BUILD PIPELINE
+       BUILD GENERATION + ENGINEERING SYSTEM
     ===================================================== */
 
     if (
@@ -6858,10 +4774,12 @@ async function masterAgent(
 
         );
 
+
       const builderContract =
         validateBuildResult(
           buildResult
         );
+
 
       if (
         !builderContract.valid
@@ -6897,14 +4815,15 @@ async function masterAgent(
 
 
       /* ---------------------------------------------------
-         STATIC + AUTHORITATIVE BUILD PIPELINE
+         ENGINEERING ORCHESTRATOR
       --------------------------------------------------- */
 
       currentStage =
-        "build-pipeline";
+        "engineering-orchestration";
 
-      const repairPipeline =
-        await validateAndRepairBuild(
+
+      engineeringResult =
+        await executeEngineeringWorkflow(
 
           workflowState,
 
@@ -6916,100 +4835,94 @@ async function masterAgent(
 
           planningData,
 
-          buildResult
+          buildResult,
+
+          memoryContext
 
         );
 
-      buildResult =
-        repairPipeline.buildResult;
 
-      buildValidation =
-        repairPipeline.buildValidation;
+      /*
+       * Builder output may be replaced by a repaired
+       * version returned by Engineering Orchestrator.
+       */
 
-      authoritativeBuild =
-        repairPipeline.authoritativeBuild;
-
-      fixResult =
-        repairPipeline.fixResult ||
-        null;
-
-      workflowState.buildValidation =
-        sanitizeForContext(
-          buildValidation
+      const engineeringFiles =
+        extractEngineeringFiles(
+          engineeringResult
         );
 
-      workflowState.authoritativeBuild =
-        sanitizeForContext(
-          authoritativeBuild
-        );
 
       if (
-        !repairPipeline.success
+        engineeringFiles.length > 0
+      ) {
+
+        buildResult = {
+
+          ...buildResult,
+
+          success:
+            true,
+
+          data: {
+
+            ...(buildResult?.data || {}),
+
+            files:
+              engineeringFiles
+
+          },
+
+          files:
+            engineeringFiles,
+
+          engineering:
+            sanitizeForContext(
+              engineeringResult
+            )
+
+        };
+
+      }
+
+
+      if (
+        !isEngineeringPromoted(
+          engineeringResult
+        )
       ) {
 
         workflowState.status =
           "failed";
 
-        const authoritativeFailureSummary =
-          createAuthoritativeFailureSummary(
-            authoritativeBuild
+        const failure =
+          extractEngineeringFailure(
+            engineeringResult
           );
 
+
         logError(
-          "Build Pipeline Failed",
+          "Engineering Build Pipeline Failed",
           {
 
             workflowId:
               workflowState.workflowId,
 
-            repairRounds:
-              repairPipeline.repairRounds,
+            projectId:
+              workflowState.projectId,
 
-            staticErrors:
-              buildValidation?.errors,
-
-            authoritativeError:
-              authoritativeBuild?.error,
-
-            authoritativeCategory:
-              authoritativeFailureSummary.category,
-
-            authoritativeFailureStage:
-              authoritativeFailureSummary.failureStage,
-
-            authoritativeExitCode:
-              authoritativeFailureSummary.exitCode,
-
-            authoritativeSignal:
-              authoritativeFailureSummary.signal,
-
-            authoritativeTimedOut:
-              authoritativeFailureSummary.timedOut,
-
-            authoritativeBuildCommand:
-              authoritativeFailureSummary.buildCommand,
-
-            authoritativeInstallCommand:
-              authoritativeFailureSummary.installCommand,
-
-            authoritativeAffectedFiles:
-              authoritativeFailureSummary.affectedFiles,
-
-            authoritativeRetryable:
-              authoritativeFailureSummary.retryable,
-
-            authoritativeStderr:
-              authoritativeFailureSummary.stderr,
-
-            authoritativeStdout:
-              authoritativeFailureSummary.stdout,
+            state:
+              workflowState.engineeringStatus,
 
             error:
-              repairPipeline.error ||
-              "Generated project could not be built."
+              engineeringResult?.error ||
+              "Engineering pipeline did not reach PROMOTED state.",
+
+            failure
 
           }
         );
+
 
         return {
 
@@ -7017,61 +4930,51 @@ async function masterAgent(
             false,
 
           message:
-            "Build pipeline failed after repair attempts",
+            "Engineering build pipeline failed",
 
           error:
-            repairPipeline.error ||
-            authoritativeBuild?.error ||
-            buildValidation?.error ||
-            "Generated project failed the build pipeline.",
+            engineeringResult?.error ||
+            "Engineering pipeline did not produce a verified promoted build.",
 
           stage:
-            "build-pipeline",
+            "engineering-orchestration",
 
           workflow:
             workflowState,
+
+          intent,
 
           planning,
 
           buildResult,
 
-          buildValidation,
-
-          authoritativeBuild,
-
-          fixResult
+          engineering:
+            sanitizeForContext(
+              engineeringResult
+            )
 
         };
 
       }
 
+
       logSuccess(
-        repairPipeline.repaired
-          ? "Build Pipeline Passed After Auto Repair"
-          : "Build Pipeline Passed",
+        "Engineering Build Pipeline Passed",
         {
 
           workflowId:
             workflowState.workflowId,
 
-          fileCount:
-            buildValidation?.fileCount,
+          projectId:
+            workflowState.projectId,
 
-          sourceHash:
-            buildValidation?.sourceHash,
+          state:
+            workflowState.engineeringStatus,
 
-          staticValidation:
-            buildValidation?.ready === true,
-
-          authoritative:
-            authoritativeBuild?.authoritative === true,
-
-          authoritativeBuildId:
-            authoritativeBuild?.buildId ||
-            null,
-
-          repairRounds:
-            repairPipeline.repairRounds
+          buildId:
+            engineeringResult?.buildId ||
+            engineeringResult?.data?.buildId ||
+            null
 
         }
       );
@@ -7133,6 +5036,7 @@ async function masterAgent(
           }
 
         );
+
 
       if (
         !isSuccessful(
@@ -7225,6 +5129,7 @@ async function masterAgent(
           }
 
         );
+
 
       if (
         !isSuccessful(
@@ -7347,6 +5252,7 @@ async function masterAgent(
           normalizedRequest
         );
 
+
       if (
         !gate.allowed
       ) {
@@ -7375,6 +5281,7 @@ async function masterAgent(
 
       }
 
+
       currentStage =
         "subscription";
 
@@ -7382,6 +5289,7 @@ async function masterAgent(
         getPaymentContext(
           normalizedRequest
         );
+
 
       subscriptionResult =
         await runAgent(
@@ -7452,18 +5360,16 @@ async function masterAgent(
       currentStage =
         "deployment-build-gate";
 
+
       const buildGate =
-        canDeployAfterBuild(
+        canDeployAfterEngineering(
 
           workflow,
 
-          buildResult,
-
-          buildValidation,
-
-          authoritativeBuild
+          engineeringResult
 
         );
+
 
       if (
         !buildGate.allowed
@@ -7491,9 +5397,10 @@ async function masterAgent(
 
           buildResult,
 
-          buildValidation,
-
-          authoritativeBuild
+          engineering:
+            sanitizeForContext(
+              engineeringResult
+            )
 
         };
 
@@ -7507,6 +5414,7 @@ async function masterAgent(
       currentStage =
         "deployment-environment-gate";
 
+
       const environmentGate =
         await checkEnvironmentGate(
 
@@ -7517,6 +5425,7 @@ async function masterAgent(
           workflowState
 
         );
+
 
       if (
         !environmentGate.allowed
@@ -7544,9 +5453,10 @@ async function masterAgent(
 
           buildResult,
 
-          buildValidation,
-
-          authoritativeBuild,
+          engineering:
+            sanitizeForContext(
+              engineeringResult
+            ),
 
           environmentResult:
             environmentGate.result ||
@@ -7556,17 +5466,19 @@ async function masterAgent(
 
       }
 
+
       environmentResult =
         environmentGate.result ||
         null;
 
 
       /* ---------------------------------------------------
-         ENVIRONMENT SNAPSHOT
+         SNAPSHOT
       --------------------------------------------------- */
 
       currentStage =
         "deployment-environment-snapshot";
+
 
       const snapshotResult =
         await createEnvironmentSnapshot(
@@ -7576,6 +5488,7 @@ async function masterAgent(
           environmentGate.environment
 
         );
+
 
       if (
         !isSuccessful(
@@ -7620,6 +5533,7 @@ async function masterAgent(
 
       currentStage =
         "deploy";
+
 
       deploymentResult =
         await runAgent(
@@ -7677,14 +5591,14 @@ async function masterAgent(
                 githubDeploymentResult
               ),
 
-            buildValidation:
+            engineering:
               sanitizeForContext(
-                buildValidation
+                engineeringResult
               ),
 
             authoritativeBuild:
               sanitizeForContext(
-                authoritativeBuild
+                engineeringResult
               ),
 
             workflowId:
@@ -7695,15 +5609,6 @@ async function masterAgent(
 
             environmentName:
               environmentGate.environment,
-
-            environmentId:
-              environmentResult
-                ?.environment
-                ?.id ||
-              environmentResult
-                ?.environment
-                ?._id ||
-              null,
 
             environmentReady:
               true,
@@ -7759,6 +5664,7 @@ async function masterAgent(
         currentStage =
           "deployment-auto-fix";
 
+
         autoFixResult =
           await triggerAutoFixFromDeploymentFailure(
 
@@ -7775,6 +5681,7 @@ async function masterAgent(
             deploymentResult
 
           );
+
 
         return {
 
@@ -7801,15 +5708,12 @@ async function masterAgent(
 
           planning,
 
-          githubResult,
-
-          githubDeploymentResult,
+          engineering:
+            sanitizeForContext(
+              engineeringResult
+            ),
 
           buildResult,
-
-          buildValidation,
-
-          authoritativeBuild,
 
           environmentResult,
 
@@ -7829,6 +5733,7 @@ async function masterAgent(
       currentStage =
         "environment-deployed";
 
+
       const environmentDeployedResult =
         await markEnvironmentDeployed(
 
@@ -7839,6 +5744,7 @@ async function masterAgent(
           deploymentResult
 
         );
+
 
       if (
         !isSuccessful(
@@ -7865,6 +5771,7 @@ async function masterAgent(
         );
 
       }
+
 
       logSuccess(
         "Deployment Gate Passed",
@@ -7904,6 +5811,7 @@ async function masterAgent(
           deploymentResult,
           projectId
         );
+
 
       if (
         !deploymentId
@@ -7998,6 +5906,7 @@ async function masterAgent(
           projectId
         );
 
+
       if (
         !deploymentId
       ) {
@@ -8087,8 +5996,10 @@ async function masterAgent(
         ? "degraded"
         : "completed";
 
+
     workflowState.metrics.completedAt =
       new Date();
+
 
     workflowState.metrics.durationMs =
       Date.now() -
@@ -8096,7 +6007,7 @@ async function masterAgent(
 
 
     /* =====================================================
-       ORCHESTRATION
+       ORCHESTRATION RESULT
     ===================================================== */
 
     const orchestration = {
@@ -8120,6 +6031,29 @@ async function masterAgent(
           planning
         ),
 
+      engineering:
+        sanitizeForContext(
+          engineeringResult
+        ),
+
+      engineeringStatus:
+        workflowState.engineeringStatus,
+
+      engineeringPromotion:
+        sanitizeForContext(
+          workflowState.engineeringPromotion
+        ),
+
+      engineeringVerification:
+        sanitizeForContext(
+          workflowState.engineeringVerification
+        ),
+
+      engineeringFailure:
+        sanitizeForContext(
+          workflowState.engineeringFailure
+        ),
+
       githubResult:
         sanitizeForContext(
           githubResult
@@ -8138,21 +6072,6 @@ async function masterAgent(
       buildResult:
         sanitizeForContext(
           buildResult
-        ),
-
-      buildValidation:
-        sanitizeForContext(
-          buildValidation
-        ),
-
-      authoritativeBuild:
-        sanitizeForContext(
-          authoritativeBuild
-        ),
-
-      buildRepair:
-        sanitizeForContext(
-          workflowState.buildRepair
         ),
 
       deploymentResult:
@@ -8213,7 +6132,7 @@ async function masterAgent(
 
 
     /* =====================================================
-       FINAL AI RESPONSE
+       FINAL COMMUNICATION
     ===================================================== */
 
     currentStage =
@@ -8221,6 +6140,7 @@ async function masterAgent(
 
     let reply =
       "";
+
 
     try {
 
@@ -8238,9 +6158,10 @@ async function masterAgent(
 
 You are the final communication layer of ZyrionOS.
 
-The Master Agent has already executed the workflow.
-
 The backend is the source of truth.
+
+Engineering builds are controlled exclusively by
+Engineering Orchestrator.
 
 Rules:
 
@@ -8249,37 +6170,54 @@ Rules:
 3. Never invent deployment success.
 4. Never invent payment success.
 5. Never invent subscription entitlement.
-6. Never invent AWS resources.
+6. Never invent infrastructure resources.
 7. Never expose secrets.
 8. Never expose API keys.
 9. Never expose tokens.
 10. Never expose passwords.
-11. Never claim build success unless:
-    buildResult.success=true
-    AND
-    buildValidation.ready=true
-    AND
-    authoritativeBuild.ready=true
-    AND
-    authoritativeBuild.authoritative=true.
-12. Never call static validation an authoritative build.
-13. Never claim deployment success unless deploymentResult.success=true.
-14. Never claim environment readiness unless its gate passed.
-15. Never claim GitHub success unless githubResult.success=true.
-16. Never claim GitHub deployment preparation success unless githubDeploymentResult.success=true.
-17. If something failed, clearly state that it failed.
-18. If Auto Fix was triggered, say it was triggered but do not claim the issue is already repaired.
+
+11. Never claim a build succeeded merely because:
+    - Builder succeeded
+    - static validation passed
+    - a buildId exists
+    - Docker started
+    - an artifact object exists
+
+12. A build may be reported as successful only when
+    Engineering Orchestrator reached PROMOTED state and
+    authoritative verification passed.
+
+13. Never call static validation authoritative.
+
+14. Never claim deployment success unless:
+    deploymentResult.success=true.
+
+15. Never claim environment readiness unless its gate passed.
+
+16. Never claim GitHub success unless:
+    githubResult.success=true.
+
+17. If engineering failed or escalated, clearly say it failed.
+
+18. If Auto Fix was triggered, say it was triggered but
+    never claim the issue is already repaired.
+
 19. Use only exact deployment URLs returned by backend.
+
 20. Never construct URLs.
-21. Keep the answer concise.
-22. Never expose credentials.
-23. Never claim an agent ran when it was skipped.
-24. If buildRepair.attempted=true, report repair only when the final authoritative build passed.
-25. Never claim runtime/browser success from build success alone.
-26. A successful Docker build means the application passed the authoritative build gate; it does not by itself prove browser/runtime health.
-27. Static validation is always non-authoritative.
-28. Authoritative readiness requires the verified artifact contract, not merely a buildId.
-29. If the authoritative build failed, report the authoritative failure as failed even when a buildId exists.
+
+21. Never claim runtime/browser health from a successful
+    build alone.
+
+22. Never claim a repair succeeded unless the repaired
+    project subsequently reached authoritative verification
+    and PROMOTED state.
+
+23. Never expose internal secrets or credentials.
+
+24. Never claim an agent ran if it was skipped.
+
+25. The final answer must reflect backend state exactly.
 
 `
 
@@ -8317,28 +6255,16 @@ ${safeJson(
   planning
 )}
 
+ENGINEERING:
+
+${safeJson(
+  engineeringResult
+)}
+
 BUILD:
 
 ${safeJson(
   buildResult
-)}
-
-STATIC BUILD VALIDATION:
-
-${safeJson(
-  buildValidation
-)}
-
-AUTHORITATIVE BUILD:
-
-${safeJson(
-  authoritativeBuild
-)}
-
-BUILD REPAIR:
-
-${safeJson(
-  workflowState.buildRepair
 )}
 
 GITHUB:
@@ -8418,6 +6344,7 @@ ${safeJson(
 
         });
 
+
       if (
         completion?.success === true
       ) {
@@ -8464,9 +6391,11 @@ ${safeJson(
         deploymentResult?.data?.url ||
         null;
 
-      const authoritativePassed =
-        authoritativeBuild?.ready === true &&
-        authoritativeBuild?.authoritative === true;
+      const engineeringPassed =
+        isEngineeringPromoted(
+          engineeringResult
+        );
+
 
       reply =
         [
@@ -8481,29 +6410,13 @@ ${safeJson(
             ? `Failed: ${failed}.`
             : "",
 
-          buildValidation?.ready
-            ? "Static validation passed."
+          engineeringPassed
+            ? "Engineering build passed authoritative verification and was promoted."
             : "",
 
-          authoritativePassed
-            ? "Authoritative build passed."
-            : "",
-
-          workflowState.buildRepair?.attempted &&
-          authoritativePassed
-            ? `Build repaired in ${workflowState.buildRepair.rounds} repair round(s).`
-            : "",
-
-          githubResult?.success
-            ? "GitHub operation completed."
-            : "",
-
-          githubDeploymentResult?.success
-            ? "GitHub deployment preparation completed."
-            : "",
-
-          workflowState.environmentName
-            ? `Environment: ${workflowState.environmentName}.`
+          workflowState.engineeringStatus &&
+          !engineeringPassed
+            ? `Engineering state: ${workflowState.engineeringStatus}.`
             : "",
 
           autoFixResult?.triggered
@@ -8522,7 +6435,7 @@ ${safeJson(
 
 
     /* =====================================================
-       FINAL SUCCESS
+       COMPLETE LOG
     ===================================================== */
 
     logSuccess(
@@ -8535,8 +6448,13 @@ ${safeJson(
         status:
           workflowState.status,
 
-        authoritativeBuild:
-          authoritativeBuild?.ready === true,
+        engineeringStatus:
+          workflowState.engineeringStatus,
+
+        engineeringPromoted:
+          isEngineeringPromoted(
+            engineeringResult
+          ),
 
         durationMs:
           Date.now() -
@@ -8544,6 +6462,7 @@ ${safeJson(
 
       }
     );
+
 
     return {
 
@@ -8568,6 +6487,7 @@ ${safeJson(
         error
       );
 
+
     if (
       workflowState
     ) {
@@ -8587,6 +6507,7 @@ ${safeJson(
 
     }
 
+
     logError(
       "Master Agent Failed",
       {
@@ -8603,6 +6524,7 @@ ${safeJson(
 
       }
     );
+
 
     return {
 
@@ -8636,24 +6558,19 @@ ${safeJson(
             planning
           ),
 
+        engineering:
+          sanitizeForContext(
+            engineeringResult
+          ),
+
         buildResult:
           sanitizeForContext(
             buildResult
           ),
 
-        buildValidation:
+        deploymentResult:
           sanitizeForContext(
-            buildValidation
-          ),
-
-        authoritativeBuild:
-          sanitizeForContext(
-            authoritativeBuild
-          ),
-
-        buildRepair:
-          sanitizeForContext(
-            workflowState?.buildRepair
+            deploymentResult
           ),
 
         githubResult:
@@ -8669,11 +6586,6 @@ ${safeJson(
         environment:
           sanitizeForContext(
             environmentResult
-          ),
-
-        deploymentResult:
-          sanitizeForContext(
-            deploymentResult
           ),
 
         monitoringResult:
@@ -8740,126 +6652,88 @@ masterAgent.agentCount =
 
 
 /* =========================================================
-   OWNERSHIP
+   ENGINEERING OWNERSHIP
 ========================================================= */
 
-masterAgent.ownership = {
+masterAgent.engineeringOwnership = {
 
   master: [
 
-    "request_normalization",
-    "intent_routing",
-    "workflow_orchestration",
-    "dependency_enforcement",
-    "static_build_validation_gates",
-    "authoritative_build_gates",
-    "authoritative_readiness_delegation",
-    "verified_artifact_gates",
-    "build_repair_orchestration",
-    "authoritative_failure_context_propagation",
-    "environment_gates",
-    "github_workflow_coordination",
-    "deployment_gates",
-    "deployment_failure_logging",
-    "auto_fix_trigger_coordination",
-    "failure_propagation",
+    "request_to_engineering_job",
+    "engineering_result_consumption",
+    "deployment_gate_after_promotion",
     "final_result_aggregation"
 
   ],
 
-  memory: [
-    "context_memory"
+  engineeringOrchestrator: [
+
+    "engineering_run_lifecycle",
+    "execution_orchestration",
+    "failure_diagnosis_loop",
+    "repair_loop",
+    "retry_policy",
+    "checkpoint_coordination",
+    "rollback_coordination",
+    "verification",
+    "promotion",
+    "escalation"
+
   ],
 
-  intent: [
-    "intent_classification"
+  engineeringExecutor: [
+
+    "dependency_installation",
+    "build_execution",
+    "test_execution",
+    "runtime_execution",
+    "preview_execution",
+    "docker_execution",
+    "timeouts",
+    "resource_limits",
+    "process_termination",
+    "stdout_stderr_capture",
+    "artifact_creation",
+    "artifact_verification"
+
   ],
 
-  planning: [
-    "implementation_planning",
-    "dependency_planning",
-    "project_decomposition"
+  engineeringIntelligence: [
+
+    "failure_classification",
+    "root_cause_analysis",
+    "failure_signatures",
+    "repair_strategy",
+    "repair_validation",
+    "repair_memory",
+    "regression_detection",
+    "resource_analysis",
+    "auto_scale_recommendation"
+
+  ],
+
+  engineeringState: [
+
+    "engineering_run_state",
+    "attempt_records",
+    "execution_records",
+    "failure_records",
+    "repair_records",
+    "verification_records",
+    "artifact_records",
+    "resource_events",
+    "checkpoints",
+    "rollback_records",
+    "audit_events",
+    "state_transitions",
+    "successful_patterns"
+
   ],
 
   builder: [
-    "project_file_generation"
-  ],
 
-  fix: [
-    "bug_analysis",
-    "bug_repair"
-  ],
+    "source_generation_only"
 
-  file: [
-    "file_operations"
-  ],
-
-  environment: [
-    "environment_configuration",
-    "environment_validation",
-    "environment_secret_boundary",
-    "deployment_environment_state"
-  ],
-
-  log: [
-    "deployment_logging",
-    "deployment_error_recording",
-    "auto_fix_eligibility",
-    "auto_fix_trigger"
-  ],
-
-  github: [
-    "github_connection_operations",
-    "repository_operations",
-    "branch_operations",
-    "repository_contents",
-    "repository_analysis"
-  ],
-
-  githubDeployment: [
-    "github_deployment_contract",
-    "github_deployment_readiness",
-    "github_deployment_preparation"
-  ],
-
-  deploy: [
-    "deployment_orchestration",
-    "deployment_lifecycle",
-    "deployment_result"
-  ],
-
-  docker: [
-    "docker_operations"
-  ],
-
-  aws: [
-    "aws_infrastructure"
-  ],
-
-  domain: [
-    "dns_operations"
-  ],
-
-  ssl: [
-    "certificate_operations"
-  ],
-
-  monitoring: [
-    "runtime_monitoring"
-  ],
-
-  scaling: [
-    "capacity_scaling"
-  ],
-
-  billing: [
-    "billing_operations",
-    "payment_state"
-  ],
-
-  subscription: [
-    "subscription_state",
-    "entitlements"
   ]
 
 };
@@ -8889,41 +6763,38 @@ masterAgent.security = {
   directGithubApiAccess:
     false,
 
+  directDockerExecution:
+    false,
+
+  directBuildExecution:
+    false,
+
   environmentSecretsExposedToMaster:
     false,
 
   githubTokensExposedToMaster:
     false,
 
-  deploymentSecretsResolvedBy:
-    "trusted-deployment-workflow",
-
   providerArchitecture:
     "centralized-ai-provider-service",
 
-  buildValidationArchitecture:
-    "static-build-validation-service",
+  buildArchitecture:
+    "engineering-orchestrator",
 
-  authoritativeBuildArchitecture:
-    "authoritative-build-service",
+  executionArchitecture:
+    "engineering-executor",
 
-  authoritativeReadinessArchitecture:
-    "authoritative-build-service-owned",
+  intelligenceArchitecture:
+    "engineering-intelligence",
 
-  artifactReadinessArchitecture:
-    "authoritative-build-service-owned",
+  stateArchitecture:
+    "engineering-state",
 
-  githubArchitecture:
-    "github-agent-service-boundary",
+  artifactAuthority:
+    "engineering-executor",
 
-  autoFixArchitecture:
-    "log-agent-trigger-boundary",
-
-  buildRepairArchitecture:
-    "static-validation-authoritative-build-fix-rebuild-loop",
-
-  authoritativeFailurePropagation:
-    "master-extracts-and-sanitizes-authoritative-repair-context-before-fix-handoff"
+  promotionAuthority:
+    "engineering-orchestrator"
 
 };
 
@@ -8940,11 +6811,14 @@ masterAgent.workflowContract = {
     "intent",
     "planning",
     "builder",
-    "build-validation",
-    "authoritative-build",
-    "build-fix-*",
-    "build-validation-*",
-    "authoritative-build-*"
+    "engineering-orchestration",
+    "ANALYZING",
+    "EXECUTING",
+    "DIAGNOSING",
+    "REPAIRING",
+    "VERIFYING",
+    "PASSED",
+    "PROMOTED"
 
   ],
 
@@ -8954,27 +6828,11 @@ masterAgent.workflowContract = {
     "intent",
     "planning",
     "builder",
-    "build-validation",
-    "authoritative-build",
-    "build-fix-*",
-    "build-validation-*",
-    "authoritative-build-*",
+    "engineering-orchestration",
+    "PROMOTED",
     "environment-readiness",
     "environment-snapshot",
     "deploy",
-    "environment-deployed"
-
-  ],
-
-  deploy: [
-
-    "memory",
-    "intent",
-    "environment-readiness",
-    "environment-snapshot",
-    "deploy",
-    "deployment-error-log",
-    "auto-fix-trigger",
     "environment-deployed"
 
   ],
@@ -8993,11 +6851,10 @@ masterAgent.workflowContract = {
     "intent",
     "github",
     "github-deployment",
-    "build-validation",
-    "authoritative-build",
-    "build-fix-*",
-    "build-validation-*",
-    "authoritative-build-*",
+    "planning",
+    "builder",
+    "engineering-orchestration",
+    "PROMOTED",
     "environment-readiness",
     "environment-snapshot",
     "deploy",
@@ -9009,8 +6866,7 @@ masterAgent.workflowContract = {
 
     "deploy",
     "deployment-error-log",
-    "auto-fix-trigger",
-    "fix-agent-handoff"
+    "auto-fix-trigger"
 
   ],
 
@@ -9045,6 +6901,106 @@ masterAgent.workflowContract = {
     "billing"
 
   ]
+
+};
+
+
+/* =========================================================
+   LEGACY BUILD CONTRACT
+========================================================= */
+
+/*
+ * Legacy AuthoritativeBuildService is intentionally NOT
+ * imported by Master Agent anymore.
+ *
+ * Compatibility must be handled only inside the Engineering
+ * Executor / Orchestrator boundary if required during
+ * migration.
+ */
+
+masterAgent.legacyBuildArchitecture = {
+
+  masterDirectAuthoritativeBuild:
+    false,
+
+  masterDirectDocker:
+    false,
+
+  masterDirectInstall:
+    false,
+
+  masterDirectRuntime:
+    false,
+
+  masterDirectArtifactCreation:
+    false,
+
+  adapterLocation:
+    "engineeringExecutor",
+
+  finalOwner:
+    "engineeringOrchestrator"
+
+};
+
+
+/* =========================================================
+   ENGINEERING SYSTEM CONTRACT
+========================================================= */
+
+masterAgent.engineeringContract = {
+
+  version:
+    "2.0.0",
+
+  files: [
+
+    "engineeringState.js",
+    "engineeringExecutor.js",
+    "engineeringIntelligence.js",
+    "engineeringOrchestrator.js"
+
+  ],
+
+  states:
+    Array.from(
+      ENGINEERING_STATES
+    ),
+
+  successState:
+    "PROMOTED",
+
+  failureStates: [
+
+    "FAILED",
+    "ROLLBACK",
+    "ESCALATED"
+
+  ],
+
+  authoritativeSuccessRequired:
+    true,
+
+  artifactVerificationRequired:
+    true,
+
+  promotionRequiredForDeployment:
+    true,
+
+  masterMayDeclareBuildSuccess:
+    false,
+
+  orchestratorMayDeclareBuildSuccess:
+    true,
+
+  executorMayExecuteBuild:
+    true,
+
+  intelligenceMayDeclareBuildSuccess:
+    false,
+
+  stateIsSourceOfTruth:
+    true
 
 };
 
