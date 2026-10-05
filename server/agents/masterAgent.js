@@ -3,7 +3,7 @@
  * ZYRIONOS MASTER AGENT
  * =========================================================
  *
- * Version: 6.1.0
+ * Version: 6.2.0
  *
  * CENTRAL AUTONOMOUS ORCHESTRATOR / CEO CONTROL PLANE
  *
@@ -45,7 +45,7 @@
  *            │
  *            └── PASS
  *                  ↓
- *              Artifact
+ *              Verified Artifact
  *                  ↓
  *            Deployment Gate
  *                  ↓
@@ -53,17 +53,23 @@
  *
  * =========================================================
  *
- * MASTER DOES NOT:
+ * IMPORTANT CONTRACT
  *
- * - Generate source code directly
- * - Modify source files directly
- * - Access MongoDB directly
- * - Access GitHub API directly
- * - Execute Docker directly
- * - Configure AWS directly
- * - Resolve secrets directly
- * - Process payments directly
- * - Call AI providers directly
+ * Master owns orchestration.
+ *
+ * BuildValidationService owns static validation.
+ *
+ * AuthoritativeBuildService owns:
+ * - real dependency installation
+ * - real production build
+ * - Docker isolation
+ * - authoritative diagnostics
+ * - artifact creation
+ * - authoritative readiness
+ *
+ * Fix Agent owns source repair.
+ *
+ * Master NEVER executes Docker/build commands directly.
  *
  * =========================================================
  */
@@ -201,7 +207,7 @@ const {
 ========================================================= */
 
 const MASTER_VERSION =
-  "6.1.0";
+  "6.2.0";
 
 const MAX_PROMPT_LENGTH =
   12000;
@@ -217,6 +223,18 @@ const MAX_FINAL_RESPONSE_TOKENS =
 
 const MAX_BUILD_REPAIR_ROUNDS =
   2;
+
+const MAX_DIAGNOSTIC_ERRORS =
+  100;
+
+const MAX_AFFECTED_FILES =
+  100;
+
+const MAX_STDOUT_LENGTH =
+  12000;
+
+const MAX_STDERR_LENGTH =
+  20000;
 
 const VALID_ENVIRONMENTS =
   new Set([
@@ -2257,6 +2275,36 @@ async function validateGeneratedBuild(
           ?.packageManager ||
         null,
 
+      nodeVersion:
+        validation?.summary
+          ?.nodeVersion ||
+        validation?.metadata
+          ?.nodeVersion ||
+        planningData?.nodeVersion ||
+        null,
+
+      buildCommand:
+        validation?.summary
+          ?.buildCommand ||
+        validation?.metadata
+          ?.buildCommand ||
+        null,
+
+      installCommand:
+        validation?.summary
+          ?.installCommand ||
+        validation?.metadata
+          ?.installCommand ||
+        null,
+
+      outputDirectory:
+        validation?.summary
+          ?.outputDirectory ||
+        validation?.metadata
+          ?.outputDirectory ||
+        planningData?.outputDirectory ||
+        null,
+
       fileCount:
         files.length,
 
@@ -2342,85 +2390,40 @@ async function validateGeneratedBuild(
 
 
 /* =========================================================
-   AUTHORITATIVE BUILD CONTRACT
+   AUTHORITATIVE RAW RESULT
 ========================================================= */
 
-function validateAuthoritativeBuildResult(
-  result
+function getAuthoritativeRawResult(
+  authoritativeBuild
 ) {
 
   if (
-    !result ||
-    typeof result !== "object"
+    !authoritativeBuild ||
+    typeof authoritativeBuild !== "object"
   ) {
 
-    return {
-
-      ready:
-        false,
-
-      error:
-        "Authoritative build service returned no result."
-
-    };
+    return {};
 
   }
 
-  const authoritative =
-    result.authoritative === true ||
-    result.data?.authoritative === true;
+  /*
+   * Master wraps the direct service result inside
+   * normalized.result.
+   *
+   * This helper intentionally supports BOTH:
+   *
+   * 1. normalized.result
+   * 2. direct authoritativeBuild result
+   *
+   * so the contract remains forward-compatible.
+   */
 
-  const success =
-    result.success === true;
-
-  const status =
-    result.status ||
-    result.data?.status ||
-    "";
-
-  const buildId =
-    result.buildId ||
-    result.data?.buildId ||
-    result.id ||
-    result.data?.id ||
-    null;
-
-  const passedStatus =
-    status === "passed" ||
-    status === "success" ||
-    status === "completed";
-
-  const ready =
-    success &&
-    authoritative &&
-    (
-      passedStatus ||
-      buildId !== null
-    );
-
-  return {
-
-    ready,
-
-    success,
-
-    authoritative,
-
-    status,
-
-    buildId,
-
-    error:
-      ready
-        ? null
-        : (
-            result.error ||
-            result.message ||
-            result.data?.error ||
-            "Authoritative build failed."
-          )
-
-  };
+  return (
+    authoritativeBuild.result &&
+    typeof authoritativeBuild.result === "object"
+      ? authoritativeBuild.result
+      : authoritativeBuild
+  );
 
 }
 
@@ -2442,20 +2445,24 @@ function getAuthoritativeRepairContext(
 
   }
 
-  const result =
-    authoritativeBuild.result;
+  const raw =
+    getAuthoritativeRawResult(
+      authoritativeBuild
+    );
 
   const candidates = [
 
-    result?.repairContext,
+    raw?.repairContext,
 
-    authoritativeBuild.repairContext,
+    authoritativeBuild?.repairContext,
 
-    result?.data?.repairContext,
+    raw?.data?.repairContext,
 
-    result?.errorDetails?.repairContext,
+    authoritativeBuild?.data?.repairContext,
 
-    result?.details?.repairContext
+    raw?.errorDetails?.repairContext,
+
+    raw?.details?.repairContext
 
   ];
 
@@ -2487,53 +2494,77 @@ function getAuthoritativeFailureDetails(
   authoritativeBuild
 ) {
 
+  const empty = {
+
+    category:
+      null,
+
+    failureStage:
+      null,
+
+    retryable:
+      false,
+
+    affectedFiles:
+      [],
+
+    errors:
+      [],
+
+    stdout:
+      "",
+
+    stderr:
+      "",
+
+    exitCode:
+      null,
+
+    signal:
+      null,
+
+    timedOut:
+      false,
+
+    strategy:
+      null,
+
+    buildCommand:
+      null,
+
+    installCommand:
+      null,
+
+    buildId:
+      null,
+
+    sourceHash:
+      null,
+
+    nodeVersion:
+      null,
+
+    packageManager:
+      null,
+
+    outputDirectory:
+      null
+
+  };
+
   if (
     !authoritativeBuild ||
     typeof authoritativeBuild !== "object"
   ) {
 
-    return {
-
-      category:
-        null,
-
-      failureStage:
-        null,
-
-      retryable:
-        false,
-
-      affectedFiles:
-        [],
-
-      errors:
-        [],
-
-      stdout:
-        "",
-
-      stderr:
-        "",
-
-      exitCode:
-        null,
-
-      strategy:
-        null,
-
-      buildCommand:
-        null,
-
-      installCommand:
-        null
-
-    };
+    return empty;
 
   }
 
-  const result =
-    authoritativeBuild.result ||
-    {};
+  const raw =
+    getAuthoritativeRawResult(
+      authoritativeBuild
+    );
 
   const repairContext =
     getAuthoritativeRepairContext(
@@ -2541,15 +2572,21 @@ function getAuthoritativeFailureDetails(
     ) ||
     {};
 
-  const errors =
+  const rawErrors =
     Array.isArray(
       repairContext.errors
     )
       ? repairContext.errors
       : (
-          Array.isArray(result.errors)
-            ? result.errors
-            : []
+          Array.isArray(raw.errors)
+            ? raw.errors
+            : (
+                Array.isArray(
+                  raw.data?.errors
+                )
+                  ? raw.data.errors
+                  : []
+              )
         );
 
   const affectedFiles =
@@ -2557,35 +2594,61 @@ function getAuthoritativeFailureDetails(
       repairContext.affectedFiles
     )
       ? repairContext.affectedFiles
-      : [];
+      : (
+          Array.isArray(
+            raw.affectedFiles
+          )
+            ? raw.affectedFiles
+            : []
+        );
 
   const stdout =
     cleanString(
       repairContext.stdout ||
-      result.stdout ||
+      raw.stdout ||
+      raw.data?.stdout ||
       "",
-      12000
+      MAX_STDOUT_LENGTH
     );
 
   const stderr =
     cleanString(
       repairContext.stderr ||
-      result.stderr ||
+      raw.stderr ||
+      raw.data?.stderr ||
       "",
-      20000
+      MAX_STDERR_LENGTH
     );
 
   const exitCode =
     repairContext.exitCode ??
-    result.exitCode ??
-    result.data?.exitCode ??
+    raw.exitCode ??
+    raw.data?.exitCode ??
     null;
+
+  const signal =
+    cleanString(
+      repairContext.signal ||
+      raw.signal ||
+      raw.data?.signal ||
+      "",
+      100
+    ) ||
+    null;
+
+  const timedOut =
+    repairContext.timedOut === true ||
+    raw.timedOut === true ||
+    raw.data?.timedOut === true;
 
   const category =
     cleanString(
+      repairContext.failureCategory ||
       repairContext.category ||
-      result.category ||
-      result.data?.category ||
+      raw.failureCategory ||
+      raw.category ||
+      raw.data?.failureCategory ||
+      raw.data?.category ||
       "",
       200
     ) ||
@@ -2595,8 +2658,10 @@ function getAuthoritativeFailureDetails(
     cleanString(
       repairContext.failureStage ||
       repairContext.stage ||
-      result.failureStage ||
-      result.stage ||
+      raw.failureStage ||
+      raw.stage ||
+      raw.data?.failureStage ||
+      raw.data?.stage ||
       "authoritative-build",
       200
     );
@@ -2604,7 +2669,8 @@ function getAuthoritativeFailureDetails(
   const strategy =
     cleanString(
       repairContext.strategy ||
-      result.strategy ||
+      raw.strategy ||
+      raw.data?.strategy ||
       "",
       4000
     ) ||
@@ -2612,12 +2678,14 @@ function getAuthoritativeFailureDetails(
 
   const retryable =
     repairContext.retryable === true ||
-    result.retryable === true;
+    raw.retryable === true ||
+    raw.data?.retryable === true;
 
   const buildCommand =
     cleanString(
-      result.buildCommand ||
-      result.data?.buildCommand ||
+      repairContext.buildCommand ||
+      raw.buildCommand ||
+      raw.data?.buildCommand ||
       "",
       2000
     ) ||
@@ -2625,11 +2693,42 @@ function getAuthoritativeFailureDetails(
 
   const installCommand =
     cleanString(
-      result.installCommand ||
-      result.data?.installCommand ||
+      repairContext.installCommand ||
+      raw.installCommand ||
+      raw.data?.installCommand ||
       "",
       2000
     ) ||
+    null;
+
+  const buildId =
+    repairContext.buildId ||
+    raw.buildId ||
+    raw.data?.buildId ||
+    null;
+
+  const sourceHash =
+    repairContext.sourceHash ||
+    raw.sourceHash ||
+    raw.data?.sourceHash ||
+    null;
+
+  const nodeVersion =
+    repairContext.nodeVersion ||
+    raw.nodeVersion ||
+    raw.data?.nodeVersion ||
+    null;
+
+  const packageManager =
+    repairContext.packageManager ||
+    raw.packageManager ||
+    raw.data?.packageManager ||
+    null;
+
+  const outputDirectory =
+    repairContext.outputDirectory ||
+    raw.outputDirectory ||
+    raw.data?.outputDirectory ||
     null;
 
   return {
@@ -2641,16 +2740,18 @@ function getAuthoritativeFailureDetails(
     retryable,
 
     affectedFiles:
-      affectedFiles.slice(
-        0,
-        100
-      ),
+      affectedFiles
+        .slice(
+          0,
+          MAX_AFFECTED_FILES
+        ),
 
     errors:
-      errors.slice(
-        0,
-        100
-      ),
+      rawErrors
+        .slice(
+          0,
+          MAX_DIAGNOSTIC_ERRORS
+        ),
 
     stdout,
 
@@ -2658,11 +2759,228 @@ function getAuthoritativeFailureDetails(
 
     exitCode,
 
+    signal,
+
+    timedOut,
+
     strategy,
 
     buildCommand,
 
-    installCommand
+    installCommand,
+
+    buildId,
+
+    sourceHash,
+
+    nodeVersion,
+
+    packageManager,
+
+    outputDirectory
+
+  };
+
+}
+
+
+/* =========================================================
+   AUTHORITATIVE READINESS
+========================================================= */
+
+function isAuthoritativeReady(
+  result
+) {
+
+  if (
+    !result ||
+    typeof result !== "object"
+  ) {
+
+    return false;
+
+  }
+
+  /*
+   * FIRST CHOICE:
+   *
+   * The AuthoritativeBuildService owns authoritative
+   * readiness semantics.
+   *
+   * Never duplicate its artifact/readiness rules in Master
+   * when the official service contract is available.
+   */
+
+  if (
+    typeof authoritativeBuildService
+      ?.isAuthoritativeBuildReady ===
+    "function"
+  ) {
+
+    try {
+
+      return Boolean(
+        authoritativeBuildService
+          .isAuthoritativeBuildReady(
+            result
+          )
+      );
+
+    } catch (
+      error
+    ) {
+
+      logWarn(
+        "Authoritative readiness service check failed; using strict local contract.",
+        {
+          error:
+            error?.message ||
+            "Unknown readiness error"
+        }
+      );
+
+    }
+
+  }
+
+  /*
+   * STRICT FALLBACK.
+   *
+   * buildId alone is NEVER enough.
+   */
+
+  const authoritative =
+    result.authoritative === true;
+
+  const success =
+    result.success === true;
+
+  const validationMode =
+    result.validationMode ||
+    result.mode ||
+    "";
+
+  const status =
+    result.status ||
+    "";
+
+  const artifact =
+    result.artifact ||
+    result.data?.artifact ||
+    null;
+
+  const artifactReady =
+    Boolean(
+      artifact &&
+      typeof artifact === "object" &&
+      artifact.storageKey &&
+      artifact.checksum
+    );
+
+  return (
+    success &&
+    authoritative &&
+    validationMode === "authoritative" &&
+    (
+      status === "passed" ||
+      status === "success" ||
+      status === "completed"
+    ) &&
+    artifactReady
+  );
+
+}
+
+
+/* =========================================================
+   AUTHORITATIVE BUILD CONTRACT
+========================================================= */
+
+function validateAuthoritativeBuildResult(
+  result
+) {
+
+  if (
+    !result ||
+    typeof result !== "object"
+  ) {
+
+    return {
+
+      ready:
+        false,
+
+      success:
+        false,
+
+      authoritative:
+        false,
+
+      status:
+        "invalid",
+
+      buildId:
+        null,
+
+      error:
+        "Authoritative build service returned no result."
+
+    };
+
+  }
+
+  const raw =
+    result;
+
+  const success =
+    raw.success === true;
+
+  const authoritative =
+    raw.authoritative === true;
+
+  const status =
+    raw.status ||
+    "";
+
+  const buildId =
+    raw.buildId ||
+    raw.id ||
+    null;
+
+  /*
+   * IMPORTANT:
+   *
+   * Readiness is delegated to the authoritative service.
+   * This prevents Master from declaring a build ready only
+   * because a buildId exists.
+   */
+
+  const ready =
+    isAuthoritativeReady(
+      raw
+    );
+
+  return {
+
+    ready,
+
+    success,
+
+    authoritative,
+
+    status,
+
+    buildId,
+
+    error:
+      ready
+        ? null
+        : (
+            raw.error ||
+            raw.message ||
+            raw.data?.error ||
+            "Authoritative build failed or did not produce a verified artifact."
+          )
 
   };
 
@@ -2682,22 +3000,29 @@ function createAuthoritativeFailureSummary(
       authoritativeBuild
     );
 
+  const raw =
+    getAuthoritativeRawResult(
+      authoritativeBuild
+    );
+
   return {
 
     status:
       authoritativeBuild?.status ||
-      authoritativeBuild?.result?.status ||
+      raw?.status ||
       "failed",
 
     buildId:
+      details.buildId ||
       authoritativeBuild?.buildId ||
-      authoritativeBuild?.result?.buildId ||
+      raw?.buildId ||
       null,
 
     error:
       cleanString(
         authoritativeBuild?.error ||
-        authoritativeBuild?.result?.error ||
+        raw?.error ||
+        raw?.message ||
         "Authoritative build failed.",
         4000
       ),
@@ -2713,6 +3038,12 @@ function createAuthoritativeFailureSummary(
 
     exitCode:
       details.exitCode,
+
+    signal:
+      details.signal,
+
+    timedOut:
+      details.timedOut,
 
     buildCommand:
       details.buildCommand,
@@ -2733,7 +3064,19 @@ function createAuthoritativeFailureSummary(
       details.stderr,
 
     strategy:
-      details.strategy
+      details.strategy,
+
+    sourceHash:
+      details.sourceHash,
+
+    nodeVersion:
+      details.nodeVersion,
+
+    packageManager:
+      details.packageManager,
+
+    outputDirectory:
+      details.outputDirectory
 
   };
 
@@ -2767,13 +3110,82 @@ async function executeAuthoritativeBuild(
         false,
 
       authoritative:
-        false,
+        true,
 
       status:
         "service_unavailable",
 
+      validationMode:
+        "authoritative",
+
       error:
-        "AuthoritativeBuildService.executeBuild is unavailable."
+        "AuthoritativeBuildService.executeBuild is unavailable.",
+
+      repairContext: {
+
+        required:
+          true,
+
+        failureStage:
+          "service",
+
+        failureCategory:
+          "service",
+
+        retryable:
+          false,
+
+        affectedFiles:
+          [],
+
+        errors: [
+          {
+            code:
+              "AUTHORITATIVE_SERVICE_UNAVAILABLE",
+
+            message:
+              "AuthoritativeBuildService.executeBuild is unavailable.",
+
+            stage:
+              "service",
+
+            category:
+              "service",
+
+            retryable:
+              false,
+
+            file:
+              "",
+            
+            line:
+              null,
+
+            column:
+              null
+
+          }
+        ],
+
+        stdout:
+          "",
+
+        stderr:
+          "",
+
+        exitCode:
+          null,
+
+        signal:
+          null,
+
+        timedOut:
+          false,
+
+        strategy:
+          "service_unavailable"
+
+      }
 
     };
 
@@ -2797,6 +3209,37 @@ async function executeAuthoritativeBuild(
     planningData?.packageManager ||
     "npm";
 
+  /*
+   * Resolve authoritative build configuration from the
+   * static validation / planning contract.
+   *
+   * AuthoritativeBuildService remains the final owner of
+   * actual command validation and execution.
+   */
+
+  const nodeVersion =
+    buildValidation?.nodeVersion ||
+    planningData?.nodeVersion ||
+    planningData?.runtime?.nodeVersion ||
+    null;
+
+  const buildCommand =
+    buildValidation?.buildCommand ||
+    planningData?.buildCommand ||
+    planningData?.scripts?.build ||
+    null;
+
+  const installCommand =
+    buildValidation?.installCommand ||
+    planningData?.installCommand ||
+    null;
+
+  const outputDirectory =
+    buildValidation?.outputDirectory ||
+    planningData?.outputDirectory ||
+    planningData?.build?.outputDirectory ||
+    null;
+
   try {
 
     logInfo(
@@ -2814,10 +3257,27 @@ async function executeAuthoritativeBuild(
 
         framework,
 
-        packageManager
+        packageManager,
+
+        nodeVersion,
+
+        buildCommand,
+
+        installCommand,
+
+        outputDirectory
 
       }
     );
+
+    /*
+     * IMPORTANT:
+     *
+     * Keep the call as executeBuild().
+     *
+     * Do not wrap its returned contract here before
+     * validating it.
+     */
 
     const result =
       await authoritativeBuildService
@@ -2839,6 +3299,14 @@ async function executeAuthoritativeBuild(
           framework,
 
           packageManager,
+
+          nodeVersion,
+
+          buildCommand,
+
+          installCommand,
+
+          outputDirectory,
 
           files,
 
@@ -2882,7 +3350,17 @@ async function executeAuthoritativeBuild(
       error:
         contract.error,
 
-      result
+      /*
+       * Keep the original authoritative service result
+       * intact so repairContext/artifact/diagnostics are
+       * never lost.
+       */
+      result:
+
+        result &&
+        typeof result === "object"
+          ? result
+          : null
 
     };
 
@@ -2912,7 +3390,13 @@ async function executeAuthoritativeBuild(
             workflowState.workflowId,
 
           buildId:
-            normalized.buildId
+            normalized.buildId,
+
+          artifact:
+            Boolean(
+              result?.artifact ||
+              result?.data?.artifact
+            )
 
         }
       );
@@ -2945,6 +3429,12 @@ async function executeAuthoritativeBuild(
 
           exitCode:
             failureSummary.exitCode,
+
+          signal:
+            failureSummary.signal,
+
+          timedOut:
+            failureSummary.timedOut,
 
           buildCommand:
             failureSummary.buildCommand,
@@ -2988,11 +3478,18 @@ async function executeAuthoritativeBuild(
       ready:
         false,
 
+      /*
+       * The authoritative boundary was entered, therefore
+       * this is still an authoritative-stage failure.
+       */
       authoritative:
         true,
 
       status:
         "exception",
+
+      validationMode:
+        "authoritative",
 
       buildId:
         null,
@@ -3005,11 +3502,112 @@ async function executeAuthoritativeBuild(
 
       result: {
 
+        success:
+          false,
+
+        authoritative:
+          true,
+
+        status:
+          "exception",
+
+        validationMode:
+          "authoritative",
+
         error:
           normalized.message,
 
         code:
-          normalized.code
+          normalized.code,
+
+        buildCommand,
+
+        installCommand,
+
+        outputDirectory,
+
+        repairContext: {
+
+          required:
+            true,
+
+          buildId:
+            null,
+
+          sourceHash:
+            buildValidation?.sourceHash ||
+            null,
+
+          packageManager,
+
+          failureStage:
+            "service",
+
+          failureCategory:
+            "service",
+
+          retryable:
+            false,
+
+          affectedFiles:
+            [],
+
+          errors: [
+            {
+              code:
+                normalized.code ||
+                "AUTHORITATIVE_BUILD_EXCEPTION",
+
+              message:
+                normalized.message,
+
+              step:
+                "executeBuild",
+
+              stage:
+                "service",
+
+              category:
+                "service",
+
+              retryable:
+                false,
+
+              file:
+                "",
+
+              line:
+                null,
+
+              column:
+                null
+
+            }
+          ],
+
+          stdout:
+            "",
+
+          stderr:
+            "",
+
+          exitCode:
+            null,
+
+          signal:
+            null,
+
+          timedOut:
+            false,
+
+          buildCommand,
+
+          installCommand,
+
+          strategy:
+            "master_service_exception"
+
+        }
 
       }
 
@@ -3167,12 +3765,6 @@ function createBuildRepairContext(
         null
       ),
 
-    /*
-     * CRITICAL:
-     *
-     * AuthoritativeBuildService repairContext is now
-     * explicitly preserved.
-     */
     authoritativeRepairContext:
       sanitizeForContext(
         authoritativeRepairContext
@@ -3186,11 +3778,7 @@ function createBuildRepairContext(
     authoritativeErrors:
       sanitizeForContext(
         authoritativeFailure?.errors ||
-        authoritativeBuild?.result?.errors ||
-        authoritativeBuild?.result?.errorDetails ||
-        authoritativeBuild?.result?.details ||
-        authoritativeBuild?.error ||
-        null
+        []
       ),
 
     affectedFiles:
@@ -3218,12 +3806,21 @@ function createBuildRepairContext(
       authoritativeFailure?.exitCode ??
       null,
 
+    signal:
+      authoritativeFailure?.signal ||
+      null,
+
+    timedOut:
+      authoritativeFailure?.timedOut === true,
+
     buildCommand:
       authoritativeFailure?.buildCommand ||
+      buildValidation?.buildCommand ||
       null,
 
     installCommand:
       authoritativeFailure?.installCommand ||
+      buildValidation?.installCommand ||
       null,
 
     stdout:
@@ -3882,9 +4479,6 @@ async function validateAndRepairBuild(
         authoritativeBuild.error ||
         "Authoritative Docker build failed.",
 
-      /*
-       * Explicit structured failure information.
-       */
       authoritativeFailure:
         sanitizeForContext(
           authoritativeFailure
@@ -3909,9 +4503,6 @@ async function validateAndRepairBuild(
           []
         ),
 
-      /*
-       * Full master-generated repair context.
-       */
       repairContext:
         sanitizeForContext(
           authoritativeRepairContext
@@ -3954,6 +4545,12 @@ async function validateAndRepairBuild(
 
         exitCode:
           authoritativeFailure.exitCode,
+
+        signal:
+          authoritativeFailure.signal,
+
+        timedOut:
+          authoritativeFailure.timedOut,
 
         buildCommand:
           authoritativeFailure.buildCommand,
@@ -4252,6 +4849,13 @@ function canDeployAfterBuild(
 
   }
 
+  /*
+   * Re-check authoritative readiness through the same
+   * authoritative service contract.
+   *
+   * Do not trust only buildId/status here.
+   */
+
   if (
     !authoritativeBuild ||
     authoritativeBuild.ready !== true ||
@@ -4264,7 +4868,30 @@ function canDeployAfterBuild(
         false,
 
       reason:
-        "Deployment blocked because the authoritative Docker build did not pass."
+        "Deployment blocked because the authoritative Docker build did not produce a verified artifact."
+
+    };
+
+  }
+
+  const raw =
+    getAuthoritativeRawResult(
+      authoritativeBuild
+    );
+
+  if (
+    !isAuthoritativeReady(
+      raw
+    )
+  ) {
+
+    return {
+
+      allowed:
+        false,
+
+      reason:
+        "Deployment blocked because authoritative artifact readiness could not be verified."
 
     };
 
@@ -4276,7 +4903,7 @@ function canDeployAfterBuild(
       true,
 
     reason:
-      "Static validation and authoritative build gates passed."
+      "Static validation and authoritative artifact build gates passed."
 
   };
 
@@ -6353,6 +6980,12 @@ async function masterAgent(
             authoritativeExitCode:
               authoritativeFailureSummary.exitCode,
 
+            authoritativeSignal:
+              authoritativeFailureSummary.signal,
+
+            authoritativeTimedOut:
+              authoritativeFailureSummary.timedOut,
+
             authoritativeBuildCommand:
               authoritativeFailureSummary.buildCommand,
 
@@ -7645,6 +8278,8 @@ Rules:
 25. Never claim runtime/browser success from build success alone.
 26. A successful Docker build means the application passed the authoritative build gate; it does not by itself prove browser/runtime health.
 27. Static validation is always non-authoritative.
+28. Authoritative readiness requires the verified artifact contract, not merely a buildId.
+29. If the authoritative build failed, report the authoritative failure as failed even when a buildId exists.
 
 `
 
@@ -8118,6 +8753,8 @@ masterAgent.ownership = {
     "dependency_enforcement",
     "static_build_validation_gates",
     "authoritative_build_gates",
+    "authoritative_readiness_delegation",
+    "verified_artifact_gates",
     "build_repair_orchestration",
     "authoritative_failure_context_propagation",
     "environment_gates",
@@ -8269,6 +8906,12 @@ masterAgent.security = {
 
   authoritativeBuildArchitecture:
     "authoritative-build-service",
+
+  authoritativeReadinessArchitecture:
+    "authoritative-build-service-owned",
+
+  artifactReadinessArchitecture:
+    "authoritative-build-service-owned",
 
   githubArchitecture:
     "github-agent-service-boundary",
