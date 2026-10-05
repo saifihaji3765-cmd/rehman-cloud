@@ -7,64 +7,39 @@
  *   services/engineering/engineeringIntelligence.js
  *
  * Version:
- *   1.0.0
+ *   1.1.0
  *
  * Role:
  *   Engineering Diagnosis / Repair / Learning Intelligence
  *
- * Responsibilities:
- *
- *   1. Failure normalization
- *   2. Root-cause analysis
- *   3. Failure signature generation
- *   4. Repair strategy generation
- *   5. Repair scope control
- *   6. Dependency-change control
- *   7. Static repair validation
- *   8. Repair confidence scoring
- *   9. Successful repair pattern recording
- *  10. Failure pattern recording
- *  11. Engineering memory
- *  12. Resource pressure analysis
- *  13. Auto-scale recommendations
- *  14. Regression detection
- *  15. Deterministic fallback reasoning
- *  16. Centralized AI provider integration
- *
  * IMPORTANT:
  *
- * This module NEVER declares an authoritative build successful.
+ * This module can diagnose and propose/produce repairs.
  *
- * AI can:
+ * It NEVER declares an authoritative build successful.
  *
- *   diagnose
- *   propose
- *   repair
- *   explain
+ * Only EngineeringExecutor can establish:
  *
- * But only the authoritative executor can prove:
- *
- *   build success
- *   artifact creation
- *   artifact validity
- *   runtime success
+ *   - real process execution
+ *   - real exit code
+ *   - authoritative build success
+ *   - artifact creation
+ *   - artifact checksum verification
  *
  * ================================================================
  */
 
 "use strict";
 
-
 /* ================================================================
    MODULE IDENTITY
 ================================================================ */
 
 const INTELLIGENCE_VERSION =
-  "1.0.0";
+  "1.1.0";
 
 const ENGINEERING_SYSTEM_VERSION =
-  "1.0.0";
-
+  "2.0.0";
 
 /* ================================================================
    NODE MODULES
@@ -73,113 +48,60 @@ const ENGINEERING_SYSTEM_VERSION =
 const crypto =
   require("crypto");
 
-const fs =
-  require("fs");
-
-const path =
-  require("path");
-
-
 /* ================================================================
-   DEPENDENCY LOADING
+   OPTIONAL DEPENDENCIES
 ================================================================ */
 
 let engineeringState = null;
-
 let aiProvider = null;
-
 
 /* ================================================================
    SAFE REQUIRE
 ================================================================ */
 
 function safeRequire(modulePath) {
-
   try {
-
     return require(modulePath);
-
-  } catch (error) {
-
+  } catch (_) {
     return null;
-
   }
-
 }
-
 
 /* ================================================================
    LOAD DEPENDENCIES
 ================================================================ */
 
 function loadDependencies() {
-
   if (!engineeringState) {
-
     engineeringState =
       safeRequire("./engineeringState");
-
   }
 
-
-  /**
-   * Centralized provider.
-   *
-   * This file NEVER calls Gemini/OpenAI/Claude/DeepSeek directly.
-   *
-   * It uses the existing centralized ZyrionOS provider abstraction.
-   */
-
   if (!aiProvider) {
-
     const candidates = [
-
       "../aiProviderService",
-
       "../services/aiProviderService",
-
       "../../services/aiProviderService",
-
       "../ai/providerService",
-
       "../../ai/providerService",
-
     ];
 
-
-    for (
-      const candidate
-      of candidates
-    ) {
-
+    for (const candidate of candidates) {
       const loaded =
         safeRequire(candidate);
 
-
       if (loaded) {
-
-        aiProvider =
-          loaded;
-
+        aiProvider = loaded;
         break;
-
       }
-
     }
-
   }
 
-
   return {
-
     engineeringState,
-
     aiProvider,
-
   };
-
 }
-
 
 /* ================================================================
    FAILURE CATEGORIES
@@ -187,57 +109,23 @@ function loadDependencies() {
 
 const FAILURE_CATEGORIES =
   Object.freeze({
-
-    SYNTAX:
-      "syntax",
-
-    DEPENDENCY:
-      "dependency",
-
-    MISSING_MODULE:
-      "missing-module",
-
-    CONFIGURATION:
-      "configuration",
-
-    PERMISSION:
-      "permission",
-
-    NETWORK:
-      "network",
-
-    TIMEOUT:
-      "timeout",
-
-    RESOURCE:
-      "resource",
-
-    PROCESS:
-      "process-terminated",
-
-    BUILD:
-      "build",
-
-    TEST:
-      "test",
-
-    RUNTIME:
-      "runtime",
-
-    ARTIFACT:
-      "artifact",
-
-    INVALID_COMMAND:
-      "invalid-command",
-
-    SECURITY:
-      "security",
-
-    UNKNOWN:
-      "unknown",
-
+    SYNTAX: "syntax",
+    DEPENDENCY: "dependency",
+    MISSING_MODULE: "missing-module",
+    CONFIGURATION: "configuration",
+    PERMISSION: "permission",
+    NETWORK: "network",
+    TIMEOUT: "timeout",
+    RESOURCE: "resource",
+    PROCESS: "process-terminated",
+    BUILD: "build",
+    TEST: "test",
+    RUNTIME: "runtime",
+    ARTIFACT: "artifact",
+    INVALID_COMMAND: "invalid-command",
+    SECURITY: "security",
+    UNKNOWN: "unknown",
   });
-
 
 /* ================================================================
    REPAIR STRATEGIES
@@ -245,42 +133,19 @@ const FAILURE_CATEGORIES =
 
 const REPAIR_STRATEGIES =
   Object.freeze({
-
-    SOURCE_FIX:
-      "source-fix",
-
-    DEPENDENCY_FIX:
-      "dependency-fix",
-
-    CONFIG_FIX:
-      "configuration-fix",
-
-    IMPORT_FIX:
-      "import-fix",
-
-    BUILD_SCRIPT_FIX:
-      "build-script-fix",
-
-    TEST_FIX:
-      "test-fix",
-
-    RUNTIME_FIX:
-      "runtime-fix",
-
-    ENVIRONMENT_FIX:
-      "environment-fix",
-
-    RESOURCE_ADJUSTMENT:
-      "resource-adjustment",
-
-    ROLLBACK:
-      "rollback",
-
-    NO_SAFE_REPAIR:
-      "no-safe-repair",
-
+    SOURCE_FIX: "source-fix",
+    DEPENDENCY_FIX: "dependency-fix",
+    CONFIG_FIX: "configuration-fix",
+    IMPORT_FIX: "import-fix",
+    BUILD_SCRIPT_FIX: "build-script-fix",
+    TEST_FIX: "test-fix",
+    RUNTIME_FIX: "runtime-fix",
+    ENVIRONMENT_FIX: "environment-fix",
+    RESOURCE_ADJUSTMENT: "resource-adjustment",
+    ARTIFACT_FIX: "artifact-fix",
+    ROLLBACK: "rollback",
+    NO_SAFE_REPAIR: "no-safe-repair",
   });
-
 
 /* ================================================================
    DEFAULT INTELLIGENCE POLICY
@@ -288,218 +153,206 @@ const REPAIR_STRATEGIES =
 
 const DEFAULT_POLICY =
   Object.freeze({
+    MAX_REPAIR_FILES: 25,
 
-    MAX_REPAIR_FILES:
-      25,
+    MAX_DEPENDENCY_CHANGES: 15,
 
-    MAX_DEPENDENCY_CHANGES:
-      15,
+    MAX_SCOPE_EXPANSION: 1.5,
 
-    MAX_SCOPE_EXPANSION:
-      1.5,
+    MIN_REPAIR_CONFIDENCE: 0.70,
 
-    MIN_REPAIR_CONFIDENCE:
-      0.70,
+    MIN_HIGH_RISK_CONFIDENCE: 0.90,
 
-    MIN_HIGH_RISK_CONFIDENCE:
-      0.90,
+    MAX_DIAGNOSIS_FILES: 100,
 
-    MAX_DIAGNOSIS_FILES:
-      100,
+    MAX_ERROR_MESSAGES: 100,
 
-    MAX_ERROR_MESSAGES:
-      100,
+    MAX_OUTPUT_CHARS: 50000,
 
-    MAX_OUTPUT_CHARS:
-      50000,
+    MAX_MEMORY_PATTERNS: 5000,
 
-    MAX_MEMORY_PATTERNS:
-      5000,
+    MAX_REPAIR_PLAN_STEPS: 30,
 
-    MAX_REPAIR_PLAN_STEPS:
-      30,
+    MAX_AI_REPAIR_ROUNDS: 2,
 
-    MAX_AI_REPAIR_ROUNDS:
-      2,
+    MAX_PATCH_BYTES:
+      2 * 1024 * 1024,
 
+    MAX_FILE_BYTES:
+      2 * 1024 * 1024,
+
+    MAX_SECRET_SCAN_CHARS:
+      200000,
+
+    MAX_KNOWN_REPAIRS:
+      10,
   });
 
-
 /* ================================================================
-   FAILURE RETRYABILITY
+   RETRYABLE CATEGORIES
 ================================================================ */
 
 const RETRYABLE_CATEGORIES =
   new Set([
-
     FAILURE_CATEGORIES.NETWORK,
-
     FAILURE_CATEGORIES.TIMEOUT,
-
     FAILURE_CATEGORIES.RESOURCE,
-
     FAILURE_CATEGORIES.PROCESS,
-
   ]);
 
+/* ================================================================
+   HIGH-RISK REPAIR STRATEGIES
+================================================================ */
+
+const HIGH_RISK_STRATEGIES =
+  new Set([
+    REPAIR_STRATEGIES.DEPENDENCY_FIX,
+    REPAIR_STRATEGIES.RESOURCE_ADJUSTMENT,
+    REPAIR_STRATEGIES.ENVIRONMENT_FIX,
+    REPAIR_STRATEGIES.ROLLBACK,
+  ]);
 
 /* ================================================================
    HASH
 ================================================================ */
 
-function sha256(
-  value
-) {
-
+function sha256(value) {
   return crypto
     .createHash("sha256")
-    .update(
-      String(value)
-    )
+    .update(String(value))
     .digest("hex");
-
 }
-
 
 /* ================================================================
    FILE HASH
 ================================================================ */
 
-function calculateFilesHash(
-  files
-) {
-
+function calculateFilesHash(files) {
   const normalized =
     Array.isArray(files)
+      ? files
+          .map((file) => ({
+            path: String(
+              file?.path ||
+              file?.name ||
+              ""
+            ),
 
-      ? files.map(
-          file => ({
-
-            path:
-              String(
-                file?.path ||
-                file?.name ||
-                ""
-              ),
-
-            content:
-              String(
-                file?.content ||
-                ""
-              ),
-
-          })
-        )
-
+            content: String(
+              file?.content ||
+              ""
+            ),
+          }))
+          .sort((a, b) =>
+            a.path.localeCompare(
+              b.path
+            )
+          )
       : [];
-
 
   return sha256(
     JSON.stringify(
       normalized
     )
   );
-
 }
-
 
 /* ================================================================
    SAFE JSON
 ================================================================ */
 
-function safeJsonParse(
-  value
-) {
-
+function safeJsonParse(value) {
   if (
     typeof value !==
     "string"
   ) {
-
     return value;
-
   }
-
 
   try {
-
-    return JSON.parse(
-      value
-    );
-
-  } catch (error) {
-
+    return JSON.parse(value);
+  } catch (_) {
     return null;
-
   }
-
 }
-
 
 /* ================================================================
    CLONE
 ================================================================ */
 
-function clone(
-  value
-) {
-
+function clone(value) {
   if (
     value ===
     undefined
   ) {
-
     return undefined;
-
   }
 
-
-  return JSON.parse(
-    JSON.stringify(value)
-  );
-
+  try {
+    return JSON.parse(
+      JSON.stringify(value)
+    );
+  } catch (_) {
+    return null;
+  }
 }
 
-
 /* ================================================================
-   LIMIT STRING
+   STRING LIMIT
 ================================================================ */
 
 function limitString(
   value,
   max
 ) {
-
   const text =
-    String(
-      value ||
-      ""
-    );
-
+    String(value || "");
 
   if (
-    text.length <=
-    max
+    text.length <= max
   ) {
-
     return text;
-
   }
 
-
   return (
-
-    text.slice(
-      0,
-      max
-    ) +
-
+    text.slice(0, max) +
     "\n...[TRUNCATED]..."
-
   );
-
 }
 
+/* ================================================================
+   NUMBER HELPERS
+================================================================ */
+
+function clampNumber(
+  value,
+  min,
+  max,
+  fallback
+) {
+  const number =
+    Number(value);
+
+  if (
+    !Number.isFinite(number)
+  ) {
+    return fallback;
+  }
+
+  return Math.min(
+    max,
+    Math.max(min, number)
+  );
+}
+
+function clampConfidence(value) {
+  return clampNumber(
+    value,
+    0,
+    1,
+    0
+  );
+}
 
 /* ================================================================
    PATH NORMALIZATION
@@ -508,22 +361,12 @@ function limitString(
 function normalizeFilePath(
   filePath
 ) {
-
   return String(
-    filePath ||
-    ""
+    filePath || ""
   )
-    .replace(
-      /\\/g,
-      "/"
-    )
-    .replace(
-      /^\/+/,
-      ""
-    );
-
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "");
 }
-
 
 /* ================================================================
    PATH SAFETY
@@ -532,116 +375,75 @@ function normalizeFilePath(
 function isSafeProjectPath(
   filePath
 ) {
-
   const normalized =
     normalizeFilePath(
       filePath
     );
 
-
   if (!normalized) {
-
     return false;
-
   }
-
 
   if (
-    normalized.includes(
-      "\0"
-    )
+    normalized.includes("\0")
   ) {
-
     return false;
-
   }
-
 
   const parts =
     normalized.split("/");
 
-
   if (
     parts.includes("..")
   ) {
-
     return false;
-
   }
-
 
   if (
-    normalized.startsWith(
-      ".git/"
-    ) ||
-    normalized ===
-      ".git"
+    normalized === ".git" ||
+    normalized.startsWith(".git/")
   ) {
-
     return false;
-
   }
-
 
   if (
-    normalized.startsWith(
-      ".env"
-    )
+    normalized === ".env" ||
+    normalized.startsWith(".env.")
   ) {
-
     return false;
-
   }
-
 
   return true;
-
 }
-
 
 /* ================================================================
    FILE MAP
 ================================================================ */
 
-function createFileMap(
-  files
-) {
-
+function createFileMap(files) {
   const map =
     new Map();
-
 
   if (
     !Array.isArray(files)
   ) {
-
     return map;
-
   }
 
-
-  for (
-    const file
-    of files
-  ) {
-
+  for (const file of files) {
     const filePath =
       normalizeFilePath(
         file?.path ||
         file?.name
       );
 
-
     if (
       !isSafeProjectPath(
         filePath
       )
     ) {
-
       continue;
-
     }
-
 
     map.set(
       filePath,
@@ -650,14 +452,10 @@ function createFileMap(
         ""
       )
     );
-
   }
 
-
   return map;
-
 }
-
 
 /* ================================================================
    ERROR EXTRACTION
@@ -666,105 +464,94 @@ function createFileMap(
 function extractErrors(
   failure
 ) {
-
   const errors = [];
-
 
   if (
     Array.isArray(
       failure?.errors
     )
   ) {
-
     errors.push(
       ...failure.errors
     );
-
   }
-
 
   if (
     failure?.stderr
   ) {
-
     errors.push(
       failure.stderr
     );
-
   }
-
 
   if (
     failure?.stdout
   ) {
-
     errors.push(
       failure.stdout
     );
-
   }
-
 
   if (
     failure?.message
   ) {
-
     errors.push(
       failure.message
     );
-
   }
 
-
   return errors
-    .map(
-      value =>
-        limitString(
-          typeof value ===
-          "string"
-            ? value
-            : JSON.stringify(value),
+    .map((value) => {
+      if (
+        typeof value ===
+        "string"
+      ) {
+        return limitString(
+          value,
           DEFAULT_POLICY.MAX_OUTPUT_CHARS
-        )
-    )
+        );
+      }
+
+      try {
+        return limitString(
+          JSON.stringify(
+            value
+          ),
+          DEFAULT_POLICY.MAX_OUTPUT_CHARS
+        );
+      } catch (_) {
+        return "";
+      }
+    })
     .filter(Boolean)
     .slice(
       0,
       DEFAULT_POLICY.MAX_ERROR_MESSAGES
     );
-
 }
 
-
 /* ================================================================
-   FAILURE CATEGORY DETECTION
+   FAILURE CATEGORY
 ================================================================ */
 
 function detectFailureCategory(
   failure
 ) {
+  if (
+    failure?.failureCategory
+  ) {
+    return String(
+      failure.failureCategory
+    ).toLowerCase();
+  }
 
   if (
     failure?.category
   ) {
-
     return String(
       failure.category
     ).toLowerCase();
-
   }
-
-
-  if (
-    failure?.failureCategory
-  ) {
-
-    return String(
-      failure.failureCategory
-    ).toLowerCase();
-
-  }
-
 
   const text =
     extractErrors(
@@ -773,17 +560,37 @@ function detectFailureCategory(
       .join("\n")
       .toLowerCase();
 
-
   if (
     failure?.timedOut ||
     text.includes("timeout") ||
     text.includes("timed out")
   ) {
-
     return FAILURE_CATEGORIES.TIMEOUT;
-
   }
 
+  if (
+    failure?.resourceViolation ||
+    text.includes(
+      "out of memory"
+    ) ||
+    text.includes(
+      "heap out of memory"
+    ) ||
+    text.includes(
+      "memory limit"
+    ) ||
+    text.includes(
+      "cpu limit"
+    ) ||
+    text.includes(
+      "pids-limit"
+    ) ||
+    text.includes(
+      "no space left"
+    )
+  ) {
+    return FAILURE_CATEGORIES.RESOURCE;
+  }
 
   if (
     text.includes(
@@ -796,11 +603,8 @@ function detectFailureCategory(
       "err_module_not_found"
     )
   ) {
-
     return FAILURE_CATEGORIES.MISSING_MODULE;
-
   }
-
 
   if (
     text.includes(
@@ -813,85 +617,26 @@ function detectFailureCategory(
       "unexpected identifier"
     )
   ) {
-
     return FAILURE_CATEGORIES.SYNTAX;
-
   }
 
-
   if (
-    text.includes(
-      "eacces"
-    ) ||
+    text.includes("eacces") ||
     text.includes(
       "permission denied"
     )
   ) {
-
     return FAILURE_CATEGORIES.PERMISSION;
-
   }
 
-
   if (
-    text.includes(
-      "enotfound"
-    ) ||
-    text.includes(
-      "network"
-    ) ||
-    text.includes(
-      "fetch failed"
-    ) ||
-    text.includes(
-      "getaddrinfo"
-    )
+    text.includes("enotfound") ||
+    text.includes("network") ||
+    text.includes("fetch failed") ||
+    text.includes("getaddrinfo")
   ) {
-
     return FAILURE_CATEGORIES.NETWORK;
-
   }
-
-
-  if (
-    text.includes(
-      "out of memory"
-    ) ||
-    text.includes(
-      "heap out of memory"
-    ) ||
-    text.includes(
-      "memory limit"
-    ) ||
-    text.includes(
-      "cpu limit"
-    )
-  ) {
-
-    return FAILURE_CATEGORIES.RESOURCE;
-
-  }
-
-
-  if (
-    text.includes(
-      "npm err"
-    ) ||
-    text.includes(
-      "yarn error"
-    ) ||
-    text.includes(
-      "pnpm"
-    ) &&
-    text.includes(
-      "error"
-    )
-  ) {
-
-    return FAILURE_CATEGORIES.DEPENDENCY;
-
-  }
-
 
   if (
     text.includes(
@@ -901,16 +646,33 @@ function detectFailureCategory(
       "invalid command"
     )
   ) {
-
     return FAILURE_CATEGORIES.INVALID_COMMAND;
-
   }
 
+  if (
+    text.includes(
+      "artifact"
+    ) ||
+    text.includes(
+      "checksum"
+    )
+  ) {
+    return FAILURE_CATEGORIES.ARTIFACT;
+  }
+
+  if (
+    text.includes("npm err") ||
+    text.includes("yarn error") ||
+    (
+      text.includes("pnpm") &&
+      text.includes("error")
+    )
+  ) {
+    return FAILURE_CATEGORIES.DEPENDENCY;
+  }
 
   return FAILURE_CATEGORIES.UNKNOWN;
-
 }
-
 
 /* ================================================================
    RETRYABILITY
@@ -920,23 +682,17 @@ function determineRetryability(
   category,
   failure
 ) {
-
   if (
     typeof failure?.retryable ===
     "boolean"
   ) {
-
     return failure.retryable;
-
   }
-
 
   return RETRYABLE_CATEGORIES.has(
     category
   );
-
 }
-
 
 /* ================================================================
    FAILURE NORMALIZATION
@@ -945,15 +701,12 @@ function determineRetryability(
 function normalizeFailure(
   failure
 ) {
-
   const category =
     detectFailureCategory(
       failure
     );
 
-
   return {
-
     category,
 
     message:
@@ -974,6 +727,7 @@ function normalizeFailure(
 
     failureStage:
       failure?.failureStage ||
+      failure?.stage ||
       null,
 
     affectedFiles:
@@ -1022,6 +776,10 @@ function normalizeFailure(
         failure?.timedOut
       ),
 
+    resourceViolation:
+      failure?.resourceViolation ||
+      null,
+
     buildId:
       failure?.buildId ||
       null,
@@ -1030,10 +788,23 @@ function normalizeFailure(
       failure?.sourceHash ||
       null,
 
+    buildCommand:
+      failure?.buildCommand ||
+      null,
+
+    installCommand:
+      failure?.installCommand ||
+      null,
+
+    authoritative:
+      failure?.authoritative ===
+      true,
+
+    validationMode:
+      failure?.validationMode ||
+      null,
   };
-
 }
-
 
 /* ================================================================
    ERROR SIGNATURE NORMALIZATION
@@ -1042,66 +813,43 @@ function normalizeFailure(
 function normalizeErrorForSignature(
   error
 ) {
-
   return String(
-    error ||
-    ""
+    error || ""
   )
-
     .toLowerCase()
 
-    /**
-     * Remove timestamps.
-     */
     .replace(
       /\b\d{4}-\d{2}-\d{2}[tT][^\s]+\b/g,
       "<timestamp>"
     )
 
-    /**
-     * Remove absolute paths.
-     */
     .replace(
       /\/(?:workspace|home|tmp)\/[^\s:'"]+/g,
       "<path>"
     )
 
-    /**
-     * Remove Windows paths.
-     */
     .replace(
       /[a-zA-Z]:\\[^\s:'"]+/g,
       "<path>"
     )
 
-    /**
-     * Remove line/column noise.
-     */
     .replace(
       /:\d+:\d+/g,
       ":<line>:<column>"
     )
 
-    /**
-     * Remove hexadecimal IDs.
-     */
     .replace(
       /\b[a-f0-9]{16,}\b/g,
       "<id>"
     )
 
-    /**
-     * Normalize whitespace.
-     */
     .replace(
       /\s+/g,
       " "
     )
 
     .trim();
-
 }
-
 
 /* ================================================================
    FAILURE SIGNATURE
@@ -1110,15 +858,12 @@ function normalizeErrorForSignature(
 function createFailureSignature(
   failure
 ) {
-
   const normalized =
     normalizeFailure(
       failure
     );
 
-
   const signatureInput = {
-
     category:
       normalized.category,
 
@@ -1143,11 +888,12 @@ function createFailureSignature(
         .slice(0, 20)
         .sort(),
 
+    buildCommand:
+      normalized.buildCommand ||
+      null,
   };
 
-
   return {
-
     signatureId:
       sha256(
         JSON.stringify(
@@ -1156,87 +902,65 @@ function createFailureSignature(
       ),
 
     ...signatureInput,
-
   };
-
 }
 
-
 /* ================================================================
-   SOURCE CONTEXT EXTRACTION
+   SOURCE CONTEXT
 ================================================================ */
 
 function extractSourceContext(
   files,
   affectedFiles
 ) {
-
   const map =
     createFileMap(
       files
     );
 
-
   const contexts = [];
 
-
-  const targets =
-    Array.isArray(
-      affectedFiles
-    )
-      ? affectedFiles
-      : [];
-
-
   for (
-    const target
-    of targets.slice(
+    const target of (
+      Array.isArray(
+        affectedFiles
+      )
+        ? affectedFiles
+        : []
+    ).slice(
       0,
       DEFAULT_POLICY.MAX_DIAGNOSIS_FILES
     )
   ) {
-
     const filePath =
       normalizeFilePath(
         target
       );
 
-
     if (
-      !map.has(filePath)
+      !map.has(
+        filePath
+      )
     ) {
-
       continue;
-
     }
 
-
-    const content =
-      map.get(
-        filePath
-      );
-
-
     contexts.push({
-
       path:
         filePath,
 
       content:
         limitString(
-          content,
+          map.get(
+            filePath
+          ),
           30000
         ),
-
     });
-
   }
 
-
   return contexts;
-
 }
-
 
 /* ================================================================
    ERROR TARGET EXTRACTION
@@ -1246,100 +970,80 @@ function extractTargetsFromErrors(
   failure,
   files
 ) {
-
   const map =
     createFileMap(
       files
     );
 
-
   const targets =
     new Set();
 
-
   for (
-    const filePath
-    of (
+    const filePath of (
       failure?.affectedFiles ||
       []
     )
   ) {
-
     const normalized =
       normalizeFilePath(
         filePath
       );
-
 
     if (
       map.has(
         normalized
       )
     ) {
-
       targets.add(
         normalized
       );
-
     }
-
   }
-
 
   const text =
     extractErrors(
       failure
-    )
-      .join("\n");
-
+    ).join("\n");
 
   for (
-    const filePath
-    of map.keys()
+    const filePath of map.keys()
   ) {
-
     if (
       text.includes(
         filePath
       )
     ) {
-
       targets.add(
         filePath
       );
-
     }
-
   }
-
 
   return Array.from(
     targets
+  ).slice(
+    0,
+    DEFAULT_POLICY.MAX_DIAGNOSIS_FILES
   );
-
 }
 
-
 /* ================================================================
-   DETERMINISTIC ROOT-CAUSE ANALYSIS
+   DETERMINISTIC DIAGNOSIS
 ================================================================ */
 
 function deterministicDiagnosis(
   failure,
   files
 ) {
-
   const normalized =
     normalizeFailure(
       failure
     );
 
-
   const signature =
     createFailureSignature(
       normalized
     );
-
 
   const targets =
     extractTargetsFromErrors(
@@ -1347,32 +1051,25 @@ function deterministicDiagnosis(
       files
     );
 
-
   const sourceContext =
     extractSourceContext(
       files,
       targets
     );
 
-
   let rootCause =
     "Unable to determine a deterministic root cause.";
-
 
   let strategy =
     REPAIR_STRATEGIES.NO_SAFE_REPAIR;
 
-
   let confidence =
     0.20;
-
 
   switch (
     normalized.category
   ) {
-
     case FAILURE_CATEGORIES.SYNTAX:
-
       rootCause =
         "Source syntax is invalid in one or more project files.";
 
@@ -1384,9 +1081,7 @@ function deterministicDiagnosis(
 
       break;
 
-
     case FAILURE_CATEGORIES.MISSING_MODULE:
-
       rootCause =
         "A referenced module is unavailable or an import path is incorrect.";
 
@@ -1398,9 +1093,7 @@ function deterministicDiagnosis(
 
       break;
 
-
     case FAILURE_CATEGORIES.DEPENDENCY:
-
       rootCause =
         "Dependency installation or dependency metadata is inconsistent with the generated project.";
 
@@ -1412,9 +1105,7 @@ function deterministicDiagnosis(
 
       break;
 
-
     case FAILURE_CATEGORIES.CONFIGURATION:
-
       rootCause =
         "Project configuration is incompatible with the requested execution.";
 
@@ -1426,9 +1117,7 @@ function deterministicDiagnosis(
 
       break;
 
-
     case FAILURE_CATEGORIES.INVALID_COMMAND:
-
       rootCause =
         "The configured command is not a valid authoritative build command.";
 
@@ -1440,9 +1129,7 @@ function deterministicDiagnosis(
 
       break;
 
-
     case FAILURE_CATEGORIES.TIMEOUT:
-
       rootCause =
         "Execution exceeded the configured time budget.";
 
@@ -1454,11 +1141,9 @@ function deterministicDiagnosis(
 
       break;
 
-
     case FAILURE_CATEGORIES.RESOURCE:
-
       rootCause =
-        "Execution exceeded an available CPU or memory resource boundary.";
+        "Execution exceeded an available resource boundary.";
 
       strategy =
         REPAIR_STRATEGIES.RESOURCE_ADJUSTMENT;
@@ -1468,9 +1153,7 @@ function deterministicDiagnosis(
 
       break;
 
-
     case FAILURE_CATEGORIES.NETWORK:
-
       rootCause =
         "The operation requires network access that was unavailable or failed.";
 
@@ -1482,9 +1165,7 @@ function deterministicDiagnosis(
 
       break;
 
-
     case FAILURE_CATEGORIES.PERMISSION:
-
       rootCause =
         "The execution environment rejected a filesystem or process operation.";
 
@@ -1496,9 +1177,7 @@ function deterministicDiagnosis(
 
       break;
 
-
     case FAILURE_CATEGORIES.TEST:
-
       rootCause =
         "One or more verification tests failed.";
 
@@ -1510,9 +1189,7 @@ function deterministicDiagnosis(
 
       break;
 
-
     case FAILURE_CATEGORIES.RUNTIME:
-
       rootCause =
         "The generated application failed during runtime execution.";
 
@@ -1524,30 +1201,23 @@ function deterministicDiagnosis(
 
       break;
 
-
     case FAILURE_CATEGORIES.ARTIFACT:
-
       rootCause =
         "The build artifact could not be created or verified.";
 
       strategy =
-        REPAIR_STRATEGIES.ARTIFACT;
+        REPAIR_STRATEGIES.ARTIFACT_FIX;
 
       confidence =
         0.82;
 
       break;
 
-
     default:
-
       break;
-
   }
 
-
   return {
-
     success:
       true,
 
@@ -1572,207 +1242,1238 @@ function deterministicDiagnosis(
 
     retryable:
       normalized.retryable,
-
   };
-
 }
 
-
 /* ================================================================
-   ARTIFACT STRATEGY NORMALIZATION
+   SCOPE
 ================================================================ */
 
-function normalizeArtifactStrategy(
-  strategy
+function normalizeScopeExpansion(
+  value
 ) {
+  return clampNumber(
+    value,
+    1,
+    DEFAULT_POLICY.MAX_SCOPE_EXPANSION,
+    1
+  );
+}
 
-  if (
-    strategy ===
-    "artifact-fix"
+/* ================================================================
+   FILE LIST SANITIZATION
+================================================================ */
+
+function sanitizeFileList(
+  files,
+  projectFiles
+) {
+  const available =
+    createFileMap(
+      projectFiles
+    );
+
+  const result = [];
+
+  for (
+    const file of (
+      Array.isArray(files)
+        ? files
+        : []
+    )
   ) {
+    const normalized =
+      normalizeFilePath(
+        file
+      );
 
-    return REPAIR_STRATEGIES.ENVIRONMENT_FIX;
-
+    if (
+      available.has(
+        normalized
+      ) &&
+      !result.includes(
+        normalized
+      )
+    ) {
+      result.push(
+        normalized
+      );
+    }
   }
 
-
-  return strategy;
-
+  return result.slice(
+    0,
+    DEFAULT_POLICY.MAX_REPAIR_FILES
+  );
 }
 
-
 /* ================================================================
-   AI PROVIDER CALL
+   SECRET DETECTION
 ================================================================ */
 
-/**
- * Central provider adapter.
- *
- * Supports the common generateText-style contracts already used by
- * ZyrionOS while avoiding direct provider selection here.
- */
+const SECRET_PATTERNS = [
+  /-----BEGIN (?:RSA|EC|OPENSSH|DSA|PRIVATE) KEY-----/i,
+
+  /\bAKIA[0-9A-Z]{16}\b/,
+
+  /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/,
+
+  /\bsk-[A-Za-z0-9]{20,}\b/,
+
+  /\bAIza[0-9A-Za-z_-]{20,}\b/,
+
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b/i,
+
+  /\b(?:api[_-]?key|secret|password|access[_-]?token)\s*[:=]\s*["'][^"']{12,}["']/i,
+];
+
+function containsLikelySecret(
+  content
+) {
+  const text =
+    limitString(
+      content,
+      DEFAULT_POLICY.MAX_SECRET_SCAN_CHARS
+    );
+
+  return SECRET_PATTERNS.some(
+    (pattern) =>
+      pattern.test(
+        text
+      )
+  );
+}
+
+/* ================================================================
+   DEPENDENCY EXTRACTION
+================================================================ */
+
+function extractPackageDependencies(
+  content
+) {
+  const parsed =
+    safeJsonParse(
+      content
+    );
+
+  if (
+    !parsed ||
+    typeof parsed !==
+      "object"
+  ) {
+    return {};
+  }
+
+  return {
+    ...(parsed.dependencies ||
+      {}),
+
+    ...(parsed.devDependencies ||
+      {}),
+
+    ...(parsed.peerDependencies ||
+      {}),
+  };
+}
+
+/* ================================================================
+   ACTUAL DEPENDENCY DIFF
+================================================================ */
+
+function calculateDependencyChanges(
+  originalFiles,
+  repairedFiles
+) {
+  const beforeMap =
+    createFileMap(
+      originalFiles
+    );
+
+  const afterMap =
+    createFileMap(
+      repairedFiles
+    );
+
+  const before =
+    extractPackageDependencies(
+      beforeMap.get(
+        "package.json"
+      ) || ""
+    );
+
+  const after =
+    extractPackageDependencies(
+      afterMap.get(
+        "package.json"
+      ) || ""
+    );
+
+  const changes =
+    [];
+
+  const names =
+    new Set([
+      ...Object.keys(before),
+      ...Object.keys(after),
+    ]);
+
+  for (
+    const name of names
+  ) {
+    if (
+      before[name] !==
+      after[name]
+    ) {
+      changes.push({
+        name,
+
+        before:
+          before[name] ||
+          null,
+
+        after:
+          after[name] ||
+          null,
+      });
+    }
+  }
+
+  return changes;
+}
+
+/* ================================================================
+   ACTUAL SCOPE CALCULATION
+================================================================ */
+
+function calculateScopeExpansion(
+  originalFiles,
+  repairedFiles
+) {
+  const before =
+    createFileMap(
+      originalFiles
+    );
+
+  const after =
+    createFileMap(
+      repairedFiles
+    );
+
+  const changed =
+    [];
+
+  for (
+    const [
+      filePath,
+      content
+    ]
+    of after.entries()
+  ) {
+    if (
+      !before.has(
+        filePath
+      ) ||
+      before.get(
+        filePath
+      ) !== content
+    ) {
+      changed.push(
+        filePath
+      );
+    }
+  }
+
+  const deleted =
+    [];
+
+  for (
+    const filePath
+    of before.keys()
+  ) {
+    if (
+      !after.has(
+        filePath
+      )
+    ) {
+      deleted.push(
+        filePath
+      );
+    }
+  }
+
+  const originalCount =
+    Math.max(
+      1,
+      before.size
+    );
+
+  const touchedCount =
+    changed.length +
+    deleted.length;
+
+  return {
+    changedFiles:
+      changed,
+
+    deletedFiles:
+      deleted,
+
+    touchedFiles:
+      touchedCount,
+
+    ratio:
+      Math.max(
+        1,
+        touchedCount /
+          originalCount
+      ),
+  };
+}
+
+/* ================================================================
+   REPAIR PROMPT
+================================================================ */
+
+function buildRepairPrompt(
+  context
+) {
+  return `
+You are the autonomous Repair Intelligence of ZyrionOS.
+
+You have a REAL authoritative execution failure.
+
+Generate the smallest safe repair.
+
+You MUST use only supplied evidence.
+
+Do not:
+- invent logs
+- invent files
+- claim build success
+- bypass authoritative execution
+- disable security controls
+- remove tests
+- weaken sandboxing
+- introduce credentials
+- add arbitrary network access
+- replace build commands with runtime commands
+- modify unrelated files
+
+RUN:
+${JSON.stringify(
+  context.run,
+  null,
+  2
+)}
+
+AUTHORITATIVE FAILURE:
+${JSON.stringify(
+  context.failure,
+  null,
+  2
+)}
+
+DIAGNOSIS:
+${JSON.stringify(
+  context.diagnosis,
+  null,
+  2
+)}
+
+SOURCE FILES:
+${JSON.stringify(
+  context.files,
+  null,
+  2
+)}
+
+Return ONLY JSON:
+
+{
+  "success": true,
+  "strategy": "...",
+  "confidence": 0.0,
+  "files": [
+    {
+      "path": "...",
+      "content": "..."
+    }
+  ],
+  "explanation": [],
+  "verificationPlan": []
+}
+
+Rules:
+
+1. Return complete content for every changed file.
+2. Return only files required for this repair.
+3. Existing files may only be changed when authorized.
+4. New files may only be created when explicitly authorized.
+5. Never modify .env or .git.
+6. Never add secrets.
+7. Never weaken security.
+8. Never change dependencies without evidence.
+9. Never increase resource requirements without evidence.
+10. Never claim authoritative success.
+`;
+}
+
+/* ================================================================
+   AI PROVIDER
+================================================================ */
 
 async function callAI(
   prompt,
-  options
+  options = {}
 ) {
-
   loadDependencies();
-
 
   if (
     !aiProvider
   ) {
-
     return null;
-
   }
 
-
   const methods = [
-
     "generateText",
-
     "generate",
-
     "complete",
-
     "chat",
-
   ];
-
 
   let method =
     null;
 
+  let methodName =
+    null;
 
   for (
-    const name
-    of methods
+    const name of methods
   ) {
-
     if (
       typeof aiProvider[name] ===
       "function"
     ) {
-
       method =
         aiProvider[name];
 
+      methodName =
+        name;
+
       break;
-
     }
-
   }
-
 
   if (!method) {
-
     return null;
-
   }
 
-
   const payload = {
-
     prompt,
 
     system:
-      options?.system ||
+      options.system ||
       undefined,
 
     temperature:
-      options?.temperature ??
-      0.1,
+      options.temperature ??
+      0.05,
 
     maxTokens:
-      options?.maxTokens ||
+      options.maxTokens ||
       12000,
 
     responseFormat:
-      options?.responseFormat ||
+      options.responseFormat ||
       "json",
 
     purpose:
-      options?.purpose ||
+      options.purpose ||
       "engineering-intelligence",
-
   };
 
-
   try {
+    let result;
 
-    const result =
-      await method.call(
-        aiProvider,
-        payload
-      );
+    /*
+     * Preserve the centralized provider abstraction.
+     * Different ZyrionOS provider versions can expose different
+     * method contracts.
+     */
+    if (
+      methodName ===
+      "chat"
+    ) {
+      result =
+        await method.call(
+          aiProvider,
+          {
+            messages: [
+              {
+                role:
+                  "system",
 
+                content:
+                  payload.system ||
+                  "",
+              },
+
+              {
+                role:
+                  "user",
+
+                content:
+                  payload.prompt,
+              },
+            ],
+
+            temperature:
+              payload.temperature,
+
+            maxTokens:
+              payload.maxTokens,
+
+            responseFormat:
+              payload.responseFormat,
+
+            purpose:
+              payload.purpose,
+          }
+        );
+    } else {
+      result =
+        await method.call(
+          aiProvider,
+          payload
+        );
+    }
 
     if (
       typeof result ===
       "string"
     ) {
-
-      return safeJsonParse(
-        result
-      ) || {
-
-        text:
-          result,
-
-      };
-
+      return (
+        safeJsonParse(
+          result
+        ) || {
+          text:
+            result,
+        }
+      );
     }
-
 
     if (
       result?.data &&
       typeof result.data ===
-      "object"
+        "object"
     ) {
-
       return result.data;
-
     }
-
 
     if (
       result?.text &&
       typeof result.text ===
-      "string"
+        "string"
     ) {
-
       return (
         safeJsonParse(
           result.text
         ) || result
       );
-
     }
 
+    if (
+      result?.content &&
+      typeof result.content ===
+        "string"
+    ) {
+      return (
+        safeJsonParse(
+          result.content
+        ) || result
+      );
+    }
 
     return result;
-
   } catch (error) {
-
     return {
-
       success:
         false,
-
-      error:
-        error.message,
 
       providerFailure:
         true,
 
+      error:
+        limitString(
+          error?.message,
+          2000
+        ),
     };
-
   }
-
 }
 
+/* ================================================================
+   MEMORY
+================================================================ */
+
+const failureMemory =
+  new Map();
+
+const repairMemory =
+  new Map();
+
+/* ================================================================
+   MEMORY LIMIT
+================================================================ */
+
+function enforceMemoryLimit(
+  memory
+) {
+  while (
+    memory.size >
+    DEFAULT_POLICY.MAX_MEMORY_PATTERNS
+  ) {
+    const first =
+      memory.keys().next()
+        .value;
+
+    if (
+      first ===
+      undefined
+    ) {
+      break;
+    }
+
+    memory.delete(
+      first
+    );
+  }
+}
+
+/* ================================================================
+   PERSIST PATTERN
+================================================================ */
+
+function persistPattern(
+  type,
+  key,
+  data
+) {
+  loadDependencies();
+
+  if (
+    !engineeringState
+  ) {
+    return;
+  }
+
+  const methods = [
+    "recordPattern",
+    "recordEngineeringPattern",
+    "recordLearning",
+    "savePattern",
+  ];
+
+  for (
+    const methodName of methods
+  ) {
+    if (
+      typeof engineeringState[
+        methodName
+      ] ===
+      "function"
+    ) {
+      try {
+        /*
+         * State v1.1.0 accepts the canonical recordPattern
+         * contract. Other names remain compatibility adapters.
+         */
+        engineeringState[
+          methodName
+        ]({
+          type,
+
+          key,
+
+          data:
+            clone(data),
+
+          timestamp:
+            new Date().toISOString(),
+        });
+      } catch (_) {}
+
+      break;
+    }
+  }
+}
+
+/* ================================================================
+   RECORD FAILURE PATTERN
+================================================================ */
+
+function recordFailurePattern(
+  failure,
+  diagnosis
+) {
+  const signature =
+    diagnosis?.signature
+      ?.signatureId;
+
+  if (!signature) {
+    return null;
+  }
+
+  const existing =
+    failureMemory.get(
+      signature
+    ) || {
+      signatureId:
+        signature,
+
+      count:
+        0,
+
+      categories:
+        new Set(),
+
+      strategies:
+        new Map(),
+
+      lastSeen:
+        null,
+    };
+
+  existing.count += 1;
+
+  existing.categories.add(
+    diagnosis.category
+  );
+
+  existing.strategies.set(
+    diagnosis.strategy,
+    (
+      existing.strategies.get(
+        diagnosis.strategy
+      ) || 0
+    ) + 1
+  );
+
+  existing.lastSeen =
+    new Date().toISOString();
+
+  failureMemory.set(
+    signature,
+    existing
+  );
+
+  enforceMemoryLimit(
+    failureMemory
+  );
+
+  persistPattern(
+    "failure",
+    signature,
+    {
+      count:
+        existing.count,
+
+      category:
+        diagnosis.category,
+
+      strategy:
+        diagnosis.strategy,
+
+      lastSeen:
+        existing.lastSeen,
+    }
+  );
+
+  return existing;
+}
+
+/* ================================================================
+   RECORD REPAIR PATTERN
+================================================================ */
+
+function recordRepairPattern(
+  failure,
+  diagnosis,
+  repair
+) {
+  const signature =
+    diagnosis?.signature
+      ?.signatureId;
+
+  if (!signature) {
+    return null;
+  }
+
+  const key =
+    `${signature}:${repair.strategy}`;
+
+  const existing =
+    repairMemory.get(
+      key
+    ) || {
+      key,
+
+      signatureId:
+        signature,
+
+      strategy:
+        repair.strategy,
+
+      attempts:
+        0,
+
+      successes:
+        0,
+
+      failures:
+        0,
+
+      lastSeen:
+        null,
+    };
+
+  existing.attempts += 1;
+
+  existing.lastSeen =
+    new Date().toISOString();
+
+  repairMemory.set(
+    key,
+    existing
+  );
+
+  enforceMemoryLimit(
+    repairMemory
+  );
+
+  persistPattern(
+    "repair",
+    key,
+    existing
+  );
+
+  return existing;
+}
+
+/* ================================================================
+   MARK REPAIR SUCCESS
+================================================================ */
+
+function markRepairSuccess(
+  signatureId,
+  strategy
+) {
+  const key =
+    `${signatureId}:${strategy}`;
+
+  const pattern =
+    repairMemory.get(
+      key
+    );
+
+  if (!pattern) {
+    return null;
+  }
+
+  pattern.successes += 1;
+
+  pattern.lastSeen =
+    new Date().toISOString();
+
+  repairMemory.set(
+    key,
+    pattern
+  );
+
+  persistPattern(
+    "repair-success",
+    key,
+    pattern
+  );
+
+  return pattern;
+}
+
+/* ================================================================
+   MARK REPAIR FAILURE
+================================================================ */
+
+function markRepairFailure(
+  signatureId,
+  strategy
+) {
+  const key =
+    `${signatureId}:${strategy}`;
+
+  const pattern =
+    repairMemory.get(
+      key
+    );
+
+  if (!pattern) {
+    return null;
+  }
+
+  pattern.failures += 1;
+
+  pattern.lastSeen =
+    new Date().toISOString();
+
+  repairMemory.set(
+    key,
+    pattern
+  );
+
+  persistPattern(
+    "repair-failure",
+    key,
+    pattern
+  );
+
+  return pattern;
+}
+
+/* ================================================================
+   SUCCESS RATE
+================================================================ */
+
+function getRepairSuccessRate(
+  signatureId,
+  strategy
+) {
+  const key =
+    `${signatureId}:${strategy}`;
+
+  const pattern =
+    repairMemory.get(
+      key
+    );
+
+  if (
+    !pattern ||
+    pattern.attempts <= 0
+  ) {
+    return 0;
+  }
+
+  return (
+    pattern.successes /
+    pattern.attempts
+  );
+}
+
+/* ================================================================
+   KNOWN REPAIRS
+================================================================ */
+
+function findKnownRepair(
+  failure
+) {
+  const signature =
+    createFailureSignature(
+      failure
+    );
+
+  const matches = [];
+
+  for (
+    const pattern of
+      repairMemory.values()
+  ) {
+    if (
+      pattern.signatureId !==
+      signature.signatureId
+    ) {
+      continue;
+    }
+
+    const successRate =
+      pattern.attempts > 0
+        ? pattern.successes /
+          pattern.attempts
+        : 0;
+
+    matches.push({
+      ...clone(pattern),
+
+      successRate,
+    });
+  }
+
+  return matches
+    .sort(
+      (a, b) =>
+        b.successRate -
+        a.successRate
+    )
+    .slice(
+      0,
+      DEFAULT_POLICY.MAX_KNOWN_REPAIRS
+    );
+}
+
+/* ================================================================
+   RESOURCE ANALYSIS
+================================================================ */
+
+function analyzeResources(
+  resourceUsage
+) {
+  if (
+    !resourceUsage ||
+    typeof resourceUsage !==
+      "object"
+  ) {
+    return {
+      pressure:
+        "unknown",
+
+      scaleRecommended:
+        false,
+
+      reasons: [],
+    };
+  }
+
+  const cpu =
+    Number(
+      resourceUsage.cpuPercent
+    );
+
+  const memory =
+    Number(
+      resourceUsage.memoryPercent
+    );
+
+  const reasons = [];
+
+  if (
+    Number.isFinite(cpu) &&
+    cpu >= 90
+  ) {
+    reasons.push(
+      "CPU pressure is critical"
+    );
+  } else if (
+    Number.isFinite(cpu) &&
+    cpu >= 80
+  ) {
+    reasons.push(
+      "CPU pressure is high"
+    );
+  }
+
+  if (
+    Number.isFinite(memory) &&
+    memory >= 90
+  ) {
+    reasons.push(
+      "Memory pressure is critical"
+    );
+  } else if (
+    Number.isFinite(memory) &&
+    memory >= 80
+  ) {
+    reasons.push(
+      "Memory pressure is high"
+    );
+  }
+
+  let pressure =
+    "normal";
+
+  if (
+    reasons.some(
+      (reason) =>
+        reason.includes(
+          "critical"
+        )
+    )
+  ) {
+    pressure =
+      "critical";
+  } else if (
+    reasons.length
+  ) {
+    pressure =
+      "high";
+  }
+
+  return {
+    pressure,
+
+    scaleRecommended:
+      pressure === "high" ||
+      pressure === "critical",
+
+    reasons,
+
+    cpuPercent:
+      Number.isFinite(cpu)
+        ? cpu
+        : null,
+
+    memoryPercent:
+      Number.isFinite(memory)
+        ? memory
+        : null,
+  };
+}
+
+/* ================================================================
+   AUTO SCALE
+================================================================ */
+
+function recommendAutoScale(
+  context
+) {
+  const resource =
+    analyzeResources(
+      context?.resourceUsage
+    );
+
+  if (
+    !resource.scaleRecommended
+  ) {
+    return {
+      scale:
+        false,
+
+      level:
+        1,
+
+      reason:
+        "No significant resource pressure",
+
+      resource,
+    };
+  }
+
+  const current =
+    Number(
+      context?.currentScale ||
+      1
+    );
+
+  const max =
+    clampNumber(
+      context?.maxAutoScale,
+      1,
+      4,
+      4
+    );
+
+  if (
+    current >= max
+  ) {
+    return {
+      scale:
+        false,
+
+      level:
+        current,
+
+      reason:
+        "Maximum auto-scale level reached",
+
+      resource,
+    };
+  }
+
+  return {
+    scale:
+      true,
+
+    level:
+      Math.min(
+        max,
+        current + 1
+      ),
+
+    reason:
+      "Resource pressure justifies controlled scale increase",
+
+    resource,
+  };
+}
+
+/* ================================================================
+   REGRESSION DETECTION
+================================================================ */
+
+function detectRegression(
+  context
+) {
+  const before =
+    context?.previousFailure;
+
+  const current =
+    context?.currentFailure;
+
+  if (
+    !before ||
+    !current
+  ) {
+    return {
+      regression:
+        false,
+
+      reason:
+        "Insufficient comparison evidence",
+    };
+  }
+
+  const previous =
+    createFailureSignature(
+      before
+    );
+
+  const currentSignature =
+    createFailureSignature(
+      current
+    );
+
+  if (
+    previous.signatureId ===
+    currentSignature.signatureId
+  ) {
+    return {
+      regression:
+        false,
+
+      recurringFailure:
+        true,
+
+      reason:
+        "Same failure signature recurred",
+
+      signatureId:
+        currentSignature.signatureId,
+    };
+  }
+
+  return {
+    regression:
+      false,
+
+    recurringFailure:
+      false,
+
+    reason:
+      "Failure signature changed",
+
+    previousSignature:
+      previous.signatureId,
+
+    currentSignature:
+      currentSignature.signatureId,
+  };
+}
 
 /* ================================================================
    DIAGNOSIS PROMPT
@@ -1781,28 +2482,29 @@ async function callAI(
 function buildDiagnosisPrompt(
   context
 ) {
-
   return `
 You are the Engineering Intelligence layer of ZyrionOS.
 
 You are diagnosing a REAL authoritative execution failure.
 
-You must NOT claim the project is fixed.
-You must NOT claim the build passed.
-You must NOT invent logs.
-You must use only the supplied evidence.
+The authoritative executor is the source of truth.
 
-OBJECTIVE:
-Determine the most probable root cause and the smallest safe repair.
+You must NOT claim:
+- build success
+- artifact success
+- deployment success
+- runtime success
 
-ENGINEERING RUN:
+Use only supplied evidence.
+
+RUN:
 ${JSON.stringify(
   context.run,
   null,
   2
 )}
 
-FAILURE:
+AUTHORITATIVE FAILURE:
 ${JSON.stringify(
   context.failure,
   null,
@@ -1812,6 +2514,13 @@ ${JSON.stringify(
 DETERMINISTIC ANALYSIS:
 ${JSON.stringify(
   context.deterministic,
+  null,
+  2
+)}
+
+KNOWN REPAIR HISTORY:
+${JSON.stringify(
+  context.knownRepairs,
   null,
   2
 )}
@@ -1843,20 +2552,18 @@ Return ONLY JSON:
 
 Rules:
 
-1. affectedFiles must reference supplied files.
-2. Do not create imaginary files.
-3. Prefer the smallest repair.
-4. Do not change dependencies unless evidence requires it.
-5. Do not modify unrelated files.
-6. Never remove security boundaries to make a build pass.
-7. Never disable authoritative verification.
-8. Never replace a build command with a runtime command.
-9. Never claim success.
-10. If evidence is insufficient, set safeToRepair=false.
+1. Use authoritative failure evidence first.
+2. affectedFiles must reference supplied files.
+3. Do not invent files.
+4. Prefer the smallest repair.
+5. Do not change dependencies without evidence.
+6. Do not weaken security.
+7. Do not bypass authoritative verification.
+8. Do not replace a build command with a runtime command.
+9. If evidence is insufficient, safeToRepair=false.
+10. High-risk repairs require confidence >= 0.90.
 `;
-
 }
-
 
 /* ================================================================
    DIAGNOSIS
@@ -1865,12 +2572,10 @@ Rules:
 async function diagnoseFailure(
   context
 ) {
-
   const failure =
     normalizeFailure(
       context?.failure
     );
-
 
   const files =
     Array.isArray(
@@ -1879,27 +2584,23 @@ async function diagnoseFailure(
       ? context.files
       : [];
 
-
   const deterministic =
     deterministicDiagnosis(
       failure,
       files
     );
 
-
-  const targets =
-    deterministic.affectedFiles;
-
+  const knownRepairs =
+    findKnownRepair(
+      failure
+    );
 
   const sourceContext =
     deterministic.sourceContext;
 
-
   const prompt =
     buildDiagnosisPrompt({
-
       run: {
-
         runId:
           context?.runId ||
           null,
@@ -1912,22 +2613,24 @@ async function diagnoseFailure(
           context?.attempt ||
           null,
 
+        repairAttempt:
+          context?.repairAttempt ||
+          null,
       },
 
       failure,
 
       deterministic,
 
+      knownRepairs,
+
       sourceContext,
-
     });
-
 
   const ai =
     await callAI(
       prompt,
       {
-
         purpose:
           "engineering-diagnosis",
 
@@ -1936,18 +2639,10 @@ async function diagnoseFailure(
 
         maxTokens:
           12000,
-
       }
     );
 
-
-  /**
-   * Deterministic fallback remains authoritative for diagnosis
-   * output when the AI provider is unavailable.
-   */
-
   const diagnosis = {
-
     success:
       true,
 
@@ -1963,10 +2658,8 @@ async function diagnoseFailure(
       deterministic.rootCause,
 
     strategy:
-      normalizeArtifactStrategy(
-        ai?.strategy ||
-        deterministic.strategy
-      ),
+      ai?.strategy ||
+      deterministic.strategy,
 
     confidence:
       clampConfidence(
@@ -2013,7 +2706,10 @@ async function diagnoseFailure(
       Array.isArray(
         ai?.dependencyChanges
       )
-        ? ai.dependencyChanges
+        ? ai.dependencyChanges.slice(
+            0,
+            DEFAULT_POLICY.MAX_DEPENDENCY_CHANGES
+          )
         : [],
 
     scopeExpansion:
@@ -2035,260 +2731,110 @@ async function diagnoseFailure(
     signature:
       deterministic.signature,
 
+    knownRepairs,
+
     deterministicFallback:
       !ai ||
       ai?.providerFailure ===
       true,
 
+    authoritativeEvidence:
+      {
+        authoritative:
+          failure.authoritative,
+
+        validationMode:
+          failure.validationMode,
+
+        buildId:
+          failure.buildId,
+
+        sourceHash:
+          failure.sourceHash,
+
+        exitCode:
+          failure.exitCode,
+
+        failureStage:
+          failure.failureStage,
+
+        buildCommand:
+          failure.buildCommand,
+
+        installCommand:
+          failure.installCommand,
+      },
   };
 
-
-  /**
-   * Confidence safety gate.
+  /*
+   * Strategy must be one of our controlled strategies.
    */
+  if (
+    !Object.values(
+      REPAIR_STRATEGIES
+    ).includes(
+      diagnosis.strategy
+    )
+  ) {
+    diagnosis.strategy =
+      deterministic.strategy;
+  }
 
+  /*
+   * Confidence gate.
+   */
   if (
     diagnosis.confidence <
     DEFAULT_POLICY.MIN_REPAIR_CONFIDENCE
   ) {
-
     diagnosis.safeToRepair =
       false;
-
   }
 
-
-  /**
-   * High-risk changes require stronger confidence.
+  /*
+   * High-risk strategy gate.
    */
-
   if (
-    diagnosis.dependencyChanges.length >
-    0 &&
+    HIGH_RISK_STRATEGIES.has(
+      diagnosis.strategy
+    ) &&
     diagnosis.confidence <
     DEFAULT_POLICY.MIN_HIGH_RISK_CONFIDENCE
   ) {
-
     diagnosis.safeToRepair =
       false;
-
   }
 
+  /*
+   * Dependency declaration gate.
+   */
+  if (
+    diagnosis.dependencyChanges
+      .length >
+    DEFAULT_POLICY.MAX_DEPENDENCY_CHANGES
+  ) {
+    diagnosis.safeToRepair =
+      false;
+  }
+
+  /*
+   * Scope gate.
+   */
+  if (
+    diagnosis.scopeExpansion >
+    DEFAULT_POLICY.MAX_SCOPE_EXPANSION
+  ) {
+    diagnosis.safeToRepair =
+      false;
+  }
 
   recordFailurePattern(
     failure,
     diagnosis
   );
 
-
   return diagnosis;
-
 }
-
-
-/* ================================================================
-   CONFIDENCE
-================================================================ */
-
-function clampConfidence(
-  value
-) {
-
-  const number =
-    Number(value);
-
-
-  if (
-    !Number.isFinite(number)
-  ) {
-
-    return 0;
-
-  }
-
-
-  return Math.max(
-    0,
-    Math.min(
-      1,
-      number
-    )
-  );
-
-}
-
-
-/* ================================================================
-   SCOPE
-================================================================ */
-
-function normalizeScopeExpansion(
-  value
-) {
-
-  const number =
-    Number(value);
-
-
-  if (
-    !Number.isFinite(number) ||
-    number < 1
-  ) {
-
-    return 1;
-
-  }
-
-
-  return number;
-
-}
-
-
-/* ================================================================
-   FILE LIST SANITIZATION
-================================================================ */
-
-function sanitizeFileList(
-  files,
-  projectFiles
-) {
-
-  const available =
-    createFileMap(
-      projectFiles
-    );
-
-
-  const result = [];
-
-
-  for (
-    const file
-    of (
-      Array.isArray(files)
-        ? files
-        : []
-    )
-  ) {
-
-    const normalized =
-      normalizeFilePath(
-        file
-      );
-
-
-    if (
-      available.has(
-        normalized
-      ) &&
-      !result.includes(
-        normalized
-      )
-    ) {
-
-      result.push(
-        normalized
-      );
-
-    }
-
-  }
-
-
-  return result;
-
-}
-
-
-/* ================================================================
-   REPAIR PLAN PROMPT
-================================================================ */
-
-function buildRepairPrompt(
-  context
-) {
-
-  return `
-You are the autonomous Repair Intelligence of ZyrionOS.
-
-You have a REAL authoritative failure.
-
-Generate a MINIMAL and SAFE repair.
-
-Do not invent evidence.
-Do not claim success.
-Do not modify unrelated files.
-Do not remove security controls.
-Do not disable tests.
-Do not bypass the authoritative build.
-Do not convert runtime commands into build commands.
-
-RUN:
-${JSON.stringify(
-  context.run,
-  null,
-  2
-)}
-
-FAILURE:
-${JSON.stringify(
-  context.failure,
-  null,
-  2
-)}
-
-DIAGNOSIS:
-${JSON.stringify(
-  context.diagnosis,
-  null,
-  2
-)}
-
-FILES:
-${JSON.stringify(
-  context.files,
-  null,
-  2
-)}
-
-Return ONLY JSON:
-
-{
-  "success": true,
-  "strategy": "...",
-  "confidence": 0.0,
-  "changedFiles": [],
-  "dependencyChanges": 0,
-  "scopeExpansion": 1.0,
-  "files": [
-    {
-      "path": "...",
-      "content": "..."
-    }
-  ],
-  "explanation": [],
-  "verificationPlan": []
-}
-
-STRICT RULES:
-
-1. Return complete content for every changed file.
-2. Return only files required for the repair.
-3. Never modify .env files.
-4. Never modify .git files.
-5. Never introduce credentials.
-6. Never add arbitrary network access.
-7. Never weaken Docker/security constraints.
-8. Never increase resource limits unless the diagnosis explicitly
-   identifies resource pressure.
-9. Never change package dependencies without evidence.
-10. Never exceed the supplied repair limits.
-11. Never return a fake successful build result.
-`;
-
-}
-
 
 /* ================================================================
    REPAIR VALIDATION
@@ -2298,25 +2844,19 @@ function validateRepair(
   repair,
   context
 ) {
-
   if (
     !repair ||
     repair.success !==
     true
   ) {
-
     return {
-
       success:
         false,
 
       reason:
         "Repair response is not successful",
-
     };
-
   }
-
 
   const originalFiles =
     Array.isArray(
@@ -2325,12 +2865,10 @@ function validateRepair(
       ? context.files
       : [];
 
-
   const originalMap =
     createFileMap(
       originalFiles
     );
-
 
   const repairFiles =
     Array.isArray(
@@ -2339,147 +2877,39 @@ function validateRepair(
       ? repair.files
       : [];
 
-
   if (
     repairFiles.length ===
     0
   ) {
-
     return {
-
       success:
         false,
 
       reason:
         "Repair returned no files",
-
     };
-
   }
-
 
   if (
     repairFiles.length >
     DEFAULT_POLICY.MAX_REPAIR_FILES
   ) {
-
     return {
-
       success:
         false,
 
       reason:
         "Repair file count exceeds safety limit",
-
     };
-
   }
-
-
-  const sanitized =
-    [];
-
-
-  const seen =
-    new Set();
-
-
-  for (
-    const file
-    of repairFiles
-  ) {
-
-    const filePath =
-      normalizeFilePath(
-        file?.path ||
-        file?.name
-      );
-
-
-    if (
-      !isSafeProjectPath(
-        filePath
-      )
-    ) {
-
-      return {
-
-        success:
-          false,
-
-        reason:
-          `Unsafe repair path: ${filePath}`,
-
-      };
-
-    }
-
-
-    if (
-      seen.has(
-        filePath
-      )
-    ) {
-
-      return {
-
-        success:
-          false,
-
-        reason:
-          `Duplicate repair path: ${filePath}`,
-
-      };
-
-    }
-
-
-    seen.add(
-      filePath
-    );
-
-
-    if (
-      typeof file.content !==
-      "string"
-    ) {
-
-      return {
-
-        success:
-          false,
-
-        reason:
-          `Repair content missing for ${filePath}`,
-
-      };
-
-    }
-
-
-    sanitized.push({
-
-      path:
-        filePath,
-
-      content:
-        file.content,
-
-    });
-
-  }
-
-
-  /**
-   * Changed-file authorization.
-   */
 
   const allowedTargets =
     new Set(
-
       (
-        context?.diagnosis?.repairTargets ||
-        context?.diagnosis?.affectedFiles ||
+        context?.diagnosis
+          ?.repairTargets ||
+        context?.diagnosis
+          ?.affectedFiles ||
         []
       )
         .map(
@@ -2488,206 +2918,314 @@ function validateRepair(
         .filter(
           isSafeProjectPath
         )
-
     );
 
+  const sanitized =
+    [];
+
+  const seen =
+    new Set();
 
   for (
-    const file
-    of sanitized
+    const file of repairFiles
   ) {
-
-    /**
-     * Existing files must be explicitly targeted.
-     *
-     * New files are allowed only when diagnosis explicitly
-     * authorized the path.
-     */
+    const filePath =
+      normalizeFilePath(
+        file?.path ||
+        file?.name
+      );
 
     if (
-      originalMap.has(
-        file.path
+      !isSafeProjectPath(
+        filePath
       )
     ) {
+      return {
+        success:
+          false,
 
+        reason:
+          `Unsafe repair path: ${filePath}`,
+      };
+    }
+
+    if (
+      seen.has(
+        filePath
+      )
+    ) {
+      return {
+        success:
+          false,
+
+        reason:
+          `Duplicate repair path: ${filePath}`,
+      };
+    }
+
+    seen.add(
+      filePath
+    );
+
+    if (
+      typeof file.content !==
+      "string"
+    ) {
+      return {
+        success:
+          false,
+
+        reason:
+          `Repair content missing for ${filePath}`,
+      };
+    }
+
+    if (
+      Buffer.byteLength(
+        file.content,
+        "utf8"
+      ) >
+      DEFAULT_POLICY.MAX_FILE_BYTES
+    ) {
+      return {
+        success:
+          false,
+
+        reason:
+          `Repair file exceeds maximum size: ${filePath}`,
+      };
+    }
+
+    /*
+     * Security gate.
+     */
+    if (
+      containsLikelySecret(
+        file.content
+      )
+    ) {
+      return {
+        success:
+          false,
+
+        reason:
+          `Potential secret detected in repair: ${filePath}`,
+      };
+    }
+
+    /*
+     * Existing files require explicit authorization.
+     */
+    if (
+      originalMap.has(
+        filePath
+      )
+    ) {
       if (
         allowedTargets.size > 0 &&
         !allowedTargets.has(
-          file.path
+          filePath
         )
       ) {
-
         return {
-
           success:
             false,
 
           reason:
-            `Repair attempted unauthorized file: ${file.path}`,
-
+            `Unauthorized repair file: ${filePath}`,
         };
-
       }
-
-    }
-
-    else {
-
+    } else {
+      /*
+       * New files also require explicit authorization.
+       */
       if (
         !allowedTargets.has(
-          file.path
+          filePath
         )
       ) {
-
         return {
-
           success:
             false,
 
           reason:
-            `New file not authorized by diagnosis: ${file.path}`,
-
+            `New file not authorized by diagnosis: ${filePath}`,
         };
-
       }
-
     }
 
+    sanitized.push({
+      path:
+        filePath,
+
+      content:
+        file.content,
+    });
   }
 
+  /*
+   * Merge temporarily so dependency/scope changes can be
+   * calculated from the actual source state rather than trusting
+   * AI-declared numbers.
+   */
+  const merged =
+    mergeRepairFiles(
+      originalFiles,
+      sanitized
+    );
 
   const dependencyChanges =
+    calculateDependencyChanges(
+      originalFiles,
+      merged
+    );
+
+  if (
+    dependencyChanges.length >
+    DEFAULT_POLICY.MAX_DEPENDENCY_CHANGES
+  ) {
+    return {
+      success:
+        false,
+
+      reason:
+        "Actual dependency change limit exceeded",
+
+      dependencyChanges,
+    };
+  }
+
+  /*
+   * If AI claims no dependency change but package.json actually
+   * changes dependencies, treat the actual diff as authoritative.
+   */
+  const declaredDependencyChanges =
     Number(
       repair.dependencyChanges ||
       0
     );
 
-
   if (
-    !Number.isInteger(
-      dependencyChanges
+    !Number.isFinite(
+      declaredDependencyChanges
     ) ||
-    dependencyChanges < 0
+    declaredDependencyChanges < 0
   ) {
-
     return {
-
       success:
         false,
 
       reason:
-        "Invalid dependencyChanges",
-
+        "Invalid dependencyChanges declaration",
     };
-
   }
 
-
-  if (
-    dependencyChanges >
-    DEFAULT_POLICY.MAX_DEPENDENCY_CHANGES
-  ) {
-
-    return {
-
-      success:
-        false,
-
-      reason:
-        "Dependency change limit exceeded",
-
-    };
-
-  }
-
-
-  const scopeExpansion =
-    normalizeScopeExpansion(
-      repair.scopeExpansion
+  const scope =
+    calculateScopeExpansion(
+      originalFiles,
+      merged
     );
 
-
   if (
-    scopeExpansion >
+    scope.ratio >
     DEFAULT_POLICY.MAX_SCOPE_EXPANSION
   ) {
-
     return {
-
       success:
         false,
 
       reason:
-        "Scope expansion limit exceeded",
+        "Actual scope expansion limit exceeded",
 
+      scope,
     };
-
   }
 
+  const patchBytes =
+    sanitized.reduce(
+      (
+        total,
+        file
+      ) =>
+        total +
+        Buffer.byteLength(
+          file.content,
+          "utf8"
+        ),
+      0
+    );
+
+  if (
+    patchBytes >
+    DEFAULT_POLICY.MAX_PATCH_BYTES
+  ) {
+    return {
+      success:
+        false,
+
+      reason:
+        "Total repair patch exceeds safety limit",
+    };
+  }
 
   return {
-
     success:
       true,
 
     files:
       sanitized,
 
-    dependencyChanges,
+    dependencyChanges:
+      dependencyChanges.length,
 
-    scopeExpansion,
+    dependencyDiff:
+      dependencyChanges,
 
+    scopeExpansion:
+      scope.ratio,
+
+    scope,
+
+    patchBytes,
   };
-
 }
 
-
 /* ================================================================
-   MERGE REPAIR
+   MERGE REPAIR FILES
 ================================================================ */
 
 function mergeRepairFiles(
   originalFiles,
   repairedFiles
 ) {
-
   const map =
     createFileMap(
       originalFiles
     );
 
-
   for (
-    const file
-    of repairedFiles
+    const file of repairedFiles
   ) {
-
     map.set(
       normalizeFilePath(
         file.path
       ),
       file.content
     );
-
   }
-
 
   return Array.from(
     map.entries()
   )
     .map(
       ([filePath, content]) => ({
-
         path:
           filePath,
 
         content,
-
       })
     );
-
 }
-
 
 /* ================================================================
    REPAIR
@@ -2696,12 +3234,10 @@ function mergeRepairFiles(
 async function repairFailure(
   context
 ) {
-
   const failure =
     normalizeFailure(
       context?.failure
     );
-
 
   const files =
     Array.isArray(
@@ -2710,26 +3246,20 @@ async function repairFailure(
       ? context.files
       : [];
 
-
   const diagnosis =
     context?.diagnosis ||
     await diagnoseFailure({
-
       ...context,
 
       failure,
 
       files,
-
     });
-
 
   if (
     !diagnosis.safeToRepair
   ) {
-
     return {
-
       success:
         false,
 
@@ -2737,17 +3267,23 @@ async function repairFailure(
         "Diagnosis did not reach the repair safety threshold",
 
       diagnosis,
-
     };
-
   }
 
+  /*
+   * First inspect known successful patterns.
+   *
+   * We do NOT blindly replay them. They are intelligence,
+   * not authoritative truth.
+   */
+  const knownRepairs =
+    findKnownRepair(
+      failure
+    );
 
   const prompt =
     buildRepairPrompt({
-
       run: {
-
         runId:
           context?.runId ||
           null,
@@ -2763,17 +3299,19 @@ async function repairFailure(
         repairAttempt:
           context?.repairAttempt ||
           null,
-
       },
 
       failure,
 
-      diagnosis,
+      diagnosis: {
+        ...diagnosis,
+
+        knownRepairs,
+      },
 
       files:
         files.map(
-          file => ({
-
+          (file) => ({
             path:
               file.path ||
               file.name,
@@ -2783,18 +3321,14 @@ async function repairFailure(
                 file.content,
                 30000
               ),
-
           })
         ),
-
     });
-
 
   const ai =
     await callAI(
       prompt,
       {
-
         purpose:
           "engineering-repair",
 
@@ -2803,18 +3337,14 @@ async function repairFailure(
 
         maxTokens:
           14000,
-
       }
     );
-
 
   if (
     !ai ||
     ai.providerFailure
   ) {
-
     return {
-
       success:
         false,
 
@@ -2823,16 +3353,14 @@ async function repairFailure(
 
       diagnosis,
 
+      deterministicRepairAvailable:
+        false,
     };
-
   }
-
 
   const validation =
     validateRepair(
-
       {
-
         ...ai,
 
         files:
@@ -2841,38 +3369,29 @@ async function repairFailure(
           )
             ? ai.files
             : [],
-
       },
-
       {
-
         files,
 
         diagnosis,
-
       }
-
     );
-
 
   if (
     !validation.success
   ) {
-
     return {
-
       success:
         false,
 
       reason:
         validation.reason,
 
+      validation,
+
       diagnosis,
-
     };
-
   }
-
 
   const finalFiles =
     mergeRepairFiles(
@@ -2880,33 +3399,24 @@ async function repairFailure(
       validation.files
     );
 
-
   const changedFiles =
-    validation.files.map(
-      file =>
-        file.path
-    );
-
+    validation.scope.changedFiles;
 
   const beforeHash =
     calculateFilesHash(
       files
     );
 
-
   const afterHash =
     calculateFilesHash(
       finalFiles
     );
 
-
   if (
     beforeHash ===
     afterHash
   ) {
-
     return {
-
       success:
         false,
 
@@ -2914,14 +3424,40 @@ async function repairFailure(
         "Repair produced no effective source change",
 
       diagnosis,
-
     };
-
   }
 
+  const confidence =
+    clampConfidence(
+      ai.confidence ??
+      diagnosis.confidence
+    );
+
+  /*
+   * High-risk repair cannot downgrade its safety requirement
+   * simply because AI returned a higher confidence value without
+   * deterministic evidence.
+   */
+  if (
+    HIGH_RISK_STRATEGIES.has(
+      ai.strategy ||
+      diagnosis.strategy
+    ) &&
+    confidence <
+    DEFAULT_POLICY.MIN_HIGH_RISK_CONFIDENCE
+  ) {
+    return {
+      success:
+        false,
+
+      reason:
+        "High-risk repair confidence is below safety threshold",
+
+      diagnosis,
+    };
+  }
 
   const repair = {
-
     success:
       true,
 
@@ -2929,14 +3465,15 @@ async function repairFailure(
       INTELLIGENCE_VERSION,
 
     strategy:
-      ai.strategy ||
-      diagnosis.strategy,
+      Object.values(
+        REPAIR_STRATEGIES
+      ).includes(
+        ai.strategy
+      )
+        ? ai.strategy
+        : diagnosis.strategy,
 
-    confidence:
-      clampConfidence(
-        ai.confidence ??
-        diagnosis.confidence
-      ),
+    confidence,
 
     files:
       finalFiles,
@@ -2946,8 +3483,17 @@ async function repairFailure(
     dependencyChanges:
       validation.dependencyChanges,
 
+    dependencyDiff:
+      validation.dependencyDiff,
+
     scopeExpansion:
       validation.scopeExpansion,
+
+    scope:
+      validation.scope,
+
+    patchBytes:
+      validation.patchBytes,
 
     beforeHash,
 
@@ -2957,20 +3503,27 @@ async function repairFailure(
       Array.isArray(
         ai.explanation
       )
-        ? ai.explanation
+        ? ai.explanation.slice(
+            0,
+            DEFAULT_POLICY.MAX_REPAIR_PLAN_STEPS
+          )
         : [],
 
     verificationPlan:
       Array.isArray(
         ai.verificationPlan
       )
-        ? ai.verificationPlan
+        ? ai.verificationPlan.slice(
+            0,
+            DEFAULT_POLICY.MAX_REPAIR_PLAN_STEPS
+          )
         : [],
 
     diagnosis,
 
+    authoritativeSuccess:
+      false,
   };
-
 
   recordRepairPattern(
     failure,
@@ -2978,835 +3531,49 @@ async function repairFailure(
     repair
   );
 
-
   return repair;
-
 }
 
-
 /* ================================================================
-   FAILURE MEMORY
+   RESOURCE RECOMMENDATION
 ================================================================ */
 
-const failureMemory =
-  new Map();
-
-
-const repairMemory =
-  new Map();
-
-
-/* ================================================================
-   RECORD FAILURE PATTERN
-================================================================ */
-
-function recordFailurePattern(
-  failure,
-  diagnosis
+function buildResourceContext(
+  executionResult
 ) {
-
-  const signature =
-    diagnosis?.signature?.signatureId;
-
-
-  if (!signature) {
-
+  if (
+    !executionResult
+  ) {
     return null;
-
   }
 
+  const snapshot =
+    executionResult
+      .finalResourceSnapshot ||
+    null;
 
-  const existing =
-    failureMemory.get(
-      signature
-    ) || {
-
-      signatureId:
-        signature,
-
-      count:
-        0,
-
-      categories:
-        new Set(),
-
-      strategies:
-        new Map(),
-
-      lastSeen:
-        null,
-
-    };
-
-
-  existing.count +=
-    1;
-
-
-  existing.categories.add(
-    diagnosis.category
-  );
-
-
-  const strategy =
-    diagnosis.strategy;
-
-
-  existing.strategies.set(
-
-    strategy,
-
-    (
-      existing.strategies.get(
-        strategy
-      ) || 0
-    ) + 1
-
-  );
-
-
-  existing.lastSeen =
-    new Date().toISOString();
-
-
-  failureMemory.set(
-    signature,
-    existing
-  );
-
-
-  persistPattern(
-    "failure",
-    signature,
-    {
-
-      count:
-        existing.count,
-
-      category:
-        diagnosis.category,
-
-      strategy:
-        diagnosis.strategy,
-
-      lastSeen:
-        existing.lastSeen,
-
-    }
-
-  );
-
-
-  return existing;
-
-}
-
-
-/* ================================================================
-   RECORD REPAIR PATTERN
-================================================================ */
-
-function recordRepairPattern(
-  failure,
-  diagnosis,
-  repair
-) {
-
-  const signature =
-    diagnosis?.signature?.signatureId;
-
-
-  if (!signature) {
-
+  if (!snapshot) {
     return null;
-
   }
-
-
-  const key =
-    `${signature}:${repair.strategy}`;
-
-
-  const existing =
-    repairMemory.get(
-      key
-    ) || {
-
-      key,
-
-      signatureId:
-        signature,
-
-      strategy:
-        repair.strategy,
-
-      attempts:
-        0,
-
-      successes:
-        0,
-
-      failures:
-        0,
-
-      lastSeen:
-        null,
-
-    };
-
-
-  existing.attempts +=
-    1;
-
-
-  existing.lastSeen =
-    new Date().toISOString();
-
-
-  repairMemory.set(
-    key,
-    existing
-  );
-
-
-  persistPattern(
-    "repair",
-    key,
-    existing
-  );
-
-
-  return existing;
-
-}
-
-
-/* ================================================================
-   PERSIST PATTERN
-================================================================ */
-
-function persistPattern(
-  type,
-  key,
-  data
-) {
-
-  loadDependencies();
-
-
-  if (
-    !engineeringState
-  ) {
-
-    return;
-
-  }
-
-
-  const methods = [
-
-    "recordPattern",
-
-    "recordEngineeringPattern",
-
-    "recordLearning",
-
-    "savePattern",
-
-  ];
-
-
-  for (
-    const methodName
-    of methods
-  ) {
-
-    if (
-      typeof engineeringState[
-        methodName
-      ] ===
-      "function"
-    ) {
-
-      try {
-
-        engineeringState[
-          methodName
-        ](
-          {
-
-            type,
-
-            key,
-
-            data:
-              clone(data),
-
-            timestamp:
-              new Date().toISOString(),
-
-          }
-        );
-
-
-      } catch (error) {
-
-        /**
-         * Learning persistence must never crash the engineering
-         * pipeline.
-         */
-
-      }
-
-
-      break;
-
-    }
-
-  }
-
-}
-
-
-/* ================================================================
-   REPAIR PATTERN SUCCESS UPDATE
-================================================================ */
-
-function markRepairSuccess(
-  signatureId,
-  strategy
-) {
-
-  const key =
-    `${signatureId}:${strategy}`;
-
-
-  const pattern =
-    repairMemory.get(
-      key
-    );
-
-
-  if (!pattern) {
-
-    return null;
-
-  }
-
-
-  pattern.successes +=
-    1;
-
-
-  pattern.lastSeen =
-    new Date().toISOString();
-
-
-  repairMemory.set(
-    key,
-    pattern
-  );
-
-
-  persistPattern(
-    "repair-success",
-    key,
-    pattern
-  );
-
-
-  return pattern;
-
-}
-
-
-/* ================================================================
-   REPAIR PATTERN FAILURE UPDATE
-================================================================ */
-
-function markRepairFailure(
-  signatureId,
-  strategy
-) {
-
-  const key =
-    `${signatureId}:${strategy}`;
-
-
-  const pattern =
-    repairMemory.get(
-      key
-    );
-
-
-  if (!pattern) {
-
-    return null;
-
-  }
-
-
-  pattern.failures +=
-    1;
-
-
-  pattern.lastSeen =
-    new Date().toISOString();
-
-
-  repairMemory.set(
-    key,
-    pattern
-  );
-
-
-  persistPattern(
-    "repair-failure",
-    key,
-    pattern
-  );
-
-
-  return pattern;
-
-}
-
-
-/* ================================================================
-   REPAIR SUCCESS RATE
-================================================================ */
-
-function getRepairSuccessRate(
-  signatureId,
-  strategy
-) {
-
-  const key =
-    `${signatureId}:${strategy}`;
-
-
-  const pattern =
-    repairMemory.get(
-      key
-    );
-
-
-  if (
-    !pattern ||
-    pattern.attempts ===
-    0
-  ) {
-
-    return 0;
-
-  }
-
-
-  return (
-    pattern.successes /
-    pattern.attempts
-  );
-
-}
-
-
-/* ================================================================
-   RESOURCE ANALYSIS
-================================================================ */
-
-function analyzeResources(
-  resourceUsage
-) {
-
-  if (
-    !resourceUsage ||
-    typeof resourceUsage !==
-    "object"
-  ) {
-
-    return {
-
-      pressure:
-        "unknown",
-
-      scaleRecommended:
-        false,
-
-      reasons: [],
-
-    };
-
-  }
-
-
-  const cpu =
-    Number(
-      resourceUsage.cpuPercent
-    );
-
-
-  const memory =
-    Number(
-      resourceUsage.memoryPercent
-    );
-
-
-  const reasons = [];
-
-
-  if (
-    Number.isFinite(cpu) &&
-    cpu >= 90
-  ) {
-
-    reasons.push(
-      "CPU pressure is critical"
-    );
-
-  }
-
-  else if (
-    Number.isFinite(cpu) &&
-    cpu >= 80
-  ) {
-
-    reasons.push(
-      "CPU pressure is high"
-    );
-
-  }
-
-
-  if (
-    Number.isFinite(memory) &&
-    memory >= 90
-  ) {
-
-    reasons.push(
-      "Memory pressure is critical"
-    );
-
-  }
-
-  else if (
-    Number.isFinite(memory) &&
-    memory >= 80
-  ) {
-
-    reasons.push(
-      "Memory pressure is high"
-    );
-
-  }
-
-
-  let pressure =
-    "normal";
-
-
-  if (
-    reasons.some(
-      reason =>
-        reason.includes(
-          "critical"
-        )
-    )
-  ) {
-
-    pressure =
-      "critical";
-
-  }
-
-  else if (
-    reasons.length
-  ) {
-
-    pressure =
-      "high";
-
-  }
-
 
   return {
-
-    pressure,
-
-    scaleRecommended:
-      pressure ===
-      "high" ||
-      pressure ===
-      "critical",
-
-    reasons,
-
     cpuPercent:
-      Number.isFinite(cpu)
-        ? cpu
-        : null,
+      snapshot.cpuPercent ??
+      null,
+
+    memoryMB:
+      snapshot.memoryMB ??
+      null,
+
+    pids:
+      snapshot.pids ??
+      null,
 
     memoryPercent:
-      Number.isFinite(memory)
-        ? memory
-        : null,
-
+      snapshot.memoryPercent ??
+      null,
   };
-
 }
-
-
-/* ================================================================
-   AUTO SCALE RECOMMENDATION
-================================================================ */
-
-function recommendAutoScale(
-  context
-) {
-
-  const resource =
-    analyzeResources(
-      context?.resourceUsage
-    );
-
-
-  if (
-    !resource.scaleRecommended
-  ) {
-
-    return {
-
-      scale:
-        false,
-
-      level:
-        1,
-
-      reason:
-        "No significant resource pressure",
-
-      resource,
-
-    };
-
-  }
-
-
-  const current =
-    Number(
-      context?.currentScale ||
-      1
-    );
-
-
-  const max =
-    Number(
-      context?.maxAutoScale ||
-      4
-    );
-
-
-  if (
-    current >=
-    max
-  ) {
-
-    return {
-
-      scale:
-        false,
-
-      level:
-        current,
-
-      reason:
-        "Maximum auto-scale level reached",
-
-      resource,
-
-    };
-
-  }
-
-
-  return {
-
-    scale:
-      true,
-
-    level:
-      Math.min(
-        max,
-        current + 1
-      ),
-
-    reason:
-      "Resource pressure justifies controlled scale increase",
-
-    resource,
-
-  };
-
-}
-
-
-/* ================================================================
-   REGRESSION DETECTION
-================================================================ */
-
-function detectRegression(
-  context
-) {
-
-  const before =
-    context?.previousFailure;
-
-
-  const current =
-    context?.currentFailure;
-
-
-  if (
-    !before ||
-    !current
-  ) {
-
-    return {
-
-      regression:
-        false,
-
-      reason:
-        "Insufficient comparison evidence",
-
-    };
-
-  }
-
-
-  const previous =
-    createFailureSignature(
-      before
-    );
-
-
-  const currentSignature =
-    createFailureSignature(
-      current
-    );
-
-
-  if (
-    previous.signatureId ===
-    currentSignature.signatureId
-  ) {
-
-    return {
-
-      regression:
-        false,
-
-      recurringFailure:
-        true,
-
-      reason:
-        "Same failure signature recurred",
-
-      signatureId:
-        currentSignature.signatureId,
-
-    };
-
-  }
-
-
-  return {
-
-    regression:
-      false,
-
-    recurringFailure:
-      false,
-
-    reason:
-      "Failure signature changed",
-
-    previousSignature:
-      previous.signatureId,
-
-    currentSignature:
-      currentSignature.signatureId,
-
-  };
-
-}
-
-
-/* ================================================================
-   LEARNING QUERY
-================================================================ */
-
-function findKnownRepair(
-  failure
-) {
-
-  const signature =
-    createFailureSignature(
-      failure
-    );
-
-
-  const matches = [];
-
-
-  for (
-    const [
-      key,
-      pattern
-    ]
-    of repairMemory.entries()
-  ) {
-
-    if (
-      pattern.signatureId !==
-      signature.signatureId
-    ) {
-
-      continue;
-
-    }
-
-
-    const successRate =
-      pattern.attempts > 0
-        ? pattern.successes /
-          pattern.attempts
-        : 0;
-
-
-    matches.push({
-
-      ...clone(pattern),
-
-      successRate,
-
-    });
-
-  }
-
-
-  return matches.sort(
-
-    (
-      a,
-      b
-    ) =>
-      b.successRate -
-      a.successRate
-
-  );
-
-}
-
 
 /* ================================================================
    ENGINEERING CONTEXT
@@ -3815,18 +3582,15 @@ function findKnownRepair(
 function buildEngineeringContext(
   context
 ) {
-
   const failure =
     normalizeFailure(
       context?.failure
     );
 
-
   const signature =
     createFailureSignature(
       failure
     );
-
 
   const files =
     Array.isArray(
@@ -3835,16 +3599,13 @@ function buildEngineeringContext(
       ? context.files
       : [];
 
-
   const targets =
     extractTargetsFromErrors(
       failure,
       files
     );
 
-
   return {
-
     runId:
       context?.runId ||
       null,
@@ -3884,19 +3645,83 @@ function buildEngineeringContext(
         failure
       ),
 
+    resourceUsage:
+      buildResourceContext(
+        context?.executionResult
+      ),
   };
-
 }
 
+/* ================================================================
+   LEARNING AFTER AUTHORITATIVE RESULT
+================================================================ */
+
+/**
+ * Call this ONLY after EngineeringExecutor has produced a real
+ * authoritative result.
+ *
+ * success=true means:
+ *   authoritative build passed
+ *
+ * success=false means:
+ *   authoritative verification failed
+ */
+function recordAuthoritativeRepairOutcome(
+  context
+) {
+  const diagnosis =
+    context?.diagnosis;
+
+  const repair =
+    context?.repair;
+
+  const failure =
+    context?.failure;
+
+  if (
+    !diagnosis ||
+    !repair
+  ) {
+    return null;
+  }
+
+  const signatureId =
+    diagnosis?.signature
+      ?.signatureId;
+
+  const strategy =
+    repair.strategy ||
+    diagnosis.strategy;
+
+  if (
+    !signatureId ||
+    !strategy
+  ) {
+    return null;
+  }
+
+  if (
+    context?.success ===
+    true
+  ) {
+    return markRepairSuccess(
+      signatureId,
+      strategy
+    );
+  }
+
+  return markRepairFailure(
+    signatureId,
+    strategy
+  );
+}
 
 /* ================================================================
    ENGINEERING SUMMARY
 ================================================================ */
 
 function getSummary() {
-
   return {
-
     version:
       INTELLIGENCE_VERSION,
 
@@ -3910,51 +3735,35 @@ function getSummary() {
       repairMemory.size,
 
     capabilities: [
-
       "failure-normalization",
-
+      "authoritative-failure-analysis",
       "root-cause-analysis",
-
       "failure-signatures",
-
       "repair-planning",
-
       "repair-validation",
-
       "scope-control",
-
       "dependency-control",
-
+      "secret-detection",
       "regression-detection",
-
       "repair-learning",
-
+      "known-repair-analysis",
       "resource-analysis",
-
       "auto-scale-recommendation",
-
       "deterministic-fallback",
-
       "centralized-ai-provider",
-
+      "authoritative-outcome-learning",
     ],
-
   };
-
 }
-
 
 /* ================================================================
    HEALTH
 ================================================================ */
 
 function getHealth() {
-
   loadDependencies();
 
-
   return {
-
     success:
       true,
 
@@ -3981,26 +3790,40 @@ function getHealth() {
       false,
 
     memory: {
-
       failurePatterns:
         failureMemory.size,
 
       repairPatterns:
         repairMemory.size,
-
     },
 
+    safety: {
+      secretDetection:
+        true,
+
+      dependencyDiff:
+        true,
+
+      scopeDiff:
+        true,
+
+      repairFileLimit:
+        DEFAULT_POLICY.MAX_REPAIR_FILES,
+
+      maxDependencyChanges:
+        DEFAULT_POLICY.MAX_DEPENDENCY_CHANGES,
+
+      maxScopeExpansion:
+        DEFAULT_POLICY.MAX_SCOPE_EXPANSION,
+    },
   };
-
 }
-
 
 /* ================================================================
    PUBLIC CONTRACT
 ================================================================ */
 
 module.exports = {
-
   INTELLIGENCE_VERSION,
 
   ENGINEERING_SYSTEM_VERSION,
@@ -4021,15 +3844,25 @@ module.exports = {
 
   calculateFilesHash,
 
+  extractSourceContext,
+
+  extractTargetsFromErrors,
+
   deterministicDiagnosis,
 
   diagnoseFailure,
 
-  repairFailure,
-
   validateRepair,
 
   mergeRepairFiles,
+
+  repairFailure,
+
+  calculateDependencyChanges,
+
+  calculateScopeExpansion,
+
+  containsLikelySecret,
 
   analyzeResources,
 
@@ -4045,10 +3878,13 @@ module.exports = {
 
   getRepairSuccessRate,
 
+  recordAuthoritativeRepairOutcome,
+
   buildEngineeringContext,
+
+  buildResourceContext,
 
   getSummary,
 
   getHealth,
-
 };
