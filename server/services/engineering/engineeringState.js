@@ -3,11 +3,12 @@
 /**
  * ZyrionOS Engineering State
  * ---------------------------------------------
- * Version: 1.3.0
- * Schema: 3
+ * Version: 1.4.0
+ * Schema: 4
  *
  * Responsibility:
- * - Engineering run state/source of truth
+ * - Engineering run state / source of truth
+ * - Run identity compatibility: id + runId
  * - Atomic state transitions
  * - Attempts / failures / repairs / verification
  * - Checkpoints / rollback records
@@ -15,6 +16,7 @@
  * - Repair pattern learning records
  * - Engineering budgets / limits
  * - Audit trail
+ * - Authoritative evidence tracking
  *
  * This module MUST NOT:
  * - execute builds
@@ -30,8 +32,8 @@ const crypto = require("crypto");
  * VERSION
  * ======================================================= */
 
-const SERVICE_VERSION = "1.3.0";
-const SCHEMA_VERSION = 3;
+const SERVICE_VERSION = "1.4.0";
+const SCHEMA_VERSION = 4;
 const ENGINEERING_SYSTEM_VERSION = "2.0.0";
 
 /* =========================================================
@@ -137,10 +139,6 @@ const STATE_TRANSITIONS = Object.freeze({
 
 /* =========================================================
  * GLOBAL ENGINEERING LIMITS
- *
- * IMPORTANT:
- * Orchestrator v1.3.0 can consume these values directly.
- * Both canonical and compatibility names are exposed.
  * ======================================================= */
 
 const ENGINEERING_LIMITS = Object.freeze({
@@ -172,25 +170,39 @@ const ENGINEERING_LIMITS = Object.freeze({
   MAX_AFFECTED_DEPENDENCIES: 15,
 });
 
-/*
- * Compatibility aliases.
- *
- * Orchestrator v1.3.0 may reference either naming convention.
- */
+/* =========================================================
+ * COMPATIBILITY LIMITS
+ * ======================================================= */
+
 const LIMITS = Object.freeze({
   ...ENGINEERING_LIMITS,
 
-  MAX_EXECUTION_TIME_MS: ENGINEERING_LIMITS.MAX_EXECUTION_TIME,
+  MAX_EXECUTION_TIME_MS:
+    ENGINEERING_LIMITS.MAX_EXECUTION_TIME,
 
-  MAX_CPU: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.cpu,
-  MAX_MEMORY_MB: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.memory,
-  MAX_PIDS: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.pids,
-  MAX_DISK_MB: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.disk,
+  MAX_CPU:
+    ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.cpu,
 
-  MAX_RESOURCE_CPU: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.cpu,
-  MAX_RESOURCE_MEMORY: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.memory,
-  MAX_RESOURCE_PIDS: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.pids,
-  MAX_RESOURCE_DISK: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.disk,
+  MAX_MEMORY_MB:
+    ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.memory,
+
+  MAX_PIDS:
+    ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.pids,
+
+  MAX_DISK_MB:
+    ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.disk,
+
+  MAX_RESOURCE_CPU:
+    ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.cpu,
+
+  MAX_RESOURCE_MEMORY:
+    ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.memory,
+
+  MAX_RESOURCE_PIDS:
+    ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.pids,
+
+  MAX_RESOURCE_DISK:
+    ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.disk,
 });
 
 /* =========================================================
@@ -222,6 +234,7 @@ const VERIFICATION_STATUS = Object.freeze({
 
 const EXECUTION_STATUS = Object.freeze({
   PASSED: "passed",
+  SUCCESS: "success",
   FAILED: "failed",
   CANCELLED: "cancelled",
   TIMEOUT: "timeout",
@@ -253,6 +266,14 @@ const checkpoints = new Map();
 const rollbacks = new Map();
 const patterns = new Map();
 
+/*
+ * Kept for compatibility/diagnostics.
+ *
+ * JavaScript synchronous Map mutations are atomic within a
+ * single Node.js event-loop turn. Public State APIs remain
+ * synchronous intentionally because Orchestrator/Executor
+ * contracts depend on synchronous State methods.
+ */
 const locks = new Map();
 
 /* =========================================================
@@ -268,7 +289,9 @@ function id(prefix) {
 }
 
 function clone(value) {
-  if (value === undefined) return undefined;
+  if (value === undefined) {
+    return undefined;
+  }
 
   try {
     return JSON.parse(JSON.stringify(value));
@@ -279,37 +302,62 @@ function clone(value) {
 
 function finiteNumber(value, fallback) {
   const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
+
+  return Number.isFinite(number)
+    ? number
+    : fallback;
 }
 
 function nonNegative(value, fallback = 0) {
-  const number = finiteNumber(value, fallback);
+  const number = finiteNumber(
+    value,
+    fallback
+  );
+
   return Math.max(0, number);
 }
 
-function positiveInteger(value, fallback) {
+function positiveInteger(
+  value,
+  fallback
+) {
   const number = Number(value);
 
   if (!Number.isFinite(number)) {
     return fallback;
   }
 
-  return Math.max(1, Math.floor(number));
+  return Math.max(
+    1,
+    Math.floor(number)
+  );
 }
 
 function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
+  return Math.min(
+    max,
+    Math.max(min, value)
+  );
 }
 
-function safeString(value, fallback = "") {
-  if (value === null || value === undefined) {
+function safeString(
+  value,
+  fallback = ""
+) {
+  if (
+    value === null ||
+    value === undefined
+  ) {
     return fallback;
   }
 
   return String(value);
 }
 
-function normalizeArray(value, max = Infinity) {
+function normalizeArray(
+  value,
+  max = Infinity
+) {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -523,47 +571,28 @@ function normalizeLimits(input = {}) {
 }
 
 /* =========================================================
- * LOCKING
- *
- * This is an in-process atomic guard.
- * It prevents concurrent state mutations in one Node process.
+ * RUN ASSERTIONS
  * ======================================================= */
 
-async function withLock(key, fn) {
-  const previous = locks.get(key) || Promise.resolve();
-
-  let release;
-
-  const current = new Promise((resolve) => {
-    release = resolve;
-  });
-
-  locks.set(key, previous.then(() => current));
-
-  try {
-    await previous;
-    return await fn();
-  } finally {
-    release();
-
-    if (locks.get(key) === current) {
-      locks.delete(key);
-    }
-  }
-}
-
 function assertRun(runId) {
-  const run = runs.get(runId);
+  const normalizedRunId =
+    safeString(runId);
+
+  const run =
+    runs.get(normalizedRunId);
 
   if (!run) {
-    throw new Error(`Engineering run not found: ${runId}`);
+    throw new Error(
+      `Engineering run not found: ${normalizedRunId}`
+    );
   }
 
   return run;
 }
 
 function assertAttempt(attemptId) {
-  const attempt = attempts.get(attemptId);
+  const attempt =
+    attempts.get(attemptId);
 
   if (!attempt) {
     throw new Error(
@@ -574,10 +603,16 @@ function assertAttempt(attemptId) {
   return attempt;
 }
 
-function assertTerminalMutationAllowed(run) {
-  if (TERMINAL_STATES.has(run.state)) {
+function assertTerminalMutationAllowed(
+  run
+) {
+  if (
+    TERMINAL_STATES.has(
+      run.state
+    )
+  ) {
     throw new Error(
-      `Run ${run.id} is terminal and cannot be mutated from state ${run.state}`
+      `Run ${run.runId} is terminal and cannot be mutated from state ${run.state}`
     );
   }
 }
@@ -587,86 +622,151 @@ function assertTerminalMutationAllowed(run) {
  * ======================================================= */
 
 function createRun(input = {}) {
-  const runId = input.runId || id("engrun");
+  const requestedRunId =
+    input.runId ||
+    input.id ||
+    id("engrun");
+
+  const runId =
+    safeString(requestedRunId);
 
   if (runs.has(runId)) {
-    throw new Error(`Engineering run already exists: ${runId}`);
+    throw new Error(
+      `Engineering run already exists: ${runId}`
+    );
   }
 
-  const limits = normalizeLimits(
-    input.policy ||
-      input.engineeringPolicy ||
-      input.limits ||
-      {}
-  );
+  const limits =
+    normalizeLimits(
+      input.policy ||
+        input.engineeringPolicy ||
+        input.limits ||
+        {}
+    );
 
   const createdAt = now();
 
+  /*
+   * IMPORTANT:
+   *
+   * `runId` is the canonical external identity.
+   * `id` is retained as a compatibility alias.
+   *
+   * This fixes the State <-> Orchestrator contract mismatch.
+   */
   const run = {
     id: runId,
+    runId,
 
-    serviceVersion: SERVICE_VERSION,
-    schemaVersion: SCHEMA_VERSION,
+    serviceVersion:
+      SERVICE_VERSION,
+
+    schemaVersion:
+      SCHEMA_VERSION,
+
     engineeringSystemVersion:
       ENGINEERING_SYSTEM_VERSION,
 
-    projectId: input.projectId || null,
-    userId: input.userId || null,
-    projectName: input.projectName || null,
+    projectId:
+      input.projectId ||
+      null,
+
+    userId:
+      input.userId ||
+      null,
+
+    projectName:
+      input.projectName ||
+      null,
 
     jobId:
       input.jobId ||
       input.requestId ||
       null,
 
-    state: STATES.CREATED,
+    state:
+      STATES.CREATED,
 
-    status: "created",
+    status:
+      "created",
 
     createdAt,
-    updatedAt: createdAt,
+    updatedAt,
 
-    startedAt: null,
-    completedAt: null,
+    startedAt:
+      null,
 
-    deadlineAt: null,
+    completedAt:
+      null,
 
-    currentAttemptId: null,
+    deadlineAt:
+      null,
 
-    attemptCount: 0,
-    repairAttemptCount: 0,
-    diagnosisAttemptCount: 0,
-    rollbackCount: 0,
-    checkpointCount: 0,
+    currentAttemptId:
+      null,
 
-    cancellationRequested: false,
-    cancellationReason: null,
+    attemptCount:
+      0,
 
-    resumedFrom: input.resumedFrom || null,
+    repairAttemptCount:
+      0,
+
+    diagnosisAttemptCount:
+      0,
+
+    rollbackCount:
+      0,
+
+    checkpointCount:
+      0,
+
+    cancellationRequested:
+      false,
+
+    cancellationReason:
+      null,
+
+    resumedFrom:
+      input.resumedFrom ||
+      null,
 
     policy: {
       ...limits,
     },
 
-    scope: clone(
-      input.scope ||
-        input.planningScope ||
-        null
-    ),
+    scope:
+      clone(
+        input.scope ||
+          input.planningScope ||
+          null
+      ),
 
-    scopeExpansion: 1,
+    scopeExpansion:
+      1,
 
     resources: {
-      requested: clone(
-        input.resources ||
+      requested:
+        clone(
+          input.resources ||
+            limits.resourceLimit
+        ),
+
+      effective:
+        clone(
           limits.resourceLimit
-      ),
-      effective: clone(limits.resourceLimit),
-      scaleFactor: 1,
+        ),
+
+      scaleFactor:
+        1,
+
       violations: [],
     },
 
-    planning: clone(input.planning || null),
+    planning:
+      clone(
+        input.planning ||
+          null
+      ),
 
     sourceHash:
       input.sourceHash ||
@@ -680,19 +780,32 @@ function createRun(input = {}) {
       input.buildId ||
       null,
 
-    artifact: null,
+    artifact:
+      null,
 
-    authoritative: false,
+    authoritative:
+      false,
 
-    validationMode: null,
+    validationMode:
+      null,
 
-    execution: null,
+    execution:
+      null,
 
-    latestFailureId: null,
-    latestRepairId: null,
-    latestVerificationId: null,
-    latestCheckpointId: null,
-    latestRollbackId: null,
+    latestFailureId:
+      null,
+
+    latestRepairId:
+      null,
+
+    latestVerificationId:
+      null,
+
+    latestCheckpointId:
+      null,
+
+    latestRollbackId:
+      null,
 
     failureIds: [],
     repairIds: [],
@@ -711,32 +824,58 @@ function createRun(input = {}) {
     recovery: {
       available: false,
       reason: null,
-      lastCheckpointId: null,
-      lastRollbackId: null,
+      lastCheckpointId:
+        null,
+      lastRollbackId:
+        null,
     },
 
-    result: null,
+    result:
+      null,
 
-    error: null,
+    error:
+      null,
 
-    metadata: clone(input.metadata || {}),
+    metadata:
+      clone(
+        input.metadata ||
+          {}
+      ),
 
-    version: 0,
+    version:
+      0,
   };
 
   if (input.deadlineAt) {
-    run.deadlineAt = input.deadlineAt;
-  } else if (input.deadlineMs) {
-    run.deadlineAt = new Date(
-      Date.now() + Number(input.deadlineMs)
-    ).toISOString();
+    run.deadlineAt =
+      input.deadlineAt;
+  } else if (
+    input.deadlineMs
+  ) {
+    run.deadlineAt =
+      new Date(
+        Date.now() +
+          Number(
+            input.deadlineMs
+          )
+      ).toISOString();
   }
 
-  runs.set(runId, run);
+  runs.set(
+    runId,
+    run
+  );
 
   appendAudit(run, {
-    type: "RUN_CREATED",
-    state: STATES.CREATED,
+    type:
+      "RUN_CREATED",
+
+    state:
+      STATES.CREATED,
+
+    metadata: {
+      runId,
+    },
   });
 
   return snapshotRun(run);
@@ -747,7 +886,10 @@ function createRun(input = {}) {
  * ======================================================= */
 
 function getRun(runId) {
-  const run = runs.get(runId);
+  const run =
+    runs.get(
+      safeString(runId)
+    );
 
   if (!run) {
     return null;
@@ -768,45 +910,70 @@ function snapshotRun(run) {
  * AUDIT
  * ======================================================= */
 
-function appendAudit(run, event = {}) {
+function appendAudit(
+  run,
+  event = {}
+) {
   const entry = {
-    id: id("audit"),
-    timestamp: now(),
-    type: safeString(event.type, "UNKNOWN"),
+    id:
+      id("audit"),
+
+    timestamp:
+      now(),
+
+    type:
+      safeString(
+        event.type,
+        "UNKNOWN"
+      ),
+
     fromState:
       event.fromState ??
       null,
+
     toState:
       event.toState ??
       null,
+
     state:
       event.state ??
       run.state,
+
     actor:
       event.actor ||
       "engineering-state",
+
     reason:
       event.reason ||
       null,
+
     metadata:
-      clone(event.metadata || {}),
+      clone(
+        event.metadata ||
+          {}
+      ),
   };
 
-  run.audit.push(entry);
+  run.audit.push(
+    entry
+  );
 
-  /*
-   * Audit is bounded by the same output/event philosophy.
-   * Keep the state record finite.
-   */
-  if (run.audit.length > 500) {
+  if (
+    run.audit.length >
+    500
+  ) {
     run.audit.splice(
       0,
-      run.audit.length - 500
+      run.audit.length -
+        500
     );
   }
 
-  run.updatedAt = now();
-  run.version += 1;
+  run.updatedAt =
+    entry.timestamp;
+
+  run.version +=
+    1;
 
   return entry;
 }
@@ -815,8 +982,14 @@ function appendAudit(run, event = {}) {
  * STATE TRANSITION
  * ======================================================= */
 
-function canTransition(from, to) {
-  if (!STATES[from] || !STATES[to]) {
+function canTransition(
+  from,
+  to
+) {
+  if (
+    !STATES[from] ||
+    !STATES[to]
+  ) {
     return false;
   }
 
@@ -824,7 +997,8 @@ function canTransition(from, to) {
     return true;
   }
 
-  const allowed = STATE_TRANSITIONS[from];
+  const allowed =
+    STATE_TRANSITIONS[from];
 
   return Boolean(
     allowed &&
@@ -837,7 +1011,8 @@ function transitionState(
   nextState,
   options = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   if (!STATES[nextState]) {
     throw new Error(
@@ -845,29 +1020,43 @@ function transitionState(
     );
   }
 
-  const previousState = run.state;
+  const previousState =
+    run.state;
 
-  if (previousState === nextState) {
-    /*
-     * Same-state transition is not an actual transition.
-     * Record an explicit audit event only.
-     */
+  if (
+    previousState ===
+    nextState
+  ) {
     appendAudit(run, {
-      type: "STATE_REASSERTED",
-      fromState: previousState,
-      toState: nextState,
-      reason: options.reason || null,
+      type:
+        "STATE_REASSERTED",
+
+      fromState:
+        previousState,
+
+      toState:
+        nextState,
+
+      reason:
+        options.reason ||
+        null,
+
       actor:
         options.actor ||
         "engineering-orchestrator",
-      metadata: options.metadata || {},
+
+      metadata:
+        options.metadata ||
+        {},
     });
 
     return snapshotRun(run);
   }
 
   if (
-    TERMINAL_STATES.has(previousState)
+    TERMINAL_STATES.has(
+      previousState
+    )
   ) {
     throw new Error(
       `Illegal transition from terminal state ${previousState} to ${nextState}`
@@ -885,58 +1074,82 @@ function transitionState(
     );
   }
 
-  const timestamp = now();
+  const timestamp =
+    now();
 
-  run.state = nextState;
+  run.state =
+    nextState;
 
   if (
-    nextState === STATES.ANALYZING &&
+    nextState ===
+      STATES.ANALYZING &&
     !run.startedAt
   ) {
-    run.startedAt = timestamp;
+    run.startedAt =
+      timestamp;
   }
 
   if (
-    TERMINAL_STATES.has(nextState)
+    TERMINAL_STATES.has(
+      nextState
+    )
   ) {
     run.completedAt =
       run.completedAt ||
       timestamp;
 
     run.status =
-      nextState === STATES.PASSED ||
-      nextState === STATES.PROMOTED
+      nextState ===
+        STATES.PASSED ||
+      nextState ===
+        STATES.PROMOTED
         ? "success"
         : "failed";
   } else {
-    run.status = nextState.toLowerCase();
+    run.status =
+      nextState.toLowerCase();
   }
 
   appendAudit(run, {
-    type: "STATE_TRANSITION",
-    fromState: previousState,
-    toState: nextState,
-    reason: options.reason || null,
+    type:
+      "STATE_TRANSITION",
+
+    fromState:
+      previousState,
+
+    toState:
+      nextState,
+
+    reason:
+      options.reason ||
+      null,
+
     actor:
       options.actor ||
       "engineering-orchestrator",
-    metadata: options.metadata || {},
+
+    metadata:
+      options.metadata ||
+      {},
   });
 
   return snapshotRun(run);
 }
 
 /* =========================================================
- * ATTEMPT
+ * ATTEMPTS
  * ======================================================= */
 
 function createAttempt(
   runId,
   input = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
-  assertTerminalMutationAllowed(run);
+  assertTerminalMutationAllowed(
+    run
+  );
 
   if (run.currentAttemptId) {
     const current =
@@ -972,37 +1185,53 @@ function createAttempt(
     input.attemptId ||
     id("attempt");
 
-  if (attempts.has(attemptId)) {
+  if (
+    attempts.has(attemptId)
+  ) {
     throw new Error(
       `Engineering attempt already exists: ${attemptId}`
     );
   }
 
-  const timestamp = now();
+  const timestamp =
+    now();
 
   const attempt = {
-    id: attemptId,
+    id:
+      attemptId,
 
     runId,
 
     number:
-      run.attemptCount + 1,
+      run.attemptCount +
+      1,
 
     status:
       ATTEMPT_STATUS.CREATED,
 
-    createdAt: timestamp,
-    startedAt: null,
-    completedAt: null,
+    createdAt:
+      timestamp,
+
+    startedAt:
+      null,
+
+    completedAt:
+      null,
 
     stateAtCreation:
       run.state,
 
-    executionId: null,
+    executionId:
+      null,
 
-    failureRecordId: null,
-    repairRecordId: null,
-    verificationRecordId: null,
+    failureRecordId:
+      null,
+
+    repairRecordId:
+      null,
+
+    verificationRecordId:
+      null,
 
     sourceHashBefore:
       input.sourceHashBefore ||
@@ -1018,18 +1247,24 @@ function createAttempt(
       input.buildId ||
       null,
 
-    authoritative: false,
+    authoritative:
+      false,
 
     validationMode:
       input.validationMode ||
       null,
 
-    resourceEventIds: [],
+    resourceEventIds:
+      [],
 
     metadata:
-      clone(input.metadata || {}),
+      clone(
+        input.metadata ||
+          {}
+      ),
 
-    error: null,
+    error:
+      null,
   };
 
   attempts.set(
@@ -1037,14 +1272,19 @@ function createAttempt(
     attempt
   );
 
-  run.attemptCount += 1;
+  run.attemptCount +=
+    1;
+
   run.currentAttemptId =
     attemptId;
 
   appendAudit(run, {
-    type: "ATTEMPT_CREATED",
+    type:
+      "ATTEMPT_CREATED",
+
     metadata: {
       attemptId,
+
       attemptNumber:
         attempt.number,
     },
@@ -1055,9 +1295,13 @@ function createAttempt(
   );
 }
 
-function startAttempt(attemptId) {
+function startAttempt(
+  attemptId
+) {
   const attempt =
-    assertAttempt(attemptId);
+    assertAttempt(
+      attemptId
+    );
 
   if (
     attempt.status !==
@@ -1071,7 +1315,8 @@ function startAttempt(attemptId) {
   attempt.status =
     ATTEMPT_STATUS.RUNNING;
 
-  attempt.startedAt = now();
+  attempt.startedAt =
+    now();
 
   return snapshotAttempt(
     attempt
@@ -1083,7 +1328,9 @@ function completeAttempt(
   result = {}
 ) {
   const attempt =
-    assertAttempt(attemptId);
+    assertAttempt(
+      attemptId
+    );
 
   if (
     attempt.status !==
@@ -1094,9 +1341,12 @@ function completeAttempt(
     );
   }
 
-  attempt.completedAt = now();
+  attempt.completedAt =
+    now();
 
-  if (result.cancelled) {
+  if (
+    result.cancelled
+  ) {
     attempt.status =
       ATTEMPT_STATUS.CANCELLED;
   } else if (
@@ -1121,7 +1371,8 @@ function completeAttempt(
     null;
 
   attempt.authoritative =
-    result.authoritative === true;
+    result.authoritative ===
+    true;
 
   attempt.validationMode =
     result.validationMode ||
@@ -1129,7 +1380,10 @@ function completeAttempt(
     null;
 
   attempt.error =
-    clone(result.error || null);
+    clone(
+      result.error ||
+        null
+    );
 
   return snapshotAttempt(
     attempt
@@ -1141,7 +1395,9 @@ function cancelAttempt(
   reason
 ) {
   const attempt =
-    assertAttempt(attemptId);
+    assertAttempt(
+      attemptId
+    );
 
   if (
     attempt.status ===
@@ -1180,7 +1436,9 @@ function markAttemptRolledBack(
   reason
 ) {
   const attempt =
-    assertAttempt(attemptId);
+    assertAttempt(
+      attemptId
+    );
 
   attempt.status =
     ATTEMPT_STATUS.ROLLED_BACK;
@@ -1200,9 +1458,13 @@ function markAttemptRolledBack(
   );
 }
 
-function getAttempt(attemptId) {
+function getAttempt(
+  attemptId
+) {
   const attempt =
-    attempts.get(attemptId);
+    attempts.get(
+      attemptId
+    );
 
   return attempt
     ? snapshotAttempt(attempt)
@@ -1219,18 +1481,49 @@ function snapshotAttempt(
  * EXECUTION RECORD
  * ======================================================= */
 
+function normalizeExecutionStatus(
+  status
+) {
+  const value =
+    safeString(
+      status
+    ).toLowerCase();
+
+  if (
+    value ===
+      EXECUTION_STATUS.SUCCESS ||
+    value ===
+      "ok"
+  ) {
+    return EXECUTION_STATUS.PASSED;
+  }
+
+  if (
+    Object.values(
+      EXECUTION_STATUS
+    ).includes(value)
+  ) {
+    return value;
+  }
+
+  return EXECUTION_STATUS.FAILED;
+}
+
 function recordExecution(
   runId,
   input = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   const executionId =
     input.executionId ||
     id("execution");
 
   if (
-    executions.has(executionId)
+    executions.has(
+      executionId
+    )
   ) {
     throw new Error(
       `Execution already exists: ${executionId}`
@@ -1238,7 +1531,8 @@ function recordExecution(
   }
 
   const record = {
-    id: executionId,
+    id:
+      executionId,
 
     runId,
 
@@ -1252,8 +1546,14 @@ function recordExecution(
       "build",
 
     status:
-      input.status ||
-      EXECUTION_STATUS.FAILED,
+      normalizeExecutionStatus(
+        input.status ||
+          (
+            input.success === true
+              ? EXECUTION_STATUS.PASSED
+              : EXECUTION_STATUS.FAILED
+          )
+      ),
 
     startedAt:
       input.startedAt ||
@@ -1272,13 +1572,19 @@ function recordExecution(
       null,
 
     timedOut:
-      input.timedOut === true,
+      input.timedOut ===
+      true,
 
     cancelled:
-      input.cancelled === true,
+      input.cancelled ===
+      true,
+
+    success:
+      input.success === true,
 
     authoritative:
-      input.authoritative === true,
+      input.authoritative ===
+      true,
 
     validationMode:
       input.validationMode ||
@@ -1297,25 +1603,33 @@ function recordExecution(
       null,
 
     stdout:
-      safeString(input.stdout).slice(
-        -run.policy.MAX_OUTPUT_CHARS
+      safeString(
+        input.stdout
+      ).slice(
+        -run.policy
+          .MAX_OUTPUT_CHARS
       ),
 
     stderr:
-      safeString(input.stderr).slice(
-        -run.policy.MAX_OUTPUT_CHARS
+      safeString(
+        input.stderr
+      ).slice(
+        -run.policy
+          .MAX_OUTPUT_CHARS
       ),
 
     errors:
       normalizeArray(
         input.errors,
-        run.policy.MAX_ERROR_MESSAGES
+        run.policy
+          .MAX_ERROR_MESSAGES
       ),
 
     warnings:
       normalizeArray(
         input.warnings,
-        run.policy.MAX_ERROR_MESSAGES
+        run.policy
+          .MAX_ERROR_MESSAGES
       ),
 
     sourceHash:
@@ -1323,13 +1637,22 @@ function recordExecution(
       null,
 
     artifact:
-      clone(input.artifact || null),
+      clone(
+        input.artifact ||
+          null
+      ),
 
     resourceUsage:
-      clone(input.resourceUsage || null),
+      clone(
+        input.resourceUsage ||
+          null
+      ),
 
     metadata:
-      clone(input.metadata || {}),
+      clone(
+        input.metadata ||
+          {}
+      ),
   };
 
   executions.set(
@@ -1341,30 +1664,73 @@ function recordExecution(
     executionId
   );
 
+  run.execution =
+    clone(record);
+
   if (record.buildId) {
     run.buildId =
       record.buildId;
   }
 
-  run.execution = clone(record);
-
-  if (record.authoritative) {
-    run.authoritative = true;
+  if (
+    record.authoritative
+  ) {
+    run.authoritative =
+      true;
   }
 
-  if (record.validationMode) {
+  if (
+    record.validationMode
+  ) {
     run.validationMode =
       record.validationMode;
   }
 
+  if (
+    record.artifact
+  ) {
+    run.artifact =
+      clone(
+        record.artifact
+      );
+  }
+
+  const attempt =
+    record.attemptId
+      ? attempts.get(
+          record.attemptId
+        )
+      : null;
+
+  if (attempt) {
+    attempt.executionId =
+      executionId;
+
+    attempt.buildId =
+      record.buildId ||
+      attempt.buildId;
+
+    attempt.authoritative =
+      record.authoritative;
+
+    attempt.validationMode =
+      record.validationMode ||
+      attempt.validationMode;
+  }
+
   appendAudit(run, {
-    type: "EXECUTION_RECORDED",
+    type:
+      "EXECUTION_RECORDED",
+
     metadata: {
       executionId,
+
       attemptId:
         record.attemptId,
+
       status:
         record.status,
+
       authoritative:
         record.authoritative,
     },
@@ -1374,7 +1740,7 @@ function recordExecution(
 }
 
 /* =========================================================
- * FAILURE RECORD
+ * FAILURE
  * ======================================================= */
 
 function normalizeFailure(
@@ -1384,13 +1750,15 @@ function normalizeFailure(
   const affectedFiles =
     normalizeArray(
       input.affectedFiles,
-      run.policy.MAX_AFFECTED_FILES
+      run.policy
+        .MAX_AFFECTED_FILES
     );
 
   const affectedDependencies =
     normalizeArray(
       input.affectedDependencies,
-      run.policy.MAX_AFFECTED_DEPENDENCIES
+      run.policy
+        .MAX_AFFECTED_DEPENDENCIES
     );
 
   return {
@@ -1399,7 +1767,7 @@ function normalizeFailure(
       id("failure"),
 
     runId:
-      run.id,
+      run.runId,
 
     attemptId:
       input.attemptId ||
@@ -1428,22 +1796,32 @@ function normalizeFailure(
         input.message ||
           input.error ||
           "Engineering execution failed"
-      ).slice(0, 5000),
+      ).slice(
+        0,
+        5000
+      ),
 
     errors:
       normalizeArray(
         input.errors,
-        run.policy.MAX_ERROR_MESSAGES
+        run.policy
+          .MAX_ERROR_MESSAGES
       ),
 
     stdout:
-      safeString(input.stdout).slice(
-        -run.policy.MAX_OUTPUT_CHARS
+      safeString(
+        input.stdout
+      ).slice(
+        -run.policy
+          .MAX_OUTPUT_CHARS
       ),
 
     stderr:
-      safeString(input.stderr).slice(
-        -run.policy.MAX_OUTPUT_CHARS
+      safeString(
+        input.stderr
+      ).slice(
+        -run.policy
+          .MAX_OUTPUT_CHARS
       ),
 
     exitCode:
@@ -1455,13 +1833,16 @@ function normalizeFailure(
       null,
 
     timedOut:
-      input.timedOut === true,
+      input.timedOut ===
+      true,
 
     retryable:
-      input.retryable === true,
+      input.retryable ===
+      true,
 
     authoritative:
-      input.authoritative === true,
+      input.authoritative ===
+      true,
 
     validationMode:
       input.validationMode ||
@@ -1484,14 +1865,18 @@ function normalizeFailure(
       null,
 
     resourceViolation:
-      input.resourceViolation === true,
+      input.resourceViolation ===
+      true,
 
     affectedFiles,
 
     affectedDependencies,
 
     metadata:
-      clone(input.metadata || {}),
+      clone(
+        input.metadata ||
+          {}
+      ),
   };
 }
 
@@ -1499,7 +1884,8 @@ function recordFailure(
   runId,
   input = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   const failure =
     normalizeFailure(
@@ -1508,7 +1894,9 @@ function recordFailure(
     );
 
   if (
-    failures.has(failure.id)
+    failures.has(
+      failure.id
+    )
   ) {
     throw new Error(
       `Failure already exists: ${failure.id}`
@@ -1555,14 +1943,19 @@ function recordFailure(
   }
 
   appendAudit(run, {
-    type: "FAILURE_RECORDED",
+    type:
+      "FAILURE_RECORDED",
+
     metadata: {
       failureId:
         failure.id,
+
       category:
         failure.category,
+
       stage:
         failure.stage,
+
       retryable:
         failure.retryable,
     },
@@ -1571,9 +1964,13 @@ function recordFailure(
   return clone(failure);
 }
 
-function getFailure(failureId) {
+function getFailure(
+  failureId
+) {
   const failure =
-    failures.get(failureId);
+    failures.get(
+      failureId
+    );
 
   return failure
     ? clone(failure)
@@ -1581,20 +1978,24 @@ function getFailure(failureId) {
 }
 
 /* =========================================================
- * REPAIR RECORD
+ * REPAIR
  * ======================================================= */
 
 function createRepair(
   runId,
   input = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
-  assertTerminalMutationAllowed(run);
+  assertTerminalMutationAllowed(
+    run
+  );
 
   if (
     run.repairAttemptCount >=
-    run.policy.MAX_REPAIR_ATTEMPTS
+    run.policy
+      .MAX_REPAIR_ATTEMPTS
   ) {
     throw new Error(
       `Maximum repair attempts exceeded for run ${runId}`
@@ -1606,7 +2007,9 @@ function createRepair(
     id("repair");
 
   if (
-    repairs.has(repairId)
+    repairs.has(
+      repairId
+    )
   ) {
     throw new Error(
       `Repair already exists: ${repairId}`
@@ -1617,17 +2020,20 @@ function createRepair(
     normalizeArray(
       input.affectedFiles ||
         input.files,
-      run.policy.MAX_REPAIR_FILES
+      run.policy
+        .MAX_REPAIR_FILES
     );
 
   const dependencyChanges =
     normalizeArray(
       input.dependencyChanges,
-      run.policy.MAX_DEPENDENCY_CHANGES
+      run.policy
+        .MAX_DEPENDENCY_CHANGES
     );
 
   const repair = {
-    id: repairId,
+    id:
+      repairId,
 
     runId,
 
@@ -1641,7 +2047,8 @@ function createRepair(
       run.latestFailureId ||
       null,
 
-    timestamp: now(),
+    timestamp:
+      now(),
 
     type:
       input.type ||
@@ -1694,17 +2101,22 @@ function createRepair(
     newFiles:
       normalizeArray(
         input.newFiles,
-        run.policy.MAX_REPAIR_FILES
+        run.policy
+          .MAX_REPAIR_FILES
       ),
 
     deletedFiles:
       normalizeArray(
         input.deletedFiles,
-        run.policy.MAX_REPAIR_FILES
+        run.policy
+          .MAX_REPAIR_FILES
       ),
 
     metadata:
-      clone(input.metadata || {}),
+      clone(
+        input.metadata ||
+          {}
+      ),
   };
 
   repairs.set(
@@ -1719,13 +2131,20 @@ function createRepair(
   run.latestRepairId =
     repairId;
 
-  run.repairAttemptCount += 1;
+  run.repairAttemptCount +=
+    1;
 
   run.repairHistory.push({
     repairId,
-    type: repair.type,
-    status: repair.status,
-    timestamp: repair.timestamp,
+
+    type:
+      repair.type,
+
+    status:
+      repair.status,
+
+    timestamp:
+      repair.timestamp,
   });
 
   const attempt =
@@ -1741,12 +2160,18 @@ function createRepair(
   }
 
   appendAudit(run, {
-    type: "REPAIR_RECORDED",
+    type:
+      "REPAIR_RECORDED",
+
     metadata: {
       repairId,
-      type: repair.type,
+
+      type:
+        repair.type,
+
       affectedFiles:
         affectedFiles.length,
+
       dependencyChanges:
         dependencyChanges.length,
     },
@@ -1760,7 +2185,9 @@ function updateRepair(
   patch = {}
 ) {
   const repair =
-    repairs.get(repairId);
+    repairs.get(
+      repairId
+    );
 
   if (!repair) {
     throw new Error(
@@ -1772,7 +2199,9 @@ function updateRepair(
     patch.status &&
     !Object.values(
       REPAIR_STATUS
-    ).includes(patch.status)
+    ).includes(
+      patch.status
+    )
   ) {
     throw new Error(
       `Invalid repair status: ${patch.status}`
@@ -1800,9 +2229,13 @@ function recordRepair(
   );
 }
 
-function getRepair(repairId) {
+function getRepair(
+  repairId
+) {
   const repair =
-    repairs.get(repairId);
+    repairs.get(
+      repairId
+    );
 
   return repair
     ? clone(repair)
@@ -1817,7 +2250,8 @@ function recordVerification(
   runId,
   input = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   const verificationId =
     input.verificationId ||
@@ -1852,7 +2286,8 @@ function recordVerification(
   }
 
   const record = {
-    id: verificationId,
+    id:
+      verificationId,
 
     runId,
 
@@ -1872,7 +2307,8 @@ function recordVerification(
       VERIFICATION_STATUS.PASSED,
 
     authoritative:
-      input.authoritative === true,
+      input.authoritative ===
+      true,
 
     validationMode:
       input.validationMode ||
@@ -1887,26 +2323,67 @@ function recordVerification(
       null,
 
     checks:
-      clone(input.checks || {}),
+      clone(
+        input.checks ||
+          {}
+      ),
 
     errors:
       normalizeArray(
         input.errors,
-        run.policy.MAX_ERROR_MESSAGES
+        run.policy
+          .MAX_ERROR_MESSAGES
       ),
 
     warnings:
       normalizeArray(
         input.warnings,
-        run.policy.MAX_ERROR_MESSAGES
+        run.policy
+          .MAX_ERROR_MESSAGES
       ),
 
     artifact:
-      clone(input.artifact || null),
+      clone(
+        input.artifact ||
+          null
+      ),
 
     metadata:
-      clone(input.metadata || {}),
+      clone(
+        input.metadata ||
+          {}
+      ),
   };
+
+  /*
+   * A successful verification is not allowed to silently
+   * become authoritative unless the verification itself
+   * carries authoritative evidence.
+   */
+  if (
+    record.success &&
+    record.authoritative &&
+    record.validationMode ===
+      "authoritative"
+  ) {
+    if (
+      !isAuthoritativeSuccess({
+        success: true,
+        authoritative:
+          record.authoritative,
+        validationMode:
+          record.validationMode,
+        buildId:
+          record.buildId,
+        artifact:
+          record.artifact,
+      })
+    ) {
+      throw new Error(
+        "Authoritative verification requires complete authoritative artifact evidence"
+      );
+    }
+  }
 
   verifications.set(
     verificationId,
@@ -1922,7 +2399,9 @@ function recordVerification(
 
   run.verificationHistory.push({
     verificationId,
+
     status,
+
     timestamp:
       record.timestamp,
   });
@@ -1940,10 +2419,14 @@ function recordVerification(
   }
 
   appendAudit(run, {
-    type: "VERIFICATION_RECORDED",
+    type:
+      "VERIFICATION_RECORDED",
+
     metadata: {
       verificationId,
+
       status,
+
       authoritative:
         record.authoritative,
     },
@@ -1973,14 +2456,17 @@ function recordArtifact(
   runId,
   input = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   const artifactId =
     input.artifactId ||
     id("artifact");
 
   if (
-    artifacts.has(artifactId)
+    artifacts.has(
+      artifactId
+    )
   ) {
     throw new Error(
       `Artifact already exists: ${artifactId}`
@@ -1988,7 +2474,8 @@ function recordArtifact(
   }
 
   const artifact = {
-    id: artifactId,
+    id:
+      artifactId,
 
     runId,
 
@@ -1997,7 +2484,9 @@ function recordArtifact(
       run.currentAttemptId ||
       null,
 
-    timestamp: now(),
+    timestamp:
+      input.timestamp ||
+      now(),
 
     name:
       input.name ||
@@ -2030,15 +2519,25 @@ function recordArtifact(
       null,
 
     authoritative:
-      input.authoritative === true,
+      input.authoritative ===
+      true,
 
     verified:
-      input.verified === true,
+      input.verified ===
+      true,
 
     metadata:
-      clone(input.metadata || {}),
+      clone(
+        input.metadata ||
+          {}
+      ),
   };
 
+  /*
+   * Keep artifact as the authoritative evidence object only
+   * when the caller explicitly supplies authoritative=true.
+   * State never fabricates this flag.
+   */
   artifacts.set(
     artifactId,
     artifact
@@ -2051,14 +2550,29 @@ function recordArtifact(
   run.artifact =
     clone(artifact);
 
+  if (
+    artifact.authoritative
+  ) {
+    run.authoritative =
+      true;
+
+    run.validationMode =
+      "authoritative";
+  }
+
   appendAudit(run, {
-    type: "ARTIFACT_RECORDED",
+    type:
+      "ARTIFACT_RECORDED",
+
     metadata: {
       artifactId,
+
       checksum:
         artifact.checksum,
+
       authoritative:
         artifact.authoritative,
+
       verified:
         artifact.verified,
     },
@@ -2067,9 +2581,13 @@ function recordArtifact(
   return clone(artifact);
 }
 
-function getArtifact(artifactId) {
+function getArtifact(
+  artifactId
+) {
   const artifact =
-    artifacts.get(artifactId);
+    artifacts.get(
+      artifactId
+    );
 
   return artifact
     ? clone(artifact)
@@ -2084,14 +2602,17 @@ function recordResourceEvent(
   runId,
   input = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   const eventId =
     input.eventId ||
     id("resource");
 
   if (
-    resourceEvents.has(eventId)
+    resourceEvents.has(
+      eventId
+    )
   ) {
     throw new Error(
       `Resource event already exists: ${eventId}`
@@ -2099,7 +2620,8 @@ function recordResourceEvent(
   }
 
   const event = {
-    id: eventId,
+    id:
+      eventId,
 
     runId,
 
@@ -2145,11 +2667,13 @@ function recordResourceEvent(
     limit:
       clone(
         input.limit ||
-          run.policy.resourceLimit
+          run.policy
+            .resourceLimit
       ),
 
     violation:
-      input.violation === true,
+      input.violation ===
+      true,
 
     violations:
       normalizeArray(
@@ -2158,7 +2682,10 @@ function recordResourceEvent(
       ),
 
     metadata:
-      clone(input.metadata || {}),
+      clone(
+        input.metadata ||
+          {}
+      ),
   };
 
   resourceEvents.set(
@@ -2173,10 +2700,14 @@ function recordResourceEvent(
   if (event.violation) {
     run.resources.violations.push({
       eventId,
+
       timestamp:
         event.timestamp,
+
       violations:
-        clone(event.violations),
+        clone(
+          event.violations
+        ),
     });
   }
 
@@ -2194,9 +2725,12 @@ function recordResourceEvent(
   }
 
   appendAudit(run, {
-    type: "RESOURCE_EVENT",
+    type:
+      "RESOURCE_EVENT",
+
     metadata: {
       eventId,
+
       violation:
         event.violation,
     },
@@ -2226,9 +2760,12 @@ function createCheckpoint(
   runId,
   input = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
-  assertTerminalMutationAllowed(run);
+  assertTerminalMutationAllowed(
+    run
+  );
 
   if (
     run.checkpointCount >=
@@ -2254,7 +2791,8 @@ function createCheckpoint(
   }
 
   const checkpoint = {
-    id: checkpointId,
+    id:
+      checkpointId,
 
     runId,
 
@@ -2263,7 +2801,9 @@ function createCheckpoint(
       run.currentAttemptId ||
       null,
 
-    timestamp: now(),
+    timestamp:
+      input.timestamp ||
+      now(),
 
     sourceHash:
       input.sourceHash ||
@@ -2271,23 +2811,71 @@ function createCheckpoint(
       run.sourceHash ||
       null,
 
+    /*
+     * IMPORTANT:
+     * Executor-generated checkpoint archives need these
+     * fields for rollback.
+     */
+    storageKey:
+      input.storageKey ||
+      null,
+
+    path:
+      input.path ||
+      null,
+
+    checksum:
+      input.checksum ||
+      null,
+
+    size:
+      nonNegative(
+        input.size,
+        0
+      ),
+
+    name:
+      input.name ||
+      null,
+
     files:
       normalizeArray(
         input.files,
-        run.policy.MAX_REPAIR_FILES
+        run.policy
+          .MAX_REPAIR_FILES
       ),
 
     artifact:
-      clone(input.artifact || null),
+      clone(
+        input.artifact ||
+          null
+      ),
 
     state:
       run.state,
 
     metadata:
-      clone(input.metadata || {}),
+      clone(
+        input.metadata ||
+          {}
+      ),
 
-    valid: true,
+    valid:
+      input.valid !== false,
   };
+
+  /*
+   * A checkpoint with artifact evidence can expose the
+   * artifact information without manufacturing authority.
+   */
+  if (
+    checkpoint.artifact
+  ) {
+    checkpoint.artifact =
+      clone(
+        checkpoint.artifact
+      );
+  }
 
   checkpoints.set(
     checkpointId,
@@ -2298,19 +2886,36 @@ function createCheckpoint(
     checkpointId
   );
 
-  run.checkpointCount += 1;
+  run.checkpointCount +=
+    1;
 
   run.latestCheckpointId =
     checkpointId;
 
-  run.recovery.available = true;
+  run.recovery.available =
+    checkpoint.valid === true;
+
   run.recovery.lastCheckpointId =
     checkpointId;
 
   appendAudit(run, {
-    type: "CHECKPOINT_CREATED",
+    type:
+      "CHECKPOINT_CREATED",
+
     metadata: {
       checkpointId,
+
+      storageKey:
+        checkpoint.storageKey,
+
+      path:
+        checkpoint.path,
+
+      checksum:
+        checkpoint.checksum,
+
+      valid:
+        checkpoint.valid,
     },
   });
 
@@ -2338,11 +2943,14 @@ function recordRollback(
   runId,
   input = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   if (
-    run.state === STATES.PASSED ||
-    run.state === STATES.PROMOTED
+    run.state ===
+      STATES.PASSED ||
+    run.state ===
+      STATES.PROMOTED
   ) {
     throw new Error(
       `Cannot rollback terminal successful run ${runId}`
@@ -2377,19 +2985,34 @@ function recordRollback(
     run.latestCheckpointId ||
     null;
 
+  const checkpoint =
+    checkpointId
+      ? checkpoints.get(
+          checkpointId
+        )
+      : null;
+
   if (
     checkpointId &&
-    !checkpoints.has(
-      checkpointId
-    )
+    !checkpoint
   ) {
     throw new Error(
       `Rollback checkpoint not found: ${checkpointId}`
     );
   }
 
+  if (
+    checkpoint &&
+    checkpoint.valid !== true
+  ) {
+    throw new Error(
+      `Rollback checkpoint is invalid: ${checkpointId}`
+    );
+  }
+
   const rollback = {
-    id: rollbackId,
+    id:
+      rollbackId,
 
     runId,
 
@@ -2400,7 +3023,9 @@ function recordRollback(
 
     checkpointId,
 
-    timestamp: now(),
+    timestamp:
+      input.timestamp ||
+      now(),
 
     reason:
       input.reason ||
@@ -2414,10 +3039,32 @@ function recordRollback(
     sourceHashAfter:
       input.sourceHashAfter ||
       (
-        checkpointId
-          ? checkpoints.get(
-              checkpointId
-            ).sourceHash
+        checkpoint
+          ? checkpoint.sourceHash
+          : null
+      ),
+
+    storageKey:
+      input.storageKey ||
+      (
+        checkpoint
+          ? checkpoint.storageKey
+          : null
+      ),
+
+    path:
+      input.path ||
+      (
+        checkpoint
+          ? checkpoint.path
+          : null
+      ),
+
+    checksum:
+      input.checksum ||
+      (
+        checkpoint
+          ? checkpoint.checksum
           : null
       ),
 
@@ -2425,7 +3072,10 @@ function recordRollback(
       input.success !== false,
 
     metadata:
-      clone(input.metadata || {}),
+      clone(
+        input.metadata ||
+          {}
+      ),
   };
 
   rollbacks.set(
@@ -2437,7 +3087,8 @@ function recordRollback(
     rollbackId
   );
 
-  run.rollbackCount += 1;
+  run.rollbackCount +=
+    1;
 
   run.latestRollbackId =
     rollbackId;
@@ -2447,7 +3098,9 @@ function recordRollback(
 
   run.recovery.available =
     Boolean(
-      checkpointId
+      checkpointId &&
+        checkpoint &&
+        checkpoint.valid
     );
 
   if (run.currentAttemptId) {
@@ -2465,10 +3118,20 @@ function recordRollback(
   }
 
   appendAudit(run, {
-    type: "ROLLBACK_RECORDED",
+    type:
+      "ROLLBACK_RECORDED",
+
     metadata: {
       rollbackId,
+
       checkpointId,
+
+      storageKey:
+        rollback.storageKey,
+
+      checksum:
+        rollback.checksum,
+
       success:
         rollback.success,
     },
@@ -2561,7 +3224,10 @@ function normalizePattern(
       ),
 
     metadata:
-      clone(input.metadata || {}),
+      clone(
+        input.metadata ||
+          {}
+      ),
 
     createdAt:
       input.createdAt ||
@@ -2576,7 +3242,9 @@ function recordPattern(
   input = {}
 ) {
   const incoming =
-    normalizePattern(input);
+    normalizePattern(
+      input
+    );
 
   const key =
     incoming.signature ||
@@ -2635,9 +3303,13 @@ function recordPattern(
   return clone(incoming);
 }
 
-function getPattern(signature) {
+function getPattern(
+  signature
+) {
   const pattern =
-    patterns.get(signature);
+    patterns.get(
+      signature
+    );
 
   return pattern
     ? clone(pattern)
@@ -2654,72 +3326,99 @@ function listPatterns() {
  * BUDGET HELPERS
  * ======================================================= */
 
-function getRunBudget(runId) {
-  const run = assertRun(runId);
+function getRunBudget(
+  runId
+) {
+  const run =
+    assertRun(runId);
 
   return {
     attempts: {
-      used: run.attemptCount,
+      used:
+        run.attemptCount,
+
       limit:
         run.policy.MAX_ATTEMPTS,
-      remaining: Math.max(
-        0,
-        run.policy.MAX_ATTEMPTS -
-          run.attemptCount
-      ),
+
+      remaining:
+        Math.max(
+          0,
+          run.policy.MAX_ATTEMPTS -
+            run.attemptCount
+        ),
     },
 
     repairs: {
       used:
         run.repairAttemptCount,
+
       limit:
-        run.policy.MAX_REPAIR_ATTEMPTS,
-      remaining: Math.max(
-        0,
-        run.policy.MAX_REPAIR_ATTEMPTS -
-          run.repairAttemptCount
-      ),
+        run.policy
+          .MAX_REPAIR_ATTEMPTS,
+
+      remaining:
+        Math.max(
+          0,
+          run.policy
+            .MAX_REPAIR_ATTEMPTS -
+            run.repairAttemptCount
+        ),
     },
 
     diagnoses: {
       used:
         run.diagnosisAttemptCount,
+
       limit:
-        run.policy.MAX_DIAGNOSIS_ATTEMPTS,
-      remaining: Math.max(
-        0,
-        run.policy.MAX_DIAGNOSIS_ATTEMPTS -
-          run.diagnosisAttemptCount
-      ),
+        run.policy
+          .MAX_DIAGNOSIS_ATTEMPTS,
+
+      remaining:
+        Math.max(
+          0,
+          run.policy
+            .MAX_DIAGNOSIS_ATTEMPTS -
+            run.diagnosisAttemptCount
+        ),
     },
 
     rollbacks: {
       used:
         run.rollbackCount,
+
       limit:
         run.policy.MAX_ROLLBACKS,
-      remaining: Math.max(
-        0,
-        run.policy.MAX_ROLLBACKS -
-          run.rollbackCount
-      ),
+
+      remaining:
+        Math.max(
+          0,
+          run.policy.MAX_ROLLBACKS -
+            run.rollbackCount
+        ),
     },
 
     checkpoints: {
       used:
         run.checkpointCount,
+
       limit:
-        run.policy.MAX_CHECKPOINTS,
-      remaining: Math.max(
-        0,
-        run.policy.MAX_CHECKPOINTS -
-          run.checkpointCount
-      ),
+        run.policy
+          .MAX_CHECKPOINTS,
+
+      remaining:
+        Math.max(
+          0,
+          run.policy
+            .MAX_CHECKPOINTS -
+            run.checkpointCount
+        ),
     },
 
     executionTime: {
       limit:
-        run.policy.MAX_EXECUTION_TIME_MS,
+        run.policy
+          .MAX_EXECUTION_TIME_MS,
+
       deadlineAt:
         run.deadlineAt,
     },
@@ -2727,12 +3426,16 @@ function getRunBudget(runId) {
     scopeExpansion: {
       current:
         run.scopeExpansion,
+
       limit:
-        run.policy.MAX_SCOPE_EXPANSION,
+        run.policy
+          .MAX_SCOPE_EXPANSION,
+
       remaining:
         Math.max(
           0,
-          run.policy.MAX_SCOPE_EXPANSION -
+          run.policy
+            .MAX_SCOPE_EXPANSION -
             run.scopeExpansion
         ),
     },
@@ -2742,7 +3445,8 @@ function getRunBudget(runId) {
 function canCreateAttempt(
   runId
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   if (
     TERMINAL_STATES.has(
@@ -2787,8 +3491,11 @@ function canCreateAttempt(
   return true;
 }
 
-function canRepair(runId) {
-  const run = assertRun(runId);
+function canRepair(
+  runId
+) {
+  const run =
+    assertRun(runId);
 
   return (
     !TERMINAL_STATES.has(
@@ -2796,12 +3503,16 @@ function canRepair(runId) {
     ) &&
     !run.cancellationRequested &&
     run.repairAttemptCount <
-      run.policy.MAX_REPAIR_ATTEMPTS
+      run.policy
+        .MAX_REPAIR_ATTEMPTS
   );
 }
 
-function canDiagnose(runId) {
-  const run = assertRun(runId);
+function canDiagnose(
+  runId
+) {
+  const run =
+    assertRun(runId);
 
   return (
     !TERMINAL_STATES.has(
@@ -2809,14 +3520,16 @@ function canDiagnose(runId) {
     ) &&
     !run.cancellationRequested &&
     run.diagnosisAttemptCount <
-      run.policy.MAX_DIAGNOSIS_ATTEMPTS
+      run.policy
+        .MAX_DIAGNOSIS_ATTEMPTS
   );
 }
 
 function incrementDiagnosisAttempt(
   runId
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   assertTerminalMutationAllowed(
     run
@@ -2824,17 +3537,21 @@ function incrementDiagnosisAttempt(
 
   if (
     run.diagnosisAttemptCount >=
-    run.policy.MAX_DIAGNOSIS_ATTEMPTS
+    run.policy
+      .MAX_DIAGNOSIS_ATTEMPTS
   ) {
     throw new Error(
       `Maximum diagnosis attempts exceeded for run ${runId}`
     );
   }
 
-  run.diagnosisAttemptCount += 1;
+  run.diagnosisAttemptCount +=
+    1;
 
   appendAudit(run, {
-    type: "DIAGNOSIS_ATTEMPT",
+    type:
+      "DIAGNOSIS_ATTEMPT",
+
     metadata: {
       count:
         run.diagnosisAttemptCount,
@@ -2852,7 +3569,8 @@ function updateScopeExpansion(
   runId,
   value
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   assertTerminalMutationAllowed(
     run
@@ -2866,7 +3584,8 @@ function updateScopeExpansion(
 
   if (
     expansion >
-    run.policy.MAX_SCOPE_EXPANSION
+    run.policy
+      .MAX_SCOPE_EXPANSION
   ) {
     throw new Error(
       `Scope expansion ${expansion} exceeds limit ${run.policy.MAX_SCOPE_EXPANSION}`
@@ -2883,7 +3602,9 @@ function updateScopeExpansion(
     expansion;
 
   appendAudit(run, {
-    type: "SCOPE_UPDATED",
+    type:
+      "SCOPE_UPDATED",
+
     metadata: {
       scopeExpansion:
         expansion,
@@ -2901,7 +3622,8 @@ function updateEffectiveResources(
   runId,
   resources = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   assertTerminalMutationAllowed(
     run
@@ -2942,36 +3664,67 @@ function updateEffectiveResources(
     run.policy.resourceLimit;
 
   const next = {
-    cpu: clamp(
-      requested.cpu,
-      0.1,
-      limit.cpu
-    ),
+    cpu:
+      clamp(
+        requested.cpu,
+        0.1,
+        limit.cpu
+      ),
 
-    memory: clamp(
-      requested.memory,
-      128,
-      limit.memory
-    ),
+    memory:
+      clamp(
+        requested.memory,
+        128,
+        limit.memory
+      ),
 
-    pids: clamp(
-      requested.pids,
-      16,
-      limit.pids
-    ),
+    pids:
+      clamp(
+        requested.pids,
+        16,
+        limit.pids
+      ),
 
-    disk: clamp(
-      requested.disk,
-      256,
-      limit.disk
-    ),
+    disk:
+      clamp(
+        requested.disk,
+        256,
+        limit.disk
+      ),
   };
 
   run.resources.effective =
     next;
 
+  run.resources.scaleFactor =
+    Math.max(
+      next.cpu /
+        Math.max(
+          0.1,
+          limit.cpu
+        ),
+      next.memory /
+        Math.max(
+          128,
+          limit.memory
+        ),
+      next.pids /
+        Math.max(
+          16,
+          limit.pids
+        ),
+      next.disk /
+        Math.max(
+          256,
+          limit.disk
+        ),
+      1
+    );
+
   appendAudit(run, {
-    type: "RESOURCE_LIMIT_UPDATED",
+    type:
+      "RESOURCE_LIMIT_UPDATED",
+
     metadata: {
       resources:
         clone(next),
@@ -2989,7 +3742,8 @@ function requestCancellation(
   runId,
   reason
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   if (
     TERMINAL_STATES.has(
@@ -3007,7 +3761,9 @@ function requestCancellation(
     "Cancellation requested";
 
   appendAudit(run, {
-    type: "CANCELLATION_REQUESTED",
+    type:
+      "CANCELLATION_REQUESTED",
+
     reason:
       run.cancellationReason,
   });
@@ -3044,7 +3800,8 @@ function requestCancellation(
 function isDeadlineExceeded(
   runId
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   if (!run.deadlineAt) {
     return false;
@@ -3061,11 +3818,14 @@ function isDeadlineExceeded(
 function getRemainingExecutionTime(
   runId
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   if (!run.deadlineAt) {
-    return run.policy
-      .MAX_EXECUTION_TIME_MS;
+    return (
+      run.policy
+        .MAX_EXECUTION_TIME_MS
+    );
   }
 
   return Math.max(
@@ -3078,7 +3838,7 @@ function getRemainingExecutionTime(
 }
 
 /* =========================================================
- * SUCCESS / AUTHORITY
+ * AUTHORITATIVE EVIDENCE
  * ======================================================= */
 
 function isAuthoritativeSuccess(
@@ -3091,7 +3851,8 @@ function isAuthoritativeSuccess(
   }
 
   if (
-    input.authoritative !== true
+    input.authoritative !==
+    true
   ) {
     return false;
   }
@@ -3132,7 +3893,8 @@ function isAuthoritativeSuccess(
 function hasPassedVerification(
   runId
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   if (
     !run.latestVerificationId
@@ -3150,19 +3912,23 @@ function hasPassedVerification(
   }
 
   return (
-    verification.success === true
+    verification.success ===
+      true &&
+    verification.status ===
+      VERIFICATION_STATUS.PASSED
   );
 }
 
 /* =========================================================
- * COMPLETE / PROMOTE / ESCALATE
+ * COMPLETE RUN
  * ======================================================= */
 
 function completeRun(
   runId,
   result = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   if (
     TERMINAL_STATES.has(
@@ -3181,10 +3947,6 @@ function completeRun(
     result.success === true &&
     !authoritativeSuccess
   ) {
-    /*
-     * Critical truth gate:
-     * State MUST NOT mark a fake build as PASSED.
-     */
     throw new Error(
       "Cannot complete engineering run successfully without authoritative build evidence"
     );
@@ -3192,7 +3954,9 @@ function completeRun(
 
   if (
     result.success === true &&
-    !hasPassedVerification(runId)
+    !hasPassedVerification(
+      runId
+    )
   ) {
     throw new Error(
       "Cannot complete engineering run successfully without passed verification"
@@ -3205,7 +3969,8 @@ function completeRun(
   if (
     authoritativeSuccess
   ) {
-    run.authoritative = true;
+    run.authoritative =
+      true;
 
     run.buildId =
       result.buildId ||
@@ -3223,9 +3988,89 @@ function completeRun(
     run.finalSourceHash =
       result.sourceHash ||
       run.finalSourceHash;
+
+    /*
+     * Ensure authoritative artifact is represented in
+     * State's artifact registry as well.
+     */
+    const artifact =
+      result.artifact;
+
+    if (artifact) {
+      const alreadyRegistered =
+        Array.from(
+          artifacts.values()
+        ).some(
+          (item) =>
+            item.runId ===
+              run.runId &&
+            item.checksum ===
+              artifact.checksum &&
+            (
+              item.storageKey ===
+                artifact.storageKey ||
+              item.path ===
+                artifact.path
+            )
+        );
+
+      if (!alreadyRegistered) {
+        const registered =
+          recordArtifact(
+            run.runId,
+            {
+              ...artifact,
+
+              authoritative:
+                true,
+
+              verified:
+                artifact.verified !==
+                false,
+            }
+          );
+
+        run.artifact =
+          clone(
+            registered
+          );
+      } else {
+        const matching =
+          Array.from(
+            artifacts.values()
+          ).find(
+            (item) =>
+              item.runId ===
+                run.runId &&
+              item.checksum ===
+                artifact.checksum &&
+              (
+                item.storageKey ===
+                  artifact.storageKey ||
+                item.path ===
+                  artifact.path
+              )
+          );
+
+        if (matching) {
+          matching.authoritative =
+            true;
+
+          matching.verified =
+            matching.verified ||
+            artifact.verified ===
+              true;
+
+          run.artifact =
+            clone(matching);
+        }
+      }
+    }
   }
 
-  if (result.success === true) {
+  if (
+    result.success === true
+  ) {
     transitionState(
       runId,
       STATES.PASSED,
@@ -3255,14 +4100,20 @@ function completeRun(
   return snapshotRun(run);
 }
 
+/* =========================================================
+ * PROMOTE
+ * ======================================================= */
+
 function promoteRun(
   runId,
   metadata = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   if (
-    run.state !== STATES.PASSED
+    run.state !==
+    STATES.PASSED
   ) {
     throw new Error(
       `Only PASSED runs can be promoted. Current state: ${run.state}`
@@ -3280,19 +4131,21 @@ function promoteRun(
   }
 
   if (
-    !isAuthoritativeSuccess(
-      {
-        success: true,
-        authoritative:
-          run.authoritative,
-        validationMode:
-          run.validationMode,
-        buildId:
-          run.buildId,
-        artifact:
-          run.artifact,
-      }
-    )
+    !isAuthoritativeSuccess({
+      success: true,
+
+      authoritative:
+        run.authoritative,
+
+      validationMode:
+        run.validationMode,
+
+      buildId:
+        run.buildId,
+
+      artifact:
+        run.artifact,
+    })
   ) {
     throw new Error(
       "Promotion requires authoritative artifact evidence"
@@ -3300,7 +4153,9 @@ function promoteRun(
   }
 
   if (
-    !hasPassedVerification(runId)
+    !hasPassedVerification(
+      runId
+    )
   ) {
     throw new Error(
       "Promotion requires passed verification"
@@ -3309,6 +4164,7 @@ function promoteRun(
 
   run.result = {
     ...(run.result || {}),
+
     promotion:
       clone(metadata),
   };
@@ -3319,6 +4175,7 @@ function promoteRun(
     {
       reason:
         "Engineering run promoted",
+
       metadata,
     }
   );
@@ -3326,12 +4183,17 @@ function promoteRun(
   return snapshotRun(run);
 }
 
+/* =========================================================
+ * ESCALATE
+ * ======================================================= */
+
 function escalateRun(
   runId,
   reason,
   metadata = {}
 ) {
-  const run = assertRun(runId);
+  const run =
+    assertRun(runId);
 
   if (
     run.state ===
@@ -3348,6 +4210,7 @@ function escalateRun(
     message:
       reason ||
       "Engineering run escalated",
+
     metadata:
       clone(metadata),
   };
@@ -3359,6 +4222,7 @@ function escalateRun(
       reason:
         reason ||
         "Engineering run escalated",
+
       metadata,
     }
   );
@@ -3370,7 +4234,9 @@ function escalateRun(
  * LIST / QUERY
  * ======================================================= */
 
-function listAttempts(runId) {
+function listAttempts(
+  runId
+) {
   assertRun(runId);
 
   return Array.from(
@@ -3378,12 +4244,17 @@ function listAttempts(runId) {
   )
     .filter(
       (item) =>
-        item.runId === runId
+        item.runId ===
+        runId
     )
-    .map(snapshotAttempt);
+    .map(
+      snapshotAttempt
+    );
 }
 
-function listFailures(runId) {
+function listFailures(
+  runId
+) {
   assertRun(runId);
 
   return Array.from(
@@ -3391,12 +4262,15 @@ function listFailures(runId) {
   )
     .filter(
       (item) =>
-        item.runId === runId
+        item.runId ===
+        runId
     )
     .map(clone);
 }
 
-function listRepairs(runId) {
+function listRepairs(
+  runId
+) {
   assertRun(runId);
 
   return Array.from(
@@ -3404,7 +4278,8 @@ function listRepairs(runId) {
   )
     .filter(
       (item) =>
-        item.runId === runId
+        item.runId ===
+        runId
     )
     .map(clone);
 }
@@ -3419,12 +4294,15 @@ function listVerifications(
   )
     .filter(
       (item) =>
-        item.runId === runId
+        item.runId ===
+        runId
     )
     .map(clone);
 }
 
-function listExecutions(runId) {
+function listExecutions(
+  runId
+) {
   assertRun(runId);
 
   return Array.from(
@@ -3432,12 +4310,15 @@ function listExecutions(runId) {
   )
     .filter(
       (item) =>
-        item.runId === runId
+        item.runId ===
+        runId
     )
     .map(clone);
 }
 
-function listArtifacts(runId) {
+function listArtifacts(
+  runId
+) {
   assertRun(runId);
 
   return Array.from(
@@ -3445,12 +4326,15 @@ function listArtifacts(runId) {
   )
     .filter(
       (item) =>
-        item.runId === runId
+        item.runId ===
+        runId
     )
     .map(clone);
 }
 
-function listCheckpoints(runId) {
+function listCheckpoints(
+  runId
+) {
   assertRun(runId);
 
   return Array.from(
@@ -3458,12 +4342,15 @@ function listCheckpoints(runId) {
   )
     .filter(
       (item) =>
-        item.runId === runId
+        item.runId ===
+        runId
     )
     .map(clone);
 }
 
-function listRollbacks(runId) {
+function listRollbacks(
+  runId
+) {
   assertRun(runId);
 
   return Array.from(
@@ -3471,7 +4358,8 @@ function listRollbacks(runId) {
   )
     .filter(
       (item) =>
-        item.runId === runId
+        item.runId ===
+        runId
     )
     .map(clone);
 }
@@ -3486,20 +4374,28 @@ function listResourceEvents(
   )
     .filter(
       (item) =>
-        item.runId === runId
+        item.runId ===
+        runId
     )
     .map(clone);
 }
 
 /* =========================================================
- * STATE SUMMARY
+ * RUN SUMMARY
  * ======================================================= */
 
-function getRunSummary(runId) {
-  const run = assertRun(runId);
+function getRunSummary(
+  runId
+) {
+  const run =
+    assertRun(runId);
 
   return {
-    id: run.id,
+    id:
+      run.id,
+
+    runId:
+      run.runId,
 
     projectId:
       run.projectId,
@@ -3573,13 +4469,19 @@ function getRunSummary(runId) {
       run.latestRollbackId,
 
     artifact:
-      clone(run.artifact),
+      clone(
+        run.artifact
+      ),
 
     recovery:
-      clone(run.recovery),
+      clone(
+        run.recovery
+      ),
 
     budget:
-      getRunBudget(runId),
+      getRunBudget(
+        runId
+      ),
   };
 }
 
@@ -3589,9 +4491,11 @@ function getRunSummary(runId) {
 
 function health() {
   return {
-    service: "engineeringState",
+    service:
+      "engineeringState",
 
-    healthy: true,
+    healthy:
+      true,
 
     serviceVersion:
       SERVICE_VERSION,
@@ -3603,16 +4507,31 @@ function health() {
       ENGINEERING_SYSTEM_VERSION,
 
     authority: {
-      stateOwnsTruth: true,
-      fakeSuccessAllowed: false,
+      stateOwnsTruth:
+        true,
+
+      fakeSuccessAllowed:
+        false,
+
       authoritativeBuildRequired:
         true,
+
       verificationRequired:
         true,
     },
 
+    identity: {
+      canonical:
+        "runId",
+
+      compatibilityAlias:
+        "id",
+    },
+
     states:
-      Object.values(STATES),
+      Object.values(
+        STATES
+      ),
 
     terminalStates:
       Array.from(
@@ -3630,38 +4549,49 @@ function health() {
       ).length,
 
     totals: {
-      runs: runs.size,
-      attempts: attempts.size,
+      runs:
+        runs.size,
+
+      attempts:
+        attempts.size,
+
       executions:
         executions.size,
+
       failures:
         failures.size,
+
       repairs:
         repairs.size,
+
       verifications:
         verifications.size,
+
       artifacts:
         artifacts.size,
+
       resourceEvents:
         resourceEvents.size,
+
       checkpoints:
         checkpoints.size,
+
       rollbacks:
         rollbacks.size,
+
       patterns:
         patterns.size,
     },
 
     limits:
-      clone(ENGINEERING_LIMITS),
+      clone(
+        ENGINEERING_LIMITS
+      ),
   };
 }
 
 /* =========================================================
  * RESET
- *
- * Intended for tests / process-local recovery.
- * Not used by production orchestration.
  * ======================================================= */
 
 function reset() {
