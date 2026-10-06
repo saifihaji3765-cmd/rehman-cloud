@@ -2,7 +2,7 @@
 
 /*
  * ============================================================
- * ZYRION OS — ENGINEERING EXECUTOR v1.1.0
+ * ZYRION OS — ENGINEERING EXECUTOR v1.2.0
  * ============================================================
  *
  * Enterprise Autonomous Engineering Control Plane
@@ -38,7 +38,15 @@
  *   Static validation is NEVER authoritative execution.
  *   Process launch is NEVER success.
  *
- * Authoritative success requires actual execution evidence.
+ * Authoritative build success requires:
+ *   1. real Docker execution
+ *   2. successful exit
+ *   3. authoritative execution mode
+ *   4. artifact creation
+ *   5. artifact checksum verification
+ *   6. source identity
+ *   7. build identity
+ *
  * ============================================================
  */
 
@@ -49,13 +57,19 @@ const crypto = require("crypto");
 const net = require("net");
 
 const {
-  spawn,
+  spawn
+} = require("child_process");
+
+const {
+  promisify
+} = require("util");
+
+const {
   execFile
 } = require("child_process");
 
-const { promisify } = require("util");
-
-const execFileAsync = promisify(execFile);
+const execFileAsync =
+  promisify(execFile);
 
 /* ============================================================
    OPTIONAL ENGINEERING STATE
@@ -64,7 +78,8 @@ const execFileAsync = promisify(execFile);
 let engineeringState = null;
 
 try {
-  engineeringState = require("./engineeringState");
+  engineeringState =
+    require("./engineeringState");
 } catch (_) {
   engineeringState = null;
 }
@@ -73,22 +88,25 @@ try {
    VERSION
 ============================================================ */
 
-const SERVICE_VERSION = "1.1.0";
+const SERVICE_VERSION =
+  "1.2.0";
 
 const EXECUTION_MODE =
   "engineering-control-plane";
 
-const AUTHORITATIVE = true;
+const AUTHORITATIVE =
+  true;
 
 /* ============================================================
    NETWORK POLICY
 ============================================================ */
 
-const NETWORK_POLICIES = Object.freeze({
-  NONE: "none",
-  BRIDGE: "bridge",
-  HOST: "host"
-});
+const NETWORK_POLICIES =
+  Object.freeze({
+    NONE: "none",
+    BRIDGE: "bridge",
+    HOST: "host"
+  });
 
 const DEFAULT_NETWORK_POLICY =
   NETWORK_POLICIES.NONE;
@@ -97,78 +115,86 @@ const DEFAULT_NETWORK_POLICY =
    EXECUTION TYPES
 ============================================================ */
 
-const EXECUTION_TYPES = Object.freeze({
-  PROCESS: "process",
-  INSTALL: "install",
-  BUILD: "build",
-  TEST: "test",
-  RUNTIME: "runtime",
-  PREVIEW: "preview",
-  ARTIFACT: "artifact"
-});
+const EXECUTION_TYPES =
+  Object.freeze({
+    PROCESS: "process",
+    INSTALL: "install",
+    BUILD: "build",
+    TEST: "test",
+    RUNTIME: "runtime",
+    PREVIEW: "preview",
+    ARTIFACT: "artifact"
+  });
 
 /* ============================================================
    DEFAULT EXECUTION LIMITS
- *
- * These are never allowed to exceed the engineering-state
- * policy when a stricter policy is supplied.
 ============================================================ */
 
-const DEFAULT_LIMITS = Object.freeze({
-  timeoutMs: 15 * 60 * 1000,
+const DEFAULT_LIMITS =
+  Object.freeze({
+    timeoutMs:
+      15 * 60 * 1000,
 
-  installTimeoutMs:
-    10 * 60 * 1000,
+    installTimeoutMs:
+      10 * 60 * 1000,
 
-  runtimeTimeoutMs:
-    5 * 60 * 1000,
+    runtimeTimeoutMs:
+      5 * 60 * 1000,
 
-  testTimeoutMs:
-    10 * 60 * 1000,
+    testTimeoutMs:
+      10 * 60 * 1000,
 
-  previewTimeoutMs:
-    5 * 60 * 1000,
+    previewTimeoutMs:
+      5 * 60 * 1000,
 
-  cpuCores: 2,
+    cpuCores: 2,
 
-  memoryMB: 2048,
+    memoryMB: 2048,
 
-  pids: 256,
+    pids: 256,
 
-  diskMB: 10240,
+    diskMB: 10240,
 
-  maxOutputBytes:
-    5 * 1024 * 1024,
+    maxOutputBytes:
+      5 * 1024 * 1024,
 
-  maxErrorBytes:
-    20 * 1024,
+    maxErrorBytes:
+      20 * 1024,
 
-  maxArtifactBytes:
-    500 * 1024 * 1024,
+    maxArtifactBytes:
+      500 * 1024 * 1024,
 
-  gracePeriodMs: 5000,
+    gracePeriodMs:
+      5000,
 
-  resourceSampleMs: 1000,
+    resourceSampleMs:
+      1000,
 
-  readinessTimeoutMs: 30000,
+    readinessTimeoutMs:
+      30000,
 
-  readinessIntervalMs: 1000
-});
+    readinessIntervalMs:
+      1000
+  });
 
 /* ============================================================
    FILESYSTEM POLICY
 ============================================================ */
 
-const FILESYSTEM_POLICY = Object.freeze({
-  WORKSPACE: "/workspace",
+const FILESYSTEM_POLICY =
+  Object.freeze({
+    WORKSPACE:
+      "/workspace",
 
-  TMP: "/tmp",
+    TMP:
+      "/tmp",
 
-  NODE_HOME: "/home/node",
+    NODE_HOME:
+      "/home/node",
 
-  ARTIFACT:
-    "/workspace/.zyrionos/artifacts"
-});
+    ARTIFACT:
+      "/workspace/.zyrionos/artifacts"
+  });
 
 /* ============================================================
    COMMAND SAFETY
@@ -314,7 +340,8 @@ function redactSecrets(value) {
     );
 
   for (
-    const pattern of SECRET_PATTERNS
+    const pattern of
+      SECRET_PATTERNS
   ) {
     output =
       output.replace(
@@ -324,6 +351,66 @@ function redactSecrets(value) {
   }
 
   return output;
+}
+
+function safeError(error) {
+  if (!error) {
+    return null;
+  }
+
+  return {
+    name:
+      normalizeString(
+        error.name,
+        200
+      ),
+
+    message:
+      normalizeString(
+        error.message ||
+          error,
+        4000
+      ),
+
+    code:
+      normalizeString(
+        error.code,
+        100
+      ),
+
+    stack:
+      normalizeString(
+        error.stack,
+        8000
+      )
+  };
+}
+
+/* ============================================================
+   ENGINEERING STATE LIMITS
+ *
+ * If State exposes stricter resource policy, executor never
+ * exceeds it.
+============================================================ */
+
+function getStateResourceLimits() {
+  try {
+    if (
+      engineeringState &&
+      engineeringState.ENGINEERING_LIMITS &&
+      engineeringState
+        .ENGINEERING_LIMITS
+        .MAX_RESOURCE_LIMIT
+    ) {
+      return {
+        ...engineeringState
+          .ENGINEERING_LIMITS
+          .MAX_RESOURCE_LIMIT
+      };
+    }
+  } catch (_) {}
+
+  return null;
 }
 
 /* ============================================================
@@ -338,6 +425,65 @@ function normalizeLimits(
     typeof input === "object"
       ? input
       : {};
+
+  const stateLimits =
+    getStateResourceLimits();
+
+  const stateCpu =
+    Number(
+      stateLimits?.cpu
+    );
+
+  const stateMemory =
+    Number(
+      stateLimits?.memory
+    );
+
+  const statePids =
+    Number(
+      stateLimits?.pids
+    );
+
+  const stateDisk =
+    Number(
+      stateLimits?.disk
+    );
+
+  const cpuMaximum =
+    Number.isFinite(stateCpu) &&
+    stateCpu > 0
+      ? Math.min(
+          DEFAULT_LIMITS.cpuCores,
+          stateCpu
+        )
+      : DEFAULT_LIMITS.cpuCores;
+
+  const memoryMaximum =
+    Number.isFinite(stateMemory) &&
+    stateMemory > 0
+      ? Math.min(
+          DEFAULT_LIMITS.memoryMB,
+          stateMemory
+        )
+      : DEFAULT_LIMITS.memoryMB;
+
+  const pidsMaximum =
+    Number.isFinite(statePids) &&
+    statePids > 0
+      ? Math.min(
+          DEFAULT_LIMITS.pids,
+          statePids
+        )
+      : DEFAULT_LIMITS.pids;
+
+  const diskMaximum =
+    Number.isFinite(stateDisk) &&
+    stateDisk > 0
+      ? Math.min(
+          DEFAULT_LIMITS.diskMB,
+          stateDisk
+        )
+      : DEFAULT_LIMITS.diskMB;
 
   return {
     timeoutMs:
@@ -384,32 +530,32 @@ function normalizeLimits(
       clampNumber(
         requested.cpuCores,
         0.25,
-        DEFAULT_LIMITS.cpuCores,
-        DEFAULT_LIMITS.cpuCores
+        cpuMaximum,
+        cpuMaximum
       ),
 
     memoryMB:
       clampNumber(
         requested.memoryMB,
         128,
-        DEFAULT_LIMITS.memoryMB,
-        DEFAULT_LIMITS.memoryMB
+        memoryMaximum,
+        memoryMaximum
       ),
 
     pids:
       clampNumber(
         requested.pids,
         32,
-        DEFAULT_LIMITS.pids,
-        DEFAULT_LIMITS.pids
+        pidsMaximum,
+        pidsMaximum
       ),
 
     diskMB:
       clampNumber(
         requested.diskMB,
         256,
-        DEFAULT_LIMITS.diskMB,
-        DEFAULT_LIMITS.diskMB
+        diskMaximum,
+        diskMaximum
       ),
 
     maxOutputBytes:
@@ -475,7 +621,8 @@ function normalizeLimits(
 ============================================================ */
 
 function normalizeNetworkPolicy(
-  policy = DEFAULT_NETWORK_POLICY
+  policy =
+    DEFAULT_NETWORK_POLICY
 ) {
   const normalized =
     normalizeString(
@@ -583,10 +730,14 @@ function assertPathInside(
   rootPath
 ) {
   const target =
-    path.resolve(targetPath);
+    path.resolve(
+      targetPath
+    );
 
   const root =
-    path.resolve(rootPath);
+    path.resolve(
+      rootPath
+    );
 
   const relative =
     path.relative(
@@ -765,9 +916,11 @@ function createOutputCollector(
           )
           .toString("utf8"),
 
-      bytes: limit,
+      bytes:
+        limit,
 
-      truncated: true
+      truncated:
+        true
     };
   }
 
@@ -1002,7 +1155,9 @@ async function readProcessResourceSnapshot(
 
     return {
       supported: true,
-      processExists: true,
+
+      processExists:
+        true,
 
       pid:
         Number(match[1]),
@@ -1073,8 +1228,11 @@ async function readDiskUsageMB(
 
 async function executeProcess({
   command,
+
   cwd,
+
   env = {},
+
   type =
     EXECUTION_TYPES.PROCESS,
 
@@ -1092,6 +1250,12 @@ async function executeProcess({
 
   resourceSampleMs =
     DEFAULT_LIMITS.resourceSampleMs,
+
+  cpuCores =
+    DEFAULT_LIMITS.cpuCores,
+
+  memoryMB =
+    DEFAULT_LIMITS.memoryMB,
 
   diskMB =
     DEFAULT_LIMITS.diskMB,
@@ -1132,6 +1296,8 @@ async function executeProcess({
       let cancelled = false;
       let resourceViolation =
         null;
+      let launchError =
+        null;
 
       const resourceSamples =
         [];
@@ -1168,7 +1334,8 @@ async function executeProcess({
               "pipe"
             ],
 
-            windowsHide: true
+            windowsHide:
+              true
           }
         );
 
@@ -1192,29 +1359,82 @@ async function executeProcess({
 
           if (
             snapshot &&
-            snapshot.memoryKB &&
-            snapshot.memoryKB /
-              1024 >
-              Number.MAX_SAFE_INTEGER
+            snapshot.supported &&
+            snapshot.memoryKB
           ) {
-            resourceViolation =
-              [
-                {
-                  resource:
-                    "memory",
-                  actual:
-                    snapshot.memoryKB /
-                    1024
-                }
-              ];
+            const memoryUsedMB =
+              snapshot.memoryKB /
+              1024;
 
-            await terminateProcessTree(
-              child,
-              gracePeriodMs
-            );
+            if (
+              memoryUsedMB >
+              Number(memoryMB)
+            ) {
+              resourceViolation =
+                [
+                  {
+                    resource:
+                      "memoryMB",
+
+                    actual:
+                      memoryUsedMB,
+
+                    limit:
+                      Number(memoryMB)
+                  }
+                ];
+
+              await terminateProcessTree(
+                child,
+                gracePeriodMs
+              );
+
+              return;
+            }
           }
 
-          if (diskMB) {
+          if (
+            snapshot &&
+            snapshot.supported &&
+            Number.isFinite(
+              snapshot.cpuPercent
+            )
+          ) {
+            const cpuLimitPercent =
+              Number(cpuCores) *
+              100;
+
+            if (
+              snapshot.cpuPercent >
+              cpuLimitPercent
+            ) {
+              resourceViolation =
+                [
+                  {
+                    resource:
+                      "cpu",
+
+                    actual:
+                      snapshot.cpuPercent,
+
+                    limit:
+                      cpuLimitPercent
+                  }
+                ];
+
+              await terminateProcessTree(
+                child,
+                gracePeriodMs
+              );
+
+              return;
+            }
+          }
+
+          if (
+            diskMB &&
+            diskMB > 0
+          ) {
             const used =
               await readDiskUsageMB(
                 workingDirectory
@@ -1229,8 +1449,10 @@ async function executeProcess({
                   {
                     resource:
                       "diskMB",
+
                     actual:
                       used,
+
                     limit:
                       diskMB
                   }
@@ -1246,7 +1468,10 @@ async function executeProcess({
 
       resourceTimer =
         setInterval(
-          sampleResources,
+          () => {
+            sampleResources()
+              .catch(() => {});
+          },
           resourceSampleMs
         );
 
@@ -1340,6 +1565,9 @@ async function executeProcess({
             );
           }
 
+          launchError =
+            error || launchError;
+
           const completedAt =
             new Date();
 
@@ -1350,12 +1578,14 @@ async function executeProcess({
             !timedOut &&
             !cancelled &&
             !resourceViolation &&
-            !error &&
+            !launchError &&
             exitCode === 0;
 
           resolve({
             executionId:
-              createId("exec"),
+              createId(
+                "exec"
+              ),
 
             type,
 
@@ -1399,6 +1629,13 @@ async function executeProcess({
             cancelled,
 
             resourceViolation,
+
+            error:
+              launchError
+                ? safeError(
+                    launchError
+                  )
+                : null,
 
             startedAt,
 
@@ -1458,7 +1695,14 @@ async function executeProcess({
               resourceLimitExceeded:
                 Boolean(
                   resourceViolation
-                )
+                ),
+
+              error:
+                launchError
+                  ? safeError(
+                      launchError
+                    )
+                  : null
             }
           });
         };
@@ -1489,7 +1733,7 @@ async function executeProcess({
 }
 
 /* ============================================================
-   DOCKER
+   DOCKER AVAILABILITY
 ============================================================ */
 
 async function assertDockerAvailable() {
@@ -1518,6 +1762,10 @@ async function assertDockerAvailable() {
   }
 }
 
+/* ============================================================
+   NODE IMAGE
+============================================================ */
+
 function resolveNodeImage(
   nodeVersion = "20"
 ) {
@@ -1545,16 +1793,27 @@ function resolveNodeImage(
   return `node:${major}-bookworm-slim`;
 }
 
+/* ============================================================
+   DOCKER ARGUMENTS
+============================================================ */
+
 function buildDockerArguments({
   workspacePath,
+
   command,
+
   nodeVersion = "20",
+
   networkPolicy =
     DEFAULT_NETWORK_POLICY,
+
   limits,
+
   type =
     EXECUTION_TYPES.PROCESS,
+
   user = "node",
+
   containerName = null
 }) {
   const image =
@@ -1602,9 +1861,6 @@ function buildDockerArguments({
     "--memory",
     `${limits.memoryMB}m`,
 
-    /*
-     * Prevent swap from silently exceeding the memory budget.
-     */
     "--memory-swap",
     `${limits.memoryMB}m`,
 
@@ -1653,12 +1909,19 @@ function buildDockerArguments({
 
   return {
     args,
+
     image,
+
     network,
+
     command:
       safeCommand
   };
 }
+
+/* ============================================================
+   DOCKER RESOURCE MEASUREMENT
+============================================================ */
 
 async function readDockerResourceSnapshot(
   containerName
@@ -1727,7 +1990,8 @@ async function readDockerResourceSnapshot(
     }
 
     return {
-      supported: true,
+      supported:
+        true,
 
       cpuPercent,
 
@@ -1740,6 +2004,10 @@ async function readDockerResourceSnapshot(
     return null;
   }
 }
+
+/* ============================================================
+   DOCKER CLEANUP
+============================================================ */
 
 async function removeDockerContainer(
   containerName
@@ -1764,17 +2032,30 @@ async function removeDockerContainer(
   } catch (_) {}
 }
 
+/* ============================================================
+   DOCKER EXECUTION
+============================================================ */
+
 async function executeDocker({
   workspacePath,
+
   command,
+
   nodeVersion = "20",
+
   networkPolicy =
     DEFAULT_NETWORK_POLICY,
-  limits = DEFAULT_LIMITS,
+
+  limits =
+    DEFAULT_LIMITS,
+
   type =
     EXECUTION_TYPES.PROCESS,
+
   environment = {},
+
   user = "node",
+
   cancellationToken = null
 }) {
   await assertDockerAvailable();
@@ -1833,6 +2114,9 @@ async function executeDocker({
   let resourceViolation =
     null;
 
+  let processError =
+    null;
+
   let resourceTimer =
     null;
 
@@ -1862,7 +2146,8 @@ async function executeDocker({
           "pipe"
         ],
 
-        windowsHide: true
+        windowsHide:
+          true
       }
     );
 
@@ -1946,7 +2231,10 @@ async function executeDocker({
 
   resourceTimer =
     setInterval(
-      sampleResources,
+      () => {
+        sampleResources()
+          .catch(() => {});
+      },
       normalizedLimits.resourceSampleMs
     );
 
@@ -2024,7 +2312,7 @@ async function executeDocker({
         (
           exitCode,
           signal,
-          processError = null
+          error = null
         ) => {
           if (settled) {
             return;
@@ -2049,6 +2337,9 @@ async function executeDocker({
               cancellationTimer
             );
           }
+
+          processError =
+            error || processError;
 
           const completedAt =
             new Date();
@@ -2076,6 +2367,9 @@ async function executeDocker({
 
             authoritative:
               true,
+
+            validationMode:
+              "authoritative",
 
             success,
 
@@ -2125,6 +2419,13 @@ async function executeDocker({
             cancelled,
 
             resourceViolation,
+
+            error:
+              processError
+                ? safeError(
+                    processError
+                  )
+                : null,
 
             stdout:
               collected.stdout,
@@ -2184,13 +2485,31 @@ async function executeDocker({
                 !processError,
 
               processExited:
-                !processError,
+                !processError &&
+                (
+                  typeof exitCode ===
+                    "number" ||
+                  Boolean(signal)
+                ),
 
               artifactCreated:
                 false,
 
               artifactVerified:
-                false
+                false,
+
+              authoritative:
+                true,
+
+              validationMode:
+                "authoritative",
+
+              error:
+                processError
+                  ? safeError(
+                      processError
+                    )
+                  : null
             }
           });
         };
@@ -2268,6 +2587,10 @@ function detectPackageManager(
   return "npm";
 }
 
+/* ============================================================
+   PACKAGE JSON
+============================================================ */
+
 function readPackageJson(
   workspacePath
 ) {
@@ -2302,6 +2625,10 @@ function readPackageJson(
     );
   }
 }
+
+/* ============================================================
+   INSTALL COMMAND
+============================================================ */
 
 function getInstallCommand(
   workspacePath,
@@ -2346,7 +2673,8 @@ function getInstallCommand(
       command:
         "printf '%s\\n' 'No dependencies declared; installation skipped.'",
 
-      skipped: true
+      skipped:
+        true
     };
   }
 
@@ -2367,7 +2695,8 @@ function getInstallCommand(
           ? "corepack pnpm install --frozen-lockfile"
           : "corepack pnpm install",
 
-      skipped: false
+      skipped:
+        false
     };
   }
 
@@ -2388,7 +2717,8 @@ function getInstallCommand(
           ? "corepack yarn install --immutable"
           : "corepack yarn install",
 
-      skipped: false
+      skipped:
+        false
     };
   }
 
@@ -2406,7 +2736,8 @@ function getInstallCommand(
         ? "npm ci"
         : "npm install",
 
-    skipped: false
+    skipped:
+      false
   };
 }
 
@@ -2416,13 +2747,21 @@ function getInstallCommand(
 
 async function installDependencies({
   workspacePath,
+
   packageManager = "",
+
   nodeVersion = "20",
+
   networkPolicy =
     NETWORK_POLICIES.BRIDGE,
-  limits = DEFAULT_LIMITS,
+
+  limits =
+    DEFAULT_LIMITS,
+
   environment = {},
-  cancellationToken = null
+
+  cancellationToken =
+    null
 }) {
   const {
     workspace
@@ -2441,13 +2780,17 @@ async function installDependencies({
     install.skipped
   ) {
     return {
-      success: true,
+      success:
+        true,
 
       status:
         "success",
 
       authoritative:
         true,
+
+      validationMode:
+        "authoritative",
 
       skipped:
         true,
@@ -2468,6 +2811,11 @@ async function installDependencies({
     };
   }
 
+  const normalizedLimits =
+    normalizeLimits(
+      limits
+    );
+
   return executeDocker({
     workspacePath:
       workspace,
@@ -2483,13 +2831,12 @@ async function installDependencies({
       ),
 
     limits:
-      normalizeLimits({
-        ...limits,
+      {
+        ...normalizedLimits,
 
         timeoutMs:
-          limits.installTimeoutMs ||
-          DEFAULT_LIMITS.installTimeoutMs
-      }),
+          normalizedLimits.installTimeoutMs
+      },
 
     type:
       EXECUTION_TYPES.INSTALL,
@@ -2562,6 +2909,13 @@ function classifyExecutionFailure(
   }
 
   if (
+    result.status ===
+      "cancelled"
+  ) {
+    return "cancelled";
+  }
+
+  if (
     result.exitCode === 127
   ) {
     return "missing-module";
@@ -2574,7 +2928,8 @@ function classifyExecutionFailure(
   }
 
   const combined =
-    `${result.stderr || ""}\n${result.stdout || ""}`.toLowerCase();
+    `${result.stderr || ""}\n${result.stdout || ""}`
+      .toLowerCase();
 
   if (
     combined.includes(
@@ -2648,7 +3003,8 @@ function buildRepairContext(
   result
 ) {
   return {
-    required: true,
+    required:
+      true,
 
     failureStage:
       stage,
@@ -2663,7 +3019,8 @@ function buildRepairContext(
       {
         message:
           normalizeString(
-            result?.error ||
+            result?.error?.message ||
+              result?.error ||
               result?.stderr ||
               "Execution failed",
             4000
@@ -2861,7 +3218,9 @@ async function calculateWorkspaceSourceHash(
 
 async function verifyArtifact({
   artifactPath,
+
   expectedChecksum,
+
   maxBytes =
     DEFAULT_LIMITS.maxArtifactBytes
 }) {
@@ -2921,7 +3280,10 @@ async function safeUnlink(
 
 async function createArtifact({
   workspacePath,
-  limits = DEFAULT_LIMITS,
+
+  limits =
+    DEFAULT_LIMITS,
+
   outputDirectory = ""
 }) {
   const filesystem =
@@ -2956,8 +3318,11 @@ async function createArtifact({
     )
   ) {
     return {
-      created: false,
-      verified: false,
+      created:
+        false,
+
+      verified:
+        false,
 
       error:
         "Artifact source directory does not exist"
@@ -2978,10 +3343,6 @@ async function createArtifact({
       filesystem.workspace
     );
 
-  /*
-   * execFile is intentionally used instead of shell string
-   * concatenation. Paths are passed as arguments.
-   */
   const tarArguments = [
     "-czf",
     archivePath,
@@ -3027,7 +3388,8 @@ async function createArtifact({
       );
 
     tarResult = {
-      success: true,
+      success:
+        true,
 
       status:
         "success",
@@ -3049,21 +3411,24 @@ async function createArtifact({
     };
   } catch (error) {
     return {
-      created: false,
-      verified: false,
+      created:
+        false,
+
+      verified:
+        false,
 
       artifactId,
 
       execution: {
-        success: false,
+        success:
+          false,
 
         status:
           "failed",
 
         error:
-          normalizeString(
-            error.message,
-            4000
+          safeError(
+            error
           ),
 
         stdout:
@@ -3087,8 +3452,11 @@ async function createArtifact({
     )
   ) {
     return {
-      created: false,
-      verified: false,
+      created:
+        false,
+
+      verified:
+        false,
 
       artifactId,
 
@@ -3109,8 +3477,11 @@ async function createArtifact({
     stats.size <= 0
   ) {
     return {
-      created: false,
-      verified: false,
+      created:
+        false,
+
+      verified:
+        false,
 
       artifactId,
 
@@ -3128,8 +3499,11 @@ async function createArtifact({
     );
 
     return {
-      created: false,
-      verified: false,
+      created:
+        false,
+
+      verified:
+        false,
 
       artifactId,
 
@@ -3156,9 +3530,16 @@ async function createArtifact({
     });
 
   return {
-    created: true,
+    created:
+      true,
 
     verified,
+
+    authoritative:
+      true,
+
+    validationMode:
+      "authoritative",
 
     artifactId,
 
@@ -3237,10 +3618,6 @@ async function executeBuild({
       limits
     );
 
-  /*
-   * Legacy path is now explicitly opt-in.
-   * New engineering executor is the default authoritative path.
-   */
   if (
     useLegacyAuthoritativeService &&
     legacyOptions &&
@@ -3313,7 +3690,8 @@ async function executeBuild({
       !installation.success
     ) {
       return {
-        success: false,
+        success:
+          false,
 
         status:
           installation.status ||
@@ -3377,7 +3755,8 @@ async function executeBuild({
     !execution.success
   ) {
     return {
-      success: false,
+      success:
+        false,
 
       status:
         execution.status,
@@ -3412,10 +3791,6 @@ async function executeBuild({
     };
   }
 
-  /*
-   * The build process succeeded. Now create and independently
-   * verify the artifact.
-   */
   const artifact =
     await createArtifact({
       workspacePath:
@@ -3432,7 +3807,8 @@ async function executeBuild({
     !artifact.verified
   ) {
     return {
-      success: false,
+      success:
+        false,
 
       status:
         "failed",
@@ -3464,17 +3840,14 @@ async function executeBuild({
     };
   }
 
-  /*
-   * Verify the workspace source after build so the build
-   * result is associated with a concrete source identity.
-   */
   const sourceHash =
     await calculateWorkspaceSourceHash(
       filesystem.workspace
     );
 
   const result = {
-    success: true,
+    success:
+      true,
 
     status:
       "success",
@@ -3514,32 +3887,58 @@ async function executeBuild({
 
     installation,
 
-    artifact,
+    artifact: {
+      ...artifact,
+
+      authoritative:
+        true,
+
+      validationMode:
+        "authoritative"
+    },
 
     filesystem:
       filesystem.policy,
 
     evidence: {
       dependenciesInstalled:
+        installation
+          ? Boolean(
+              !installation.skipped &&
+              installation.success
+            )
+          : false,
+
+      installationSkipped:
         Boolean(
-          installation &&
-          !installation.skipped
+          installation?.skipped
         ),
 
       buildCommandExecuted:
-        true,
+        Boolean(
+          execution.success
+        ),
 
       generatedCodeExecuted:
-        true,
+        Boolean(
+          execution.success
+        ),
 
       dockerExecuted:
-        true,
+        Boolean(
+          execution.evidence
+            ?.dockerExecuted
+        ),
 
       artifactCreated:
-        true,
+        Boolean(
+          artifact.created
+        ),
 
       artifactVerified:
-        true,
+        Boolean(
+          artifact.verified
+        ),
 
       runtimeStarted:
         false,
@@ -3550,6 +3949,7 @@ async function executeBuild({
   };
 
   await persistAuthoritativeEvidence(
+    runId,
     attemptId,
     result
   );
@@ -3566,7 +3966,8 @@ function normalizeLegacyBuildResult(
 ) {
   if (!result) {
     return {
-      success: false,
+      success:
+        false,
 
       status:
         "failed",
@@ -3725,6 +4126,12 @@ async function executeCommand({
     resourceSampleMs:
       normalizedLimits.resourceSampleMs,
 
+    cpuCores:
+      normalizedLimits.cpuCores,
+
+    memoryMB:
+      normalizedLimits.memoryMB,
+
     diskMB:
       normalizedLimits.diskMB,
 
@@ -3740,17 +4147,29 @@ async function executeCommand({
 
 async function executeRuntime({
   workspacePath,
+
   command,
+
   nodeVersion = "20",
+
   networkPolicy =
     NETWORK_POLICIES.NONE,
+
   limits =
     DEFAULT_LIMITS,
+
   environment = {},
+
   docker = true,
+
   cancellationToken =
     null
 }) {
+  const normalizedLimits =
+    normalizeLimits(
+      limits
+    );
+
   return executeCommand({
     workspacePath,
 
@@ -3763,14 +4182,12 @@ async function executeRuntime({
 
     networkPolicy,
 
-    limits:
-      normalizeLimits({
-        ...limits,
+    limits: {
+      ...normalizedLimits,
 
-        timeoutMs:
-          limits.runtimeTimeoutMs ||
-          DEFAULT_LIMITS.runtimeTimeoutMs
-      }),
+      timeoutMs:
+        normalizedLimits.runtimeTimeoutMs
+    },
 
     environment,
 
@@ -3784,13 +4201,16 @@ async function executeRuntime({
 }
 
 /* ============================================================
-   PREVIEW READINESS
+   TCP READINESS
 ============================================================ */
 
 async function waitForPort({
   host,
+
   port,
+
   timeoutMs,
+
   intervalMs
 }) {
   const started =
@@ -3857,28 +4277,44 @@ async function waitForPort({
   return false;
 }
 
+/* ============================================================
+   PREVIEW
+ *
+ * IMPORTANT:
+ * A long-running preview process cannot be treated like a
+ * normal finite build process. Docker execution therefore
+ * remains the authoritative process lifecycle.
+ *
+ * The readiness probe is used only when the supplied command
+ * terminates successfully.
+============================================================ */
+
 async function executePreview({
   workspacePath,
+
   command,
+
   nodeVersion = "20",
+
   networkPolicy =
     NETWORK_POLICIES.BRIDGE,
+
   limits =
     DEFAULT_LIMITS,
+
   environment = {},
+
   docker = true,
+
   readiness = null,
+
   cancellationToken =
     null
 }) {
   const normalizedLimits =
-    normalizeLimits({
-      ...limits,
-
-      timeoutMs:
-        limits.previewTimeoutMs ||
-        DEFAULT_LIMITS.previewTimeoutMs
-    });
+    normalizeLimits(
+      limits
+    );
 
   const execution =
     await executeCommand({
@@ -3893,8 +4329,12 @@ async function executePreview({
 
       networkPolicy,
 
-      limits:
-        normalizedLimits,
+      limits: {
+        ...normalizedLimits,
+
+        timeoutMs:
+          normalizedLimits.previewTimeoutMs
+      },
 
       environment,
 
@@ -3999,17 +4439,29 @@ async function executePreview({
 
 async function executeTests({
   workspacePath,
+
   command,
+
   nodeVersion = "20",
+
   networkPolicy =
     NETWORK_POLICIES.NONE,
+
   limits =
     DEFAULT_LIMITS,
+
   environment = {},
+
   docker = true,
+
   cancellationToken =
     null
 }) {
+  const normalizedLimits =
+    normalizeLimits(
+      limits
+    );
+
   return executeCommand({
     workspacePath,
 
@@ -4022,14 +4474,12 @@ async function executeTests({
 
     networkPolicy,
 
-    limits:
-      normalizeLimits({
-        ...limits,
+    limits: {
+      ...normalizedLimits,
 
-        timeoutMs:
-          limits.testTimeoutMs ||
-          DEFAULT_LIMITS.testTimeoutMs
-      }),
+      timeoutMs:
+        normalizedLimits.testTimeoutMs
+    },
 
     environment,
 
@@ -4044,14 +4494,19 @@ async function executeTests({
 ============================================================ */
 
 async function createCheckpoint({
-  attemptId,
+  runId = null,
+
+  attemptId = null,
+
   workspacePath,
+
   label =
     "engineering-checkpoint"
 }) {
   if (!engineeringState) {
     return {
-      success: false,
+      success:
+        false,
 
       persisted:
         false,
@@ -4114,6 +4569,20 @@ async function createCheckpoint({
     }
   );
 
+  const stats =
+    await fsp.stat(
+      archivePath
+    );
+
+  if (
+    !stats.isFile() ||
+    stats.size <= 0
+  ) {
+    throw new Error(
+      "Checkpoint archive was not created correctly"
+    );
+  }
+
   const checksum =
     await calculateSha256(
       archivePath
@@ -4132,27 +4601,62 @@ async function createCheckpoint({
     );
   }
 
+  if (!runId) {
+    throw new Error(
+      "runId is required to persist checkpoint"
+    );
+  }
+
+  const payload = {
+    attemptId,
+
+    checkpointId,
+
+    label,
+
+    sourceHash,
+
+    storageKey:
+      archivePath,
+
+    path:
+      archivePath,
+
+    checksum,
+
+    size:
+      stats.size,
+
+    artifact: {
+      storageKey:
+        archivePath,
+
+      path:
+        archivePath,
+
+      checksum,
+
+      size:
+        stats.size
+    },
+
+    state:
+      "checkpointed",
+
+    valid:
+      true
+  };
+
   const record =
     await create.call(
       engineeringState,
-      {
-        attemptId,
-
-        checkpointId,
-
-        label,
-
-        sourceHash,
-
-        storageKey:
-          archivePath,
-
-        checksum
-      }
+      runId,
+      payload
     );
 
   return {
-    success: true,
+    success:
+      true,
 
     persisted:
       true,
@@ -4164,7 +4668,13 @@ async function createCheckpoint({
     storageKey:
       archivePath,
 
+    path:
+      archivePath,
+
     checksum,
+
+    size:
+      stats.size,
 
     record
   };
@@ -4175,8 +4685,12 @@ async function createCheckpoint({
 ============================================================ */
 
 async function rollbackToCheckpoint({
+  runId = null,
+
   workspacePath,
+
   checkpoint,
+
   attemptId = null
 }) {
   if (!checkpoint) {
@@ -4194,6 +4708,12 @@ async function rollbackToCheckpoint({
     checkpoint.storageKey ||
     checkpoint.path;
 
+  if (!archivePath) {
+    throw new Error(
+      "Checkpoint storage path is missing"
+    );
+  }
+
   assertPathInside(
     archivePath,
     workspace
@@ -4207,6 +4727,24 @@ async function rollbackToCheckpoint({
     throw new Error(
       "Checkpoint archive does not exist"
     );
+  }
+
+  if (
+    checkpoint.checksum
+  ) {
+    const actualChecksum =
+      await calculateSha256(
+        archivePath
+      );
+
+    if (
+      actualChecksum !==
+      checkpoint.checksum
+    ) {
+      throw new Error(
+        "Checkpoint checksum verification failed"
+      );
+    }
   }
 
   const rollbackDirectory =
@@ -4321,17 +4859,33 @@ async function rollbackToCheckpoint({
         engineeringState.recordRollback ===
         "function"
     ) {
-      await engineeringState.recordRollback({
-        attemptId,
+      if (!runId) {
+        throw new Error(
+          "runId is required to persist rollback"
+        );
+      }
 
-        checkpointId:
-          checkpoint.checkpointId,
+      await engineeringState.recordRollback(
+        runId,
+        {
+          attemptId,
 
-        success:
-          true,
+          checkpointId:
+            checkpoint.checkpointId,
 
-        sourceHash
-      });
+          success:
+            true,
+
+          sourceHash,
+
+          storageKey:
+            archivePath,
+
+          checksum:
+            checkpoint.checksum ||
+            null
+        }
+      );
     }
 
     return {
@@ -4362,12 +4916,14 @@ async function rollbackToCheckpoint({
 ============================================================ */
 
 async function persistExecutionRecord({
-  attemptId,
+  runId = null,
+
+  attemptId = null,
+
   result
 }) {
   if (
     !engineeringState ||
-    !attemptId ||
     !result
   ) {
     return null;
@@ -4384,94 +4940,121 @@ async function persistExecutionRecord({
     return null;
   }
 
+  if (!runId) {
+    return {
+      persisted:
+        false,
+
+      error:
+        "runId is required for execution persistence"
+    };
+  }
+
   try {
-    const record =
-      await create.call(
-        engineeringState,
-        {
-          attemptId,
+    const payload = {
+      attemptId,
 
-          type:
-            result.type ||
-            EXECUTION_TYPES.PROCESS,
+      executionId:
+        result.executionId ||
+        null,
 
-          command:
-            result.command ||
-            "",
+      type:
+        result.type ||
+        EXECUTION_TYPES.PROCESS,
 
-          workingDirectory:
-            result.cwd ||
-            "",
+      command:
+        result.command ||
+        "",
 
-          status:
-            result.status ||
-            "running"
-        }
-      );
+      workingDirectory:
+        result.cwd ||
+        "",
 
-    const complete =
-      engineeringState.completeExecutionRecord ||
-      engineeringState.recordExecutionResult;
+      status:
+        result.status ||
+        "failed",
 
-    if (
-      typeof complete ===
-        "function" &&
-      record?.executionId
-    ) {
-      return complete.call(
-        engineeringState,
-        {
-          executionId:
-            record.executionId,
+      success:
+        Boolean(
+          result.success
+        ),
 
-          status:
-            result.status ||
-            "failed",
+      authoritative:
+        result.authoritative ===
+        true,
 
-          exitCode:
-            result.exitCode ??
-            null,
+      validationMode:
+        result.validationMode ||
+        (
+          result.authoritative ===
+          true
+            ? "authoritative"
+            : "unknown"
+        ),
 
-          signal:
-            result.signal ||
-            "",
+      exitCode:
+        result.exitCode ??
+        null,
 
-          timedOut:
-            Boolean(
-              result.timedOut
-            ),
+      signal:
+        result.signal ||
+        "",
 
-          startedAt:
-            result.startedAt,
+      timedOut:
+        Boolean(
+          result.timedOut
+        ),
 
-          completedAt:
-            result.completedAt,
+      cancelled:
+        Boolean(
+          result.cancelled
+        ),
 
-          stdout:
-            result.stdout ||
-            "",
+      startedAt:
+        result.startedAt,
 
-          stderr:
-            result.stderr ||
-            "",
+      completedAt:
+        result.completedAt,
 
-          resourceSnapshot:
-            result.finalResourceSnapshot ||
-            {},
+      stdout:
+        normalizeString(
+          result.stdout,
+          20000
+        ),
 
-          evidence:
-            result.evidence ||
-            {}
-        }
-      );
-    }
+      stderr:
+        normalizeString(
+          result.stderr,
+          20000
+        ),
 
-    return record;
-  } catch (error) {
+      resourceSnapshot:
+        result.finalResourceSnapshot ||
+        {},
+
+      resourceViolation:
+        result.resourceViolation ||
+        null,
+
+      evidence:
+        result.evidence ||
+        {},
+
+      error:
+        result.error ||
+        null
+    };
+
     /*
-     * Persistence failure never changes the actual execution
-     * result into success or failure.
+     * engineeringState v1.4.0 contract:
+     * recordExecution(runId, payload)
      */
+    return await create.call(
+      engineeringState,
+      runId,
+      payload
+    );
+  } catch (error) {
     return {
       persisted:
         false,
@@ -4486,28 +5069,41 @@ async function persistExecutionRecord({
 }
 
 async function persistAuthoritativeEvidence(
+  runId,
   attemptId,
   result
 ) {
   if (
-    !attemptId ||
-    !engineeringState
+    !runId ||
+    !engineeringState ||
+    !result
   ) {
     return null;
   }
 
   const executionResult =
     await persistExecutionRecord({
+      runId,
+
       attemptId,
 
       result: {
-        ...result.execution,
+        ...(
+          result.execution ||
+          {}
+        ),
 
         type:
           EXECUTION_TYPES.BUILD,
 
         command:
-          result.buildCommand
+          result.buildCommand,
+
+        authoritative:
+          true,
+
+        validationMode:
+          "authoritative"
       }
     });
 
@@ -4518,24 +5114,44 @@ async function persistAuthoritativeEvidence(
       "function"
   ) {
     try {
-      await engineeringState.recordArtifact({
-        attemptId,
+      await engineeringState.recordArtifact(
+        runId,
+        {
+          attemptId,
 
-        artifactId:
-          result.artifact.artifactId,
+          artifactId:
+            result.artifact.artifactId,
 
-        storageKey:
-          result.artifact.storageKey,
+          name:
+            result.artifact.name,
 
-        checksum:
-          result.artifact.checksum,
+          path:
+            result.artifact.path,
 
-        size:
-          result.artifact.size,
+          storageKey:
+            result.artifact.storageKey,
 
-        verified:
-          result.artifact.verified
-      });
+          checksum:
+            result.artifact.checksum,
+
+          size:
+            result.artifact.size,
+
+          type:
+            result.artifact.type ||
+            "archive",
+
+          verified:
+            result.artifact.verified ===
+            true,
+
+          authoritative:
+            true,
+
+          validationMode:
+            "authoritative"
+        }
+      );
     } catch (_) {}
   }
 
@@ -4809,14 +5425,21 @@ async function execute({
   }
 
   /*
-   * Persist only real execution evidence.
+   * Build execution already persists its authoritative
+   * execution + artifact evidence as one evidence transaction.
+   *
+   * Avoid duplicate execution records for builds.
    */
   if (
     attemptId &&
     type !==
-      EXECUTION_TYPES.ARTIFACT
+      EXECUTION_TYPES.ARTIFACT &&
+    type !==
+      EXECUTION_TYPES.BUILD
   ) {
     await persistExecutionRecord({
+      runId,
+
       attemptId,
 
       result
@@ -4855,8 +5478,19 @@ function health() {
         engineeringState
       ),
 
+    stateVersion:
+      engineeringState?.SERVICE_VERSION ||
+      null,
+
+    stateSchemaVersion:
+      engineeringState?.SCHEMA_VERSION ||
+      null,
+
     limits:
       DEFAULT_LIMITS,
+
+    effectiveStateResourceLimits:
+      getStateResourceLimits(),
 
     networkPolicies:
       NETWORK_POLICIES
