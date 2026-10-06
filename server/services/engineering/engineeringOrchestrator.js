@@ -7,7 +7,7 @@
  *   services/engineering/engineeringOrchestrator.js
  *
  * Version:
- *   1.4.0
+ *   1.5.0
  *
  * Role:
  *   Engineering Control Plane / Workflow Orchestrator
@@ -16,18 +16,8 @@
  *   Engineering Executor
  *
  * Success Rule:
- *   AI/static/master output NEVER proves success.
- *
- *   Only:
- *     authoritative execution
- *     + authoritative verification
- *     + verified artifact
- *     + checksum
- *
- *   may produce success / PASSED / PROMOTED.
- *
- * Important:
- *   This module MUST NOT create a Master Agent circular dependency.
+ *   Only authoritative execution + authoritative verification
+ *   + verified artifact + checksum can produce success.
  *
  * ================================================================
  */
@@ -38,7 +28,7 @@
    MODULE IDENTITY
 ================================================================ */
 
-const ORCHESTRATOR_VERSION = "1.4.0";
+const ORCHESTRATOR_VERSION = "1.5.0";
 const ENGINEERING_SYSTEM_VERSION = "2.0.0";
 
 /* ================================================================
@@ -55,15 +45,6 @@ let engineeringState = null;
 let engineeringExecutor = null;
 let engineeringIntelligence = null;
 
-/*
- * IMPORTANT:
- * Master Agent is intentionally NOT required here.
- *
- * Master -> Engineering Orchestrator is the intended direction.
- *
- * The orchestrator can optionally receive an analysis callback
- * through request.masterAnalyzer if a future integration requires it.
- */
 let dependenciesLoaded = false;
 let dependencyLoadErrors = [];
 
@@ -91,8 +72,8 @@ function safeRequire(modulePath) {
    DEPENDENCY LOADING
 ================================================================ */
 
-function loadDependencies() {
-  if (dependenciesLoaded) {
+function loadDependencies(force = false) {
+  if (dependenciesLoaded && !force) {
     return {
       engineeringState,
       engineeringExecutor,
@@ -103,13 +84,13 @@ function loadDependencies() {
 
   dependencyLoadErrors = [];
 
-  const stateResult =
-    safeRequire("./engineeringState");
+  const stateResult = safeRequire("./engineeringState");
 
   if (stateResult.success) {
-    engineeringState =
-      stateResult.module;
+    engineeringState = stateResult.module;
   } else {
+    engineeringState = null;
+
     dependencyLoadErrors.push({
       dependency: "engineeringState",
       path: "./engineeringState",
@@ -119,13 +100,13 @@ function loadDependencies() {
     });
   }
 
-  const executorResult =
-    safeRequire("./engineeringExecutor");
+  const executorResult = safeRequire("./engineeringExecutor");
 
   if (executorResult.success) {
-    engineeringExecutor =
-      executorResult.module;
+    engineeringExecutor = executorResult.module;
   } else {
+    engineeringExecutor = null;
+
     dependencyLoadErrors.push({
       dependency: "engineeringExecutor",
       path: "./engineeringExecutor",
@@ -142,6 +123,8 @@ function loadDependencies() {
     engineeringIntelligence =
       intelligenceResult.module;
   } else {
+    engineeringIntelligence = null;
+
     dependencyLoadErrors.push({
       dependency: "engineeringIntelligence",
       path: "./engineeringIntelligence",
@@ -263,30 +246,21 @@ const ALLOWED_TRANSITIONS = Object.freeze({
 
 const DEFAULT_POLICY = Object.freeze({
   MAX_ATTEMPTS: 5,
-
   MAX_REPAIR_ATTEMPTS: 3,
-
   MAX_DIAGNOSIS_ATTEMPTS: 3,
 
   MAX_EXECUTION_TIME_MS:
     15 * 60 * 1000,
 
   MAX_REPAIR_FILES: 25,
-
   MAX_DEPENDENCY_CHANGES: 15,
-
   MAX_SCOPE_EXPANSION: 1.5,
-
   MAX_AUTO_SCALE: 4,
-
   MAX_ROLLBACKS: 2,
-
   MAX_CHECKPOINTS: 25,
 
   RETRY_BASE_DELAY_MS: 1000,
-
   RETRY_MAX_DELAY_MS: 30000,
-
   RETRY_JITTER_MS: 500,
 });
 
@@ -347,37 +321,31 @@ function clone(value) {
   }
 
   try {
-    return JSON.parse(
-      JSON.stringify(value)
-    );
+    return JSON.parse(JSON.stringify(value));
   } catch {
     return value;
   }
 }
 
 /* ================================================================
-   HASH
+   FILE HASH
 ================================================================ */
 
 function calculateFilesHash(files) {
-  const normalized =
-    Array.isArray(files)
-      ? files.map((file) => ({
-          path: String(
-            file?.path ||
-              file?.name ||
-              ""
-          ),
+  const normalized = Array.isArray(files)
+    ? files.map((file) => ({
+        path: String(
+          file?.path ||
+            file?.name ||
+            ""
+        ),
 
-          content:
-            typeof file?.content ===
-            "string"
-              ? file.content
-              : String(
-                  file?.content || ""
-                ),
-        }))
-      : [];
+        content:
+          typeof file?.content === "string"
+            ? file.content
+            : String(file?.content || ""),
+      }))
+    : [];
 
   normalized.sort((a, b) =>
     a.path.localeCompare(b.path)
@@ -385,9 +353,7 @@ function calculateFilesHash(files) {
 
   return crypto
     .createHash("sha256")
-    .update(
-      JSON.stringify(normalized)
-    )
+    .update(JSON.stringify(normalized))
     .digest("hex");
 }
 
@@ -395,10 +361,7 @@ function calculateFilesHash(files) {
    INTEGER
 ================================================================ */
 
-function positiveInteger(
-  value,
-  fallback
-) {
+function positiveInteger(value, fallback) {
   const parsed = Number(value);
 
   if (
@@ -412,12 +375,41 @@ function positiveInteger(
 }
 
 /* ================================================================
+   EXTRACT STATE RUN ID
+================================================================ */
+
+function extractStateRunId(result) {
+  if (!result) {
+    return null;
+  }
+
+  const candidates = [
+    result.runId,
+    result.id,
+    result.data?.runId,
+    result.data?.id,
+    result.run?.runId,
+    result.run?.id,
+  ];
+
+  for (const candidate of candidates) {
+    if (
+      candidate !== undefined &&
+      candidate !== null &&
+      String(candidate).trim()
+    ) {
+      return String(candidate);
+    }
+  }
+
+  return null;
+}
+
+/* ================================================================
    POLICY NORMALIZATION
 ================================================================ */
 
-function normalizePolicy(
-  supplied
-) {
+function normalizePolicy(supplied) {
   const input =
     supplied &&
     typeof supplied === "object"
@@ -428,36 +420,25 @@ function normalizePolicy(
     ...DEFAULT_POLICY,
   };
 
-  for (const key of Object.keys(
-    DEFAULT_POLICY
-  )) {
+  for (const key of Object.keys(DEFAULT_POLICY)) {
     if (input[key] === undefined) {
       continue;
     }
 
-    if (
-      key ===
-      "MAX_SCOPE_EXPANSION"
-    ) {
-      const value = Number(
-        input[key]
-      );
+    if (key === "MAX_SCOPE_EXPANSION") {
+      const value = Number(input[key]);
 
       if (Number.isFinite(value)) {
-        policy[key] = Math.max(
-          1,
-          value
-        );
+        policy[key] = Math.max(1, value);
       }
 
       continue;
     }
 
-    policy[key] =
-      positiveInteger(
-        input[key],
-        policy[key]
-      );
+    policy[key] = positiveInteger(
+      input[key],
+      policy[key]
+    );
   }
 
   loadDependencies();
@@ -467,84 +448,52 @@ function normalizePolicy(
     engineeringState?.LIMITS ||
     {};
 
-  /*
-   * State has historically exposed both:
-   *
-   *   MAX_EXECUTION_TIME
-   *   MAX_EXECUTION_TIME_MS
-   *
-   * Normalize both forms.
-   */
   const normalizedGlobal = {
     ...globalLimits,
   };
 
   if (
-    normalizedGlobal
-      .MAX_EXECUTION_TIME_MS ===
+    normalizedGlobal.MAX_EXECUTION_TIME_MS ===
       undefined &&
-    normalizedGlobal
-      .MAX_EXECUTION_TIME !==
+    normalizedGlobal.MAX_EXECUTION_TIME !==
       undefined
   ) {
-    normalizedGlobal
-      .MAX_EXECUTION_TIME_MS =
+    normalizedGlobal.MAX_EXECUTION_TIME_MS =
       Number(
-        normalizedGlobal
-          .MAX_EXECUTION_TIME
+        normalizedGlobal.MAX_EXECUTION_TIME
       );
   }
 
   if (
-    normalizedGlobal
-      .MAX_EXECUTION_TIME ===
+    normalizedGlobal.MAX_EXECUTION_TIME ===
       undefined &&
-    normalizedGlobal
-      .MAX_EXECUTION_TIME_MS !==
+    normalizedGlobal.MAX_EXECUTION_TIME_MS !==
       undefined
   ) {
-    normalizedGlobal
-      .MAX_EXECUTION_TIME =
+    normalizedGlobal.MAX_EXECUTION_TIME =
       Number(
-        normalizedGlobal
-          .MAX_EXECUTION_TIME_MS
+        normalizedGlobal.MAX_EXECUTION_TIME_MS
       );
   }
 
-  for (const key of Object.keys(
-    policy
-  )) {
-    const globalValue =
-      Number(
-        normalizedGlobal[key]
-      );
+  for (const key of Object.keys(policy)) {
+    const globalValue = Number(
+      normalizedGlobal[key]
+    );
 
-    if (
-      !Number.isFinite(
-        globalValue
-      )
-    ) {
+    if (!Number.isFinite(globalValue)) {
       continue;
     }
 
-    if (
-      key ===
-      "MAX_SCOPE_EXPANSION"
-    ) {
+    if (key === "MAX_SCOPE_EXPANSION") {
       policy[key] = Math.min(
         policy[key],
-        Math.max(
-          1,
-          globalValue
-        )
+        Math.max(1, globalValue)
       );
     } else {
       policy[key] = Math.min(
         policy[key],
-        Math.max(
-          1,
-          globalValue
-        )
+        Math.max(1, globalValue)
       );
     }
   }
@@ -563,8 +512,7 @@ function normalizeFailure(
   if (!error) {
     return {
       category:
-        fallbackCategory ||
-        "unknown",
+        fallbackCategory || "unknown",
 
       message:
         "Unknown engineering failure",
@@ -577,25 +525,18 @@ function normalizeFailure(
     };
   }
 
-  const category =
-    String(
-      error.category ||
-        error.failureCategory ||
-        fallbackCategory ||
-        "unknown"
-    ).toLowerCase();
+  const category = String(
+    error.category ||
+      error.failureCategory ||
+      fallbackCategory ||
+      "unknown"
+  ).toLowerCase();
 
-  let retryable =
-    error.retryable;
+  let retryable = error.retryable;
 
-  if (
-    typeof retryable !==
-    "boolean"
-  ) {
+  if (typeof retryable !== "boolean") {
     retryable =
-      RETRYABLE_FAILURES.has(
-        category
-      );
+      RETRYABLE_FAILURES.has(category);
   }
 
   return {
@@ -609,41 +550,32 @@ function normalizeFailure(
     retryable,
 
     failureStage:
-      error.failureStage ||
-      null,
+      error.failureStage || null,
 
     failureCategory:
       error.failureCategory ||
       category,
 
     authoritative:
-      error.authoritative ===
-      true,
+      error.authoritative === true,
 
     validationMode:
-      error.validationMode ||
-      null,
+      error.validationMode || null,
 
     buildId:
-      error.buildId ||
-      null,
+      error.buildId || null,
 
     sourceHash:
-      error.sourceHash ||
-      null,
+      error.sourceHash || null,
 
     buildCommand:
-      error.buildCommand ||
-      null,
+      error.buildCommand || null,
 
     installCommand:
-      error.installCommand ||
-      null,
+      error.installCommand || null,
 
     affectedFiles:
-      Array.isArray(
-        error.affectedFiles
-      )
+      Array.isArray(error.affectedFiles)
         ? error.affectedFiles
         : [],
 
@@ -653,21 +585,17 @@ function normalizeFailure(
         : [],
 
     stdout:
-      typeof error.stdout ===
-      "string"
+      typeof error.stdout === "string"
         ? error.stdout
         : "",
 
     stderr:
-      typeof error.stderr ===
-      "string"
+      typeof error.stderr === "string"
         ? error.stderr
         : "",
 
     exitCode:
-      Number.isInteger(
-        error.exitCode
-      )
+      Number.isInteger(error.exitCode)
         ? error.exitCode
         : null,
 
@@ -678,9 +606,7 @@ function normalizeFailure(
       Boolean(error.timedOut),
 
     resourceViolation:
-      Boolean(
-        error.resourceViolation
-      ),
+      Boolean(error.resourceViolation),
   };
 }
 
@@ -688,13 +614,10 @@ function normalizeFailure(
    JOB NORMALIZATION
 ================================================================ */
 
-function normalizeJob(
-  request
-) {
+function normalizeJob(request) {
   if (
     !request ||
-    typeof request !==
-      "object"
+    typeof request !== "object"
   ) {
     throw new TypeError(
       "Engineering job request is required"
@@ -713,12 +636,9 @@ function normalizeJob(
     request.user?.id ||
     null;
 
-  const files =
-    Array.isArray(
-      request.files
-    )
-      ? clone(request.files)
-      : [];
+  const files = Array.isArray(request.files)
+    ? clone(request.files)
+    : [];
 
   if (!projectId) {
     throw new Error(
@@ -734,8 +654,7 @@ function normalizeJob(
 
   if (
     files.length === 0 &&
-    request.allowEmptyWorkspace !==
-      true
+    request.allowEmptyWorkspace !== true
   ) {
     throw new Error(
       "Engineering job requires project files"
@@ -747,11 +666,9 @@ function normalizeJob(
       request.jobId ||
       createId("eng-job"),
 
-    projectId:
-      String(projectId),
+    projectId: String(projectId),
 
-    userId:
-      String(userId),
+    userId: String(userId),
 
     projectName:
       request.projectName ||
@@ -770,35 +687,25 @@ function normalizeJob(
 
     files,
 
-    planning:
-      clone(
-        request.planning ||
-          null
-      ),
+    planning: clone(
+      request.planning || null
+    ),
 
-    intent:
-      clone(
-        request.intent ||
-          null
-      ),
+    intent: clone(
+      request.intent || null
+    ),
 
-    builder:
-      clone(
-        request.builder ||
-          null
-      ),
+    builder: clone(
+      request.builder || null
+    ),
 
-    manifest:
-      clone(
-        request.manifest ||
-          null
-      ),
+    manifest: clone(
+      request.manifest || null
+    ),
 
-    projectData:
-      clone(
-        request.projectData ||
-          {}
-      ),
+    projectData: clone(
+      request.projectData || {}
+    ),
 
     framework:
       request.framework ||
@@ -810,49 +717,42 @@ function normalizeJob(
       request.projectData?.packageManager ||
       null,
 
+    workspacePath:
+      request.workspacePath ||
+      request.project?.workspacePath ||
+      request.projectData?.workspacePath ||
+      null,
+
     branch:
       request.branch ||
       "engineering",
 
     baseCommit:
-      request.baseCommit ||
-      null,
+      request.baseCommit || null,
 
-    environment:
-      clone(
-        request.environment ||
-          {}
-      ),
+    environment: clone(
+      request.environment || {}
+    ),
 
-    metadata:
-      clone(
-        request.metadata ||
-          {}
-      ),
+    metadata: clone(
+      request.metadata || {}
+    ),
 
-    /*
-     * Optional callback supplied by Master.
-     *
-     * We deliberately do NOT require Master here.
-     */
     masterAnalyzer:
       typeof request.masterAnalyzer ===
       "function"
         ? request.masterAnalyzer
         : null,
 
-    policy:
-      normalizePolicy(
-        request.policy
-      ),
+    policy: normalizePolicy(
+      request.policy
+    ),
 
     allowLegacyAdapter:
-      request.allowLegacyAdapter ===
-      true,
+      request.allowLegacyAdapter === true,
 
     allowAutoScale:
-      request.allowAutoScale !==
-      false,
+      request.allowAutoScale !== false,
 
     dryRun:
       request.dryRun === true,
@@ -871,9 +771,7 @@ function stateCall(
   loadDependencies();
 
   if (!engineeringState) {
-    if (
-      options.required !== false
-    ) {
+    if (options.required !== false) {
       throw new Error(
         `Engineering State unavailable. Load errors: ${JSON.stringify(
           dependencyLoadErrors
@@ -884,21 +782,14 @@ function stateCall(
     return null;
   }
 
-  let foundMethod =
-    false;
-
+  let foundMethod = false;
   let lastError = null;
 
   for (const methodName of methodNames) {
     const method =
-      engineeringState[
-        methodName
-      ];
+      engineeringState[methodName];
 
-    if (
-      typeof method !==
-      "function"
-    ) {
+    if (typeof method !== "function") {
       continue;
     }
 
@@ -911,26 +802,17 @@ function stateCall(
       );
     } catch (error) {
       lastError = error;
-
-      /*
-       * A real State error MUST NOT be silently hidden.
-       */
       break;
     }
   }
 
-  if (
-    foundMethod &&
-    lastError
-  ) {
+  if (foundMethod && lastError) {
     throw new Error(
       `Engineering State method failed: ${lastError.message}`
     );
   }
 
-  if (
-    options.required !== false
-  ) {
+  if (options.required !== false) {
     throw new Error(
       `Engineering State method unavailable: ${methodNames.join(
         ", "
@@ -945,44 +827,34 @@ function stateCall(
    RUN RECORD
 ================================================================ */
 
-function createRunRecord(
-  job
-) {
+function createRunRecord(job) {
   if (!job) {
     throw new Error(
       "Cannot create engineering run without job"
     );
   }
 
-  const runId =
+  const requestedRunId =
     createId("eng-run");
 
-  const now =
-    Date.now();
+  const now = Date.now();
 
   const run = {
-    runId,
+    runId: requestedRunId,
 
-    jobId:
-      job.jobId,
+    jobId: job.jobId,
 
-    projectId:
-      job.projectId,
+    projectId: job.projectId,
 
-    userId:
-      job.userId,
+    userId: job.userId,
 
-    projectName:
-      job.projectName,
+    projectName: job.projectName,
 
-    operation:
-      job.operation,
+    operation: job.operation,
 
-    goal:
-      job.goal,
+    goal: job.goal,
 
-    state:
-      STATES.CREATED,
+    state: STATES.CREATED,
 
     version:
       ENGINEERING_SYSTEM_VERSION,
@@ -990,8 +862,7 @@ function createRunRecord(
     orchestratorVersion:
       ORCHESTRATOR_VERSION,
 
-    policy:
-      clone(job.policy),
+    policy: clone(job.policy),
 
     attempts: 0,
 
@@ -1009,11 +880,13 @@ function createRunRecord(
 
     autoScaleLevel: 1,
 
-    currentFiles:
-      clone(job.files),
+    currentFiles: clone(
+      job.files
+    ),
 
-    originalFiles:
-      clone(job.files),
+    originalFiles: clone(
+      job.files
+    ),
 
     checkpoints: [],
 
@@ -1028,9 +901,7 @@ function createRunRecord(
     audit: [],
 
     startedAt:
-      new Date(
-        now
-      ).toISOString(),
+      new Date(now).toISOString(),
 
     completedAt: null,
 
@@ -1050,29 +921,27 @@ function createRunRecord(
 
     result: null,
 
-    job:
-      clone(job),
+    job: clone(job),
 
-    planning:
-      clone(job.planning),
+    planning: clone(job.planning),
 
-    intent:
-      clone(job.intent),
+    intent: clone(job.intent),
 
-    builder:
-      clone(job.builder),
+    builder: clone(job.builder),
 
-    manifest:
-      clone(job.manifest),
+    manifest: clone(job.manifest),
 
-    projectData:
-      clone(job.projectData),
+    projectData: clone(
+      job.projectData
+    ),
 
-    framework:
-      job.framework,
+    framework: job.framework,
 
     packageManager:
       job.packageManager,
+
+    workspacePath:
+      job.workspacePath,
 
     masterAnalyzer:
       job.masterAnalyzer,
@@ -1080,34 +949,27 @@ function createRunRecord(
     deadlineAt:
       new Date(
         now +
-          job.policy
-            .MAX_EXECUTION_TIME_MS
+          job.policy.MAX_EXECUTION_TIME_MS
       ).toISOString(),
 
-    cancellationRequested:
-      false,
+    cancellationRequested: false,
 
     resumedFrom:
       job.metadata?.resumedFrom ||
       null,
 
     recovery:
-      job.metadata?.recovery ===
-      true,
+      job.metadata?.recovery === true,
   };
 
-  /*
-   * State owns persistence.
-   */
-  const result =
-    stateCall(
-      [
-        "createRun",
-        "createEngineeringRun",
-        "initializeRun",
-      ],
-      [run]
-    );
+  const result = stateCall(
+    [
+      "createRun",
+      "createEngineeringRun",
+      "initializeRun",
+    ],
+    [run]
+  );
 
   if (
     result &&
@@ -1118,6 +980,31 @@ function createRunRecord(
         "Engineering State failed to create run"
     );
   }
+
+  /*
+   * CRITICAL CONTRACT FIX:
+   *
+   * State v1.3.0 owns the canonical external identity as `id`.
+   * Orchestrator historically used `runId`.
+   *
+   * From this point forward the Orchestrator uses the ID returned
+   * by State as its canonical runId.
+   */
+  const stateRunId =
+    extractStateRunId(result);
+
+  if (!stateRunId) {
+    throw new Error(
+      "Engineering State created a run but returned no canonical run id"
+    );
+  }
+
+  run.runId = stateRunId;
+
+  /*
+   * Keep both forms available for compatibility with integrations.
+   */
+  run.id = stateRunId;
 
   return run;
 }
@@ -1132,30 +1019,24 @@ function audit(
   data
 ) {
   const record = {
-    eventId:
-      createId("audit"),
+    eventId: createId("audit"),
 
-    runId:
-      run.runId,
+    runId: run.runId,
 
     timestamp:
       new Date().toISOString(),
 
     event,
 
-    state:
-      run.state,
+    state: run.state,
 
     attempt:
       run.attempts || 0,
 
-    data:
-      clone(data || {}),
+    data: clone(data || {}),
   };
 
-  if (
-    Array.isArray(run.audit)
-  ) {
+  if (Array.isArray(run.audit)) {
     run.audit.push(record);
   }
 
@@ -1175,10 +1056,7 @@ function audit(
       }
     );
   } catch {
-    /*
-     * Audit persistence failure must never alter
-     * engineering execution truth.
-     */
+    /* Audit is non-authoritative. */
   }
 
   return record;
@@ -1203,16 +1081,11 @@ function transition(
   const currentState =
     run.state;
 
-  if (
-    currentState ===
-    nextState
-  ) {
+  if (currentState === nextState) {
     return {
-      from:
-        currentState,
+      from: currentState,
 
-      to:
-        nextState,
+      to: nextState,
 
       reason:
         reason ||
@@ -1233,25 +1106,18 @@ function transition(
       currentState
     ] || [];
 
-  if (
-    !allowed.includes(
-      nextState
-    )
-  ) {
+  if (!allowed.includes(nextState)) {
     throw new Error(
       `Illegal engineering state transition: ${currentState} → ${nextState}`
     );
   }
 
   const transitionRecord = {
-    from:
-      currentState,
+    from: currentState,
 
-    to:
-      nextState,
+    to: nextState,
 
-    reason:
-      reason || null,
+    reason: reason || null,
 
     timestamp:
       new Date().toISOString(),
@@ -1274,8 +1140,7 @@ function transition(
     ]
   );
 
-  run.state =
-    nextState;
+  run.state = nextState;
 
   audit(
     run,
@@ -1290,38 +1155,28 @@ function transition(
    BUDGETS
 ================================================================ */
 
-function hasAttemptBudget(
-  run
-) {
+function hasAttemptBudget(run) {
   return (
     run.attempts <
     run.policy.MAX_ATTEMPTS
   );
 }
 
-function hasRepairBudget(
-  run
-) {
+function hasRepairBudget(run) {
   return (
     run.repairAttempts <
-    run.policy
-      .MAX_REPAIR_ATTEMPTS
+    run.policy.MAX_REPAIR_ATTEMPTS
   );
 }
 
-function hasDiagnosisBudget(
-  run
-) {
+function hasDiagnosisBudget(run) {
   return (
     run.diagnosisAttempts <
-    run.policy
-      .MAX_DIAGNOSIS_ATTEMPTS
+    run.policy.MAX_DIAGNOSIS_ATTEMPTS
   );
 }
 
-function hasRollbackBudget(
-  run
-) {
+function hasRollbackBudget(run) {
   return (
     run.rollbackCount <
     run.policy.MAX_ROLLBACKS
@@ -1332,9 +1187,7 @@ function hasRollbackBudget(
    DEADLINE
 ================================================================ */
 
-function isRunDeadlineExceeded(
-  run
-) {
+function isRunDeadlineExceeded(run) {
   if (!run.deadlineAt) {
     return false;
   }
@@ -1347,9 +1200,7 @@ function isRunDeadlineExceeded(
   );
 }
 
-function getRemainingExecutionTime(
-  run
-) {
+function getRemainingExecutionTime(run) {
   if (!run.deadlineAt) {
     return run.policy
       .MAX_EXECUTION_TIME_MS;
@@ -1368,12 +1219,9 @@ function getRemainingExecutionTime(
    CANCELLATION
 ================================================================ */
 
-function isCancellationRequested(
-  run
-) {
+function isCancellationRequested(run) {
   return (
-    run.cancellationRequested ===
-    true
+    run.cancellationRequested === true
   );
 }
 
@@ -1396,22 +1244,18 @@ function withinScope(
     );
 
   const current =
-    Array.isArray(
-      candidateFiles
-    )
+    Array.isArray(candidateFiles)
       ? candidateFiles.length
       : 0;
 
   const ratio =
     current / original;
 
-  run.scopeExpansion =
-    ratio;
+  run.scopeExpansion = ratio;
 
   return (
     ratio <=
-    run.policy
-      .MAX_SCOPE_EXPANSION
+    run.policy.MAX_SCOPE_EXPANSION
   );
 }
 
@@ -1436,8 +1280,7 @@ async function createCheckpoint(
     checkpointId:
       createId("checkpoint"),
 
-    runId:
-      run.runId,
+    runId: run.runId,
 
     attempt:
       run.attempts,
@@ -1461,6 +1304,10 @@ async function createCheckpoint(
       ),
   };
 
+  /*
+   * State v1.3.0 contract:
+   * createCheckpoint(runId, input)
+   */
   stateCall(
     [
       "createCheckpoint",
@@ -1477,8 +1324,7 @@ async function createCheckpoint(
     checkpoint
   );
 
-  run.checkpointCount +=
-    1;
+  run.checkpointCount += 1;
 
   audit(
     run,
@@ -1513,9 +1359,7 @@ async function rollbackToCheckpoint(
     );
   }
 
-  if (
-    !hasRollbackBudget(run)
-  ) {
+  if (!hasRollbackBudget(run)) {
     throw new Error(
       "Maximum rollback limit exceeded"
     );
@@ -1544,8 +1388,7 @@ async function rollbackToCheckpoint(
   run.currentFiles =
     clone(checkpoint.files);
 
-  run.rollbackCount +=
-    1;
+  run.rollbackCount += 1;
 
   const rollbackRecord = {
     rollbackId:
@@ -1575,6 +1418,10 @@ async function rollbackToCheckpoint(
       new Date().toISOString(),
   };
 
+  /*
+   * State v1.3.0 contract:
+   * recordRollback(runId, input)
+   */
   stateCall(
     [
       "recordRollback",
@@ -1584,7 +1431,6 @@ async function rollbackToCheckpoint(
     [
       run.runId,
       rollbackRecord,
-      checkpoint,
     ]
   );
 
@@ -1592,7 +1438,8 @@ async function rollbackToCheckpoint(
 
   if (
     engineeringExecutor &&
-    typeof engineeringExecutor.restoreCheckpoint ===
+    typeof engineeringExecutor
+      .restoreCheckpoint ===
       "function"
   ) {
     await engineeringExecutor
@@ -1624,9 +1471,7 @@ async function rollbackToCheckpoint(
    RETRY
 ================================================================ */
 
-function calculateRetryDelay(
-  run
-) {
+function calculateRetryDelay(run) {
   const exponent =
     Math.max(
       0,
@@ -1640,25 +1485,19 @@ function calculateRetryDelay(
 
       run.policy
         .RETRY_BASE_DELAY_MS *
-        Math.pow(
-          2,
-          exponent
-        )
+        Math.pow(2, exponent)
     );
 
   const jitter =
     Math.floor(
       Math.random() *
-        run.policy
-          .RETRY_JITTER_MS
+        run.policy.RETRY_JITTER_MS
     );
 
   return base + jitter;
 }
 
-function sleep(
-  milliseconds
-) {
+function sleep(milliseconds) {
   if (
     !milliseconds ||
     milliseconds <= 0
@@ -1681,21 +1520,16 @@ function shouldRetry(
 ) {
   if (
     !failure ||
-    failure.retryable !==
-      true
+    failure.retryable !== true
   ) {
     return false;
   }
 
-  if (
-    !hasAttemptBudget(run)
-  ) {
+  if (!hasAttemptBudget(run)) {
     return false;
   }
 
-  if (
-    isRunDeadlineExceeded(run)
-  ) {
+  if (isRunDeadlineExceeded(run)) {
     return false;
   }
 
@@ -1717,9 +1551,7 @@ function recordFailure(
   failure
 ) {
   const normalized =
-    normalizeFailure(
-      failure
-    );
+    normalizeFailure(failure);
 
   const record = {
     failureId:
@@ -1737,12 +1569,9 @@ function recordFailure(
     ...normalized,
   };
 
-  run.failures.push(
-    record
-  );
+  run.failures.push(record);
 
-  run.lastError =
-    record;
+  run.lastError = record;
 
   try {
     stateCall(
@@ -1816,8 +1645,7 @@ function recordExecution(
       result?.success === true,
 
     authoritative:
-      result?.authoritative ===
-      true,
+      result?.authoritative === true,
 
     validationMode:
       result?.validationMode ||
@@ -1851,8 +1679,7 @@ function recordExecution(
         : null,
 
     signal:
-      result?.signal ||
-      null,
+      result?.signal || null,
 
     timedOut:
       Boolean(
@@ -1883,11 +1710,13 @@ function recordExecution(
       ),
   };
 
-  run.executions.push(
-    record
-  );
+  run.executions.push(record);
 
   try {
+    /*
+     * State v1.3.0:
+     * recordExecution(runId, input)
+     */
     stateCall(
       [
         "recordExecution",
@@ -1901,11 +1730,15 @@ function recordExecution(
         required: false,
       }
     );
-  } catch {
-    /*
-     * Execution truth remains local even if audit persistence
-     * fails. Promotion still requires executor evidence.
-     */
+  } catch (error) {
+    audit(
+      run,
+      "STATE_EXECUTION_RECORD_ERROR",
+      {
+        error:
+          error.message,
+      }
+    );
   }
 
   audit(
@@ -2045,9 +1878,7 @@ function isAuthoritativeSuccess(
    EXECUTOR
 ================================================================ */
 
-async function executeBuild(
-  run
-) {
+async function executeBuild(run) {
   loadDependencies();
 
   if (!engineeringExecutor) {
@@ -2092,9 +1923,7 @@ async function executeBuild(
       run
     );
 
-  if (
-    remainingTime <= 0
-  ) {
+  if (remainingTime <= 0) {
     throw Object.assign(
       new Error(
         "Engineering execution deadline exceeded"
@@ -2110,136 +1939,106 @@ async function executeBuild(
     );
   }
 
-  /*
-   * CPU/resource limit belongs to the engineering resource
-   * policy, not the auto-scale level.
-   */
   const resourceLimits =
     engineeringState
       ?.ENGINEERING_LIMITS ||
     engineeringState?.LIMITS ||
     {};
 
-  const maxCpu =
-    Number(
-      resourceLimits
-        .MAX_RESOURCE_CPU ||
-        resourceLimits
-          .MAX_CPU ||
-        2
-    );
+  const maxCpu = Number(
+    resourceLimits
+      .MAX_RESOURCE_CPU ||
+      resourceLimits.MAX_CPU ||
+      2
+  );
 
-  const maxMemory =
-    Number(
-      resourceLimits
-        .MAX_RESOURCE_MEMORY ||
-        resourceLimits
-          .MAX_MEMORY ||
-        2048
-    );
+  const maxMemory = Number(
+    resourceLimits
+      .MAX_RESOURCE_MEMORY ||
+      resourceLimits.MAX_MEMORY ||
+      2048
+  );
 
-  const maxPids =
-    Number(
-      resourceLimits
-        .MAX_RESOURCE_PIDS ||
-        resourceLimits
-          .MAX_PIDS ||
-        256
-    );
+  const maxPids = Number(
+    resourceLimits
+      .MAX_RESOURCE_PIDS ||
+      resourceLimits.MAX_PIDS ||
+      256
+  );
 
-  return engineeringExecutor
-    .executeBuild({
-      projectId:
-        run.projectId,
+  return engineeringExecutor.executeBuild({
+    projectId:
+      run.projectId,
 
-      userId:
-        run.userId,
+    userId:
+      run.userId,
 
-      projectName:
-        run.projectName,
+    projectName:
+      run.projectName,
 
-      files:
-        clone(
-          run.currentFiles
-        ),
+    files:
+      clone(run.currentFiles),
 
-      planning:
-        clone(
-          run.planning ||
-            null
-        ),
+    planning:
+      clone(run.planning || null),
 
-      manifest:
-        clone(
-          run.manifest ||
-            null
-        ),
+    manifest:
+      clone(run.manifest || null),
 
-      projectData:
-        clone(
-          run.projectData ||
-            {}
-        ),
+    projectData:
+      clone(run.projectData || {}),
 
-      framework:
-        run.framework ||
-        null,
+    framework:
+      run.framework || null,
 
-      packageManager:
-        run.packageManager ||
-        null,
+    packageManager:
+      run.packageManager || null,
 
-      attempt:
-        run.attempts,
+    workspacePath:
+      run.workspacePath || null,
 
-      runId:
-        run.runId,
+    attempt:
+      run.attempts,
 
-      timeoutMs:
-        remainingTime,
+    runId:
+      run.runId,
 
-      resourcePolicy: {
-        maxCpu:
-          Number.isFinite(maxCpu)
-            ? maxCpu
-            : 2,
+    timeoutMs:
+      remainingTime,
 
-        maxMemoryMb:
-          Number.isFinite(
-            maxMemory
-          )
-            ? maxMemory
-            : 2048,
+    resourcePolicy: {
+      maxCpu:
+        Number.isFinite(maxCpu)
+          ? maxCpu
+          : 2,
 
-        maxPids:
-          Number.isFinite(maxPids)
-            ? maxPids
-            : 256,
+      maxMemoryMb:
+        Number.isFinite(maxMemory)
+          ? maxMemory
+          : 2048,
 
-        autoScaleLevel:
-          run.autoScaleLevel,
-      },
+      maxPids:
+        Number.isFinite(maxPids)
+          ? maxPids
+          : 256,
 
-      engineeringPolicy:
-        clone(run.policy),
+      autoScaleLevel:
+        run.autoScaleLevel,
+    },
 
-      cancellationRequested:
-        isCancellationRequested(
-          run
-        ),
-    });
+    engineeringPolicy:
+      clone(run.policy),
+
+    cancellationRequested:
+      isCancellationRequested(run),
+  });
 }
 
 /* ================================================================
    LEGACY ADAPTER
 ================================================================ */
 
-async function executeLegacyBuild(
-  run
-) {
-  /*
-   * Legacy authority is opt-in only.
-   */
+async function executeLegacyBuild(run) {
   if (
     !run.job?.allowLegacyAdapter
   ) {
@@ -2274,8 +2073,7 @@ async function executeLegacyBuild(
     legacyService.buildProject;
 
   if (
-    typeof execute !==
-    "function"
+    typeof execute !== "function"
   ) {
     return null;
   }
@@ -2301,35 +2099,25 @@ async function executeLegacyBuild(
       run.projectName,
 
     files:
-      clone(
-        run.currentFiles
-      ),
+      clone(run.currentFiles),
 
     planning:
-      clone(
-        run.planning ||
-          null
-      ),
+      clone(run.planning || null),
 
     manifest:
-      clone(
-        run.manifest ||
-          null
-      ),
+      clone(run.manifest || null),
 
     projectData:
-      clone(
-        run.projectData ||
-          {}
-      ),
+      clone(run.projectData || {}),
 
     framework:
-      run.framework ||
-      null,
+      run.framework || null,
 
     packageManager:
-      run.packageManager ||
-      null,
+      run.packageManager || null,
+
+    workspacePath:
+      run.workspacePath || null,
 
     attempt:
       run.attempts,
@@ -2338,9 +2126,7 @@ async function executeLegacyBuild(
       run.runId,
 
     timeoutMs:
-      getRemainingExecutionTime(
-        run
-      ),
+      getRemainingExecutionTime(run),
   });
 }
 
@@ -2348,20 +2134,7 @@ async function executeLegacyBuild(
    MASTER ANALYSIS
 ================================================================ */
 
-async function analyzeWithMaster(
-  run
-) {
-  /*
-   * No require("../../masterAgent").
-   *
-   * This eliminates the circular dependency that can occur when
-   * Master Agent imports this orchestrator.
-   *
-   * Master may optionally provide:
-   *
-   *   request.masterAnalyzer
-   */
-
+async function analyzeWithMaster(run) {
   if (
     typeof run.masterAnalyzer !==
     "function"
@@ -2398,47 +2171,28 @@ async function analyzeWithMaster(
       run.goal,
 
     files:
-      clone(
-        run.currentFiles
-      ),
+      clone(run.currentFiles),
 
     planning:
-      clone(
-        run.planning ||
-          null
-      ),
+      clone(run.planning || null),
 
     intent:
-      clone(
-        run.intent ||
-          null
-      ),
+      clone(run.intent || null),
 
     builder:
-      clone(
-        run.builder ||
-          null
-      ),
+      clone(run.builder || null),
 
     manifest:
-      clone(
-        run.manifest ||
-          null
-      ),
+      clone(run.manifest || null),
 
     projectData:
-      clone(
-        run.projectData ||
-          {}
-      ),
+      clone(run.projectData || {}),
 
     framework:
-      run.framework ||
-      null,
+      run.framework || null,
 
     packageManager:
-      run.packageManager ||
-      null,
+      run.packageManager || null,
 
     engineeringPolicy:
       clone(run.policy),
@@ -2505,41 +2259,34 @@ async function diagnoseFailure(
     typeof engineeringIntelligence
       .findKnownRepair ===
     "function"
-      ? engineeringIntelligence
-          .findKnownRepair(
-            failure
-          )
+      ? engineeringIntelligence.findKnownRepair(
+          failure
+        )
       : [];
 
-  return engineeringIntelligence
-    .diagnoseFailure({
-      runId:
-        run.runId,
+  return engineeringIntelligence.diagnoseFailure({
+    runId:
+      run.runId,
 
-      projectId:
-        run.projectId,
+    projectId:
+      run.projectId,
 
-      attempt:
-        run.attempts,
+    attempt:
+      run.attempts,
 
-      files:
-        clone(
-          run.currentFiles
-        ),
+    files:
+      clone(run.currentFiles),
 
-      failure:
-        clone(failure),
+    failure:
+      clone(failure),
 
-      authoritative: true,
+    authoritative: true,
 
-      planning:
-        clone(
-          run.planning ||
-            null
-        ),
+    planning:
+      clone(run.planning || null),
 
-      knownRepairs,
-    });
+    knownRepairs,
+  });
 }
 
 /* ================================================================
@@ -2577,53 +2324,46 @@ async function repairFailure(
     };
   }
 
-  return engineeringIntelligence
-    .repairFailure({
-      runId:
-        run.runId,
+  return engineeringIntelligence.repairFailure({
+    runId:
+      run.runId,
 
-      projectId:
-        run.projectId,
+    projectId:
+      run.projectId,
 
-      attempt:
-        run.attempts,
+    attempt:
+      run.attempts,
 
-      repairAttempt:
-        run.repairAttempts,
+    repairAttempt:
+      run.repairAttempts,
 
-      files:
-        clone(
-          run.currentFiles
-        ),
+    files:
+      clone(run.currentFiles),
 
-      failure:
-        clone(failure),
+    failure:
+      clone(failure),
 
-      diagnosis:
-        clone(diagnosis),
+    diagnosis:
+      clone(diagnosis),
 
-      planning:
-        clone(
-          run.planning ||
-            null
-        ),
+    planning:
+      clone(run.planning || null),
 
-      authoritative: true,
+    authoritative: true,
 
-      limits: {
-        MAX_REPAIR_FILES:
-          run.policy
-            .MAX_REPAIR_FILES,
+    limits: {
+      MAX_REPAIR_FILES:
+        run.policy.MAX_REPAIR_FILES,
 
-        MAX_DEPENDENCY_CHANGES:
-          run.policy
-            .MAX_DEPENDENCY_CHANGES,
+      MAX_DEPENDENCY_CHANGES:
+        run.policy
+          .MAX_DEPENDENCY_CHANGES,
 
-        MAX_SCOPE_EXPANSION:
-          run.policy
-            .MAX_SCOPE_EXPANSION,
-      },
-    });
+      MAX_SCOPE_EXPANSION:
+        run.policy
+          .MAX_SCOPE_EXPANSION,
+    },
+  });
 }
 
 /* ================================================================
@@ -2701,8 +2441,7 @@ function applyRepair(
 
   loadDependencies();
 
-  let dependencyChanges =
-    0;
+  let dependencyChanges = 0;
 
   if (
     engineeringIntelligence &&
@@ -2736,8 +2475,7 @@ function applyRepair(
 
   if (
     dependencyChanges >
-    run.policy
-      .MAX_DEPENDENCY_CHANGES
+    run.policy.MAX_DEPENDENCY_CHANGES
   ) {
     return {
       success: false,
@@ -2818,11 +2556,15 @@ function applyRepair(
         required: false,
       }
     );
-  } catch {
-    /*
-     * Persistence failure does not make a repair successful.
-     * The source mutation remains locally tracked.
-     */
+  } catch (error) {
+    audit(
+      run,
+      "STATE_REPAIR_RECORD_ERROR",
+      {
+        error:
+          error.message,
+      }
+    );
   }
 
   audit(
@@ -2880,8 +2622,7 @@ function recordVerification(
       evidence.valid,
 
     authoritative:
-      result?.authoritative ===
-      true,
+      result?.authoritative === true,
 
     validationMode:
       result?.validationMode ||
@@ -2906,10 +2647,7 @@ function recordVerification(
       null,
 
     errors:
-      clone(
-        result?.errors ||
-          []
-      ),
+      clone(result?.errors || []),
 
     failureCategory:
       result?.repairContext
@@ -2946,11 +2684,15 @@ function recordVerification(
         required: false,
       }
     );
-  } catch {
-    /*
-     * Verification remains locally authoritative for the
-     * current orchestration decision.
-     */
+  } catch (error) {
+    audit(
+      run,
+      "STATE_VERIFICATION_RECORD_ERROR",
+      {
+        error:
+          error.message,
+      }
+    );
   }
 
   audit(
@@ -3035,8 +2777,7 @@ function recordAuthoritativeRepairOutcome(
 
       failure:
         clone(
-          run.lastError ||
-            null
+          run.lastError || null
         ),
     });
 }
@@ -3076,9 +2817,7 @@ function canPromote(
     };
   }
 
-  if (
-    run.rollbackRequired
-  ) {
+  if (run.rollbackRequired) {
     return {
       promote: false,
 
@@ -3094,8 +2833,7 @@ function canPromote(
 
   if (
     !lastVerification ||
-    lastVerification.passed !==
-      true
+    lastVerification.passed !== true
   ) {
     return {
       promote: false,
@@ -3137,6 +2875,10 @@ function canPromote(
   };
 }
 
+/* ================================================================
+   PROMOTION
+================================================================ */
+
 function promote(
   run,
   result
@@ -3147,12 +2889,104 @@ function promote(
       result
     );
 
-  if (
-    !decision.promote
-  ) {
+  if (!decision.promote) {
     return decision;
   }
 
+  /*
+   * IMPORTANT ORDER:
+   *
+   * State v1.3.0 completeRun/promoteRun require the run to still
+   * satisfy the PASSED-state contract.
+   *
+   * Therefore persistence happens BEFORE local transition to
+   * PROMOTED.
+   */
+
+  try {
+    const completeResult =
+      stateCall(
+        [
+          "completeRun",
+        ],
+        [
+          run.runId,
+          clone(result),
+        ],
+        {
+          required: false,
+        }
+      );
+
+    if (
+      completeResult &&
+      completeResult.success === false
+    ) {
+      return {
+        promote: false,
+
+        reason:
+          completeResult.error ||
+          "Engineering State refused run completion",
+      };
+    }
+  } catch (error) {
+    return {
+      promote: false,
+
+      reason:
+        `Engineering State completion failed: ${error.message}`,
+    };
+  }
+
+  try {
+    const promoteResult =
+      stateCall(
+        [
+          "promoteRun",
+          "finalizePromotion",
+          "markPromoted",
+        ],
+        [
+          run.runId,
+          {
+            ...clone(result),
+            authoritative: true,
+            validationMode:
+              "authoritative",
+            verificationPassed: true,
+          },
+        ],
+        {
+          required: false,
+        }
+      );
+
+    if (
+      promoteResult &&
+      promoteResult.success === false
+    ) {
+      return {
+        promote: false,
+
+        reason:
+          promoteResult.error ||
+          "Engineering State refused promotion",
+      };
+    }
+  } catch (error) {
+    return {
+      promote: false,
+
+      reason:
+        `Engineering State promotion failed: ${error.message}`,
+    };
+  }
+
+  /*
+   * State persistence succeeded while local run is PASSED.
+   * Now transition the authoritative orchestration state.
+   */
   transition(
     run,
     STATES.PROMOTED,
@@ -3168,28 +3002,6 @@ function promote(
 
   run.result =
     clone(result);
-
-  try {
-    stateCall(
-      [
-        "promoteRun",
-        "finalizePromotion",
-        "markPromoted",
-      ],
-      [
-        run.runId,
-        result,
-      ],
-      {
-        required: false,
-      }
-    );
-  } catch {
-    /*
-     * State persistence cannot manufacture promotion.
-     * Local truth remains evidence-gated.
-     */
-  }
 
   audit(
     run,
@@ -3241,15 +3053,6 @@ function escalate(
         STATES.ESCALATED,
         reason
       );
-    } else if (
-      !TERMINAL_STATES.has(
-        run.state
-      )
-    ) {
-      /*
-       * A malformed state must never silently become success.
-       */
-      run.escalated = true;
     }
   }
 
@@ -3264,8 +3067,7 @@ function escalate(
   run.result = {
     success: false,
 
-    status:
-      "escalated",
+    status: "escalated",
 
     authoritative: false,
 
@@ -3293,9 +3095,7 @@ function escalate(
       }
     );
   } catch {
-    /*
-     * Escalation truth remains local.
-     */
+    /* Local escalation remains authoritative for this run. */
   }
 
   audit(
@@ -3326,9 +3126,7 @@ async function verifyExecution(
       result
     );
 
-  if (
-    run.repairs.length > 0
-  ) {
+  if (run.repairs.length > 0) {
     try {
       recordAuthoritativeRepairOutcome(
         run,
@@ -3346,9 +3144,7 @@ async function verifyExecution(
     }
   }
 
-  if (
-    verification.passed
-  ) {
+  if (verification.passed) {
     transition(
       run,
       STATES.PASSED,
@@ -3392,17 +3188,13 @@ async function verifyExecution(
 async function performExecutionAttempt(
   run
 ) {
-  if (
-    !hasAttemptBudget(run)
-  ) {
+  if (!hasAttemptBudget(run)) {
     throw Object.assign(
       new Error(
         "MAX_ATTEMPTS exhausted"
       ),
       {
-        category:
-          "policy",
-
+        category: "policy",
         retryable: false,
       }
     );
@@ -3416,11 +3208,8 @@ async function performExecutionAttempt(
         "Engineering run execution deadline exceeded"
       ),
       {
-        category:
-          "timeout",
-
+        category: "timeout",
         retryable: false,
-
         timedOut: true,
       }
     );
@@ -3434,9 +3223,7 @@ async function performExecutionAttempt(
         "Engineering run cancellation requested"
       ),
       {
-        category:
-          "cancelled",
-
+        category: "cancelled",
         retryable: false,
       }
     );
@@ -3479,6 +3266,14 @@ async function performExecutionAttempt(
 
         category:
           executorError.category ||
+          null,
+
+        errorName:
+          executorError.name ||
+          null,
+
+        stack:
+          executorError.stack ||
           null,
 
         dependencyLoadErrors:
@@ -3576,9 +3371,8 @@ async function handleFailure(
   }
 
   /*
-   * Retry transient infrastructure failures BEFORE AI repair.
-   *
-   * There is no source defect to repair in these cases.
+   * Transient failures must never enter AI repair.
+   * Retry policy handles them.
    */
   if (
     failure.retryable === true
@@ -3609,9 +3403,7 @@ async function handleFailure(
     };
   }
 
-  if (
-    !hasDiagnosisBudget(run)
-  ) {
+  if (!hasDiagnosisBudget(run)) {
     return {
       retry: false,
 
@@ -3626,9 +3418,7 @@ async function handleFailure(
     };
   }
 
-  if (
-    !hasRepairBudget(run)
-  ) {
+  if (!hasRepairBudget(run)) {
     return {
       retry: false,
 
@@ -3674,8 +3464,7 @@ async function handleFailure(
     "FAILURE_DIAGNOSED",
     {
       success:
-        diagnosis?.success !==
-        false,
+        diagnosis?.success !== false,
 
       diagnosis:
         clone(diagnosis),
@@ -3684,8 +3473,7 @@ async function handleFailure(
 
   if (
     !diagnosis ||
-    diagnosis.success ===
-      false
+    diagnosis.success === false
   ) {
     return {
       retry: false,
@@ -3733,8 +3521,7 @@ async function handleFailure(
     "REPAIR_GENERATED",
     {
       success:
-        repair?.success ===
-        true,
+        repair?.success === true,
 
       repairAttempt:
         run.repairAttempts,
@@ -3747,9 +3534,7 @@ async function handleFailure(
       repair
     );
 
-  if (
-    !applied.success
-  ) {
+  if (!applied.success) {
     return {
       retry: false,
 
@@ -3809,22 +3594,17 @@ async function retryIfAllowed(
     return false;
   }
 
-  run.retryCount +=
-    1;
+  run.retryCount += 1;
 
   const delay =
-    calculateRetryDelay(
-      run
-    );
+    calculateRetryDelay(run);
 
   const remaining =
     getRemainingExecutionTime(
       run
     );
 
-  if (
-    remaining <= 0
-  ) {
+  if (remaining <= 0) {
     return false;
   }
 
@@ -3911,8 +3691,7 @@ function evaluateAutoScale(
   }
 
   const metadata =
-    result?.metadata ||
-    {};
+    result?.metadata || {};
 
   const resource =
     metadata.resourceUsage ||
@@ -3958,8 +3737,7 @@ function evaluateAutoScale(
     };
   }
 
-  run.autoScaleLevel +=
-    1;
+  run.autoScaleLevel += 1;
 
   audit(
     run,
@@ -3991,9 +3769,7 @@ function evaluateAutoScale(
    START JOB
 ================================================================ */
 
-async function startJob(
-  request
-) {
+async function startJob(request) {
   const job =
     normalizeJob(request);
 
@@ -4015,6 +3791,9 @@ async function startJob(
 
       policy:
         clone(job.policy),
+
+      canonicalRunId:
+        run.runId,
     }
   );
 
@@ -4025,9 +3804,7 @@ async function startJob(
    MAIN RUN
 ================================================================ */
 
-async function run(
-  request
-) {
+async function run(request) {
   let runRecord = null;
 
   try {
@@ -4064,13 +3841,9 @@ async function run(
       }
     );
 
-    /*
-     * Master is advisory/control-plane only.
-     */
     if (
       masterResult &&
-      masterResult.success ===
-        false &&
+      masterResult.success === false &&
       !masterResult.skipped
     ) {
       return finalizeRun(
@@ -4093,9 +3866,7 @@ async function run(
     }
 
     while (
-      hasAttemptBudget(
-        runRecord
-      )
+      hasAttemptBudget(runRecord)
     ) {
       if (
         TERMINAL_STATES.has(
@@ -4313,19 +4084,14 @@ async function run(
       )
     );
   } catch (error) {
-    /*
-     * This block is deliberately verbose so production logs can
-     * identify the actual orchestrator failure instead of only:
-     *
-     *   "Engineering Orchestrator Exception"
-     */
     if (!runRecord) {
       return {
         success: false,
 
         status: "failed",
 
-        state: STATES.ESCALATED,
+        state:
+          STATES.ESCALATED,
 
         authoritative: false,
 
@@ -4385,8 +4151,7 @@ async function run(
           ],
 
           stderr:
-            error.stack ||
-            "",
+            error.stack || "",
         }
       );
 
@@ -4422,8 +4187,7 @@ function finalizeRun(
   const authoritative =
     runRecord.state ===
       STATES.PROMOTED &&
-    runRecord.authoritative ===
-      true &&
+    runRecord.authoritative === true &&
     runRecord.passed === true &&
     runRecord.promoted === true &&
     evidence.valid;
@@ -4458,8 +4222,7 @@ function finalizeRun(
       authoritative,
 
     escalated:
-      runRecord.escalated ===
-      true,
+      runRecord.escalated === true,
 
     attempts:
       runRecord.attempts,
@@ -4517,24 +4280,13 @@ function finalizeRun(
     },
   };
 
-  /*
-   * Absolute public success gate.
-   */
   if (
-    finalResult.success !==
-    true
+    finalResult.success !== true
   ) {
-    finalResult.success =
-      false;
-
-    finalResult.authoritative =
-      false;
-
-    finalResult.passed =
-      false;
-
-    finalResult.promoted =
-      false;
+    finalResult.success = false;
+    finalResult.authoritative = false;
+    finalResult.passed = false;
+    finalResult.promoted = false;
 
     if (
       finalResult.status !==
@@ -4548,26 +4300,36 @@ function finalizeRun(
   runRecord.result =
     clone(finalResult);
 
-  try {
-    stateCall(
-      [
-        "completeRun",
-        "finalizeRun",
-        "saveRun",
-      ],
-      [
-        runRecord.runId,
-        finalResult,
-      ],
-      {
-        required: false,
-      }
-    );
-  } catch {
-    /*
-     * Never convert a failed engineering run into success because
-     * persistence failed.
-     */
+  /*
+   * IMPORTANT:
+   *
+   * completeRun is already called during promotion while the
+   * State run is PASSED. Calling it again after PROMOTED can
+   * violate State's PASSED-only completion contract.
+   *
+   * Therefore finalization only performs a best-effort final save
+   * if such a generic persistence method exists.
+   */
+  if (
+    !authoritative
+  ) {
+    try {
+      stateCall(
+        [
+          "finalizeRun",
+          "saveRun",
+        ],
+        [
+          runRecord.runId,
+          finalResult,
+        ],
+        {
+          required: false,
+        }
+      );
+    } catch {
+      /* Never manufacture success from persistence. */
+    }
   }
 
   return finalResult;
@@ -4610,8 +4372,7 @@ async function cancelRun(
 
     if (
       stateResult &&
-      stateResult.success ===
-        false
+      stateResult.success === false
     ) {
       return {
         success: false,
@@ -4636,8 +4397,7 @@ async function cancelRun(
   if (
     engineeringExecutor &&
     typeof engineeringExecutor
-      .cancel ===
-      "function"
+      .cancel === "function"
   ) {
     try {
       await engineeringExecutor.cancel(
@@ -4668,9 +4428,7 @@ async function cancelRun(
    RESUME
 ================================================================ */
 
-async function resume(
-  request
-) {
+async function resume(request) {
   if (
     !request ||
     !request.run
@@ -4682,6 +4440,28 @@ async function resume(
 
   const existing =
     clone(request.run);
+
+  /*
+   * Backward compatibility:
+   *
+   * Persisted State v1.3.0 uses `id`.
+   * Older orchestrator snapshots may use `runId`.
+   */
+  existing.runId =
+    existing.runId ||
+    existing.id ||
+    null;
+
+  existing.id =
+    existing.id ||
+    existing.runId ||
+    null;
+
+  if (!existing.runId) {
+    throw new Error(
+      "Resume requires an engineering run id"
+    );
+  }
 
   if (
     TERMINAL_STATES.has(
@@ -4701,25 +4481,16 @@ async function resume(
     };
   }
 
-  /*
-   * Re-normalize policy so old persisted runs do not contain
-   * unsafe/undefined policy values.
-   */
   existing.policy =
     normalizePolicy(
       existing.policy
     );
 
-  existing.recovery =
-    true;
+  existing.recovery = true;
 
   existing.resumedAt =
     new Date().toISOString();
 
-  /*
-   * Existing runs retain their original deadline.
-   * Resume must NOT silently grant another full 15 minutes.
-   */
   audit(
     existing,
     "RUN_RESUME_REQUESTED",
@@ -4753,9 +4524,6 @@ async function resume(
     );
   }
 
-  /*
-   * Continue using the same logical run.
-   */
   return runExistingRecord(
     existing
   );
@@ -4770,9 +4538,7 @@ async function runExistingRecord(
 ) {
   try {
     while (
-      hasAttemptBudget(
-        runRecord
-      )
+      hasAttemptBudget(runRecord)
     ) {
       if (
         TERMINAL_STATES.has(
@@ -5001,9 +4767,18 @@ async function runExistingRecord(
           failureStage:
             "resume",
 
+          errors: [
+            {
+              name:
+                error.name,
+
+              message:
+                error.message,
+            },
+          ],
+
           stderr:
-            error.stack ||
-            "",
+            error.stack || "",
         }
       );
 
@@ -5062,29 +4837,21 @@ function getHealth() {
     authority:
       "engineeringExecutor",
 
-    authoritativePromotion:
-      true,
+    authoritativePromotion: true,
 
-    fakeSuccessAllowed:
-      false,
+    fakeSuccessAllowed: false,
 
-    staticValidationCanPromote:
-      false,
+    staticValidationCanPromote: false,
 
-    aiCanPromote:
-      false,
+    aiCanPromote: false,
 
-    masterCanPromote:
-      false,
+    masterCanPromote: false,
 
-    artifactRequired:
-      true,
+    artifactRequired: true,
 
-    checksumRequired:
-      true,
+    checksumRequired: true,
 
-    circularMasterRequire:
-      false,
+    circularMasterRequire: false,
 
     terminalStates:
       Array.from(
