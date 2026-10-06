@@ -1,72 +1,44 @@
 "use strict";
 
-/*
- * ============================================================
- * ZYRION OS — ENGINEERING STATE
- * ============================================================
+/**
+ * ZyrionOS Engineering State
+ * ---------------------------------------------
+ * Version: 1.3.0
+ * Schema: 3
  *
- * Enterprise Autonomous Engineering Control Plane
+ * Responsibility:
+ * - Engineering run state/source of truth
+ * - Atomic state transitions
+ * - Attempts / failures / repairs / verification
+ * - Checkpoints / rollback records
+ * - Resource events
+ * - Repair pattern learning records
+ * - Engineering budgets / limits
+ * - Audit trail
  *
- * VERSION:
- *   Service: 1.1.0
- *   Schema : 2
- *
- * ROLE:
- *   AUTHORITATIVE STATE / PERSISTENCE LAYER
- *
- * This file DOES:
- *   - persist engineering runs
- *   - persist attempts
- *   - persist executions
- *   - persist failures
- *   - persist repairs
- *   - persist verifications
- *   - persist artifacts
- *   - persist resource events
- *   - persist checkpoints
- *   - persist rollback records
- *   - persist failure signatures
- *   - persist successful repair patterns
- *   - persist audit events
- *   - enforce state transitions
- *   - enforce engineering safety limits
- *   - provide controlled state snapshots
- *
- * This file DOES NOT:
- *   - execute commands
- *   - execute Docker
- *   - call AI providers
- *   - modify source files
- *   - perform builds
- *   - claim build success
- *   - perform repairs
- *
- * Execution:
- *   engineeringExecutor.js
- *
- * Intelligence:
- *   engineeringIntelligence.js
- *
- * Orchestration:
- *   engineeringOrchestrator.js
- *
- * ============================================================
+ * This module MUST NOT:
+ * - execute builds
+ * - call AI providers
+ * - modify source files
+ * - deploy applications
+ * - fabricate success
  */
 
-const mongoose = require("mongoose");
+const crypto = require("crypto");
 
-/* ============================================================
-   VERSION
-============================================================ */
+/* =========================================================
+ * VERSION
+ * ======================================================= */
 
-const SERVICE_VERSION = "1.1.0";
-const SCHEMA_VERSION = 2;
+const SERVICE_VERSION = "1.3.0";
+const SCHEMA_VERSION = 3;
+const ENGINEERING_SYSTEM_VERSION = "2.0.0";
 
-/* ============================================================
-   ENGINEERING STATES
-============================================================ */
+/* =========================================================
+ * STATES
+ * ======================================================= */
 
-const ENGINEERING_STATES = Object.freeze({
+const STATES = Object.freeze({
   CREATED: "CREATED",
   ANALYZING: "ANALYZING",
   EXECUTING: "EXECUTING",
@@ -77,4454 +49,3778 @@ const ENGINEERING_STATES = Object.freeze({
   PASSED: "PASSED",
   ROLLBACK: "ROLLBACK",
   ESCALATED: "ESCALATED",
-  PROMOTED: "PROMOTED"
+  PROMOTED: "PROMOTED",
 });
 
-const ENGINEERING_STATE_VALUES = Object.freeze(
-  Object.values(ENGINEERING_STATES)
+/* =========================================================
+ * TERMINAL STATES
+ * ======================================================= */
+
+const TERMINAL_STATES = Object.freeze(
+  new Set([
+    STATES.PASSED,
+    STATES.ESCALATED,
+    STATES.PROMOTED,
+  ])
 );
 
-/* ============================================================
-   TERMINAL STATES
-============================================================ */
-
-const TERMINAL_STATES = new Set([
-  ENGINEERING_STATES.PROMOTED,
-  ENGINEERING_STATES.ESCALATED
-]);
-
-/* ============================================================
-   VALID STATE TRANSITIONS
-============================================================ */
+/* =========================================================
+ * VALID STATE TRANSITIONS
+ * ======================================================= */
 
 const STATE_TRANSITIONS = Object.freeze({
-  [ENGINEERING_STATES.CREATED]: Object.freeze([
-    ENGINEERING_STATES.ANALYZING,
-    ENGINEERING_STATES.ESCALATED
+  [STATES.CREATED]: new Set([
+    STATES.ANALYZING,
+    STATES.ESCALATED,
   ]),
 
-  [ENGINEERING_STATES.ANALYZING]: Object.freeze([
-    ENGINEERING_STATES.EXECUTING,
-    ENGINEERING_STATES.FAILED,
-    ENGINEERING_STATES.ESCALATED
+  [STATES.ANALYZING]: new Set([
+    STATES.EXECUTING,
+    STATES.FAILED,
+    STATES.ESCALATED,
   ]),
 
-  [ENGINEERING_STATES.EXECUTING]: Object.freeze([
-    ENGINEERING_STATES.PASSED,
-    ENGINEERING_STATES.FAILED,
-    ENGINEERING_STATES.VERIFYING,
-    ENGINEERING_STATES.ESCALATED
+  [STATES.EXECUTING]: new Set([
+    STATES.VERIFYING,
+    STATES.FAILED,
+    STATES.ROLLBACK,
+    STATES.ESCALATED,
   ]),
 
-  [ENGINEERING_STATES.FAILED]: Object.freeze([
-    ENGINEERING_STATES.DIAGNOSING,
-    ENGINEERING_STATES.ROLLBACK,
-    ENGINEERING_STATES.ESCALATED
+  [STATES.FAILED]: new Set([
+    STATES.DIAGNOSING,
+    STATES.REPAIRING,
+    STATES.ROLLBACK,
+    STATES.ESCALATED,
+    STATES.EXECUTING,
   ]),
 
-  [ENGINEERING_STATES.DIAGNOSING]: Object.freeze([
-    ENGINEERING_STATES.REPAIRING,
-    ENGINEERING_STATES.ROLLBACK,
-    ENGINEERING_STATES.ESCALATED
+  [STATES.DIAGNOSING]: new Set([
+    STATES.REPAIRING,
+    STATES.EXECUTING,
+    STATES.ROLLBACK,
+    STATES.ESCALATED,
+    STATES.FAILED,
   ]),
 
-  [ENGINEERING_STATES.REPAIRING]: Object.freeze([
-    ENGINEERING_STATES.VERIFYING,
-    ENGINEERING_STATES.EXECUTING,
-    ENGINEERING_STATES.FAILED,
-    ENGINEERING_STATES.ROLLBACK,
-    ENGINEERING_STATES.ESCALATED
+  [STATES.REPAIRING]: new Set([
+    STATES.VERIFYING,
+    STATES.EXECUTING,
+    STATES.FAILED,
+    STATES.ROLLBACK,
+    STATES.ESCALATED,
   ]),
 
-  [ENGINEERING_STATES.VERIFYING]: Object.freeze([
-    ENGINEERING_STATES.PASSED,
-    ENGINEERING_STATES.FAILED,
-    ENGINEERING_STATES.REPAIRING,
-    ENGINEERING_STATES.ROLLBACK,
-    ENGINEERING_STATES.ESCALATED
+  [STATES.VERIFYING]: new Set([
+    STATES.PASSED,
+    STATES.FAILED,
+    STATES.REPAIRING,
+    STATES.EXECUTING,
+    STATES.ROLLBACK,
+    STATES.ESCALATED,
   ]),
 
-  [ENGINEERING_STATES.PASSED]: Object.freeze([
-    ENGINEERING_STATES.PROMOTED,
-    ENGINEERING_STATES.REPAIRING,
-    ENGINEERING_STATES.ROLLBACK,
-    ENGINEERING_STATES.ESCALATED
+  [STATES.PASSED]: new Set([
+    STATES.PROMOTED,
   ]),
 
-  [ENGINEERING_STATES.ROLLBACK]: Object.freeze([
-    ENGINEERING_STATES.ANALYZING,
-    ENGINEERING_STATES.ESCALATED
+  [STATES.ROLLBACK]: new Set([
+    STATES.EXECUTING,
+    STATES.DIAGNOSING,
+    STATES.ESCALATED,
   ]),
 
-  [ENGINEERING_STATES.ESCALATED]: Object.freeze([]),
+  [STATES.ESCALATED]: new Set([]),
 
-  [ENGINEERING_STATES.PROMOTED]: Object.freeze([])
+  [STATES.PROMOTED]: new Set([]),
 });
 
-/* ============================================================
-   CENTRAL ENGINEERING LIMITS
+/* =========================================================
+ * GLOBAL ENGINEERING LIMITS
  *
- * These are the GLOBAL HARD CEILINGS.
- *
- * Run-level policies may be LOWER than these values.
- * No run may exceed these values.
-============================================================ */
+ * IMPORTANT:
+ * Orchestrator v1.3.0 can consume these values directly.
+ * Both canonical and compatibility names are exposed.
+ * ======================================================= */
 
 const ENGINEERING_LIMITS = Object.freeze({
   MAX_ATTEMPTS: 5,
-
   MAX_REPAIR_ATTEMPTS: 3,
-
   MAX_DIAGNOSIS_ATTEMPTS: 3,
 
   MAX_REPAIR_FILES: 25,
-
   MAX_DEPENDENCY_CHANGES: 15,
 
   MAX_EXECUTION_TIME: 15 * 60 * 1000,
 
   MAX_RESOURCE_LIMIT: Object.freeze({
-    cpuCores: 2,
-    memoryMB: 2048,
+    cpu: 2,
+    memory: 2048,
     pids: 256,
-    diskMB: 10240
+    disk: 10 * 1024,
   }),
 
   MAX_SCOPE_EXPANSION: 1.5,
-
   MAX_AUTO_SCALE: 4,
 
   MAX_ROLLBACKS: 2,
-
   MAX_CHECKPOINTS: 25,
 
   MAX_OUTPUT_CHARS: 20000,
-
   MAX_ERROR_MESSAGES: 100,
-
   MAX_AFFECTED_FILES: 25,
-
-  MAX_AFFECTED_DEPENDENCIES: 15
+  MAX_AFFECTED_DEPENDENCIES: 15,
 });
 
-/* ============================================================
-   ENUMS
-============================================================ */
+/*
+ * Compatibility aliases.
+ *
+ * Orchestrator v1.3.0 may reference either naming convention.
+ */
+const LIMITS = Object.freeze({
+  ...ENGINEERING_LIMITS,
 
-const FAILURE_CATEGORIES = [
-  "syntax",
-  "type",
-  "dependency",
-  "package_manager",
-  "configuration",
-  "environment",
-  "filesystem",
-  "permission",
-  "network",
-  "resource",
-  "timeout",
-  "process",
-  "runtime",
-  "framework",
-  "build",
-  "artifact",
-  "integration",
-  "test",
-  "unknown"
-];
+  MAX_EXECUTION_TIME_MS: ENGINEERING_LIMITS.MAX_EXECUTION_TIME,
 
-const FAILURE_SEVERITIES = [
-  "low",
-  "medium",
-  "high",
-  "critical"
-];
+  MAX_CPU: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.cpu,
+  MAX_MEMORY_MB: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.memory,
+  MAX_PIDS: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.pids,
+  MAX_DISK_MB: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.disk,
 
-const EXECUTION_TYPES = [
-  "static_validation",
-  "install",
-  "build",
-  "runtime",
-  "test",
-  "preview",
-  "smoke_test",
-  "artifact"
-];
+  MAX_RESOURCE_CPU: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.cpu,
+  MAX_RESOURCE_MEMORY: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.memory,
+  MAX_RESOURCE_PIDS: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.pids,
+  MAX_RESOURCE_DISK: ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT.disk,
+});
 
-const REPAIR_TYPES = [
-  "source_patch",
-  "dependency_repair",
-  "configuration_repair",
-  "environment_repair",
-  "build_configuration",
-  "resource_adjustment",
-  "artifact_fix",
-  "rollback",
-  "other"
-];
+/* =========================================================
+ * ENUMS
+ * ======================================================= */
 
-const VERIFICATION_TYPES = [
-  "static",
-  "build",
-  "runtime",
-  "smoke_test",
-  "regression",
-  "artifact",
-  "full"
-];
+const ATTEMPT_STATUS = Object.freeze({
+  CREATED: "created",
+  RUNNING: "running",
+  FAILED: "failed",
+  PASSED: "passed",
+  CANCELLED: "cancelled",
+  ROLLED_BACK: "rolled_back",
+});
 
-/* ============================================================
-   HELPERS
-============================================================ */
+const REPAIR_STATUS = Object.freeze({
+  PROPOSED: "proposed",
+  APPLIED: "applied",
+  VERIFIED: "verified",
+  FAILED: "failed",
+  REJECTED: "rejected",
+});
 
-function assertObjectId(value, fieldName) {
-  if (!value) {
-    throw new Error(`${fieldName} is required`);
+const VERIFICATION_STATUS = Object.freeze({
+  PASSED: "passed",
+  FAILED: "failed",
+  INCONCLUSIVE: "inconclusive",
+});
+
+const EXECUTION_STATUS = Object.freeze({
+  PASSED: "passed",
+  FAILED: "failed",
+  CANCELLED: "cancelled",
+  TIMEOUT: "timeout",
+});
+
+const REPAIR_TYPES = Object.freeze({
+  SOURCE_FIX: "source_fix",
+  DEPENDENCY_FIX: "dependency_fix",
+  CONFIG_FIX: "config_fix",
+  BUILD_FIX: "build_fix",
+  ARTIFACT_FIX: "artifact_fix",
+  ENVIRONMENT_FIX: "environment_fix",
+  UNKNOWN: "unknown",
+});
+
+/* =========================================================
+ * INTERNAL STORAGE
+ * ======================================================= */
+
+const runs = new Map();
+const attempts = new Map();
+const executions = new Map();
+const failures = new Map();
+const repairs = new Map();
+const verifications = new Map();
+const artifacts = new Map();
+const resourceEvents = new Map();
+const checkpoints = new Map();
+const rollbacks = new Map();
+const patterns = new Map();
+
+const locks = new Map();
+
+/* =========================================================
+ * UTILITIES
+ * ======================================================= */
+
+function now() {
+  return new Date().toISOString();
+}
+
+function id(prefix) {
+  return `${prefix}_${crypto.randomUUID()}`;
+}
+
+function clone(value) {
+  if (value === undefined) return undefined;
+
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return value;
   }
-
-  if (!mongoose.Types.ObjectId.isValid(value)) {
-    throw new Error(`Invalid ${fieldName}`);
-  }
-
-  return new mongoose.Types.ObjectId(value);
 }
 
-function isObjectId(value) {
-  return Boolean(
-    value &&
-      mongoose.Types.ObjectId.isValid(value)
-  );
+function finiteNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
 }
 
-function normalizeString(value, maxLength = 4000) {
-  if (value === null || value === undefined) {
-    return "";
-  }
-
-  return String(value).slice(0, maxLength);
+function nonNegative(value, fallback = 0) {
+  const number = finiteNumber(value, fallback);
+  return Math.max(0, number);
 }
 
-function normalizeArray(value) {
-  return Array.isArray(value) ? value : [];
-}
-
-function uniqueStrings(values, max = 100) {
-  return [
-    ...new Set(
-      normalizeArray(values)
-        .map((value) =>
-          normalizeString(value, 1000).trim()
-        )
-        .filter(Boolean)
-    )
-  ].slice(0, max);
-}
-
-function clampNumber(
-  value,
-  minimum,
-  maximum,
-  fallback = minimum
-) {
+function positiveInteger(value, fallback) {
   const number = Number(value);
 
   if (!Number.isFinite(number)) {
     return fallback;
   }
 
-  return Math.min(
-    maximum,
-    Math.max(minimum, number)
-  );
+  return Math.max(1, Math.floor(number));
 }
 
-function now() {
-  return new Date();
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
 
-/* ============================================================
-   SECRET / CREDENTIAL REDACTION
-============================================================ */
-
-const SECRET_PATTERNS = [
-  /bearer\s+[a-z0-9._-]+/gi,
-  /authorization\s*[:=]\s*[^\s]+/gi,
-  /api[_-]?key\s*[:=]\s*[^\s]+/gi,
-  /secret\s*[:=]\s*[^\s]+/gi,
-  /token\s*[:=]\s*[^\s]+/gi,
-  /password\s*[:=]\s*[^\s]+/gi,
-  /access[_-]?token\s*[:=]\s*[^\s]+/gi,
-  /refresh[_-]?token\s*[:=]\s*[^\s]+/gi
-];
-
-function redactSecrets(value) {
-  let text = normalizeString(
-    value,
-    ENGINEERING_LIMITS.MAX_OUTPUT_CHARS
-  );
-
-  for (const pattern of SECRET_PATTERNS) {
-    text = text.replace(
-      pattern,
-      "[REDACTED]"
-    );
-  }
-
-  return text;
-}
-
-function normalizeEvidence(
-  value,
-  maxLength = ENGINEERING_LIMITS.MAX_OUTPUT_CHARS
-) {
-  let text = normalizeString(value, maxLength);
-
-  for (const pattern of SECRET_PATTERNS) {
-    text = text.replace(
-      pattern,
-      "[REDACTED]"
-    );
-  }
-
-  return text;
-}
-
-/* ============================================================
-   JSON-SAFE SNAPSHOT
-============================================================ */
-
-function safeSnapshot(
-  value,
-  maxDepth = 4,
-  depth = 0
-) {
-  if (depth > maxDepth) {
-    return "[MAX_DEPTH]";
-  }
-
-  if (
-    value === null ||
-    value === undefined ||
-    typeof value === "number" ||
-    typeof value === "boolean"
-  ) {
-    return value;
-  }
-
-  if (typeof value === "string") {
-    return redactSecrets(value);
-  }
-
-  if (value instanceof Date) {
-    return value.toISOString();
-  }
-
-  if (Array.isArray(value)) {
-    return value
-      .slice(0, 100)
-      .map((item) =>
-        safeSnapshot(
-          item,
-          maxDepth,
-          depth + 1
-        )
-      );
-  }
-
-  if (typeof value === "object") {
-    const output = {};
-
-    for (
-      const [key, item] of Object.entries(value)
-        .slice(0, 100)
-    ) {
-      if (
-        /password|secret|token|api[-_]?key|authorization/i.test(
-          key
-        )
-      ) {
-        output[key] = "[REDACTED]";
-      } else {
-        output[key] = safeSnapshot(
-          item,
-          maxDepth,
-          depth + 1
-        );
-      }
-    }
-
-    return output;
+function safeString(value, fallback = "") {
+  if (value === null || value === undefined) {
+    return fallback;
   }
 
   return String(value);
 }
 
-/* ============================================================
-   POLICY NORMALIZATION
- *
- * Run policies can only become stricter than global limits.
-============================================================ */
+function normalizeArray(value, max = Infinity) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
 
-function normalizeResourcePolicy(
-  resourcePolicy = {}
-) {
-  const global =
-    ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT;
-
-  return {
-    cpuCores: clampNumber(
-      resourcePolicy.cpuCores,
-      0.25,
-      global.cpuCores,
-      global.cpuCores
-    ),
-
-    memoryMB: clampNumber(
-      resourcePolicy.memoryMB,
-      128,
-      global.memoryMB,
-      global.memoryMB
-    ),
-
-    pids: clampNumber(
-      resourcePolicy.pids,
-      1,
-      global.pids,
-      global.pids
-    ),
-
-    diskMB: clampNumber(
-      resourcePolicy.diskMB,
-      128,
-      global.diskMB,
-      global.diskMB
-    )
-  };
+  return value.slice(0, max);
 }
 
-function normalizeRunPolicy(
-  policy = {}
-) {
+function timestampMs(value) {
+  const parsed = Date.parse(value);
+
+  if (!Number.isFinite(parsed)) {
+    return Date.now();
+  }
+
+  return parsed;
+}
+
+/* =========================================================
+ * LIMIT NORMALIZATION
+ * ======================================================= */
+
+function normalizeLimits(input = {}) {
+  const requested = input || {};
+
+  const resourceInput =
+    requested.resourceLimit ||
+    requested.resourceLimits ||
+    requested.resources ||
+    {};
+
+  const max = ENGINEERING_LIMITS;
+
   return {
-    maxAttempts: clampNumber(
-      policy.maxAttempts,
+    MAX_ATTEMPTS: clamp(
+      positiveInteger(
+        requested.MAX_ATTEMPTS,
+        max.MAX_ATTEMPTS
+      ),
       1,
-      ENGINEERING_LIMITS.MAX_ATTEMPTS,
-      ENGINEERING_LIMITS.MAX_ATTEMPTS
+      max.MAX_ATTEMPTS
     ),
 
-    maxRepairAttempts: clampNumber(
-      policy.maxRepairAttempts,
+    MAX_REPAIR_ATTEMPTS: clamp(
+      positiveInteger(
+        requested.MAX_REPAIR_ATTEMPTS,
+        max.MAX_REPAIR_ATTEMPTS
+      ),
       0,
-      ENGINEERING_LIMITS.MAX_REPAIR_ATTEMPTS,
-      ENGINEERING_LIMITS.MAX_REPAIR_ATTEMPTS
+      max.MAX_REPAIR_ATTEMPTS
     ),
 
-    maxDiagnosisAttempts: clampNumber(
-      policy.maxDiagnosisAttempts,
+    MAX_DIAGNOSIS_ATTEMPTS: clamp(
+      positiveInteger(
+        requested.MAX_DIAGNOSIS_ATTEMPTS,
+        max.MAX_DIAGNOSIS_ATTEMPTS
+      ),
       0,
-      ENGINEERING_LIMITS.MAX_DIAGNOSIS_ATTEMPTS,
-      ENGINEERING_LIMITS.MAX_DIAGNOSIS_ATTEMPTS
+      max.MAX_DIAGNOSIS_ATTEMPTS
     ),
 
-    maxRepairFiles: clampNumber(
-      policy.maxRepairFiles,
+    MAX_REPAIR_FILES: clamp(
+      positiveInteger(
+        requested.MAX_REPAIR_FILES,
+        max.MAX_REPAIR_FILES
+      ),
+      1,
+      max.MAX_REPAIR_FILES
+    ),
+
+    MAX_DEPENDENCY_CHANGES: clamp(
+      positiveInteger(
+        requested.MAX_DEPENDENCY_CHANGES,
+        max.MAX_DEPENDENCY_CHANGES
+      ),
       0,
-      ENGINEERING_LIMITS.MAX_REPAIR_FILES,
-      ENGINEERING_LIMITS.MAX_REPAIR_FILES
+      max.MAX_DEPENDENCY_CHANGES
     ),
 
-    maxDependencyChanges: clampNumber(
-      policy.maxDependencyChanges,
+    MAX_EXECUTION_TIME: clamp(
+      positiveInteger(
+        requested.MAX_EXECUTION_TIME ??
+          requested.MAX_EXECUTION_TIME_MS,
+        max.MAX_EXECUTION_TIME
+      ),
+      1,
+      max.MAX_EXECUTION_TIME
+    ),
+
+    MAX_EXECUTION_TIME_MS: clamp(
+      positiveInteger(
+        requested.MAX_EXECUTION_TIME_MS ??
+          requested.MAX_EXECUTION_TIME,
+        max.MAX_EXECUTION_TIME
+      ),
+      1,
+      max.MAX_EXECUTION_TIME
+    ),
+
+    MAX_SCOPE_EXPANSION: clamp(
+      finiteNumber(
+        requested.MAX_SCOPE_EXPANSION,
+        max.MAX_SCOPE_EXPANSION
+      ),
+      1,
+      max.MAX_SCOPE_EXPANSION
+    ),
+
+    MAX_AUTO_SCALE: clamp(
+      positiveInteger(
+        requested.MAX_AUTO_SCALE,
+        max.MAX_AUTO_SCALE
+      ),
+      1,
+      max.MAX_AUTO_SCALE
+    ),
+
+    MAX_ROLLBACKS: clamp(
+      positiveInteger(
+        requested.MAX_ROLLBACKS,
+        max.MAX_ROLLBACKS
+      ),
       0,
-      ENGINEERING_LIMITS.MAX_DEPENDENCY_CHANGES,
-      ENGINEERING_LIMITS.MAX_DEPENDENCY_CHANGES
+      max.MAX_ROLLBACKS
     ),
 
-    maxExecutionTime: clampNumber(
-      policy.maxExecutionTime,
+    MAX_CHECKPOINTS: clamp(
+      positiveInteger(
+        requested.MAX_CHECKPOINTS,
+        max.MAX_CHECKPOINTS
+      ),
+      1,
+      max.MAX_CHECKPOINTS
+    ),
+
+    MAX_OUTPUT_CHARS: clamp(
+      positiveInteger(
+        requested.MAX_OUTPUT_CHARS,
+        max.MAX_OUTPUT_CHARS
+      ),
       1000,
-      ENGINEERING_LIMITS.MAX_EXECUTION_TIME,
-      ENGINEERING_LIMITS.MAX_EXECUTION_TIME
+      max.MAX_OUTPUT_CHARS
     ),
 
-    maxScopeExpansion: clampNumber(
-      policy.maxScopeExpansion,
-      0,
-      ENGINEERING_LIMITS.MAX_SCOPE_EXPANSION,
-      ENGINEERING_LIMITS.MAX_SCOPE_EXPANSION
-    ),
-
-    maxAutoScale: clampNumber(
-      policy.maxAutoScale,
-      0,
-      ENGINEERING_LIMITS.MAX_AUTO_SCALE,
-      ENGINEERING_LIMITS.MAX_AUTO_SCALE
-    ),
-
-    maxRollbacks: clampNumber(
-      policy.maxRollbacks,
-      0,
-      ENGINEERING_LIMITS.MAX_ROLLBACKS,
-      ENGINEERING_LIMITS.MAX_ROLLBACKS
-    ),
-
-    maxCheckpoints: clampNumber(
-      policy.maxCheckpoints,
+    MAX_ERROR_MESSAGES: clamp(
+      positiveInteger(
+        requested.MAX_ERROR_MESSAGES,
+        max.MAX_ERROR_MESSAGES
+      ),
       1,
-      ENGINEERING_LIMITS.MAX_CHECKPOINTS,
-      ENGINEERING_LIMITS.MAX_CHECKPOINTS
+      max.MAX_ERROR_MESSAGES
     ),
 
-    maxResourceLimit:
-      normalizeResourcePolicy(
-        policy.maxResourceLimit
-      )
+    MAX_AFFECTED_FILES: clamp(
+      positiveInteger(
+        requested.MAX_AFFECTED_FILES,
+        max.MAX_AFFECTED_FILES
+      ),
+      1,
+      max.MAX_AFFECTED_FILES
+    ),
+
+    MAX_AFFECTED_DEPENDENCIES: clamp(
+      positiveInteger(
+        requested.MAX_AFFECTED_DEPENDENCIES,
+        max.MAX_AFFECTED_DEPENDENCIES
+      ),
+      0,
+      max.MAX_AFFECTED_DEPENDENCIES
+    ),
+
+    resourceLimit: {
+      cpu: clamp(
+        finiteNumber(
+          resourceInput.cpu,
+          max.MAX_RESOURCE_LIMIT.cpu
+        ),
+        0.1,
+        max.MAX_RESOURCE_LIMIT.cpu
+      ),
+
+      memory: clamp(
+        finiteNumber(
+          resourceInput.memory ??
+            resourceInput.memoryMB,
+          max.MAX_RESOURCE_LIMIT.memory
+        ),
+        128,
+        max.MAX_RESOURCE_LIMIT.memory
+      ),
+
+      pids: clamp(
+        positiveInteger(
+          resourceInput.pids,
+          max.MAX_RESOURCE_LIMIT.pids
+        ),
+        16,
+        max.MAX_RESOURCE_LIMIT.pids
+      ),
+
+      disk: clamp(
+        finiteNumber(
+          resourceInput.disk ??
+            resourceInput.diskMB,
+          max.MAX_RESOURCE_LIMIT.disk
+        ),
+        256,
+        max.MAX_RESOURCE_LIMIT.disk
+      ),
+    },
   };
 }
 
-/* ============================================================
-   FAILURE SIGNATURE
-============================================================ */
-
-function buildFailureSignature({
-  category,
-  code,
-  message,
-  command,
-  framework,
-  packageManager
-}) {
-  const raw = [
-    normalizeString(category, 100),
-    normalizeString(code, 200),
-    normalizeString(message, 1000)
-      .toLowerCase()
-      .replace(
-        /[0-9a-f]{8,}/gi,
-        "#"
-      )
-      .replace(
-        /\/[^\s:]+/g,
-        "<path>"
-      )
-      .replace(
-        /\d+/g,
-        "#"
-      )
-      .replace(
-        /\s+/g,
-        " "
-      )
-      .trim(),
-    normalizeString(command, 500),
-    normalizeString(framework, 100),
-    normalizeString(packageManager, 100)
-  ].join("|");
-
-  return raw.slice(0, 3000);
-}
-
-/* ============================================================
-   SUB-SCHEMAS
-============================================================ */
-
-/* ---------------- Engineering Attempt ---------------- */
-
-const attemptSchema = new mongoose.Schema(
-  {
-    attemptNumber: {
-      type: Number,
-      required: true,
-      min: 1
-    },
-
-    status: {
-      type: String,
-      enum: [
-        "created",
-        "executing",
-        "failed",
-        "repairing",
-        "verifying",
-        "passed",
-        "rolled_back",
-        "escalated"
-      ],
-      default: "created",
-      index: true
-    },
-
-    strategy: {
-      type: String,
-      default: "",
-      maxlength: 500
-    },
-
-    startedAt: {
-      type: Date,
-      default: null
-    },
-
-    completedAt: {
-      type: Date,
-      default: null
-    },
-
-    durationMs: {
-      type: Number,
-      default: 0,
-      min: 0,
-      max: ENGINEERING_LIMITS.MAX_EXECUTION_TIME
-    },
-
-    changedFiles: {
-      type: [String],
-      default: []
-    },
-
-    dependencyChanges: {
-      type: [String],
-      default: []
-    },
-
-    scopeExpansionPercent: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    success: {
-      type: Boolean,
-      default: false
-    },
-
-    failureRecordId: {
-      type: mongoose.Schema.Types.ObjectId,
-      default: null
-    },
-
-    repairRecordIds: {
-      type: [
-        mongoose.Schema.Types.ObjectId
-      ],
-      default: []
-    },
-
-    verificationRecordIds: {
-      type: [
-        mongoose.Schema.Types.ObjectId
-      ],
-      default: []
-    }
-  },
-  {
-    _id: true,
-    timestamps: true
-  }
-);
-
-/* ---------------- Execution Record ---------------- */
-
-const executionSchema = new mongoose.Schema(
-  {
-    executionId: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true
-    },
-
-    attemptId: {
-      type: mongoose.Schema.Types.ObjectId,
-      required: true,
-      index: true
-    },
-
-    type: {
-      type: String,
-      enum: EXECUTION_TYPES,
-      required: true
-    },
-
-    command: {
-      type: String,
-      default: "",
-      maxlength: 2000
-    },
-
-    workingDirectory: {
-      type: String,
-      default: "",
-      maxlength: 1000
-    },
-
-    status: {
-      type: String,
-      enum: [
-        "queued",
-        "running",
-        "success",
-        "failed",
-        "cancelled",
-        "timeout"
-      ],
-      default: "queued",
-      index: true
-    },
-
-    exitCode: {
-      type: Number,
-      default: null
-    },
-
-    signal: {
-      type: String,
-      default: "",
-      maxlength: 100
-    },
-
-    timedOut: {
-      type: Boolean,
-      default: false
-    },
-
-    startedAt: {
-      type: Date,
-      default: null
-    },
-
-    completedAt: {
-      type: Date,
-      default: null
-    },
-
-    durationMs: {
-      type: Number,
-      default: 0,
-      min: 0,
-      max: ENGINEERING_LIMITS.MAX_EXECUTION_TIME
-    },
-
-    stdout: {
-      type: String,
-      default: "",
-      maxlength: ENGINEERING_LIMITS.MAX_OUTPUT_CHARS
-    },
-
-    stderr: {
-      type: String,
-      default: "",
-      maxlength: ENGINEERING_LIMITS.MAX_OUTPUT_CHARS
-    },
-
-    resourceSnapshot: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
-    }
-  },
-  {
-    timestamps: true
-  }
-);
-
-/* ---------------- Failure Record ---------------- */
-
-const failureSchema = new mongoose.Schema(
-  {
-    failureId: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true
-    },
-
-    attemptId: {
-      type: mongoose.Schema.Types.ObjectId,
-      required: true,
-      index: true
-    },
-
-    stage: {
-      type: String,
-      required: true,
-      maxlength: 200
-    },
-
-    category: {
-      type: String,
-      enum: FAILURE_CATEGORIES,
-      default: "unknown",
-      index: true
-    },
-
-    severity: {
-      type: String,
-      enum: FAILURE_SEVERITIES,
-      default: "medium"
-    },
-
-    code: {
-      type: String,
-      default: "",
-      maxlength: 300
-    },
-
-    message: {
-      type: String,
-      default: "",
-      maxlength: 4000
-    },
-
-    rootCause: {
-      type: String,
-      default: "",
-      maxlength: 4000
-    },
-
-    confidence: {
-      type: Number,
-      default: 0,
-      min: 0,
-      max: 1
-    },
-
-    retryable: {
-      type: Boolean,
-      default: false
-    },
-
-    repairable: {
-      type: Boolean,
-      default: false
-    },
-
-    affectedFiles: {
-      type: [String],
-      default: []
-    },
-
-    affectedDependencies: {
-      type: [String],
-      default: []
-    },
-
-    command: {
-      type: String,
-      default: "",
-      maxlength: 2000
-    },
-
-    exitCode: {
-      type: Number,
-      default: null
-    },
-
-    signal: {
-      type: String,
-      default: "",
-      maxlength: 100
-    },
-
-    timedOut: {
-      type: Boolean,
-      default: false
-    },
-
-    stdout: {
-      type: String,
-      default: "",
-      maxlength: ENGINEERING_LIMITS.MAX_OUTPUT_CHARS
-    },
-
-    stderr: {
-      type: String,
-      default: "",
-      maxlength: ENGINEERING_LIMITS.MAX_OUTPUT_CHARS
-    },
-
-    signature: {
-      type: String,
-      default: "",
-      maxlength: 3000,
-      index: true
-    },
-
-    evidence: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
-    }
-  },
-  {
-    timestamps: true
-  }
-);
-
-/* ---------------- Repair Record ---------------- */
-
-const repairSchema = new mongoose.Schema(
-  {
-    repairId: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true
-    },
-
-    attemptId: {
-      type: mongoose.Schema.Types.ObjectId,
-      required: true,
-      index: true
-    },
-
-    type: {
-      type: String,
-      enum: REPAIR_TYPES,
-      required: true
-    },
-
-    strategy: {
-      type: String,
-      required: true,
-      maxlength: 1000
-    },
-
-    reason: {
-      type: String,
-      default: "",
-      maxlength: 4000
-    },
-
-    affectedFiles: {
-      type: [String],
-      default: []
-    },
-
-    dependencyChanges: {
-      type: [String],
-      default: []
-    },
-
-    changedFilesCount: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    confidence: {
-      type: Number,
-      default: 0,
-      min: 0,
-      max: 1
-    },
-
-    risk: {
-      type: String,
-      enum: [
-        "low",
-        "medium",
-        "high",
-        "critical"
-      ],
-      default: "medium"
-    },
-
-    status: {
-      type: String,
-      enum: [
-        "planned",
-        "approved",
-        "applied",
-        "verified",
-        "rejected",
-        "rolled_back"
-      ],
-      default: "planned"
-    },
-
-    aiGenerated: {
-      type: Boolean,
-      default: false
-    },
-
-    verificationRequired: {
-      type: Boolean,
-      default: true
-    },
-
-    result: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
-    }
-  },
-  {
-    timestamps: true
-  }
-);
-
-/* ---------------- Verification Record ---------------- */
-
-const verificationSchema = new mongoose.Schema(
-  {
-    verificationId: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true
-    },
-
-    attemptId: {
-      type: mongoose.Schema.Types.ObjectId,
-      required: true,
-      index: true
-    },
-
-    type: {
-      type: String,
-      enum: VERIFICATION_TYPES,
-      required: true
-    },
-
-    status: {
-      type: String,
-      enum: [
-        "pending",
-        "running",
-        "passed",
-        "failed",
-        "skipped"
-      ],
-      default: "pending"
-    },
-
-    success: {
-      type: Boolean,
-      default: false
-    },
-
-    authoritative: {
-      type: Boolean,
-      default: false
-    },
-
-    evidence: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
-    },
-
-    errors: {
-      type: [String],
-      default: []
-    },
-
-    warnings: {
-      type: [String],
-      default: []
-    },
-
-    startedAt: {
-      type: Date,
-      default: null
-    },
-
-    completedAt: {
-      type: Date,
-      default: null
-    },
-
-    durationMs: {
-      type: Number,
-      default: 0,
-      min: 0
-    }
-  },
-  {
-    timestamps: true
-  }
-);
-
-/* ---------------- Artifact Record ---------------- */
-
-const artifactSchema = new mongoose.Schema(
-  {
-    artifactId: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true
-    },
-
-    attemptId: {
-      type: mongoose.Schema.Types.ObjectId,
-      required: true,
-      index: true
-    },
-
-    name: {
-      type: String,
-      required: true,
-      maxlength: 500
-    },
-
-    type: {
-      type: String,
-      enum: [
-        "build",
-        "bundle",
-        "source",
-        "archive",
-        "container",
-        "preview",
-        "other"
-      ],
-      default: "build"
-    },
-
-    storageKey: {
-      type: String,
-      default: "",
-      maxlength: 2000
-    },
-
-    url: {
-      type: String,
-      default: "",
-      maxlength: 2000
-    },
-
-    size: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    checksum: {
-      type: String,
-      default: "",
-      maxlength: 256
-    },
-
-    verified: {
-      type: Boolean,
-      default: false
-    },
-
-    createdAt: {
-      type: Date,
-      default: now
-    }
-  },
-  {
-    timestamps: true
-  }
-);
-
-/* ---------------- Resource Event ---------------- */
-
-const resourceEventSchema = new mongoose.Schema(
-  {
-    attemptId: {
-      type: mongoose.Schema.Types.ObjectId,
-      required: true,
-      index: true
-    },
-
-    type: {
-      type: String,
-      enum: [
-        "allocation",
-        "usage",
-        "limit",
-        "scale",
-        "throttle",
-        "oom",
-        "timeout",
-        "process_limit",
-        "disk_limit"
-      ],
-      required: true
-    },
-
-    cpuCores: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    memoryMB: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    pids: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    diskMB: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    durationMs: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    action: {
-      type: String,
-      default: "",
-      maxlength: 500
-    },
-
-    metadata: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
-    }
-  },
-  {
-    timestamps: true
-  }
-);
-
-/* ---------------- Checkpoint ---------------- */
-
-const checkpointSchema = new mongoose.Schema(
-  {
-    checkpointId: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true
-    },
-
-    attemptId: {
-      type: mongoose.Schema.Types.ObjectId,
-      required: true,
-      index: true
-    },
-
-    sourceHash: {
-      type: String,
-      default: "",
-      maxlength: 256
-    },
-
-    files: {
-      type: [String],
-      default: []
-    },
-
-    artifactId: {
-      type: mongoose.Schema.Types.ObjectId,
-      default: null
-    },
-
-    reason: {
-      type: String,
-      default: "",
-      maxlength: 1000
-    },
-
-    restorable: {
-      type: Boolean,
-      default: true
-    },
-
-    restoredAt: {
-      type: Date,
-      default: null
-    }
-  },
-  {
-    timestamps: true
-  }
-);
-
-/* ---------------- Rollback Information ---------------- */
-
-const rollbackSchema = new mongoose.Schema(
-  {
-    attemptId: {
-      type: mongoose.Schema.Types.ObjectId,
-      required: true,
-      index: true
-    },
-
-    checkpointId: {
-      type: mongoose.Schema.Types.ObjectId,
-      default: null
-    },
-
-    reason: {
-      type: String,
-      required: true,
-      maxlength: 4000
-    },
-
-    status: {
-      type: String,
-      enum: [
-        "requested",
-        "running",
-        "completed",
-        "failed"
-      ],
-      default: "requested"
-    },
-
-    restoredSourceHash: {
-      type: String,
-      default: "",
-      maxlength: 256
-    },
-
-    restoredFiles: {
-      type: [String],
-      default: []
-    },
-
-    error: {
-      type: String,
-      default: "",
-      maxlength: 4000
-    },
-
-    completedAt: {
-      type: Date,
-      default: null
-    }
-  },
-  {
-    timestamps: true
-  }
-);
-
-/* ---------------- Failure Signature ---------------- */
-
-const failureSignatureSchema = new mongoose.Schema(
-  {
-    signature: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true,
-      maxlength: 3000
-    },
-
-    category: {
-      type: String,
-      enum: FAILURE_CATEGORIES,
-      default: "unknown"
-    },
-
-    occurrences: {
-      type: Number,
-      default: 1,
-      min: 1
-    },
-
-    firstSeenAt: {
-      type: Date,
-      default: now
-    },
-
-    lastSeenAt: {
-      type: Date,
-      default: now
-    },
-
-    successfulRepairCount: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    failedRepairCount: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    lastSuccessfulRepairStrategy: {
-      type: String,
-      default: "",
-      maxlength: 1000
-    },
-
-    metadata: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
-    }
-  },
-  {
-    timestamps: true
-  }
-);
-
-/* ---------------- Successful Repair Pattern ---------------- */
-
-const repairPatternSchema = new mongoose.Schema(
-  {
-    patternKey: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true,
-      maxlength: 3000
-    },
-
-    failureSignature: {
-      type: String,
-      required: true,
-      index: true,
-      maxlength: 3000
-    },
-
-    strategy: {
-      type: String,
-      required: true,
-      maxlength: 1000
-    },
-
-    repairType: {
-      type: String,
-      enum: REPAIR_TYPES,
-      required: true
-    },
-
-    affectedFiles: {
-      type: [String],
-      default: []
-    },
-
-    dependencyChanges: {
-      type: [String],
-      default: []
-    },
-
-    successCount: {
-      type: Number,
-      default: 1,
-      min: 1
-    },
-
-    failureCount: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    confidence: {
-      type: Number,
-      default: 0.5,
-      min: 0,
-      max: 1
-    },
-
-    lastSuccessfulAt: {
-      type: Date,
-      default: now
-    },
-
-    metadata: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
-    }
-  },
-  {
-    timestamps: true
-  }
-);
-
-/* ---------------- Audit Event ---------------- */
-
-const auditEventSchema = new mongoose.Schema(
-  {
-    runId: {
-      type: mongoose.Schema.Types.ObjectId,
-      required: true,
-      index: true
-    },
-
-    attemptId: {
-      type: mongoose.Schema.Types.ObjectId,
-      default: null,
-      index: true
-    },
-
-    actorType: {
-      type: String,
-      enum: [
-        "user",
-        "master_agent",
-        "engineering",
-        "builder",
-        "fix_agent",
-        "system"
-      ],
-      default: "engineering"
-    },
-
-    action: {
-      type: String,
-      required: true,
-      maxlength: 300
-    },
-
-    fromState: {
-      type: String,
-      enum: ENGINEERING_STATE_VALUES,
-      default: null
-    },
-
-    toState: {
-      type: String,
-      enum: ENGINEERING_STATE_VALUES,
-      default: null
-    },
-
-    message: {
-      type: String,
-      default: "",
-      maxlength: 4000
-    },
-
-    metadata: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
-    }
-  },
-  {
-    timestamps: true
-  }
-);
-
-/* ============================================================
-   ENGINEERING RUN
-============================================================ */
-
-const engineeringRunSchema = new mongoose.Schema(
-  {
-    schemaVersion: {
-      type: Number,
-      required: true,
-      default: SCHEMA_VERSION
-    },
-
-    serviceVersion: {
-      type: String,
-      required: true,
-      default: SERVICE_VERSION
-    },
-
-    runId: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true,
-      trim: true,
-      maxlength: 300
-    },
-
-    projectId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Project",
-      required: true,
-      index: true
-    },
-
-    userId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-      index: true
-    },
-
-    workflowId: {
-      type: String,
-      default: "",
-      index: true,
-      maxlength: 300
-    },
-
-    requestId: {
-      type: String,
-      default: "",
-      index: true,
-      maxlength: 300
-    },
-
-    projectName: {
-      type: String,
-      default: "",
-      maxlength: 500
-    },
-
-    framework: {
-      type: String,
-      default: "",
-      maxlength: 200
-    },
-
-    packageManager: {
-      type: String,
-      default: "",
-      maxlength: 100
-    },
-
-    currentState: {
-      type: String,
-      enum: ENGINEERING_STATE_VALUES,
-      default: ENGINEERING_STATES.CREATED,
-      index: true
-    },
-
-    previousState: {
-      type: String,
-      enum: ENGINEERING_STATE_VALUES,
-      default: null
-    },
-
-    attemptCount: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    currentAttemptId: {
-      type: mongoose.Schema.Types.ObjectId,
-      default: null
-    },
-
-    sourceHash: {
-      type: String,
-      default: "",
-      maxlength: 256
-    },
-
-    scope: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
-    },
-
-    policy: {
-      maxAttempts: {
-        type: Number,
-        default: ENGINEERING_LIMITS.MAX_ATTEMPTS
-      },
-
-      maxRepairAttempts: {
-        type: Number,
-        default:
-          ENGINEERING_LIMITS.MAX_REPAIR_ATTEMPTS
-      },
-
-      maxDiagnosisAttempts: {
-        type: Number,
-        default:
-          ENGINEERING_LIMITS.MAX_DIAGNOSIS_ATTEMPTS
-      },
-
-      maxRepairFiles: {
-        type: Number,
-        default:
-          ENGINEERING_LIMITS.MAX_REPAIR_FILES
-      },
-
-      maxDependencyChanges: {
-        type: Number,
-        default:
-          ENGINEERING_LIMITS.MAX_DEPENDENCY_CHANGES
-      },
-
-      maxExecutionTime: {
-        type: Number,
-        default:
-          ENGINEERING_LIMITS.MAX_EXECUTION_TIME
-      },
-
-      maxScopeExpansion: {
-        type: Number,
-        default:
-          ENGINEERING_LIMITS.MAX_SCOPE_EXPANSION
-      },
-
-      maxAutoScale: {
-        type: Number,
-        default:
-          ENGINEERING_LIMITS.MAX_AUTO_SCALE
-      },
-
-      maxRollbacks: {
-        type: Number,
-        default:
-          ENGINEERING_LIMITS.MAX_ROLLBACKS
-      },
-
-      maxCheckpoints: {
-        type: Number,
-        default:
-          ENGINEERING_LIMITS.MAX_CHECKPOINTS
-      },
-
-      maxResourceLimit: {
-        type: mongoose.Schema.Types.Mixed,
-        default: () => ({
-          ...ENGINEERING_LIMITS.MAX_RESOURCE_LIMIT
-        })
-      }
-    },
-
-    success: {
-      type: Boolean,
-      default: false
-    },
-
-    promoted: {
-      type: Boolean,
-      default: false
-    },
-
-    escalated: {
-      type: Boolean,
-      default: false
-    },
-
-    rollbackRequired: {
-      type: Boolean,
-      default: false
-    },
-
-    finalArtifactId: {
-      type: mongoose.Schema.Types.ObjectId,
-      default: null
-    },
-
-    startedAt: {
-      type: Date,
-      default: null
-    },
-
-    completedAt: {
-      type: Date,
-      default: null
-    },
-
-    lastError: {
-      type: String,
-      default: "",
-      maxlength: 4000
-    },
-
-    metadata: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
-    }
-  },
-  {
-    timestamps: true
-  }
-);
-
-/* ============================================================
-   INDEXES
-============================================================ */
-
-engineeringRunSchema.index({
-  projectId: 1,
-  createdAt: -1
-});
-
-engineeringRunSchema.index({
-  userId: 1,
-  createdAt: -1
-});
-
-engineeringRunSchema.index({
-  currentState: 1,
-  createdAt: -1
-});
-
-failureSchema.index({
-  attemptId: 1,
-  createdAt: -1
-});
-
-executionSchema.index({
-  attemptId: 1,
-  createdAt: -1
-});
-
-repairSchema.index({
-  attemptId: 1,
-  createdAt: -1
-});
-
-verificationSchema.index({
-  attemptId: 1,
-  createdAt: -1
-});
-
-resourceEventSchema.index({
-  attemptId: 1,
-  createdAt: -1
-});
-
-checkpointSchema.index({
-  attemptId: 1,
-  createdAt: -1
-});
-
-rollbackSchema.index({
-  attemptId: 1,
-  createdAt: -1
-});
-
-auditEventSchema.index({
-  runId: 1,
-  createdAt: -1
-});
-
-/* ============================================================
-   MODEL REGISTRATION
-============================================================ */
-
-const EngineeringRun =
-  mongoose.models.EngineeringRun ||
-  mongoose.model(
-    "EngineeringRun",
-    engineeringRunSchema
-  );
-
-const EngineeringAttempt =
-  mongoose.models.EngineeringAttempt ||
-  mongoose.model(
-    "EngineeringAttempt",
-    attemptSchema
-  );
-
-const EngineeringExecution =
-  mongoose.models.EngineeringExecution ||
-  mongoose.model(
-    "EngineeringExecution",
-    executionSchema
-  );
-
-const EngineeringFailure =
-  mongoose.models.EngineeringFailure ||
-  mongoose.model(
-    "EngineeringFailure",
-    failureSchema
-  );
-
-const EngineeringRepair =
-  mongoose.models.EngineeringRepair ||
-  mongoose.model(
-    "EngineeringRepair",
-    repairSchema
-  );
-
-const EngineeringVerification =
-  mongoose.models.EngineeringVerification ||
-  mongoose.model(
-    "EngineeringVerification",
-    verificationSchema
-  );
-
-const EngineeringArtifact =
-  mongoose.models.EngineeringArtifact ||
-  mongoose.model(
-    "EngineeringArtifact",
-    artifactSchema
-  );
-
-const EngineeringResourceEvent =
-  mongoose.models.EngineeringResourceEvent ||
-  mongoose.model(
-    "EngineeringResourceEvent",
-    resourceEventSchema
-  );
-
-const EngineeringCheckpoint =
-  mongoose.models.EngineeringCheckpoint ||
-  mongoose.model(
-    "EngineeringCheckpoint",
-    checkpointSchema
-  );
-
-const EngineeringRollback =
-  mongoose.models.EngineeringRollback ||
-  mongoose.model(
-    "EngineeringRollback",
-    rollbackSchema
-  );
-
-const EngineeringFailureSignature =
-  mongoose.models.EngineeringFailureSignature ||
-  mongoose.model(
-    "EngineeringFailureSignature",
-    failureSignatureSchema
-  );
-
-const EngineeringRepairPattern =
-  mongoose.models.EngineeringRepairPattern ||
-  mongoose.model(
-    "EngineeringRepairPattern",
-    repairPatternSchema
-  );
-
-const EngineeringAuditEvent =
-  mongoose.models.EngineeringAuditEvent ||
-  mongoose.model(
-    "EngineeringAuditEvent",
-    auditEventSchema
-  );
-
-/* ============================================================
-   INTERNAL RUN LOOKUP
-============================================================ */
-
-async function getRunDocument(runId) {
-  const safeRunId = normalizeString(
-    runId,
-    300
-  ).trim();
-
-  if (!safeRunId) {
-    throw new Error("runId is required");
-  }
-
-  return EngineeringRun.findOne({
-    runId: safeRunId
-  }).exec();
-}
-
-/* ============================================================
-   RUN OPERATIONS
-============================================================ */
-
-async function createEngineeringRun({
-  projectId,
-  userId,
-  projectName = "",
-  framework = "",
-  packageManager = "",
-  workflowId = "",
-  requestId = "",
-  sourceHash = "",
-  scope = {},
-  policy = {},
-  metadata = {}
-}) {
-  const safeProjectId =
-    assertObjectId(
-      projectId,
-      "projectId"
-    );
-
-  const safeUserId =
-    assertObjectId(
-      userId,
-      "userId"
-    );
-
-  const normalizedPolicy =
-    normalizeRunPolicy(policy);
-
-  const runId =
-    `eng-${Date.now()}-${new mongoose.Types.ObjectId().toString()}`;
-
-  const run =
-    await EngineeringRun.create({
-      runId,
-      schemaVersion: SCHEMA_VERSION,
-      serviceVersion: SERVICE_VERSION,
-
-      projectId: safeProjectId,
-      userId: safeUserId,
-
-      projectName:
-        normalizeString(
-          projectName,
-          500
-        ),
-
-      framework:
-        normalizeString(
-          framework,
-          200
-        ),
-
-      packageManager:
-        normalizeString(
-          packageManager,
-          100
-        ),
-
-      workflowId:
-        normalizeString(
-          workflowId,
-          300
-        ),
-
-      requestId:
-        normalizeString(
-          requestId,
-          300
-        ),
-
-      sourceHash:
-        normalizeString(
-          sourceHash,
-          256
-        ),
-
-      scope:
-        safeSnapshot(scope),
-
-      policy:
-        normalizedPolicy,
-
-      metadata:
-        safeSnapshot(metadata),
-
-      currentState:
-        ENGINEERING_STATES.CREATED
-    });
-
-  await createAuditEvent({
-    runId: run._id,
-    actorType: "engineering",
-    action:
-      "engineering_run_created",
-    message:
-      "Engineering run created."
+/* =========================================================
+ * LOCKING
+ *
+ * This is an in-process atomic guard.
+ * It prevents concurrent state mutations in one Node process.
+ * ======================================================= */
+
+async function withLock(key, fn) {
+  const previous = locks.get(key) || Promise.resolve();
+
+  let release;
+
+  const current = new Promise((resolve) => {
+    release = resolve;
   });
+
+  locks.set(key, previous.then(() => current));
+
+  try {
+    await previous;
+    return await fn();
+  } finally {
+    release();
+
+    if (locks.get(key) === current) {
+      locks.delete(key);
+    }
+  }
+}
+
+function assertRun(runId) {
+  const run = runs.get(runId);
+
+  if (!run) {
+    throw new Error(`Engineering run not found: ${runId}`);
+  }
 
   return run;
 }
 
-async function getEngineeringRun(
-  runId
-) {
-  return getRunDocument(runId);
-}
+function assertAttempt(attemptId) {
+  const attempt = attempts.get(attemptId);
 
-/* ============================================================
-   STATE TRANSITION
- *
- * Atomic compare-and-set transition.
- *
- * This prevents stale concurrent workers from
- * silently overwriting state.
-============================================================ */
-
-async function transitionEngineeringState({
-  runId,
-  toState,
-  actorType = "engineering",
-  message = "",
-  metadata = {}
-}) {
-  const safeRunId =
-    normalizeString(
-      runId,
-      300
-    ).trim();
-
-  if (!safeRunId) {
+  if (!attempt) {
     throw new Error(
-      "runId is required"
+      `Engineering attempt not found: ${attemptId}`
     );
   }
-
-  if (
-    !ENGINEERING_STATE_VALUES.includes(
-      toState
-    )
-  ) {
-    throw new Error(
-      `Invalid engineering state: ${toState}`
-    );
-  }
-
-  const current =
-    await EngineeringRun.findOne({
-      runId: safeRunId
-    })
-      .select(
-        "_id currentState startedAt"
-      )
-      .lean()
-      .exec();
-
-  if (!current) {
-    throw new Error(
-      `Engineering run not found: ${safeRunId}`
-    );
-  }
-
-  const fromState =
-    current.currentState;
-
-  if (fromState === toState) {
-    return EngineeringRun.findById(
-      current._id
-    ).exec();
-  }
-
-  const allowed =
-    STATE_TRANSITIONS[
-      fromState
-    ] || [];
-
-  if (!allowed.includes(toState)) {
-    throw new Error(
-      `Invalid engineering state transition: ${fromState} → ${toState}`
-    );
-  }
-
-  const update = {
-    previousState: fromState,
-    currentState: toState
-  };
-
-  if (
-    toState ===
-    ENGINEERING_STATES.EXECUTING
-  ) {
-    update.startedAt =
-      current.startedAt ||
-      now();
-  }
-
-  if (
-    toState ===
-      ENGINEERING_STATES.PROMOTED ||
-    toState ===
-      ENGINEERING_STATES.ESCALATED
-  ) {
-    update.completedAt = now();
-  }
-
-  if (
-    toState ===
-    ENGINEERING_STATES.PASSED
-  ) {
-    update.success = true;
-  }
-
-  if (
-    toState ===
-    ENGINEERING_STATES.PROMOTED
-  ) {
-    update.success = true;
-    update.promoted = true;
-    update.escalated = false;
-    update.rollbackRequired = false;
-  }
-
-  if (
-    toState ===
-    ENGINEERING_STATES.ESCALATED
-  ) {
-    update.escalated = true;
-  }
-
-  if (
-    toState ===
-    ENGINEERING_STATES.ROLLBACK
-  ) {
-    update.rollbackRequired = true;
-  }
-
-  const updated =
-    await EngineeringRun.findOneAndUpdate(
-      {
-        _id: current._id,
-
-        /*
-         * Compare-and-set guard.
-         */
-        currentState: fromState,
-
-        /*
-         * Terminal states cannot be
-         * resurrected by stale workers.
-         */
-        promoted: {
-          $ne: true
-        },
-
-        escalated: {
-          $ne: true
-        }
-      },
-      {
-        $set: update
-      },
-      {
-        new: true,
-        runValidators: true
-      }
-    ).exec();
-
-  if (!updated) {
-    throw new Error(
-      `Engineering state transition conflict for run ${safeRunId}: expected state ${fromState}`
-    );
-  }
-
-  await createAuditEvent({
-    runId: updated._id,
-    actorType,
-    action:
-      "engineering_state_transition",
-    fromState,
-    toState,
-    message,
-    metadata
-  });
-
-  return updated;
-}
-
-/* ============================================================
-   ATTEMPT OPERATIONS
-============================================================ */
-
-async function createEngineeringAttempt({
-  runId,
-  strategy = "",
-  changedFiles = [],
-  dependencyChanges = [],
-  scopeExpansionPercent = 0
-}) {
-  const run =
-    await getRunDocument(runId);
-
-  if (!run) {
-    throw new Error(
-      `Engineering run not found: ${runId}`
-    );
-  }
-
-  if (
-    TERMINAL_STATES.has(
-      run.currentState
-    )
-  ) {
-    throw new Error(
-      `Cannot create attempt for terminal run: ${run.currentState}`
-    );
-  }
-
-  const policy =
-    normalizeRunPolicy(
-      run.policy || {}
-    );
-
-  const attemptNumber =
-    run.attemptCount + 1;
-
-  if (
-    attemptNumber >
-    policy.maxAttempts
-  ) {
-    throw new Error(
-      `Engineering attempt limit exceeded: ${policy.maxAttempts}`
-    );
-  }
-
-  const safeChangedFiles =
-    uniqueStrings(
-      changedFiles,
-      policy.maxRepairFiles
-    );
-
-  const safeDependencyChanges =
-    uniqueStrings(
-      dependencyChanges,
-      policy.maxDependencyChanges
-    );
-
-  if (
-    safeChangedFiles.length >
-    policy.maxRepairFiles
-  ) {
-    throw new Error(
-      `MAX_REPAIR_FILES exceeded: ${policy.maxRepairFiles}`
-    );
-  }
-
-  if (
-    safeDependencyChanges.length >
-    policy.maxDependencyChanges
-  ) {
-    throw new Error(
-      `MAX_DEPENDENCY_CHANGES exceeded: ${policy.maxDependencyChanges}`
-    );
-  }
-
-  const safeScopeExpansion =
-    Math.max(
-      0,
-      Number(
-        scopeExpansionPercent
-      ) || 0
-    );
-
-  if (
-    safeScopeExpansion >
-    policy.maxScopeExpansion
-  ) {
-    throw new Error(
-      `MAX_SCOPE_EXPANSION exceeded: ${policy.maxScopeExpansion}`
-    );
-  }
-
-  /*
-   * Attempt number is protected against
-   * concurrent increment races.
-   */
-  const attempt =
-    await EngineeringAttempt.create({
-      attemptNumber,
-      strategy:
-        normalizeString(
-          strategy,
-          500
-        ),
-      changedFiles:
-        safeChangedFiles,
-      dependencyChanges:
-        safeDependencyChanges,
-      scopeExpansionPercent:
-        safeScopeExpansion
-    });
-
-  const updatedRun =
-    await EngineeringRun.findOneAndUpdate(
-      {
-        _id: run._id,
-        attemptCount
-      },
-      {
-        $set: {
-          attemptCount:
-            attemptNumber,
-          currentAttemptId:
-            attempt._id
-        }
-      },
-      {
-        new: true,
-        runValidators: true
-      }
-    ).exec();
-
-  if (!updatedRun) {
-    await EngineeringAttempt.deleteOne({
-      _id: attempt._id
-    }).exec();
-
-    throw new Error(
-      `Concurrent attempt creation conflict for run ${runId}`
-    );
-  }
-
-  await createAuditEvent({
-    runId: run._id,
-    attemptId:
-      attempt._id,
-    actorType:
-      "engineering",
-    action:
-      "engineering_attempt_created",
-    message:
-      `Engineering attempt ${attemptNumber} created.`
-  });
 
   return attempt;
 }
 
-async function updateEngineeringAttempt(
-  attemptId,
-  updates = {}
-) {
-  if (
-    !isObjectId(attemptId)
-  ) {
+function assertTerminalMutationAllowed(run) {
+  if (TERMINAL_STATES.has(run.state)) {
     throw new Error(
-      "Invalid attemptId"
+      `Run ${run.id} is terminal and cannot be mutated from state ${run.state}`
     );
   }
-
-  const allowed = {};
-
-  if (
-    updates.status !== undefined
-  ) {
-    allowed.status =
-      updates.status;
-  }
-
-  if (
-    updates.strategy !== undefined
-  ) {
-    allowed.strategy =
-      normalizeString(
-        updates.strategy,
-        500
-      );
-  }
-
-  if (
-    updates.changedFiles !== undefined
-  ) {
-    allowed.changedFiles =
-      uniqueStrings(
-        updates.changedFiles,
-        ENGINEERING_LIMITS.MAX_REPAIR_FILES
-      );
-  }
-
-  if (
-    updates.dependencyChanges !==
-    undefined
-  ) {
-    allowed.dependencyChanges =
-      uniqueStrings(
-        updates.dependencyChanges,
-        ENGINEERING_LIMITS.MAX_DEPENDENCY_CHANGES
-      );
-  }
-
-  if (
-    updates.success !== undefined
-  ) {
-    allowed.success =
-      Boolean(
-        updates.success
-      );
-  }
-
-  if (
-    updates.startedAt !==
-    undefined
-  ) {
-    allowed.startedAt =
-      updates.startedAt;
-  }
-
-  if (
-    updates.completedAt !==
-    undefined
-  ) {
-    allowed.completedAt =
-      updates.completedAt;
-  }
-
-  if (
-    updates.durationMs !==
-    undefined
-  ) {
-    const duration =
-      Number(
-        updates.durationMs
-      ) || 0;
-
-    if (
-      duration >
-      ENGINEERING_LIMITS.MAX_EXECUTION_TIME
-    ) {
-      throw new Error(
-        "MAX_EXECUTION_TIME exceeded"
-      );
-    }
-
-    allowed.durationMs =
-      Math.max(
-        0,
-        duration
-      );
-  }
-
-  return EngineeringAttempt.findByIdAndUpdate(
-    attemptId,
-    {
-      $set: allowed
-    },
-    {
-      new: true,
-      runValidators: true
-    }
-  ).exec();
 }
 
-/* ============================================================
-   EXECUTION RECORD
-============================================================ */
+/* =========================================================
+ * RUN CREATION
+ * ======================================================= */
 
-async function createExecutionRecord({
-  attemptId,
-  type,
-  command = "",
-  workingDirectory = ""
-}) {
-  if (
-    !isObjectId(attemptId)
-  ) {
-    throw new Error(
-      "Invalid attemptId"
-    );
+function createRun(input = {}) {
+  const runId = input.runId || id("engrun");
+
+  if (runs.has(runId)) {
+    throw new Error(`Engineering run already exists: ${runId}`);
   }
 
-  if (
-    !EXECUTION_TYPES.includes(type)
-  ) {
-    throw new Error(
-      `Invalid execution type: ${type}`
-    );
-  }
+  const limits = normalizeLimits(
+    input.policy ||
+      input.engineeringPolicy ||
+      input.limits ||
+      {}
+  );
 
-  const executionId =
-    `exec-${Date.now()}-${new mongoose.Types.ObjectId().toString()}`;
+  const createdAt = now();
 
-  return EngineeringExecution.create({
-    executionId,
-    attemptId,
-    type,
-    command:
-      normalizeString(
-        command,
-        2000
+  const run = {
+    id: runId,
+
+    serviceVersion: SERVICE_VERSION,
+    schemaVersion: SCHEMA_VERSION,
+    engineeringSystemVersion:
+      ENGINEERING_SYSTEM_VERSION,
+
+    projectId: input.projectId || null,
+    userId: input.userId || null,
+    projectName: input.projectName || null,
+
+    jobId:
+      input.jobId ||
+      input.requestId ||
+      null,
+
+    state: STATES.CREATED,
+
+    status: "created",
+
+    createdAt,
+    updatedAt: createdAt,
+
+    startedAt: null,
+    completedAt: null,
+
+    deadlineAt: null,
+
+    currentAttemptId: null,
+
+    attemptCount: 0,
+    repairAttemptCount: 0,
+    diagnosisAttemptCount: 0,
+    rollbackCount: 0,
+    checkpointCount: 0,
+
+    cancellationRequested: false,
+    cancellationReason: null,
+
+    resumedFrom: input.resumedFrom || null,
+
+    policy: {
+      ...limits,
+    },
+
+    scope: clone(
+      input.scope ||
+        input.planningScope ||
+        null
+    ),
+
+    scopeExpansion: 1,
+
+    resources: {
+      requested: clone(
+        input.resources ||
+          limits.resourceLimit
       ),
-    workingDirectory:
-      normalizeString(
-        workingDirectory,
-        1000
-      )
-  });
-}
-
-async function completeExecutionRecord({
-  executionId,
-  status,
-  exitCode = null,
-  signal = "",
-  timedOut = false,
-  startedAt = null,
-  completedAt = null,
-  stdout = "",
-  stderr = "",
-  resourceSnapshot = {}
-}) {
-  const execution =
-    await EngineeringExecution.findOne({
-      executionId:
-        normalizeString(
-          executionId,
-          300
-        )
-    });
-
-  if (!execution) {
-    throw new Error(
-      `Execution not found: ${executionId}`
-    );
-  }
-
-  const validStatuses = [
-    "success",
-    "failed",
-    "cancelled",
-    "timeout"
-  ];
-
-  if (
-    !validStatuses.includes(
-      status
-    )
-  ) {
-    throw new Error(
-      `Invalid execution completion status: ${status}`
-    );
-  }
-
-  let durationMs = 0;
-
-  if (
-    startedAt &&
-    completedAt
-  ) {
-    durationMs =
-      new Date(
-        completedAt
-      ).getTime() -
-      new Date(
-        startedAt
-      ).getTime();
-  }
-
-  if (
-    durationMs >
-    ENGINEERING_LIMITS.MAX_EXECUTION_TIME
-  ) {
-    throw new Error(
-      "MAX_EXECUTION_TIME exceeded"
-    );
-  }
-
-  return EngineeringExecution.findByIdAndUpdate(
-    execution._id,
-    {
-      $set: {
-        status,
-        exitCode,
-        signal:
-          normalizeString(
-            signal,
-            100
-          ),
-        timedOut:
-          Boolean(
-            timedOut
-          ),
-        startedAt,
-        completedAt,
-        durationMs:
-          Math.max(
-            0,
-            durationMs
-          ),
-        stdout:
-          normalizeEvidence(
-            stdout
-          ),
-        stderr:
-          normalizeEvidence(
-            stderr
-          ),
-        resourceSnapshot:
-          safeSnapshot(
-            resourceSnapshot
-          )
-      }
+      effective: clone(limits.resourceLimit),
+      scaleFactor: 1,
+      violations: [],
     },
-    {
-      new: true,
-      runValidators: true
-    }
-  ).exec();
+
+    planning: clone(input.planning || null),
+
+    sourceHash:
+      input.sourceHash ||
+      null,
+
+    finalSourceHash:
+      input.finalSourceHash ||
+      null,
+
+    buildId:
+      input.buildId ||
+      null,
+
+    artifact: null,
+
+    authoritative: false,
+
+    validationMode: null,
+
+    execution: null,
+
+    latestFailureId: null,
+    latestRepairId: null,
+    latestVerificationId: null,
+    latestCheckpointId: null,
+    latestRollbackId: null,
+
+    failureIds: [],
+    repairIds: [],
+    verificationIds: [],
+    artifactIds: [],
+    executionIds: [],
+    resourceEventIds: [],
+    checkpointIds: [],
+    rollbackIds: [],
+
+    repairHistory: [],
+    verificationHistory: [],
+
+    audit: [],
+
+    recovery: {
+      available: false,
+      reason: null,
+      lastCheckpointId: null,
+      lastRollbackId: null,
+    },
+
+    result: null,
+
+    error: null,
+
+    metadata: clone(input.metadata || {}),
+
+    version: 0,
+  };
+
+  if (input.deadlineAt) {
+    run.deadlineAt = input.deadlineAt;
+  } else if (input.deadlineMs) {
+    run.deadlineAt = new Date(
+      Date.now() + Number(input.deadlineMs)
+    ).toISOString();
+  }
+
+  runs.set(runId, run);
+
+  appendAudit(run, {
+    type: "RUN_CREATED",
+    state: STATES.CREATED,
+  });
+
+  return snapshotRun(run);
 }
 
-/* ============================================================
-   FAILURE RECORD
-============================================================ */
+/* =========================================================
+ * RUN ACCESS
+ * ======================================================= */
 
-async function createFailureRecord({
-  attemptId,
-  stage,
-  category = "unknown",
-  severity = "medium",
-  code = "",
-  message = "",
-  rootCause = "",
-  confidence = 0,
-  retryable = false,
-  repairable = false,
-  affectedFiles = [],
-  affectedDependencies = [],
-  command = "",
-  exitCode = null,
-  signal = "",
-  timedOut = false,
-  stdout = "",
-  stderr = "",
-  evidence = {},
-  framework = "",
-  packageManager = ""
-}) {
-  if (
-    !isObjectId(attemptId)
-  ) {
-    throw new Error(
-      "Invalid attemptId"
-    );
+function getRun(runId) {
+  const run = runs.get(runId);
+
+  if (!run) {
+    return null;
   }
 
-  if (
-    !FAILURE_CATEGORIES.includes(
-      category
-    )
-  ) {
-    throw new Error(
-      `Invalid failure category: ${category}`
-    );
-  }
+  return snapshotRun(run);
+}
 
-  if (
-    !FAILURE_SEVERITIES.includes(
-      severity
-    )
-  ) {
-    throw new Error(
-      `Invalid failure severity: ${severity}`
-    );
-  }
+function getMutableRun(runId) {
+  return assertRun(runId);
+}
 
-  const safeMessage =
-    normalizeString(
-      message,
-      4000
-    );
+function snapshotRun(run) {
+  return clone(run);
+}
 
-  const signature =
-    buildFailureSignature({
-      category,
-      code,
-      message:
-        safeMessage,
-      command,
-      framework,
-      packageManager
-    });
+/* =========================================================
+ * AUDIT
+ * ======================================================= */
 
-  const failureId =
-    `failure-${Date.now()}-${new mongoose.Types.ObjectId().toString()}`;
+function appendAudit(run, event = {}) {
+  const entry = {
+    id: id("audit"),
+    timestamp: now(),
+    type: safeString(event.type, "UNKNOWN"),
+    fromState:
+      event.fromState ??
+      null,
+    toState:
+      event.toState ??
+      null,
+    state:
+      event.state ??
+      run.state,
+    actor:
+      event.actor ||
+      "engineering-state",
+    reason:
+      event.reason ||
+      null,
+    metadata:
+      clone(event.metadata || {}),
+  };
 
-  const failure =
-    await EngineeringFailure.create({
-      failureId,
-      attemptId,
-      stage:
-        normalizeString(
-          stage,
-          200
-        ),
-      category,
-      severity,
-      code:
-        normalizeString(
-          code,
-          300
-        ),
-      message:
-        safeMessage,
-      rootCause:
-        normalizeString(
-          rootCause,
-          4000
-        ),
-      confidence:
-        clampNumber(
-          confidence,
-          0,
-          1,
-          0
-        ),
-      retryable:
-        Boolean(
-          retryable
-        ),
-      repairable:
-        Boolean(
-          repairable
-        ),
-      affectedFiles:
-        uniqueStrings(
-          affectedFiles,
-          ENGINEERING_LIMITS.MAX_AFFECTED_FILES
-        ),
-      affectedDependencies:
-        uniqueStrings(
-          affectedDependencies,
-          ENGINEERING_LIMITS.MAX_AFFECTED_DEPENDENCIES
-        ),
-      command:
-        normalizeString(
-          command,
-          2000
-        ),
-      exitCode,
-      signal:
-        normalizeString(
-          signal,
-          100
-        ),
-      timedOut:
-        Boolean(
-          timedOut
-        ),
-      stdout:
-        normalizeEvidence(
-          stdout
-        ),
-      stderr:
-        normalizeEvidence(
-          stderr
-        ),
-      signature,
-      evidence:
-        safeSnapshot(
-          evidence
-        )
-    });
-
-  await registerFailureSignature({
-    signature,
-    category
-  });
+  run.audit.push(entry);
 
   /*
-   * Keep the current attempt linked
-   * to its latest authoritative failure.
+   * Audit is bounded by the same output/event philosophy.
+   * Keep the state record finite.
    */
-  await EngineeringAttempt.findByIdAndUpdate(
-    attemptId,
-    {
-      $set: {
-        failureRecordId:
-          failure._id,
-        status:
-          "failed"
-      }
-    }
-  ).exec();
+  if (run.audit.length > 500) {
+    run.audit.splice(
+      0,
+      run.audit.length - 500
+    );
+  }
 
-  return failure;
+  run.updatedAt = now();
+  run.version += 1;
+
+  return entry;
 }
 
-/* ============================================================
-   REPAIR RECORD
-============================================================ */
+/* =========================================================
+ * STATE TRANSITION
+ * ======================================================= */
 
-async function createRepairRecord({
+function canTransition(from, to) {
+  if (!STATES[from] || !STATES[to]) {
+    return false;
+  }
+
+  if (from === to) {
+    return true;
+  }
+
+  const allowed = STATE_TRANSITIONS[from];
+
+  return Boolean(
+    allowed &&
+      allowed.has(to)
+  );
+}
+
+function transitionState(
+  runId,
+  nextState,
+  options = {}
+) {
+  const run = assertRun(runId);
+
+  if (!STATES[nextState]) {
+    throw new Error(
+      `Invalid engineering state: ${nextState}`
+    );
+  }
+
+  const previousState = run.state;
+
+  if (previousState === nextState) {
+    /*
+     * Same-state transition is not an actual transition.
+     * Record an explicit audit event only.
+     */
+    appendAudit(run, {
+      type: "STATE_REASSERTED",
+      fromState: previousState,
+      toState: nextState,
+      reason: options.reason || null,
+      actor:
+        options.actor ||
+        "engineering-orchestrator",
+      metadata: options.metadata || {},
+    });
+
+    return snapshotRun(run);
+  }
+
+  if (
+    TERMINAL_STATES.has(previousState)
+  ) {
+    throw new Error(
+      `Illegal transition from terminal state ${previousState} to ${nextState}`
+    );
+  }
+
+  if (
+    !canTransition(
+      previousState,
+      nextState
+    )
+  ) {
+    throw new Error(
+      `Invalid engineering state transition: ${previousState} -> ${nextState}`
+    );
+  }
+
+  const timestamp = now();
+
+  run.state = nextState;
+
+  if (
+    nextState === STATES.ANALYZING &&
+    !run.startedAt
+  ) {
+    run.startedAt = timestamp;
+  }
+
+  if (
+    TERMINAL_STATES.has(nextState)
+  ) {
+    run.completedAt =
+      run.completedAt ||
+      timestamp;
+
+    run.status =
+      nextState === STATES.PASSED ||
+      nextState === STATES.PROMOTED
+        ? "success"
+        : "failed";
+  } else {
+    run.status = nextState.toLowerCase();
+  }
+
+  appendAudit(run, {
+    type: "STATE_TRANSITION",
+    fromState: previousState,
+    toState: nextState,
+    reason: options.reason || null,
+    actor:
+      options.actor ||
+      "engineering-orchestrator",
+    metadata: options.metadata || {},
+  });
+
+  return snapshotRun(run);
+}
+
+/* =========================================================
+ * ATTEMPT
+ * ======================================================= */
+
+function createAttempt(
+  runId,
+  input = {}
+) {
+  const run = assertRun(runId);
+
+  assertTerminalMutationAllowed(run);
+
+  if (run.currentAttemptId) {
+    const current =
+      attempts.get(
+        run.currentAttemptId
+      );
+
+    if (
+      current &&
+      (
+        current.status ===
+          ATTEMPT_STATUS.CREATED ||
+        current.status ===
+          ATTEMPT_STATUS.RUNNING
+      )
+    ) {
+      throw new Error(
+        `Run ${runId} already has an active attempt: ${current.id}`
+      );
+    }
+  }
+
+  if (
+    run.attemptCount >=
+    run.policy.MAX_ATTEMPTS
+  ) {
+    throw new Error(
+      `Maximum engineering attempts exceeded for run ${runId}`
+    );
+  }
+
+  const attemptId =
+    input.attemptId ||
+    id("attempt");
+
+  if (attempts.has(attemptId)) {
+    throw new Error(
+      `Engineering attempt already exists: ${attemptId}`
+    );
+  }
+
+  const timestamp = now();
+
+  const attempt = {
+    id: attemptId,
+
+    runId,
+
+    number:
+      run.attemptCount + 1,
+
+    status:
+      ATTEMPT_STATUS.CREATED,
+
+    createdAt: timestamp,
+    startedAt: null,
+    completedAt: null,
+
+    stateAtCreation:
+      run.state,
+
+    executionId: null,
+
+    failureRecordId: null,
+    repairRecordId: null,
+    verificationRecordId: null,
+
+    sourceHashBefore:
+      input.sourceHashBefore ||
+      run.finalSourceHash ||
+      run.sourceHash ||
+      null,
+
+    sourceHashAfter:
+      input.sourceHashAfter ||
+      null,
+
+    buildId:
+      input.buildId ||
+      null,
+
+    authoritative: false,
+
+    validationMode:
+      input.validationMode ||
+      null,
+
+    resourceEventIds: [],
+
+    metadata:
+      clone(input.metadata || {}),
+
+    error: null,
+  };
+
+  attempts.set(
+    attemptId,
+    attempt
+  );
+
+  run.attemptCount += 1;
+  run.currentAttemptId =
+    attemptId;
+
+  appendAudit(run, {
+    type: "ATTEMPT_CREATED",
+    metadata: {
+      attemptId,
+      attemptNumber:
+        attempt.number,
+    },
+  });
+
+  return snapshotAttempt(
+    attempt
+  );
+}
+
+function startAttempt(attemptId) {
+  const attempt =
+    assertAttempt(attemptId);
+
+  if (
+    attempt.status !==
+      ATTEMPT_STATUS.CREATED
+  ) {
+    throw new Error(
+      `Attempt ${attemptId} cannot start from status ${attempt.status}`
+    );
+  }
+
+  attempt.status =
+    ATTEMPT_STATUS.RUNNING;
+
+  attempt.startedAt = now();
+
+  return snapshotAttempt(
+    attempt
+  );
+}
+
+function completeAttempt(
   attemptId,
-  type,
-  strategy,
-  reason = "",
-  affectedFiles = [],
-  dependencyChanges = [],
-  confidence = 0,
-  risk = "medium",
-  aiGenerated = false
-}) {
+  result = {}
+) {
+  const attempt =
+    assertAttempt(attemptId);
+
   if (
-    !isObjectId(attemptId)
+    attempt.status !==
+      ATTEMPT_STATUS.RUNNING
   ) {
     throw new Error(
-      "Invalid attemptId"
+      `Attempt ${attemptId} is not running`
     );
   }
 
-  if (
-    !REPAIR_TYPES.includes(type)
+  attempt.completedAt = now();
+
+  if (result.cancelled) {
+    attempt.status =
+      ATTEMPT_STATUS.CANCELLED;
+  } else if (
+    result.success === true
   ) {
-    throw new Error(
-      `Invalid repair type: ${type}`
+    attempt.status =
+      ATTEMPT_STATUS.PASSED;
+  } else {
+    attempt.status =
+      ATTEMPT_STATUS.FAILED;
+  }
+
+  attempt.sourceHashAfter =
+    result.sourceHash ||
+    result.sourceHashAfter ||
+    attempt.sourceHashAfter ||
+    null;
+
+  attempt.buildId =
+    result.buildId ||
+    attempt.buildId ||
+    null;
+
+  attempt.authoritative =
+    result.authoritative === true;
+
+  attempt.validationMode =
+    result.validationMode ||
+    attempt.validationMode ||
+    null;
+
+  attempt.error =
+    clone(result.error || null);
+
+  return snapshotAttempt(
+    attempt
+  );
+}
+
+function cancelAttempt(
+  attemptId,
+  reason
+) {
+  const attempt =
+    assertAttempt(attemptId);
+
+  if (
+    attempt.status ===
+      ATTEMPT_STATUS.PASSED ||
+    attempt.status ===
+      ATTEMPT_STATUS.FAILED ||
+    attempt.status ===
+      ATTEMPT_STATUS.ROLLED_BACK ||
+    attempt.status ===
+      ATTEMPT_STATUS.CANCELLED
+  ) {
+    return snapshotAttempt(
+      attempt
     );
   }
 
-  const safeFiles =
-    uniqueStrings(
-      affectedFiles,
-      ENGINEERING_LIMITS.MAX_REPAIR_FILES
-    );
+  attempt.status =
+    ATTEMPT_STATUS.CANCELLED;
 
-  const safeDependencies =
-    uniqueStrings(
-      dependencyChanges,
-      ENGINEERING_LIMITS.MAX_DEPENDENCY_CHANGES
-    );
+  attempt.completedAt =
+    now();
+
+  attempt.error = {
+    message:
+      reason ||
+      "Attempt cancelled",
+  };
+
+  return snapshotAttempt(
+    attempt
+  );
+}
+
+function markAttemptRolledBack(
+  attemptId,
+  reason
+) {
+  const attempt =
+    assertAttempt(attemptId);
+
+  attempt.status =
+    ATTEMPT_STATUS.ROLLED_BACK;
+
+  attempt.completedAt =
+    attempt.completedAt ||
+    now();
+
+  attempt.error = {
+    message:
+      reason ||
+      "Attempt rolled back",
+  };
+
+  return snapshotAttempt(
+    attempt
+  );
+}
+
+function getAttempt(attemptId) {
+  const attempt =
+    attempts.get(attemptId);
+
+  return attempt
+    ? snapshotAttempt(attempt)
+    : null;
+}
+
+function snapshotAttempt(
+  attempt
+) {
+  return clone(attempt);
+}
+
+/* =========================================================
+ * EXECUTION RECORD
+ * ======================================================= */
+
+function recordExecution(
+  runId,
+  input = {}
+) {
+  const run = assertRun(runId);
+
+  const executionId =
+    input.executionId ||
+    id("execution");
 
   if (
-    safeFiles.length >
-    ENGINEERING_LIMITS.MAX_REPAIR_FILES
+    executions.has(executionId)
   ) {
     throw new Error(
-      "MAX_REPAIR_FILES exceeded"
+      `Execution already exists: ${executionId}`
     );
   }
 
+  const record = {
+    id: executionId,
+
+    runId,
+
+    attemptId:
+      input.attemptId ||
+      run.currentAttemptId ||
+      null,
+
+    type:
+      input.type ||
+      "build",
+
+    status:
+      input.status ||
+      EXECUTION_STATUS.FAILED,
+
+    startedAt:
+      input.startedAt ||
+      null,
+
+    completedAt:
+      input.completedAt ||
+      now(),
+
+    exitCode:
+      input.exitCode ??
+      null,
+
+    signal:
+      input.signal ||
+      null,
+
+    timedOut:
+      input.timedOut === true,
+
+    cancelled:
+      input.cancelled === true,
+
+    authoritative:
+      input.authoritative === true,
+
+    validationMode:
+      input.validationMode ||
+      null,
+
+    buildId:
+      input.buildId ||
+      null,
+
+    buildCommand:
+      input.buildCommand ||
+      null,
+
+    installCommand:
+      input.installCommand ||
+      null,
+
+    stdout:
+      safeString(input.stdout).slice(
+        -run.policy.MAX_OUTPUT_CHARS
+      ),
+
+    stderr:
+      safeString(input.stderr).slice(
+        -run.policy.MAX_OUTPUT_CHARS
+      ),
+
+    errors:
+      normalizeArray(
+        input.errors,
+        run.policy.MAX_ERROR_MESSAGES
+      ),
+
+    warnings:
+      normalizeArray(
+        input.warnings,
+        run.policy.MAX_ERROR_MESSAGES
+      ),
+
+    sourceHash:
+      input.sourceHash ||
+      null,
+
+    artifact:
+      clone(input.artifact || null),
+
+    resourceUsage:
+      clone(input.resourceUsage || null),
+
+    metadata:
+      clone(input.metadata || {}),
+  };
+
+  executions.set(
+    executionId,
+    record
+  );
+
+  run.executionIds.push(
+    executionId
+  );
+
+  if (record.buildId) {
+    run.buildId =
+      record.buildId;
+  }
+
+  run.execution = clone(record);
+
+  if (record.authoritative) {
+    run.authoritative = true;
+  }
+
+  if (record.validationMode) {
+    run.validationMode =
+      record.validationMode;
+  }
+
+  appendAudit(run, {
+    type: "EXECUTION_RECORDED",
+    metadata: {
+      executionId,
+      attemptId:
+        record.attemptId,
+      status:
+        record.status,
+      authoritative:
+        record.authoritative,
+    },
+  });
+
+  return clone(record);
+}
+
+/* =========================================================
+ * FAILURE RECORD
+ * ======================================================= */
+
+function normalizeFailure(
+  run,
+  input = {}
+) {
+  const affectedFiles =
+    normalizeArray(
+      input.affectedFiles,
+      run.policy.MAX_AFFECTED_FILES
+    );
+
+  const affectedDependencies =
+    normalizeArray(
+      input.affectedDependencies,
+      run.policy.MAX_AFFECTED_DEPENDENCIES
+    );
+
+  return {
+    id:
+      input.id ||
+      id("failure"),
+
+    runId:
+      run.id,
+
+    attemptId:
+      input.attemptId ||
+      run.currentAttemptId ||
+      null,
+
+    timestamp:
+      input.timestamp ||
+      now(),
+
+    stage:
+      input.stage ||
+      input.failureStage ||
+      "unknown",
+
+    category:
+      input.category ||
+      "unknown",
+
+    signature:
+      input.signature ||
+      null,
+
+    message:
+      safeString(
+        input.message ||
+          input.error ||
+          "Engineering execution failed"
+      ).slice(0, 5000),
+
+    errors:
+      normalizeArray(
+        input.errors,
+        run.policy.MAX_ERROR_MESSAGES
+      ),
+
+    stdout:
+      safeString(input.stdout).slice(
+        -run.policy.MAX_OUTPUT_CHARS
+      ),
+
+    stderr:
+      safeString(input.stderr).slice(
+        -run.policy.MAX_OUTPUT_CHARS
+      ),
+
+    exitCode:
+      input.exitCode ??
+      null,
+
+    signal:
+      input.signal ||
+      null,
+
+    timedOut:
+      input.timedOut === true,
+
+    retryable:
+      input.retryable === true,
+
+    authoritative:
+      input.authoritative === true,
+
+    validationMode:
+      input.validationMode ||
+      null,
+
+    buildId:
+      input.buildId ||
+      null,
+
+    sourceHash:
+      input.sourceHash ||
+      null,
+
+    buildCommand:
+      input.buildCommand ||
+      null,
+
+    installCommand:
+      input.installCommand ||
+      null,
+
+    resourceViolation:
+      input.resourceViolation === true,
+
+    affectedFiles,
+
+    affectedDependencies,
+
+    metadata:
+      clone(input.metadata || {}),
+  };
+}
+
+function recordFailure(
+  runId,
+  input = {}
+) {
+  const run = assertRun(runId);
+
+  const failure =
+    normalizeFailure(
+      run,
+      input
+    );
+
   if (
-    safeDependencies.length >
-    ENGINEERING_LIMITS.MAX_DEPENDENCY_CHANGES
+    failures.has(failure.id)
   ) {
     throw new Error(
-      "MAX_DEPENDENCY_CHANGES exceeded"
+      `Failure already exists: ${failure.id}`
+    );
+  }
+
+  failures.set(
+    failure.id,
+    failure
+  );
+
+  run.failureIds.push(
+    failure.id
+  );
+
+  run.latestFailureId =
+    failure.id;
+
+  if (failure.sourceHash) {
+    run.finalSourceHash =
+      failure.sourceHash;
+  }
+
+  const attempt =
+    failure.attemptId
+      ? attempts.get(
+          failure.attemptId
+        )
+      : null;
+
+  if (attempt) {
+    attempt.failureRecordId =
+      failure.id;
+
+    attempt.status =
+      ATTEMPT_STATUS.FAILED;
+
+    attempt.completedAt =
+      attempt.completedAt ||
+      now();
+
+    attempt.error =
+      clone(failure);
+  }
+
+  appendAudit(run, {
+    type: "FAILURE_RECORDED",
+    metadata: {
+      failureId:
+        failure.id,
+      category:
+        failure.category,
+      stage:
+        failure.stage,
+      retryable:
+        failure.retryable,
+    },
+  });
+
+  return clone(failure);
+}
+
+function getFailure(failureId) {
+  const failure =
+    failures.get(failureId);
+
+  return failure
+    ? clone(failure)
+    : null;
+}
+
+/* =========================================================
+ * REPAIR RECORD
+ * ======================================================= */
+
+function createRepair(
+  runId,
+  input = {}
+) {
+  const run = assertRun(runId);
+
+  assertTerminalMutationAllowed(run);
+
+  if (
+    run.repairAttemptCount >=
+    run.policy.MAX_REPAIR_ATTEMPTS
+  ) {
+    throw new Error(
+      `Maximum repair attempts exceeded for run ${runId}`
     );
   }
 
   const repairId =
-    `repair-${Date.now()}-${new mongoose.Types.ObjectId().toString()}`;
+    input.repairId ||
+    id("repair");
 
-  const repair =
-    await EngineeringRepair.create({
-      repairId,
-      attemptId,
-      type,
-      strategy:
-        normalizeString(
-          strategy,
-          1000
-        ),
-      reason:
-        normalizeString(
-          reason,
-          4000
-        ),
-      affectedFiles:
-        safeFiles,
-      dependencyChanges:
-        safeDependencies,
-      changedFilesCount:
-        safeFiles.length,
-      confidence:
-        clampNumber(
-          confidence,
-          0,
-          1,
+  if (
+    repairs.has(repairId)
+  ) {
+    throw new Error(
+      `Repair already exists: ${repairId}`
+    );
+  }
+
+  const affectedFiles =
+    normalizeArray(
+      input.affectedFiles ||
+        input.files,
+      run.policy.MAX_REPAIR_FILES
+    );
+
+  const dependencyChanges =
+    normalizeArray(
+      input.dependencyChanges,
+      run.policy.MAX_DEPENDENCY_CHANGES
+    );
+
+  const repair = {
+    id: repairId,
+
+    runId,
+
+    attemptId:
+      input.attemptId ||
+      run.currentAttemptId ||
+      null,
+
+    failureId:
+      input.failureId ||
+      run.latestFailureId ||
+      null,
+
+    timestamp: now(),
+
+    type:
+      input.type ||
+      REPAIR_TYPES.UNKNOWN,
+
+    status:
+      input.status ||
+      REPAIR_STATUS.PROPOSED,
+
+    reason:
+      input.reason ||
+      null,
+
+    confidence:
+      clamp(
+        finiteNumber(
+          input.confidence,
           0
         ),
-      risk,
-      aiGenerated:
-        Boolean(
-          aiGenerated
+        0,
+        1
+      ),
+
+    affectedFiles,
+
+    dependencyChanges,
+
+    sourceHashBefore:
+      input.sourceHashBefore ||
+      run.finalSourceHash ||
+      run.sourceHash ||
+      null,
+
+    sourceHashAfter:
+      input.sourceHashAfter ||
+      null,
+
+    changedBytes:
+      nonNegative(
+        input.changedBytes,
+        0
+      ),
+
+    patchBytes:
+      nonNegative(
+        input.patchBytes,
+        0
+      ),
+
+    newFiles:
+      normalizeArray(
+        input.newFiles,
+        run.policy.MAX_REPAIR_FILES
+      ),
+
+    deletedFiles:
+      normalizeArray(
+        input.deletedFiles,
+        run.policy.MAX_REPAIR_FILES
+      ),
+
+    metadata:
+      clone(input.metadata || {}),
+  };
+
+  repairs.set(
+    repairId,
+    repair
+  );
+
+  run.repairIds.push(
+    repairId
+  );
+
+  run.latestRepairId =
+    repairId;
+
+  run.repairAttemptCount += 1;
+
+  run.repairHistory.push({
+    repairId,
+    type: repair.type,
+    status: repair.status,
+    timestamp: repair.timestamp,
+  });
+
+  const attempt =
+    repair.attemptId
+      ? attempts.get(
+          repair.attemptId
         )
-    });
+      : null;
 
-  await EngineeringAttempt.findByIdAndUpdate(
-    attemptId,
-    {
-      $addToSet: {
-        repairRecordIds:
-          repair._id
-      }
-    }
-  ).exec();
+  if (attempt) {
+    attempt.repairRecordId =
+      repairId;
+  }
 
-  return repair;
+  appendAudit(run, {
+    type: "REPAIR_RECORDED",
+    metadata: {
+      repairId,
+      type: repair.type,
+      affectedFiles:
+        affectedFiles.length,
+      dependencyChanges:
+        dependencyChanges.length,
+    },
+  });
+
+  return clone(repair);
 }
 
-/* ============================================================
-   VERIFICATION RECORD
-============================================================ */
+function updateRepair(
+  repairId,
+  patch = {}
+) {
+  const repair =
+    repairs.get(repairId);
 
-async function createVerificationRecord({
-  attemptId,
-  type,
-  authoritative = false
-}) {
-  if (
-    !isObjectId(attemptId)
-  ) {
+  if (!repair) {
     throw new Error(
-      "Invalid attemptId"
+      `Repair not found: ${repairId}`
     );
   }
 
   if (
-    !VERIFICATION_TYPES.includes(
-      type
-    )
+    patch.status &&
+    !Object.values(
+      REPAIR_STATUS
+    ).includes(patch.status)
   ) {
     throw new Error(
-      `Invalid verification type: ${type}`
+      `Invalid repair status: ${patch.status}`
     );
   }
+
+  Object.assign(
+    repair,
+    clone(patch)
+  );
+
+  repair.updatedAt =
+    now();
+
+  return clone(repair);
+}
+
+function recordRepair(
+  runId,
+  input = {}
+) {
+  return createRepair(
+    runId,
+    input
+  );
+}
+
+function getRepair(repairId) {
+  const repair =
+    repairs.get(repairId);
+
+  return repair
+    ? clone(repair)
+    : null;
+}
+
+/* =========================================================
+ * VERIFICATION
+ * ======================================================= */
+
+function recordVerification(
+  runId,
+  input = {}
+) {
+  const run = assertRun(runId);
 
   const verificationId =
-    `verify-${Date.now()}-${new mongoose.Types.ObjectId().toString()}`;
+    input.verificationId ||
+    id("verification");
 
-  const verification =
-    await EngineeringVerification.create({
-      verificationId,
-      attemptId,
-      type,
-      authoritative:
-        Boolean(
-          authoritative
-        )
-    });
-
-  await EngineeringAttempt.findByIdAndUpdate(
-    attemptId,
-    {
-      $addToSet: {
-        verificationRecordIds:
-          verification._id
-      }
-    }
-  ).exec();
-
-  return verification;
-}
-
-async function completeVerificationRecord({
-  verificationId,
-  success,
-  status,
-  evidence = {},
-  errors = [],
-  warnings = [],
-  startedAt = null,
-  completedAt = null
-}) {
-  const verification =
-    await EngineeringVerification.findOne({
-      verificationId:
-        normalizeString(
-          verificationId,
-          300
-        )
-    });
-
-  if (!verification) {
+  if (
+    verifications.has(
+      verificationId
+    )
+  ) {
     throw new Error(
-      `Verification not found: ${verificationId}`
+      `Verification already exists: ${verificationId}`
     );
   }
 
-  const validStatuses = [
-    "pending",
-    "running",
-    "passed",
-    "failed",
-    "skipped"
-  ];
+  const status =
+    input.status ||
+    (
+      input.success === true
+        ? VERIFICATION_STATUS.PASSED
+        : VERIFICATION_STATUS.FAILED
+    );
 
   if (
-    !validStatuses.includes(
-      status
-    )
+    !Object.values(
+      VERIFICATION_STATUS
+    ).includes(status)
   ) {
     throw new Error(
       `Invalid verification status: ${status}`
     );
   }
 
-  const durationMs =
-    startedAt &&
-    completedAt
-      ? Math.max(
-          0,
-          new Date(
-            completedAt
-          ).getTime() -
-            new Date(
-              startedAt
-            ).getTime()
-        )
-      : 0;
+  const record = {
+    id: verificationId,
 
-  return EngineeringVerification.findByIdAndUpdate(
-    verification._id,
-    {
-      $set: {
-        success:
-          Boolean(
-            success
-          ),
-        status,
-        evidence:
-          safeSnapshot(
-            evidence
-          ),
-        errors:
-          uniqueStrings(
-            errors,
-            ENGINEERING_LIMITS.MAX_ERROR_MESSAGES
-          ),
-        warnings:
-          uniqueStrings(
-            warnings,
-            ENGINEERING_LIMITS.MAX_ERROR_MESSAGES
-          ),
-        startedAt,
-        completedAt,
-        durationMs
-      }
-    },
-    {
-      new: true,
-      runValidators: true
-    }
-  ).exec();
-}
+    runId,
 
-/* ============================================================
-   ARTIFACT RECORD
-============================================================ */
+    attemptId:
+      input.attemptId ||
+      run.currentAttemptId ||
+      null,
 
-async function createArtifactRecord({
-  attemptId,
-  artifactId,
-  name,
-  type = "build",
-  storageKey = "",
-  url = "",
-  size = 0,
-  checksum = "",
-  verified = false
-}) {
-  if (
-    !isObjectId(attemptId)
-  ) {
-    throw new Error(
-      "Invalid attemptId"
-    );
-  }
+    timestamp:
+      input.timestamp ||
+      now(),
 
-  if (!artifactId) {
-    throw new Error(
-      "artifactId is required"
-    );
-  }
+    status,
 
-  if (
-    ![
-      "build",
-      "bundle",
-      "source",
-      "archive",
-      "container",
-      "preview",
-      "other"
-    ].includes(type)
-  ) {
-    throw new Error(
-      `Invalid artifact type: ${type}`
-    );
-  }
+    success:
+      status ===
+      VERIFICATION_STATUS.PASSED,
 
-  return EngineeringArtifact.create({
-    artifactId:
-      normalizeString(
-        artifactId,
-        300
-      ),
-    attemptId,
-    name:
-      normalizeString(
-        name,
-        500
-      ),
-    type,
-    storageKey:
-      normalizeString(
-        storageKey,
-        2000
-      ),
-    url:
-      normalizeString(
-        url,
-        2000
-      ),
-    size:
-      Math.max(
-        0,
-        Number(size) || 0
-      ),
-    checksum:
-      normalizeString(
-        checksum,
-        256
-      ),
-    verified:
-      Boolean(
-        verified
-      )
-  });
-}
+    authoritative:
+      input.authoritative === true,
 
-/* ============================================================
-   RESOURCE EVENT
- *
- * Run policy is the effective limit.
- * Global policy is the hard ceiling.
-============================================================ */
+    validationMode:
+      input.validationMode ||
+      null,
 
-async function createResourceEvent({
-  attemptId,
-  type,
-  cpuCores = 0,
-  memoryMB = 0,
-  pids = 0,
-  diskMB = 0,
-  durationMs = 0,
-  action = "",
-  metadata = {}
-}) {
-  if (
-    !isObjectId(attemptId)
-  ) {
-    throw new Error(
-      "Invalid attemptId"
-    );
-  }
+    buildId:
+      input.buildId ||
+      null,
 
-  const attempt =
-    await EngineeringAttempt.findById(
-      attemptId
-    )
-      .select("_id")
-      .lean()
-      .exec();
-
-  if (!attempt) {
-    throw new Error(
-      `Engineering attempt not found: ${attemptId}`
-    );
-  }
-
-  const run =
-    await EngineeringRun.findOne({
-      currentAttemptId:
-        attempt._id
-    })
-      .select("policy")
-      .lean()
-      .exec();
-
-  const limits =
-    normalizeRunPolicy(
-      run?.policy || {}
-    ).maxResourceLimit;
-
-  const cpu =
-    Math.max(
-      0,
-      Number(cpuCores) || 0
-    );
-
-  const memory =
-    Math.max(
-      0,
-      Number(memoryMB) || 0
-    );
-
-  const processCount =
-    Math.max(
-      0,
-      Number(pids) || 0
-    );
-
-  const disk =
-    Math.max(
-      0,
-      Number(diskMB) || 0
-    );
-
-  if (
-    cpu > limits.cpuCores ||
-    memory > limits.memoryMB ||
-    processCount > limits.pids ||
-    disk > limits.diskMB
-  ) {
-    throw new Error(
-      "MAX_RESOURCE_LIMIT exceeded"
-    );
-  }
-
-  return EngineeringResourceEvent.create({
-    attemptId,
-    type,
-    cpuCores: cpu,
-    memoryMB: memory,
-    pids: processCount,
-    diskMB: disk,
-    durationMs:
-      Math.max(
-        0,
-        Number(durationMs) || 0
-      ),
-    action:
-      normalizeString(
-        action,
-        500
-      ),
-    metadata:
-      safeSnapshot(
-        metadata
-      )
-  });
-}
-
-/* ============================================================
-   CHECKPOINT
-============================================================ */
-
-async function createCheckpoint({
-  attemptId,
-  checkpointId,
-  sourceHash = "",
-  files = [],
-  artifactId = null,
-  reason = ""
-}) {
-  if (
-    !isObjectId(attemptId)
-  ) {
-    throw new Error(
-      "Invalid attemptId"
-    );
-  }
-
-  if (
-    artifactId &&
-    !isObjectId(artifactId)
-  ) {
-    throw new Error(
-      "Invalid artifactId"
-    );
-  }
-
-  if (!checkpointId) {
-    throw new Error(
-      "checkpointId is required"
-    );
-  }
-
-  const attempt =
-    await EngineeringAttempt.findById(
-      attemptId
-    )
-      .select("_id")
-      .lean()
-      .exec();
-
-  if (!attempt) {
-    throw new Error(
-      `Engineering attempt not found: ${attemptId}`
-    );
-  }
-
-  const run =
-    await EngineeringRun.findOne({
-      currentAttemptId:
-        attempt._id
-    })
-      .select("policy")
-      .lean()
-      .exec();
-
-  const policy =
-    normalizeRunPolicy(
-      run?.policy || {}
-    );
-
-  const checkpointCount =
-    await EngineeringCheckpoint.countDocuments({
-      attemptId: {
-        $exists: true
-      }
-    });
-
-  if (
-    checkpointCount >=
-    policy.maxCheckpoints
-  ) {
-    throw new Error(
-      `MAX_CHECKPOINTS exceeded: ${policy.maxCheckpoints}`
-    );
-  }
-
-  return EngineeringCheckpoint.create({
-    checkpointId:
-      normalizeString(
-        checkpointId,
-        300
-      ),
-    attemptId,
     sourceHash:
-      normalizeString(
-        sourceHash,
-        256
+      input.sourceHash ||
+      null,
+
+    checks:
+      clone(input.checks || {}),
+
+    errors:
+      normalizeArray(
+        input.errors,
+        run.policy.MAX_ERROR_MESSAGES
       ),
-    files:
-      uniqueStrings(
-        files,
-        1000
+
+    warnings:
+      normalizeArray(
+        input.warnings,
+        run.policy.MAX_ERROR_MESSAGES
       ),
-    artifactId,
-    reason:
-      normalizeString(
-        reason,
-        1000
-      ),
-    restorable:
-      true
+
+    artifact:
+      clone(input.artifact || null),
+
+    metadata:
+      clone(input.metadata || {}),
+  };
+
+  verifications.set(
+    verificationId,
+    record
+  );
+
+  run.verificationIds.push(
+    verificationId
+  );
+
+  run.latestVerificationId =
+    verificationId;
+
+  run.verificationHistory.push({
+    verificationId,
+    status,
+    timestamp:
+      record.timestamp,
   });
-}
-
-/* ============================================================
-   ROLLBACK
-============================================================ */
-
-async function createRollbackRecord({
-  attemptId,
-  checkpointId = null,
-  reason
-}) {
-  if (
-    !isObjectId(attemptId)
-  ) {
-    throw new Error(
-      "Invalid attemptId"
-    );
-  }
-
-  if (
-    checkpointId &&
-    !isObjectId(checkpointId)
-  ) {
-    throw new Error(
-      "Invalid checkpointId"
-    );
-  }
-
-  if (!reason) {
-    throw new Error(
-      "Rollback reason is required"
-    );
-  }
 
   const attempt =
-    await EngineeringAttempt.findById(
-      attemptId
-    )
-      .select("_id")
-      .lean()
-      .exec();
+    record.attemptId
+      ? attempts.get(
+          record.attemptId
+        )
+      : null;
 
-  if (!attempt) {
-    throw new Error(
-      `Engineering attempt not found: ${attemptId}`
-    );
+  if (attempt) {
+    attempt.verificationRecordId =
+      verificationId;
   }
 
-  const run =
-    await EngineeringRun.findOne({
-      currentAttemptId:
-        attempt._id
-    })
-      .select("policy")
-      .lean()
-      .exec();
-
-  const policy =
-    normalizeRunPolicy(
-      run?.policy || {}
-    );
-
-  const rollbackCount =
-    await EngineeringRollback.countDocuments({
-      attemptId: {
-        $exists: true
-      }
-    });
-
-  if (
-    rollbackCount >=
-    policy.maxRollbacks
-  ) {
-    throw new Error(
-      `MAX_ROLLBACKS exceeded: ${policy.maxRollbacks}`
-    );
-  }
-
-  return EngineeringRollback.create({
-    attemptId,
-    checkpointId,
-    reason:
-      normalizeString(
-        reason,
-        4000
-      )
+  appendAudit(run, {
+    type: "VERIFICATION_RECORDED",
+    metadata: {
+      verificationId,
+      status,
+      authoritative:
+        record.authoritative,
+    },
   });
+
+  return clone(record);
 }
 
-async function completeRollbackRecord({
-  rollbackId,
-  status,
-  restoredSourceHash = "",
-  restoredFiles = [],
-  error = ""
-}) {
+function getVerification(
+  verificationId
+) {
+  const verification =
+    verifications.get(
+      verificationId
+    );
+
+  return verification
+    ? clone(verification)
+    : null;
+}
+
+/* =========================================================
+ * ARTIFACT
+ * ======================================================= */
+
+function recordArtifact(
+  runId,
+  input = {}
+) {
+  const run = assertRun(runId);
+
+  const artifactId =
+    input.artifactId ||
+    id("artifact");
+
   if (
-    !isObjectId(
+    artifacts.has(artifactId)
+  ) {
+    throw new Error(
+      `Artifact already exists: ${artifactId}`
+    );
+  }
+
+  const artifact = {
+    id: artifactId,
+
+    runId,
+
+    attemptId:
+      input.attemptId ||
+      run.currentAttemptId ||
+      null,
+
+    timestamp: now(),
+
+    name:
+      input.name ||
+      null,
+
+    path:
+      input.path ||
+      null,
+
+    storageKey:
+      input.storageKey ||
+      null,
+
+    url:
+      input.url ||
+      null,
+
+    checksum:
+      input.checksum ||
+      null,
+
+    size:
+      nonNegative(
+        input.size,
+        0
+      ),
+
+    contentType:
+      input.contentType ||
+      null,
+
+    authoritative:
+      input.authoritative === true,
+
+    verified:
+      input.verified === true,
+
+    metadata:
+      clone(input.metadata || {}),
+  };
+
+  artifacts.set(
+    artifactId,
+    artifact
+  );
+
+  run.artifactIds.push(
+    artifactId
+  );
+
+  run.artifact =
+    clone(artifact);
+
+  appendAudit(run, {
+    type: "ARTIFACT_RECORDED",
+    metadata: {
+      artifactId,
+      checksum:
+        artifact.checksum,
+      authoritative:
+        artifact.authoritative,
+      verified:
+        artifact.verified,
+    },
+  });
+
+  return clone(artifact);
+}
+
+function getArtifact(artifactId) {
+  const artifact =
+    artifacts.get(artifactId);
+
+  return artifact
+    ? clone(artifact)
+    : null;
+}
+
+/* =========================================================
+ * RESOURCE EVENTS
+ * ======================================================= */
+
+function recordResourceEvent(
+  runId,
+  input = {}
+) {
+  const run = assertRun(runId);
+
+  const eventId =
+    input.eventId ||
+    id("resource");
+
+  if (
+    resourceEvents.has(eventId)
+  ) {
+    throw new Error(
+      `Resource event already exists: ${eventId}`
+    );
+  }
+
+  const event = {
+    id: eventId,
+
+    runId,
+
+    attemptId:
+      input.attemptId ||
+      run.currentAttemptId ||
+      null,
+
+    timestamp:
+      input.timestamp ||
+      now(),
+
+    type:
+      input.type ||
+      "sample",
+
+    cpu:
+      finiteNumber(
+        input.cpu,
+        0
+      ),
+
+    memory:
+      finiteNumber(
+        input.memory ??
+          input.memoryMB,
+        0
+      ),
+
+    pids:
+      finiteNumber(
+        input.pids,
+        0
+      ),
+
+    disk:
+      finiteNumber(
+        input.disk ??
+          input.diskMB,
+        0
+      ),
+
+    limit:
+      clone(
+        input.limit ||
+          run.policy.resourceLimit
+      ),
+
+    violation:
+      input.violation === true,
+
+    violations:
+      normalizeArray(
+        input.violations,
+        25
+      ),
+
+    metadata:
+      clone(input.metadata || {}),
+  };
+
+  resourceEvents.set(
+    eventId,
+    event
+  );
+
+  run.resourceEventIds.push(
+    eventId
+  );
+
+  if (event.violation) {
+    run.resources.violations.push({
+      eventId,
+      timestamp:
+        event.timestamp,
+      violations:
+        clone(event.violations),
+    });
+  }
+
+  if (event.attemptId) {
+    const attempt =
+      attempts.get(
+        event.attemptId
+      );
+
+    if (attempt) {
+      attempt.resourceEventIds.push(
+        eventId
+      );
+    }
+  }
+
+  appendAudit(run, {
+    type: "RESOURCE_EVENT",
+    metadata: {
+      eventId,
+      violation:
+        event.violation,
+    },
+  });
+
+  return clone(event);
+}
+
+function getResourceEvent(
+  eventId
+) {
+  const event =
+    resourceEvents.get(
+      eventId
+    );
+
+  return event
+    ? clone(event)
+    : null;
+}
+
+/* =========================================================
+ * CHECKPOINT
+ * ======================================================= */
+
+function createCheckpoint(
+  runId,
+  input = {}
+) {
+  const run = assertRun(runId);
+
+  assertTerminalMutationAllowed(run);
+
+  if (
+    run.checkpointCount >=
+    run.policy.MAX_CHECKPOINTS
+  ) {
+    throw new Error(
+      `Maximum checkpoints exceeded for run ${runId}`
+    );
+  }
+
+  const checkpointId =
+    input.checkpointId ||
+    id("checkpoint");
+
+  if (
+    checkpoints.has(
+      checkpointId
+    )
+  ) {
+    throw new Error(
+      `Checkpoint already exists: ${checkpointId}`
+    );
+  }
+
+  const checkpoint = {
+    id: checkpointId,
+
+    runId,
+
+    attemptId:
+      input.attemptId ||
+      run.currentAttemptId ||
+      null,
+
+    timestamp: now(),
+
+    sourceHash:
+      input.sourceHash ||
+      run.finalSourceHash ||
+      run.sourceHash ||
+      null,
+
+    files:
+      normalizeArray(
+        input.files,
+        run.policy.MAX_REPAIR_FILES
+      ),
+
+    artifact:
+      clone(input.artifact || null),
+
+    state:
+      run.state,
+
+    metadata:
+      clone(input.metadata || {}),
+
+    valid: true,
+  };
+
+  checkpoints.set(
+    checkpointId,
+    checkpoint
+  );
+
+  run.checkpointIds.push(
+    checkpointId
+  );
+
+  run.checkpointCount += 1;
+
+  run.latestCheckpointId =
+    checkpointId;
+
+  run.recovery.available = true;
+  run.recovery.lastCheckpointId =
+    checkpointId;
+
+  appendAudit(run, {
+    type: "CHECKPOINT_CREATED",
+    metadata: {
+      checkpointId,
+    },
+  });
+
+  return clone(checkpoint);
+}
+
+function getCheckpoint(
+  checkpointId
+) {
+  const checkpoint =
+    checkpoints.get(
+      checkpointId
+    );
+
+  return checkpoint
+    ? clone(checkpoint)
+    : null;
+}
+
+/* =========================================================
+ * ROLLBACK
+ * ======================================================= */
+
+function recordRollback(
+  runId,
+  input = {}
+) {
+  const run = assertRun(runId);
+
+  if (
+    run.state === STATES.PASSED ||
+    run.state === STATES.PROMOTED
+  ) {
+    throw new Error(
+      `Cannot rollback terminal successful run ${runId}`
+    );
+  }
+
+  if (
+    run.rollbackCount >=
+    run.policy.MAX_ROLLBACKS
+  ) {
+    throw new Error(
+      `Maximum rollbacks exceeded for run ${runId}`
+    );
+  }
+
+  const rollbackId =
+    input.rollbackId ||
+    id("rollback");
+
+  if (
+    rollbacks.has(
       rollbackId
     )
   ) {
     throw new Error(
-      "Invalid rollbackId"
+      `Rollback already exists: ${rollbackId}`
     );
   }
 
-  const validStatuses = [
-    "requested",
-    "running",
-    "completed",
-    "failed"
-  ];
+  const checkpointId =
+    input.checkpointId ||
+    run.latestCheckpointId ||
+    null;
 
   if (
-    !validStatuses.includes(
-      status
+    checkpointId &&
+    !checkpoints.has(
+      checkpointId
     )
   ) {
     throw new Error(
-      `Invalid rollback status: ${status}`
+      `Rollback checkpoint not found: ${checkpointId}`
     );
   }
 
-  return EngineeringRollback.findByIdAndUpdate(
+  const rollback = {
+    id: rollbackId,
+
+    runId,
+
+    attemptId:
+      input.attemptId ||
+      run.currentAttemptId ||
+      null,
+
+    checkpointId,
+
+    timestamp: now(),
+
+    reason:
+      input.reason ||
+      "Engineering rollback",
+
+    sourceHashBefore:
+      input.sourceHashBefore ||
+      run.finalSourceHash ||
+      null,
+
+    sourceHashAfter:
+      input.sourceHashAfter ||
+      (
+        checkpointId
+          ? checkpoints.get(
+              checkpointId
+            ).sourceHash
+          : null
+      ),
+
+    success:
+      input.success !== false,
+
+    metadata:
+      clone(input.metadata || {}),
+  };
+
+  rollbacks.set(
     rollbackId,
-    {
-      $set: {
-        status,
+    rollback
+  );
 
-        restoredSourceHash:
-          normalizeString(
-            restoredSourceHash,
-            256
-          ),
+  run.rollbackIds.push(
+    rollbackId
+  );
 
-        restoredFiles:
-          uniqueStrings(
-            restoredFiles,
-            1000
-          ),
+  run.rollbackCount += 1;
 
-        error:
-          normalizeString(
-            error,
-            4000
-          ),
+  run.latestRollbackId =
+    rollbackId;
 
-        completedAt:
-          status ===
-              "completed" ||
-          status === "failed"
-            ? now()
-            : null
-      }
-    },
-    {
-      new: true,
-      runValidators: true
+  run.recovery.lastRollbackId =
+    rollbackId;
+
+  run.recovery.available =
+    Boolean(
+      checkpointId
+    );
+
+  if (run.currentAttemptId) {
+    const attempt =
+      attempts.get(
+        run.currentAttemptId
+      );
+
+    if (attempt) {
+      markAttemptRolledBack(
+        attempt.id,
+        rollback.reason
+      );
     }
-  ).exec();
+  }
+
+  appendAudit(run, {
+    type: "ROLLBACK_RECORDED",
+    metadata: {
+      rollbackId,
+      checkpointId,
+      success:
+        rollback.success,
+    },
+  });
+
+  return clone(rollback);
 }
 
-/* ============================================================
-   FAILURE SIGNATURE MEMORY
-============================================================ */
-
-async function registerFailureSignature({
-  signature,
-  category = "unknown",
-  metadata = {}
-}) {
-  if (!signature) {
-    throw new Error(
-      "Failure signature is required"
+function getRollback(
+  rollbackId
+) {
+  const rollback =
+    rollbacks.get(
+      rollbackId
     );
+
+  return rollback
+    ? clone(rollback)
+    : null;
+}
+
+/* =========================================================
+ * REPAIR PATTERNS / LEARNING
+ * ======================================================= */
+
+function normalizePattern(
+  input = {}
+) {
+  return {
+    id:
+      input.id ||
+      id("pattern"),
+
+    signature:
+      input.signature ||
+      null,
+
+    category:
+      input.category ||
+      "unknown",
+
+    repairType:
+      input.repairType ||
+      REPAIR_TYPES.UNKNOWN,
+
+    description:
+      input.description ||
+      null,
+
+    source:
+      input.source ||
+      "engineering",
+
+    successCount:
+      Math.max(
+        0,
+        Math.floor(
+          finiteNumber(
+            input.successCount,
+            0
+          )
+        )
+      ),
+
+    failureCount:
+      Math.max(
+        0,
+        Math.floor(
+          finiteNumber(
+            input.failureCount,
+            0
+          )
+        )
+      ),
+
+    confidence:
+      clamp(
+        finiteNumber(
+          input.confidence,
+          0
+        ),
+        0,
+        1
+      ),
+
+    examples:
+      normalizeArray(
+        input.examples,
+        20
+      ),
+
+    metadata:
+      clone(input.metadata || {}),
+
+    createdAt:
+      input.createdAt ||
+      now(),
+
+    updatedAt:
+      now(),
+  };
+}
+
+function recordPattern(
+  input = {}
+) {
+  const incoming =
+    normalizePattern(input);
+
+  const key =
+    incoming.signature ||
+    incoming.id;
+
+  const existing =
+    patterns.get(key);
+
+  if (existing) {
+    existing.successCount +=
+      incoming.successCount;
+
+    existing.failureCount +=
+      incoming.failureCount;
+
+    if (
+      incoming.description
+    ) {
+      existing.description =
+        incoming.description;
+    }
+
+    if (
+      incoming.repairType
+    ) {
+      existing.repairType =
+        incoming.repairType;
+    }
+
+    existing.confidence =
+      clamp(
+        finiteNumber(
+          incoming.confidence,
+          existing.confidence
+        ),
+        0,
+        1
+      );
+
+    existing.examples = [
+      ...existing.examples,
+      ...incoming.examples,
+    ].slice(-20);
+
+    existing.updatedAt =
+      now();
+
+    return clone(existing);
   }
 
+  patterns.set(
+    key,
+    incoming
+  );
+
+  return clone(incoming);
+}
+
+function getPattern(signature) {
+  const pattern =
+    patterns.get(signature);
+
+  return pattern
+    ? clone(pattern)
+    : null;
+}
+
+function listPatterns() {
+  return Array.from(
+    patterns.values()
+  ).map(clone);
+}
+
+/* =========================================================
+ * BUDGET HELPERS
+ * ======================================================= */
+
+function getRunBudget(runId) {
+  const run = assertRun(runId);
+
+  return {
+    attempts: {
+      used: run.attemptCount,
+      limit:
+        run.policy.MAX_ATTEMPTS,
+      remaining: Math.max(
+        0,
+        run.policy.MAX_ATTEMPTS -
+          run.attemptCount
+      ),
+    },
+
+    repairs: {
+      used:
+        run.repairAttemptCount,
+      limit:
+        run.policy.MAX_REPAIR_ATTEMPTS,
+      remaining: Math.max(
+        0,
+        run.policy.MAX_REPAIR_ATTEMPTS -
+          run.repairAttemptCount
+      ),
+    },
+
+    diagnoses: {
+      used:
+        run.diagnosisAttemptCount,
+      limit:
+        run.policy.MAX_DIAGNOSIS_ATTEMPTS,
+      remaining: Math.max(
+        0,
+        run.policy.MAX_DIAGNOSIS_ATTEMPTS -
+          run.diagnosisAttemptCount
+      ),
+    },
+
+    rollbacks: {
+      used:
+        run.rollbackCount,
+      limit:
+        run.policy.MAX_ROLLBACKS,
+      remaining: Math.max(
+        0,
+        run.policy.MAX_ROLLBACKS -
+          run.rollbackCount
+      ),
+    },
+
+    checkpoints: {
+      used:
+        run.checkpointCount,
+      limit:
+        run.policy.MAX_CHECKPOINTS,
+      remaining: Math.max(
+        0,
+        run.policy.MAX_CHECKPOINTS -
+          run.checkpointCount
+      ),
+    },
+
+    executionTime: {
+      limit:
+        run.policy.MAX_EXECUTION_TIME_MS,
+      deadlineAt:
+        run.deadlineAt,
+    },
+
+    scopeExpansion: {
+      current:
+        run.scopeExpansion,
+      limit:
+        run.policy.MAX_SCOPE_EXPANSION,
+      remaining:
+        Math.max(
+          0,
+          run.policy.MAX_SCOPE_EXPANSION -
+            run.scopeExpansion
+        ),
+    },
+  };
+}
+
+function canCreateAttempt(
+  runId
+) {
+  const run = assertRun(runId);
+
   if (
-    !FAILURE_CATEGORIES.includes(
-      category
+    TERMINAL_STATES.has(
+      run.state
     )
   ) {
+    return false;
+  }
+
+  if (
+    run.cancellationRequested
+  ) {
+    return false;
+  }
+
+  if (
+    run.attemptCount >=
+    run.policy.MAX_ATTEMPTS
+  ) {
+    return false;
+  }
+
+  if (run.currentAttemptId) {
+    const attempt =
+      attempts.get(
+        run.currentAttemptId
+      );
+
+    if (
+      attempt &&
+      (
+        attempt.status ===
+          ATTEMPT_STATUS.CREATED ||
+        attempt.status ===
+          ATTEMPT_STATUS.RUNNING
+      )
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function canRepair(runId) {
+  const run = assertRun(runId);
+
+  return (
+    !TERMINAL_STATES.has(
+      run.state
+    ) &&
+    !run.cancellationRequested &&
+    run.repairAttemptCount <
+      run.policy.MAX_REPAIR_ATTEMPTS
+  );
+}
+
+function canDiagnose(runId) {
+  const run = assertRun(runId);
+
+  return (
+    !TERMINAL_STATES.has(
+      run.state
+    ) &&
+    !run.cancellationRequested &&
+    run.diagnosisAttemptCount <
+      run.policy.MAX_DIAGNOSIS_ATTEMPTS
+  );
+}
+
+function incrementDiagnosisAttempt(
+  runId
+) {
+  const run = assertRun(runId);
+
+  assertTerminalMutationAllowed(
+    run
+  );
+
+  if (
+    run.diagnosisAttemptCount >=
+    run.policy.MAX_DIAGNOSIS_ATTEMPTS
+  ) {
     throw new Error(
-      `Invalid failure category: ${category}`
+      `Maximum diagnosis attempts exceeded for run ${runId}`
     );
   }
 
-  /*
-   * Atomic upsert:
-   *
-   * New record:
-   *   occurrences = 1
-   *
-   * Existing record:
-   *   occurrences += 1
-   */
-  const existing =
-    await EngineeringFailureSignature.findOneAndUpdate(
-      {
-        signature:
-          normalizeString(
-            signature,
-            3000
-          )
-      },
-      {
-        $set: {
-          category,
-          lastSeenAt:
-            now(),
-          metadata:
-            safeSnapshot(
-              metadata
-            )
-        },
+  run.diagnosisAttemptCount += 1;
 
-        $inc: {
-          occurrences: 1
-        },
+  appendAudit(run, {
+    type: "DIAGNOSIS_ATTEMPT",
+    metadata: {
+      count:
+        run.diagnosisAttemptCount,
+    },
+  });
 
-        $setOnInsert: {
-          firstSeenAt:
-            now()
-        }
-      },
-      {
-        upsert: true,
-        new: true,
-        setDefaultsOnInsert: true
-      }
-    ).exec();
+  return run.diagnosisAttemptCount;
+}
 
-  /*
-   * Mongo upsert increments a newly-created
-   * document from its schema default.
-   *
-   * Normalize the first occurrence explicitly.
-   */
+/* =========================================================
+ * SCOPE
+ * ======================================================= */
+
+function updateScopeExpansion(
+  runId,
+  value
+) {
+  const run = assertRun(runId);
+
+  assertTerminalMutationAllowed(
+    run
+  );
+
+  const expansion =
+    finiteNumber(
+      value,
+      run.scopeExpansion
+    );
+
   if (
-    existing.occurrences > 1 &&
-    existing.createdAt &&
-    existing.createdAt.getTime() ===
-      existing.updatedAt?.getTime()
+    expansion >
+    run.policy.MAX_SCOPE_EXPANSION
+  ) {
+    throw new Error(
+      `Scope expansion ${expansion} exceeds limit ${run.policy.MAX_SCOPE_EXPANSION}`
+    );
+  }
+
+  if (expansion < 1) {
+    throw new Error(
+      "Scope expansion cannot be below 1"
+    );
+  }
+
+  run.scopeExpansion =
+    expansion;
+
+  appendAudit(run, {
+    type: "SCOPE_UPDATED",
+    metadata: {
+      scopeExpansion:
+        expansion,
+    },
+  });
+
+  return run.scopeExpansion;
+}
+
+/* =========================================================
+ * RESOURCE LIMITS
+ * ======================================================= */
+
+function updateEffectiveResources(
+  runId,
+  resources = {}
+) {
+  const run = assertRun(runId);
+
+  assertTerminalMutationAllowed(
+    run
+  );
+
+  const current =
+    run.resources.effective;
+
+  const requested = {
+    cpu:
+      finiteNumber(
+        resources.cpu,
+        current.cpu
+      ),
+
+    memory:
+      finiteNumber(
+        resources.memory ??
+          resources.memoryMB,
+        current.memory
+      ),
+
+    pids:
+      positiveInteger(
+        resources.pids,
+        current.pids
+      ),
+
+    disk:
+      finiteNumber(
+        resources.disk ??
+          resources.diskMB,
+        current.disk
+      ),
+  };
+
+  const limit =
+    run.policy.resourceLimit;
+
+  const next = {
+    cpu: clamp(
+      requested.cpu,
+      0.1,
+      limit.cpu
+    ),
+
+    memory: clamp(
+      requested.memory,
+      128,
+      limit.memory
+    ),
+
+    pids: clamp(
+      requested.pids,
+      16,
+      limit.pids
+    ),
+
+    disk: clamp(
+      requested.disk,
+      256,
+      limit.disk
+    ),
+  };
+
+  run.resources.effective =
+    next;
+
+  appendAudit(run, {
+    type: "RESOURCE_LIMIT_UPDATED",
+    metadata: {
+      resources:
+        clone(next),
+    },
+  });
+
+  return clone(next);
+}
+
+/* =========================================================
+ * CANCELLATION
+ * ======================================================= */
+
+function requestCancellation(
+  runId,
+  reason
+) {
+  const run = assertRun(runId);
+
+  if (
+    TERMINAL_STATES.has(
+      run.state
+    )
+  ) {
+    return snapshotRun(run);
+  }
+
+  run.cancellationRequested =
+    true;
+
+  run.cancellationReason =
+    reason ||
+    "Cancellation requested";
+
+  appendAudit(run, {
+    type: "CANCELLATION_REQUESTED",
+    reason:
+      run.cancellationReason,
+  });
+
+  if (run.currentAttemptId) {
+    const attempt =
+      attempts.get(
+        run.currentAttemptId
+      );
+
+    if (
+      attempt &&
+      (
+        attempt.status ===
+          ATTEMPT_STATUS.CREATED ||
+        attempt.status ===
+          ATTEMPT_STATUS.RUNNING
+      )
+    ) {
+      cancelAttempt(
+        attempt.id,
+        run.cancellationReason
+      );
+    }
+  }
+
+  return snapshotRun(run);
+}
+
+/* =========================================================
+ * DEADLINE
+ * ======================================================= */
+
+function isDeadlineExceeded(
+  runId
+) {
+  const run = assertRun(runId);
+
+  if (!run.deadlineAt) {
+    return false;
+  }
+
+  return (
+    Date.now() >=
+    timestampMs(
+      run.deadlineAt
+    )
+  );
+}
+
+function getRemainingExecutionTime(
+  runId
+) {
+  const run = assertRun(runId);
+
+  if (!run.deadlineAt) {
+    return run.policy
+      .MAX_EXECUTION_TIME_MS;
+  }
+
+  return Math.max(
+    0,
+    timestampMs(
+      run.deadlineAt
+    ) -
+      Date.now()
+  );
+}
+
+/* =========================================================
+ * SUCCESS / AUTHORITY
+ * ======================================================= */
+
+function isAuthoritativeSuccess(
+  input = {}
+) {
+  if (
+    input.success !== true
+  ) {
+    return false;
+  }
+
+  if (
+    input.authoritative !== true
+  ) {
+    return false;
+  }
+
+  if (
+    input.validationMode !==
+    "authoritative"
+  ) {
+    return false;
+  }
+
+  if (!input.buildId) {
+    return false;
+  }
+
+  const artifact =
+    input.artifact ||
+    null;
+
+  if (!artifact) {
+    return false;
+  }
+
+  if (
+    !artifact.storageKey &&
+    !artifact.path
+  ) {
+    return false;
+  }
+
+  if (!artifact.checksum) {
+    return false;
+  }
+
+  return true;
+}
+
+function hasPassedVerification(
+  runId
+) {
+  const run = assertRun(runId);
+
+  if (
+    !run.latestVerificationId
+  ) {
+    return false;
+  }
+
+  const verification =
+    verifications.get(
+      run.latestVerificationId
+    );
+
+  if (!verification) {
+    return false;
+  }
+
+  return (
+    verification.success === true
+  );
+}
+
+/* =========================================================
+ * COMPLETE / PROMOTE / ESCALATE
+ * ======================================================= */
+
+function completeRun(
+  runId,
+  result = {}
+) {
+  const run = assertRun(runId);
+
+  if (
+    TERMINAL_STATES.has(
+      run.state
+    )
+  ) {
+    return snapshotRun(run);
+  }
+
+  const authoritativeSuccess =
+    isAuthoritativeSuccess(
+      result
+    );
+
+  if (
+    result.success === true &&
+    !authoritativeSuccess
   ) {
     /*
-     * Defensive normalization for databases
-     * created during schema migration.
+     * Critical truth gate:
+     * State MUST NOT mark a fake build as PASSED.
      */
-  }
-
-  return existing;
-}
-
-/* ============================================================
-   SUCCESSFUL REPAIR PATTERN MEMORY
-============================================================ */
-
-async function registerSuccessfulRepairPattern({
-  patternKey,
-  failureSignature,
-  strategy,
-  repairType,
-  affectedFiles = [],
-  dependencyChanges = [],
-  confidence = 0.5,
-  metadata = {}
-}) {
-  if (!patternKey) {
     throw new Error(
-      "patternKey is required"
-    );
-  }
-
-  if (!failureSignature) {
-    throw new Error(
-      "failureSignature is required"
+      "Cannot complete engineering run successfully without authoritative build evidence"
     );
   }
 
   if (
-    !REPAIR_TYPES.includes(
-      repairType
-    )
+    result.success === true &&
+    !hasPassedVerification(runId)
   ) {
     throw new Error(
-      `Invalid repair type: ${repairType}`
+      "Cannot complete engineering run successfully without passed verification"
     );
   }
 
-  const pattern =
-    await EngineeringRepairPattern.findOneAndUpdate(
+  run.result =
+    clone(result);
+
+  if (
+    authoritativeSuccess
+  ) {
+    run.authoritative = true;
+
+    run.buildId =
+      result.buildId ||
+      run.buildId;
+
+    run.validationMode =
+      "authoritative";
+
+    run.artifact =
+      clone(
+        result.artifact ||
+          run.artifact
+      );
+
+    run.finalSourceHash =
+      result.sourceHash ||
+      run.finalSourceHash;
+  }
+
+  if (result.success === true) {
+    transitionState(
+      runId,
+      STATES.PASSED,
       {
-        patternKey:
-          normalizeString(
-            patternKey,
-            3000
-          )
-      },
-      {
-        $set: {
-          failureSignature:
-            normalizeString(
-              failureSignature,
-              3000
-            ),
-
-          strategy:
-            normalizeString(
-              strategy,
-              1000
-            ),
-
-          repairType,
-
-          affectedFiles:
-            uniqueStrings(
-              affectedFiles,
-              ENGINEERING_LIMITS.MAX_REPAIR_FILES
-            ),
-
-          dependencyChanges:
-            uniqueStrings(
-              dependencyChanges,
-              ENGINEERING_LIMITS.MAX_DEPENDENCY_CHANGES
-            ),
-
-          confidence:
-            clampNumber(
-              confidence,
-              0,
-              1,
-              0
-            ),
-
-          lastSuccessfulAt:
-            now(),
-
-          metadata:
-            safeSnapshot(
-              metadata
-            )
-        },
-
-        $inc: {
-          successCount: 1
-        },
-
-        $setOnInsert: {
-          failureCount: 0
-        }
-      },
-      {
-        upsert: true,
-        new: true,
-        setDefaultsOnInsert: true
+        reason:
+          "Engineering run completed successfully",
       }
-    ).exec();
+    );
+  } else {
+    run.error =
+      clone(
+        result.error ||
+          result
+      );
 
-  await EngineeringFailureSignature.findOneAndUpdate(
-    {
-      signature:
-        normalizeString(
-          failureSignature,
-          3000
-        )
-    },
-    {
-      $inc: {
-        successfulRepairCount: 1
-      },
-
-      $set: {
-        lastSuccessfulRepairStrategy:
-          normalizeString(
-            strategy,
-            1000
-          ),
-
-        lastSeenAt:
-          now()
+    transitionState(
+      runId,
+      STATES.ESCALATED,
+      {
+        reason:
+          result.error?.message ||
+          "Engineering run completed unsuccessfully",
       }
-    },
-    {
-      upsert: true,
-      setDefaultsOnInsert: true
-    }
-  ).exec();
+    );
+  }
 
-  return pattern;
+  return snapshotRun(run);
 }
 
-async function findSuccessfulRepairPatterns(
-  failureSignature,
-  limit = 5
+function promoteRun(
+  runId,
+  metadata = {}
 ) {
-  if (!failureSignature) {
-    return [];
-  }
-
-  const safeLimit =
-    Math.min(
-      20,
-      Math.max(
-        1,
-        Number(limit) || 5
-      )
-    );
-
-  return EngineeringRepairPattern.find({
-    failureSignature:
-      normalizeString(
-        failureSignature,
-        3000
-      ),
-
-    successCount: {
-      $gt: 0
-    }
-  })
-    .sort({
-      confidence: -1,
-      successCount: -1,
-      lastSuccessfulAt: -1
-    })
-    .limit(safeLimit)
-    .lean()
-    .exec();
-}
-
-/* ============================================================
-   AUDIT EVENT
-============================================================ */
-
-async function createAuditEvent({
-  runId,
-  attemptId = null,
-  actorType = "engineering",
-  action,
-  fromState = null,
-  toState = null,
-  message = "",
-  metadata = {}
-}) {
-  if (!runId) {
-    throw new Error(
-      "runId is required"
-    );
-  }
+  const run = assertRun(runId);
 
   if (
-    ![
-      "user",
-      "master_agent",
-      "engineering",
-      "builder",
-      "fix_agent",
-      "system"
-    ].includes(actorType)
+    run.state !== STATES.PASSED
   ) {
     throw new Error(
-      `Invalid actorType: ${actorType}`
+      `Only PASSED runs can be promoted. Current state: ${run.state}`
     );
   }
 
   if (
-    fromState &&
-    !ENGINEERING_STATE_VALUES.includes(
-      fromState
+    !run.authoritative ||
+    run.validationMode !==
+      "authoritative"
+  ) {
+    throw new Error(
+      "Cannot promote non-authoritative run"
+    );
+  }
+
+  if (
+    !isAuthoritativeSuccess(
+      {
+        success: true,
+        authoritative:
+          run.authoritative,
+        validationMode:
+          run.validationMode,
+        buildId:
+          run.buildId,
+        artifact:
+          run.artifact,
+      }
     )
   ) {
     throw new Error(
-      `Invalid fromState: ${fromState}`
+      "Promotion requires authoritative artifact evidence"
     );
   }
 
   if (
-    toState &&
-    !ENGINEERING_STATE_VALUES.includes(
-      toState
-    )
+    !hasPassedVerification(runId)
   ) {
     throw new Error(
-      `Invalid toState: ${toState}`
+      "Promotion requires passed verification"
     );
   }
 
-  return EngineeringAuditEvent.create({
+  run.result = {
+    ...(run.result || {}),
+    promotion:
+      clone(metadata),
+  };
+
+  transitionState(
     runId,
-    attemptId,
-    actorType,
-    action:
-      normalizeString(
-        action,
-        300
-      ),
-    fromState,
-    toState,
-    message:
-      normalizeString(
-        message,
-        4000
-      ),
-    metadata:
-      safeSnapshot(
-        metadata
-      )
-  });
+    STATES.PROMOTED,
+    {
+      reason:
+        "Engineering run promoted",
+      metadata,
+    }
+  );
+
+  return snapshotRun(run);
 }
 
-/* ============================================================
-   PROMOTION
- *
- * State layer records promotion.
- * It does NOT independently decide whether an
- * artifact/build is authoritative.
- *
- * Orchestrator must only call this after
- * authoritative verification.
-============================================================ */
-
-async function promoteEngineeringRun({
+function escalateRun(
   runId,
-  artifactId = null,
-  actorType = "engineering",
-  message = "",
+  reason,
   metadata = {}
-}) {
-  const run =
-    await getRunDocument(
-      runId
-    );
-
-  if (!run) {
-    throw new Error(
-      `Engineering run not found: ${runId}`
-    );
-  }
+) {
+  const run = assertRun(runId);
 
   if (
-    run.currentState !==
-    ENGINEERING_STATES.PASSED
+    run.state ===
+      STATES.PROMOTED ||
+    run.state ===
+      STATES.PASSED ||
+    run.state ===
+      STATES.ESCALATED
   ) {
-    throw new Error(
-      `Run cannot be promoted from state ${run.currentState}`
-    );
+    return snapshotRun(run);
   }
 
-  if (
-    artifactId &&
-    !isObjectId(artifactId)
-  ) {
-    throw new Error(
-      "Invalid artifactId"
-    );
-  }
-
-  const updated =
-    await EngineeringRun.findOneAndUpdate(
-      {
-        _id: run._id,
-
-        currentState:
-          ENGINEERING_STATES.PASSED,
-
-        promoted: {
-          $ne: true
-        }
-      },
-      {
-        $set: {
-          previousState:
-            ENGINEERING_STATES.PASSED,
-
-          currentState:
-            ENGINEERING_STATES.PROMOTED,
-
-          success: true,
-
-          promoted: true,
-
-          completedAt:
-            now(),
-
-          finalArtifactId:
-            artifactId || null
-        }
-      },
-      {
-        new: true,
-        runValidators: true
-      }
-    ).exec();
-
-  if (!updated) {
-    throw new Error(
-      `Promotion conflict for run ${runId}`
-    );
-  }
-
-  await createAuditEvent({
-    runId: updated._id,
-    actorType,
-    action:
-      "engineering_run_promoted",
-    fromState:
-      ENGINEERING_STATES.PASSED,
-    toState:
-      ENGINEERING_STATES.PROMOTED,
-    message:
-      message ||
-      "Engineering run promoted.",
-    metadata
-  });
-
-  return updated;
-}
-
-/* ============================================================
-   ESCALATION
-============================================================ */
-
-async function escalateEngineeringRun({
-  runId,
-  reason = "",
-  actorType = "engineering",
-  metadata = {}
-}) {
-  const run =
-    await getRunDocument(
-      runId
-    );
-
-  if (!run) {
-    throw new Error(
-      `Engineering run not found: ${runId}`
-    );
-  }
-
-  if (
-    run.currentState ===
-    ENGINEERING_STATES.PROMOTED
-  ) {
-    throw new Error(
-      "Promoted run cannot be escalated"
-    );
-  }
-
-  if (
-    run.currentState ===
-    ENGINEERING_STATES.ESCALATED
-  ) {
-    return run;
-  }
-
-  const fromState =
-    run.currentState;
-
-  const allowed =
-    STATE_TRANSITIONS[
-      fromState
-    ] || [];
-
-  if (
-    !allowed.includes(
-      ENGINEERING_STATES.ESCALATED
-    )
-  ) {
-    throw new Error(
-      `Run cannot be escalated from state ${fromState}`
-    );
-  }
-
-  const updated =
-    await EngineeringRun.findOneAndUpdate(
-      {
-        _id: run._id,
-        currentState:
-          fromState,
-        promoted: {
-          $ne: true
-        }
-      },
-      {
-        $set: {
-          previousState:
-            fromState,
-
-          currentState:
-            ENGINEERING_STATES.ESCALATED,
-
-          escalated: true,
-
-          completedAt:
-            now(),
-
-          lastError:
-            normalizeString(
-              reason,
-              4000
-            )
-        }
-      },
-      {
-        new: true,
-        runValidators: true
-      }
-    ).exec();
-
-  if (!updated) {
-    throw new Error(
-      `Escalation conflict for run ${runId}`
-    );
-  }
-
-  await createAuditEvent({
-    runId: updated._id,
-    actorType,
-    action:
-      "engineering_run_escalated",
-    fromState,
-    toState:
-      ENGINEERING_STATES.ESCALATED,
+  run.error = {
     message:
       reason ||
-      "Engineering run escalated.",
-    metadata
-  });
+      "Engineering run escalated",
+    metadata:
+      clone(metadata),
+  };
 
-  return updated;
-}
-
-/* ============================================================
-   COMPLETE RUN
- *
- * Controlled terminal completion helper.
- *
- * Successful completion should normally use:
- *   PASSED → PROMOTED
- *
- * This method exists for controlled integration.
-============================================================ */
-
-async function completeEngineeringRun({
-  runId,
-  success = false,
-  artifactId = null,
-  message = "",
-  metadata = {}
-}) {
-  if (success) {
-    return promoteEngineeringRun({
-      runId,
-      artifactId,
-      actorType:
-        "engineering",
-      message:
-        message ||
-        "Engineering run completed and promoted.",
-      metadata
-    });
-  }
-
-  return escalateEngineeringRun({
+  transitionState(
     runId,
-    reason:
-      message ||
-      "Engineering run completed without promotion.",
-    actorType:
-      "engineering",
-    metadata
-  });
+    STATES.ESCALATED,
+    {
+      reason:
+        reason ||
+        "Engineering run escalated",
+      metadata,
+    }
+  );
+
+  return snapshotRun(run);
 }
 
-/* ============================================================
-   LIMIT CHECKS
-============================================================ */
+/* =========================================================
+ * LIST / QUERY
+ * ======================================================= */
 
-async function getRunSafetyStatus(
+function listAttempts(runId) {
+  assertRun(runId);
+
+  return Array.from(
+    attempts.values()
+  )
+    .filter(
+      (item) =>
+        item.runId === runId
+    )
+    .map(snapshotAttempt);
+}
+
+function listFailures(runId) {
+  assertRun(runId);
+
+  return Array.from(
+    failures.values()
+  )
+    .filter(
+      (item) =>
+        item.runId === runId
+    )
+    .map(clone);
+}
+
+function listRepairs(runId) {
+  assertRun(runId);
+
+  return Array.from(
+    repairs.values()
+  )
+    .filter(
+      (item) =>
+        item.runId === runId
+    )
+    .map(clone);
+}
+
+function listVerifications(
   runId
 ) {
-  const run =
-    await getRunDocument(
-      runId
-    );
+  assertRun(runId);
 
-  if (!run) {
-    throw new Error(
-      `Engineering run not found: ${runId}`
-    );
-  }
+  return Array.from(
+    verifications.values()
+  )
+    .filter(
+      (item) =>
+        item.runId === runId
+    )
+    .map(clone);
+}
 
-  const policy =
-    normalizeRunPolicy(
-      run.policy || {}
-    );
+function listExecutions(runId) {
+  assertRun(runId);
 
-  const attemptsRemaining =
-    Math.max(
-      0,
-      policy.maxAttempts -
-        run.attemptCount
-    );
+  return Array.from(
+    executions.values()
+  )
+    .filter(
+      (item) =>
+        item.runId === runId
+    )
+    .map(clone);
+}
 
-  const terminal =
-    TERMINAL_STATES.has(
-      run.currentState
-    );
+function listArtifacts(runId) {
+  assertRun(runId);
+
+  return Array.from(
+    artifacts.values()
+  )
+    .filter(
+      (item) =>
+        item.runId === runId
+    )
+    .map(clone);
+}
+
+function listCheckpoints(runId) {
+  assertRun(runId);
+
+  return Array.from(
+    checkpoints.values()
+  )
+    .filter(
+      (item) =>
+        item.runId === runId
+    )
+    .map(clone);
+}
+
+function listRollbacks(runId) {
+  assertRun(runId);
+
+  return Array.from(
+    rollbacks.values()
+  )
+    .filter(
+      (item) =>
+        item.runId === runId
+    )
+    .map(clone);
+}
+
+function listResourceEvents(
+  runId
+) {
+  assertRun(runId);
+
+  return Array.from(
+    resourceEvents.values()
+  )
+    .filter(
+      (item) =>
+        item.runId === runId
+    )
+    .map(clone);
+}
+
+/* =========================================================
+ * STATE SUMMARY
+ * ======================================================= */
+
+function getRunSummary(runId) {
+  const run = assertRun(runId);
 
   return {
-    safe:
-      !terminal &&
-      attemptsRemaining > 0,
+    id: run.id,
 
-    terminal,
+    projectId:
+      run.projectId,
 
     state:
-      run.currentState,
+      run.state,
 
-    attemptsUsed:
+    status:
+      run.status,
+
+    authoritative:
+      run.authoritative,
+
+    validationMode:
+      run.validationMode,
+
+    buildId:
+      run.buildId,
+
+    sourceHash:
+      run.finalSourceHash ||
+      run.sourceHash,
+
+    currentAttemptId:
+      run.currentAttemptId,
+
+    attempts:
       run.attemptCount,
 
-    attemptsRemaining,
+    repairs:
+      run.repairAttemptCount,
 
-    maxAttempts:
-      policy.maxAttempts,
+    diagnoses:
+      run.diagnosisAttemptCount,
 
-    maxRepairAttempts:
-      policy.maxRepairAttempts,
+    rollbacks:
+      run.rollbackCount,
 
-    maxDiagnosisAttempts:
-      policy.maxDiagnosisAttempts,
+    checkpoints:
+      run.checkpointCount,
 
-    maxRepairFiles:
-      policy.maxRepairFiles,
+    scopeExpansion:
+      run.scopeExpansion,
 
-    maxDependencyChanges:
-      policy.maxDependencyChanges,
+    cancellationRequested:
+      run.cancellationRequested,
 
-    maxExecutionTime:
-      policy.maxExecutionTime,
+    deadlineExceeded:
+      isDeadlineExceeded(
+        runId
+      ),
 
-    maxScopeExpansion:
-      policy.maxScopeExpansion,
+    remainingExecutionTime:
+      getRemainingExecutionTime(
+        runId
+      ),
 
-    maxAutoScale:
-      policy.maxAutoScale,
+    latestFailureId:
+      run.latestFailureId,
 
-    maxRollbacks:
-      policy.maxRollbacks,
+    latestRepairId:
+      run.latestRepairId,
 
-    maxCheckpoints:
-      policy.maxCheckpoints,
+    latestVerificationId:
+      run.latestVerificationId,
 
-    maxResourceLimit:
-      policy.maxResourceLimit
+    latestCheckpointId:
+      run.latestCheckpointId,
+
+    latestRollbackId:
+      run.latestRollbackId,
+
+    artifact:
+      clone(run.artifact),
+
+    recovery:
+      clone(run.recovery),
+
+    budget:
+      getRunBudget(runId),
   };
 }
 
-/* ============================================================
-   ENGINEERING SNAPSHOT
- *
- * IMPORTANT:
- *   Only reads the requested run and its current attempt.
- *
- * It never scans every EngineeringAttempt in the database.
-============================================================ */
+/* =========================================================
+ * HEALTH
+ * ======================================================= */
 
-async function getEngineeringSnapshot(
-  runId
-) {
-  const run =
-    await getRunDocument(
-      runId
-    );
-
-  if (!run) {
-    throw new Error(
-      `Engineering run not found: ${runId}`
-    );
-  }
-
-  const currentAttempt =
-    run.currentAttemptId
-      ? await EngineeringAttempt.findById(
-          run.currentAttemptId
-        )
-          .lean()
-          .exec()
-      : null;
-
-  const safety =
-    await getRunSafetyStatus(
-      runId
-    );
-
+function health() {
   return {
-    run,
-    currentAttempt,
-    safety
+    service: "engineeringState",
+
+    healthy: true,
+
+    serviceVersion:
+      SERVICE_VERSION,
+
+    schemaVersion:
+      SCHEMA_VERSION,
+
+    engineeringSystemVersion:
+      ENGINEERING_SYSTEM_VERSION,
+
+    authority: {
+      stateOwnsTruth: true,
+      fakeSuccessAllowed: false,
+      authoritativeBuildRequired:
+        true,
+      verificationRequired:
+        true,
+    },
+
+    states:
+      Object.values(STATES),
+
+    terminalStates:
+      Array.from(
+        TERMINAL_STATES
+      ),
+
+    activeRuns:
+      Array.from(
+        runs.values()
+      ).filter(
+        (run) =>
+          !TERMINAL_STATES.has(
+            run.state
+          )
+      ).length,
+
+    totals: {
+      runs: runs.size,
+      attempts: attempts.size,
+      executions:
+        executions.size,
+      failures:
+        failures.size,
+      repairs:
+        repairs.size,
+      verifications:
+        verifications.size,
+      artifacts:
+        artifacts.size,
+      resourceEvents:
+        resourceEvents.size,
+      checkpoints:
+        checkpoints.size,
+      rollbacks:
+        rollbacks.size,
+      patterns:
+        patterns.size,
+    },
+
+    limits:
+      clone(ENGINEERING_LIMITS),
   };
 }
 
-/* ============================================================
-   CANONICAL API ALIASES
+/* =========================================================
+ * RESET
  *
- * These names are intentionally stable.
- *
- * Existing integrations may use the longer
- * engineering-prefixed names above.
-============================================================ */
+ * Intended for tests / process-local recovery.
+ * Not used by production orchestration.
+ * ======================================================= */
 
-const createRun =
-  createEngineeringRun;
+function reset() {
+  runs.clear();
+  attempts.clear();
+  executions.clear();
+  failures.clear();
+  repairs.clear();
+  verifications.clear();
+  artifacts.clear();
+  resourceEvents.clear();
+  checkpoints.clear();
+  rollbacks.clear();
+  patterns.clear();
+  locks.clear();
+}
 
-const getRun =
-  getEngineeringRun;
+/* =========================================================
+ * COMPATIBILITY ALIASES
+ * ======================================================= */
 
-const transitionState =
-  transitionEngineeringState;
+const createEngineeringRun =
+  createRun;
 
-const recordExecution =
-  completeExecutionRecord;
+const getEngineeringRun =
+  getRun;
 
-const recordFailure =
-  createFailureRecord;
+const getEngineeringBudget =
+  getRunBudget;
 
-const recordRepair =
-  createRepairRecord;
-
-const recordVerification =
-  completeVerificationRecord;
-
-const recordArtifact =
-  createArtifactRecord;
-
-const recordResourceEvent =
-  createResourceEvent;
-
-const createRunCheckpoint =
-  createCheckpoint;
-
-const recordRollback =
-  completeRollbackRecord;
-
-const recordPattern =
-  registerSuccessfulRepairPattern;
-
-const promoteRun =
-  promoteEngineeringRun;
-
-const escalateRun =
-  escalateEngineeringRun;
-
-const completeRun =
-  completeEngineeringRun;
-
-/* ============================================================
-   PUBLIC CONTRACT
-============================================================ */
+/* =========================================================
+ * EXPORTS
+ * ======================================================= */
 
 module.exports = {
-  /* Versions */
+  /* versions */
   SERVICE_VERSION,
   SCHEMA_VERSION,
+  ENGINEERING_SYSTEM_VERSION,
 
-  /* States */
-  ENGINEERING_STATES,
-  ENGINEERING_STATE_VALUES,
-  STATE_TRANSITIONS,
+  /* states */
+  STATES,
   TERMINAL_STATES,
+  STATE_TRANSITIONS,
 
-  /* Limits */
+  /* limits */
   ENGINEERING_LIMITS,
+  LIMITS,
 
-  /* Enums */
-  FAILURE_CATEGORIES,
-  FAILURE_SEVERITIES,
-  EXECUTION_TYPES,
+  /* enums */
+  ATTEMPT_STATUS,
+  REPAIR_STATUS,
+  VERIFICATION_STATUS,
+  EXECUTION_STATUS,
   REPAIR_TYPES,
-  VERIFICATION_TYPES,
 
-  /* Policy helpers */
-  normalizeRunPolicy,
-  normalizeResourcePolicy,
-
-  /* Models */
-  models: {
-    EngineeringRun,
-    EngineeringAttempt,
-    EngineeringExecution,
-    EngineeringFailure,
-    EngineeringRepair,
-    EngineeringVerification,
-    EngineeringArtifact,
-    EngineeringResourceEvent,
-    EngineeringCheckpoint,
-    EngineeringRollback,
-    EngineeringFailureSignature,
-    EngineeringRepairPattern,
-    EngineeringAuditEvent
-  },
-
-  /* Canonical contract */
+  /* run */
   createRun,
+  createEngineeringRun,
   getRun,
+  getEngineeringRun,
+  getMutableRun,
+  snapshotRun,
+
+  /* state */
+  canTransition,
   transitionState,
 
+  /* attempts */
+  createAttempt,
+  startAttempt,
+  completeAttempt,
+  cancelAttempt,
+  markAttemptRolledBack,
+  getAttempt,
+  listAttempts,
+  canCreateAttempt,
+
+  /* execution */
   recordExecution,
+  listExecutions,
+
+  /* failures */
+  normalizeFailure,
   recordFailure,
+  getFailure,
+  listFailures,
+
+  /* diagnosis */
+  incrementDiagnosisAttempt,
+  canDiagnose,
+
+  /* repairs */
+  createRepair,
   recordRepair,
+  updateRepair,
+  getRepair,
+  listRepairs,
+  canRepair,
+
+  /* verification */
   recordVerification,
+  getVerification,
+  listVerifications,
+  hasPassedVerification,
+
+  /* artifacts */
   recordArtifact,
+  getArtifact,
+  listArtifacts,
+
+  /* resources */
   recordResourceEvent,
+  getResourceEvent,
+  listResourceEvents,
+  updateEffectiveResources,
 
-  createCheckpoint:
-    createRunCheckpoint,
+  /* checkpoints */
+  createCheckpoint,
+  getCheckpoint,
+  listCheckpoints,
 
+  /* rollback */
   recordRollback,
+  getRollback,
+  listRollbacks,
 
+  /* learning */
   recordPattern,
+  getPattern,
+  listPatterns,
 
+  /* budgets */
+  normalizeLimits,
+  getRunBudget,
+  getEngineeringBudget,
+
+  /* scope */
+  updateScopeExpansion,
+
+  /* cancellation / deadline */
+  requestCancellation,
+  isDeadlineExceeded,
+  getRemainingExecutionTime,
+
+  /* authority */
+  isAuthoritativeSuccess,
+
+  /* lifecycle */
+  completeRun,
   promoteRun,
   escalateRun,
-  completeRun,
 
-  /* Full explicit API */
-  createEngineeringRun,
-  getEngineeringRun,
-  transitionEngineeringState,
+  /* queries */
+  getRunSummary,
 
-  createEngineeringAttempt,
-  updateEngineeringAttempt,
+  /* health */
+  health,
 
-  createExecutionRecord,
-  completeExecutionRecord,
-
-  createFailureRecord,
-
-  createRepairRecord,
-
-  createVerificationRecord,
-  completeVerificationRecord,
-
-  createArtifactRecord,
-
-  createResourceEvent,
-
-  createCheckpoint,
-
-  createRollbackRecord,
-  completeRollbackRecord,
-
-  registerFailureSignature,
-
-  registerSuccessfulRepairPattern,
-  findSuccessfulRepairPatterns,
-
-  createAuditEvent,
-
-  promoteEngineeringRun,
-  escalateEngineeringRun,
-  completeEngineeringRun,
-
-  getRunSafetyStatus,
-  getEngineeringSnapshot
+  /* testing */
+  reset,
 };
