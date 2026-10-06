@@ -3,13 +3,11 @@
  * ZYRIONOS MASTER AGENT
  * =========================================================
  *
- * Version: 7.0.0
+ * Version: 7.1.0
  *
  * CEO / GLOBAL CONTROL PLANE
  *
- * IMPORTANT:
- *
- * Master Agent owns:
+ * Master owns:
  * - request normalization
  * - intent routing
  * - workflow coordination
@@ -18,7 +16,7 @@
  * - final result aggregation
  *
  * Engineering Orchestrator owns:
- * - build engineering lifecycle
+ * - engineering lifecycle
  * - execution
  * - authoritative build
  * - diagnosis
@@ -47,77 +45,43 @@
    CORE AGENTS
 ========================================================= */
 
-const intentAgent =
-  require("./intentAgent");
-
-const planningAgent =
-  require("./planningAgent");
-
-const builderAgent =
-  require("./builderAgent");
-
-const fixAgent =
-  require("./fixAgent");
-
-const fileAgent =
-  require("./fileAgent");
-
-const memoryAgent =
-  require("./memoryAgent");
-
-const environmentAgent =
-  require("./environmentAgent");
-
-const logAgent =
-  require("./logAgent");
+const intentAgent = require("./intentAgent");
+const planningAgent = require("./planningAgent");
+const builderAgent = require("./builderAgent");
+const fixAgent = require("./fixAgent");
+const fileAgent = require("./fileAgent");
+const memoryAgent = require("./memoryAgent");
+const environmentAgent = require("./environmentAgent");
+const logAgent = require("./logAgent");
 
 
 /* =========================================================
    GITHUB
 ========================================================= */
 
-const githubAgent =
-  require("./githubAgent");
-
-const githubDeploymentAgent =
-  require("./githubDeploymentAgent");
+const githubAgent = require("./githubAgent");
+const githubDeploymentAgent = require("./githubDeploymentAgent");
 
 
 /* =========================================================
    INFRASTRUCTURE
 ========================================================= */
 
-const dockerAgent =
-  require("./dockerAgent");
-
-const awsAgent =
-  require("./awsAgent");
-
-const domainAgent =
-  require("./domainAgent");
-
-const sslAgent =
-  require("./sslAgent");
-
-const monitoringAgent =
-  require("./monitoringAgent");
-
-const scalingAgent =
-  require("./scalingAgent");
+const dockerAgent = require("./dockerAgent");
+const awsAgent = require("./awsAgent");
+const domainAgent = require("./domainAgent");
+const sslAgent = require("./sslAgent");
+const monitoringAgent = require("./monitoringAgent");
+const scalingAgent = require("./scalingAgent");
 
 
 /* =========================================================
    BUSINESS
 ========================================================= */
 
-const billingAgent =
-  require("./billingAgent");
-
-const subscriptionAgent =
-  require("./subscriptionAgent");
-
-const deployAgent =
-  require("./deployAgent");
+const billingAgent = require("./billingAgent");
+const subscriptionAgent = require("./subscriptionAgent");
+const deployAgent = require("./deployAgent");
 
 
 /* =========================================================
@@ -184,7 +148,7 @@ const engineeringExecutor =
 ========================================================= */
 
 const MASTER_VERSION =
-  "7.0.0";
+  "7.1.0";
 
 const MAX_PROMPT_LENGTH =
   12000;
@@ -217,14 +181,8 @@ const VALID_ENVIRONMENTS =
     "production"
   ]);
 
-
-/* =========================================================
-   ENGINEERING CONTRACT
-========================================================= */
-
 const ENGINEERING_STATES =
   new Set([
-
     "CREATED",
     "ANALYZING",
     "EXECUTING",
@@ -236,7 +194,6 @@ const ENGINEERING_STATES =
     "ROLLBACK",
     "ESCALATED",
     "PROMOTED"
-
   ]);
 
 
@@ -516,13 +473,20 @@ function cleanString(
 ========================================================= */
 
 function getUserId(
-  user = {}
+  user = {},
+  request = {}
 ) {
 
   return (
     user?.id ||
     user?._id ||
     user?.userId ||
+    user?.uid ||
+    request?.userId ||
+    request?.user?.id ||
+    request?.user?._id ||
+    request?.user?.userId ||
+    request?.user?.uid ||
     null
   );
 
@@ -534,13 +498,15 @@ function getUserId(
 ========================================================= */
 
 function getProjectId(
-  request
+  request = {}
 ) {
 
   return (
     request?.projectId ||
     request?.project?._id ||
     request?.project?.id ||
+    request?.project?.projectId ||
+    request?.data?.projectId ||
     null
   );
 
@@ -585,6 +551,9 @@ function normalizeError(
         null,
 
       code:
+        null,
+
+      stack:
         null
 
     };
@@ -608,7 +577,12 @@ function normalizeError(
 
     code:
       error.code ||
-      null
+      null,
+
+    stack:
+      typeof error.stack === "string"
+        ? error.stack.slice(0, 20000)
+        : null
 
   };
 
@@ -631,6 +605,8 @@ function getAgentError(
     result.error ||
     result.message ||
     result.details?.message ||
+    result.failure?.message ||
+    result.failureRecord?.message ||
     "Agent returned an unsuccessful result."
   );
 
@@ -850,7 +826,9 @@ function normalizeRequest(
 
   normalized.projectId =
     cleanString(
-      normalized.projectId,
+      getProjectId(
+        normalized
+      ),
       300
     );
 
@@ -872,6 +850,16 @@ function normalizeRequest(
       200
     );
 
+  normalized.userId =
+    cleanString(
+      normalized.userId ||
+      normalized.user?.id ||
+      normalized.user?._id ||
+      normalized.user?.userId ||
+      normalized.user?.uid,
+      300
+    );
+
   normalized.environmentName =
     normalizeEnvironmentName(
       normalized.environmentName ||
@@ -884,9 +872,12 @@ function normalizeRequest(
     );
 
   normalized.user =
-    normalized.user ||
-    fallbackUser ||
-    {};
+    (
+      normalized.user &&
+      typeof normalized.user === "object"
+    )
+      ? normalized.user
+      : fallbackUser || {};
 
   return normalized;
 
@@ -1422,7 +1413,6 @@ function determineWorkflow(
 
   }
 
-
   if (
     secondary.includes("github") ||
     secondary.includes("repository") ||
@@ -1433,7 +1423,6 @@ function determineWorkflow(
       true;
 
   }
-
 
   if (
     secondary.includes("github-deploy") ||
@@ -1453,7 +1442,6 @@ function determineWorkflow(
 
   }
 
-
   if (
     secondary.includes("deploy")
   ) {
@@ -1462,7 +1450,6 @@ function determineWorkflow(
       true;
 
   }
-
 
   if (
     secondary.includes("environment") ||
@@ -1474,7 +1461,6 @@ function determineWorkflow(
       true;
 
   }
-
 
   if (
     secondary.includes("build")
@@ -1488,7 +1474,6 @@ function determineWorkflow(
 
   }
 
-
   if (
     secondary.includes("fix")
   ) {
@@ -1497,7 +1482,6 @@ function determineWorkflow(
       true;
 
   }
-
 
   if (
     secondary.includes("billing")
@@ -1508,7 +1492,6 @@ function determineWorkflow(
 
   }
 
-
   if (
     secondary.includes("subscription")
   ) {
@@ -1517,7 +1500,6 @@ function determineWorkflow(
       true;
 
   }
-
 
   if (
     secondary.includes("monitor") ||
@@ -1529,7 +1511,6 @@ function determineWorkflow(
 
   }
 
-
   if (
     secondary.includes("scale") ||
     secondary.includes("scaling")
@@ -1540,7 +1521,6 @@ function determineWorkflow(
 
   }
 
-
   if (
     request?.autoDeploy === true
   ) {
@@ -1550,7 +1530,6 @@ function determineWorkflow(
 
   }
 
-
   if (
     request?.afterBuild === "deploy"
   ) {
@@ -1559,7 +1538,6 @@ function determineWorkflow(
       true;
 
   }
-
 
   if (
     request?.environmentName ||
@@ -1572,7 +1550,6 @@ function determineWorkflow(
 
   }
 
-
   if (
     workflow.requiresBuild &&
     workflow.requiresDeploy
@@ -1583,7 +1560,6 @@ function determineWorkflow(
 
   }
 
-
   if (
     workflow.requiresGithubDeployment
   ) {
@@ -1592,7 +1568,6 @@ function determineWorkflow(
       true;
 
   }
-
 
   return workflow;
 
@@ -1808,7 +1783,13 @@ function extractEngineeringFiles(
 
     result?.artifact?.files,
 
-    result?.verification?.files
+    result?.verification?.files,
+
+    result?.verification?.artifact?.files,
+
+    result?.data?.verification?.files,
+
+    result?.data?.artifact?.files
 
   ];
 
@@ -1858,6 +1839,7 @@ function extractEngineeringState(
     result.snapshot ||
     result.data?.state ||
     result.data?.engineeringState ||
+    result.data?.runState ||
     null
   );
 
@@ -1889,6 +1871,7 @@ function extractEngineeringFailure(
     result.data?.failure ||
     result.data?.failureRecord ||
     result.data?.repairContext ||
+    result.data?.errorDetails ||
     null
   );
 
@@ -1917,6 +1900,7 @@ function extractEngineeringVerification(
     result.verificationRecord ||
     result.data?.verification ||
     result.data?.verificationRecord ||
+    result.result?.verification ||
     null
   );
 
@@ -1945,8 +1929,244 @@ function extractEngineeringPromotion(
     result.promotionRecord ||
     result.data?.promotion ||
     result.data?.promotionRecord ||
+    result.result?.promotion ||
     null
   );
+
+}
+
+
+/* =========================================================
+   AUTHORITATIVE EVIDENCE
+========================================================= */
+
+function getAuthoritativeEvidence(
+  result
+) {
+
+  if (
+    !result ||
+    typeof result !== "object"
+  ) {
+
+    return {
+
+      valid:
+        false,
+
+      reason:
+        "Engineering result is missing."
+
+    };
+
+  }
+
+  const verification =
+    extractEngineeringVerification(
+      result
+    ) || {};
+
+  const promotion =
+    extractEngineeringPromotion(
+      result
+    ) || {};
+
+  const state =
+    String(
+      result.state ||
+      result.engineeringState ||
+      result.status ||
+      result.data?.state ||
+      result.data?.engineeringState ||
+      ""
+    )
+      .toUpperCase();
+
+  const authoritative =
+    result.authoritative === true ||
+    result.data?.authoritative === true ||
+    verification.authoritative === true ||
+    verification.data?.authoritative === true;
+
+  const validationMode =
+    result.validationMode ||
+    result.data?.validationMode ||
+    verification.validationMode ||
+    verification.data?.validationMode ||
+    verification.mode ||
+    verification.data?.mode ||
+    null;
+
+  const normalizedValidationMode =
+    typeof validationMode === "string"
+      ? validationMode.trim().toLowerCase()
+      : "";
+
+  const verified =
+    result.verified === true ||
+    result.data?.verified === true ||
+    verification.verified === true ||
+    verification.data?.verified === true ||
+    verification.success === true;
+
+  const promoted =
+    result.promoted === true ||
+    result.data?.promoted === true ||
+    promotion.promoted === true ||
+    promotion.data?.promoted === true ||
+    state === "PROMOTED";
+
+  const buildId =
+    result.buildId ||
+    result.data?.buildId ||
+    verification.buildId ||
+    verification.data?.buildId ||
+    promotion.buildId ||
+    promotion.data?.buildId ||
+    null;
+
+  const artifact =
+    result.artifact ||
+    result.data?.artifact ||
+    verification.artifact ||
+    verification.data?.artifact ||
+    promotion.artifact ||
+    promotion.data?.artifact ||
+    null;
+
+  const storageKey =
+    artifact?.storageKey ||
+    artifact?.storage_key ||
+    artifact?.key ||
+    artifact?.path ||
+    artifact?.artifactPath ||
+    result.artifactStorageKey ||
+    result.data?.artifactStorageKey ||
+    verification.storageKey ||
+    verification.data?.storageKey ||
+    null;
+
+  const checksum =
+    artifact?.checksum ||
+    artifact?.sha256 ||
+    artifact?.hash ||
+    result.checksum ||
+    result.data?.checksum ||
+    verification.checksum ||
+    verification.data?.checksum ||
+    null;
+
+  const valid =
+    result.success === true &&
+    state === "PROMOTED" &&
+    promoted === true &&
+    authoritative === true &&
+    verified === true &&
+    normalizedValidationMode === "authoritative" &&
+    Boolean(buildId) &&
+    Boolean(storageKey) &&
+    Boolean(checksum);
+
+  if (!valid) {
+
+    const missing = [];
+
+    if (result.success !== true) {
+      missing.push("success=true");
+    }
+
+    if (state !== "PROMOTED") {
+      missing.push("state=PROMOTED");
+    }
+
+    if (!promoted) {
+      missing.push("promoted=true");
+    }
+
+    if (!authoritative) {
+      missing.push("authoritative=true");
+    }
+
+    if (!verified) {
+      missing.push("verified=true");
+    }
+
+    if (
+      normalizedValidationMode !==
+      "authoritative"
+    ) {
+      missing.push(
+        "validationMode=authoritative"
+      );
+    }
+
+    if (!buildId) {
+      missing.push("buildId");
+    }
+
+    if (!storageKey) {
+      missing.push(
+        "artifact.storageKey/path/key"
+      );
+    }
+
+    if (!checksum) {
+      missing.push("artifact.checksum");
+    }
+
+    return {
+
+      valid:
+        false,
+
+      reason:
+        `Authoritative promotion evidence incomplete: ${missing.join(", ")}.`,
+
+      state,
+
+      promoted,
+
+      authoritative,
+
+      verified,
+
+      validationMode:
+        normalizedValidationMode ||
+        null,
+
+      buildId,
+
+      storageKey,
+
+      checksum
+
+    };
+
+  }
+
+  return {
+
+    valid:
+      true,
+
+    state,
+
+    promoted,
+
+    authoritative,
+
+    verified,
+
+    validationMode:
+      normalizedValidationMode,
+
+    buildId,
+
+    storageKey,
+
+    checksum
+
+  };
 
 }
 
@@ -1959,80 +2179,10 @@ function isEngineeringPromoted(
   result
 ) {
 
-  if (
-    !result ||
-    typeof result !== "object"
-  ) {
-
-    return false;
-
-  }
-
-  const state =
-    String(
-      result.state ||
-      result.engineeringState ||
-      result.status ||
-      result.data?.state ||
-      ""
-    )
-      .toUpperCase();
-
-  const promotion =
-    extractEngineeringPromotion(
-      result
-    );
-
-  const verification =
-    extractEngineeringVerification(
-      result
-    );
-
-  const authoritative =
-    result.authoritative === true ||
-    result.data?.authoritative === true ||
-    result.verification?.authoritative === true ||
-    verification?.authoritative === true;
-
-  const verified =
-    result.verified === true ||
-    result.data?.verified === true ||
-    verification?.verified === true ||
-    verification?.success === true;
-
-  const promoted =
-    result.promoted === true ||
-    result.data?.promoted === true ||
-    promotion?.promoted === true ||
-    state === "PROMOTED";
-
-  const artifact =
-    result.artifact ||
-    result.data?.artifact ||
-    verification?.artifact ||
-    null;
-
-  const artifactReady =
-    Boolean(
-      artifact &&
-      typeof artifact === "object" &&
-      (
-        artifact.storageKey ||
-        artifact.path ||
-        artifact.checksum
-      )
-    );
-
   return Boolean(
-    result.success === true &&
-    promoted &&
-    authoritative &&
-    verified &&
-    (
-      artifactReady ||
-      result.buildId ||
-      result.data?.buildId
-    )
+    getAuthoritativeEvidence(
+      result
+    ).valid
   );
 
 }
@@ -2237,23 +2387,14 @@ async function executeEngineeringWorkflow(
 
   const job =
     createEngineeringJob(
-
       workflowState,
-
       request,
-
       normalizedUser,
-
       intent,
-
       planningData,
-
       buildResult,
-
       memoryContext
-
     );
-
 
   recordStage(
     workflowState,
@@ -2264,6 +2405,12 @@ async function executeEngineeringWorkflow(
 
       workflowId:
         workflowState.workflowId,
+
+      requestId:
+        workflowState.requestId,
+
+      userId:
+        workflowState.userId,
 
       fileCount:
         job.files.length,
@@ -2279,7 +2426,6 @@ async function executeEngineeringWorkflow(
     },
     "completed"
   );
-
 
   if (
     !engineeringOrchestrator
@@ -2297,7 +2443,10 @@ async function executeEngineeringWorkflow(
         "service_unavailable",
 
       error:
-        "Engineering Orchestrator is unavailable."
+        "Engineering Orchestrator is unavailable.",
+
+      engineeringBoundary:
+        true
 
     };
 
@@ -2318,7 +2467,6 @@ async function executeEngineeringWorkflow(
 
   }
 
-
   try {
 
     logInfo(
@@ -2328,25 +2476,20 @@ async function executeEngineeringWorkflow(
         workflowId:
           workflowState.workflowId,
 
+        requestId:
+          workflowState.requestId,
+
         projectId:
           workflowState.projectId,
+
+        userId:
+          workflowState.userId,
 
         fileCount:
           job.files.length
 
       }
     );
-
-
-    /*
-     * Canonical entrypoint:
-     *
-     * engineeringOrchestrator.run(job)
-     *
-     * A small compatibility resolver is retained so the
-     * Master remains safe if the module exports a callable
-     * orchestrator rather than an object.
-     */
 
     let result = null;
 
@@ -2404,12 +2547,40 @@ async function executeEngineeringWorkflow(
           "service_unavailable",
 
         error:
-          "Engineering Orchestrator exposes no supported execution entrypoint."
+          "Engineering Orchestrator exposes no supported execution entrypoint.",
+
+        engineeringBoundary:
+          true
 
       };
 
     }
 
+    if (
+      !result ||
+      typeof result !== "object"
+    ) {
+
+      result = {
+
+        success:
+          false,
+
+        state:
+          "ESCALATED",
+
+        status:
+          "invalid_result",
+
+        error:
+          "Engineering Orchestrator returned an invalid result.",
+
+        engineeringBoundary:
+          true
+
+      };
+
+    }
 
     const engineeringStateSnapshot =
       extractEngineeringState(
@@ -2431,6 +2602,10 @@ async function executeEngineeringWorkflow(
         result
       );
 
+    const authoritativeEvidence =
+      getAuthoritativeEvidence(
+        result
+      );
 
     workflowState.engineeringRun =
       sanitizeForContext(
@@ -2462,11 +2637,17 @@ async function executeEngineeringWorkflow(
         engineeringPromotion
       );
 
+    workflowState.engineeringRepair =
+      sanitizeForContext(
+        result?.repair ||
+        result?.repairRecord ||
+        result?.data?.repair ||
+        result?.data?.repairRecord ||
+        null
+      );
 
     if (
-      isEngineeringPromoted(
-        result
-      )
+      authoritativeEvidence.valid
     ) {
 
       const files =
@@ -2504,16 +2685,16 @@ async function executeEngineeringWorkflow(
 
       }
 
-
       recordStage(
         workflowState,
         "engineering-orchestration",
         {
+
           success:
             true,
 
           state:
-            workflowState.engineeringStatus,
+            "PROMOTED",
 
           promoted:
             true,
@@ -2524,16 +2705,24 @@ async function executeEngineeringWorkflow(
           authoritative:
             true,
 
+          validationMode:
+            "authoritative",
+
           buildId:
-            result?.buildId ||
-            result?.data?.buildId ||
-            result?.verification?.buildId ||
-            null
+            authoritativeEvidence.buildId,
+
+          artifact:
+            {
+              storageKey:
+                authoritativeEvidence.storageKey,
+
+              checksum:
+                authoritativeEvidence.checksum
+            }
 
         },
         "completed"
       );
-
 
       logSuccess(
         "Master ← Engineering Orchestrator PROMOTED",
@@ -2542,20 +2731,26 @@ async function executeEngineeringWorkflow(
           workflowId:
             workflowState.workflowId,
 
+          requestId:
+            workflowState.requestId,
+
           projectId:
             workflowState.projectId,
 
           state:
-            workflowState.engineeringStatus,
+            "PROMOTED",
 
           buildId:
-            result?.buildId ||
-            result?.data?.buildId ||
-            null
+            authoritativeEvidence.buildId,
+
+          artifactStorageKey:
+            authoritativeEvidence.storageKey,
+
+          checksum:
+            authoritativeEvidence.checksum
 
         }
       );
-
 
       return {
 
@@ -2573,8 +2768,21 @@ async function executeEngineeringWorkflow(
         authoritative:
           true,
 
+        validationMode:
+          "authoritative",
+
         state:
           "PROMOTED",
+
+        buildId:
+          result.buildId ||
+          result.data?.buildId ||
+          authoritativeEvidence.buildId,
+
+        authoritativeEvidence:
+          sanitizeForContext(
+            authoritativeEvidence
+          ),
 
         buildResult
 
@@ -2582,21 +2790,9 @@ async function executeEngineeringWorkflow(
 
     }
 
-
-    /*
-     * IMPORTANT:
-     *
-     * Engineering failure is never converted into success.
-     */
-
     const failureResult = {
 
-      ...(
-        result &&
-        typeof result === "object"
-          ? result
-          : {}
-      ),
+      ...result,
 
       success:
         false,
@@ -2614,10 +2810,18 @@ async function executeEngineeringWorkflow(
       error:
         result?.error ||
         result?.message ||
-        "Engineering workflow did not reach PROMOTED state."
+        authoritativeEvidence.reason ||
+        "Engineering workflow did not reach authoritative PROMOTED state.",
+
+      authoritativeEvidence:
+        sanitizeForContext(
+          authoritativeEvidence
+        ),
+
+      engineeringBoundary:
+        true
 
     };
-
 
     recordStage(
       workflowState,
@@ -2626,13 +2830,15 @@ async function executeEngineeringWorkflow(
       "failed"
     );
 
-
     logError(
       "Master ← Engineering Orchestrator FAILED",
       {
 
         workflowId:
           workflowState.workflowId,
+
+        requestId:
+          workflowState.requestId,
 
         projectId:
           workflowState.projectId,
@@ -2643,12 +2849,31 @@ async function executeEngineeringWorkflow(
         error:
           failureResult.error,
 
-        failure:
-          engineeringFailure
+        errorName:
+          result?.errorName ||
+          result?.errorType ||
+          result?.name ||
+          null,
+
+        code:
+          result?.code ||
+          null,
+
+        runId:
+          result?.runId ||
+          result?.data?.runId ||
+          null,
+
+        dependencyLoadErrors:
+          result?.dependencyLoadErrors ||
+          result?.data?.dependencyLoadErrors ||
+          null,
+
+        authoritativeEvidence:
+          authoritativeEvidence
 
       }
     );
-
 
     return failureResult;
 
@@ -2675,8 +2900,17 @@ async function executeEngineeringWorkflow(
       error:
         normalized.message,
 
+      errorName:
+        normalized.name,
+
       code:
         normalized.code,
+
+      statusCode:
+        normalized.status,
+
+      stack:
+        normalized.stack,
 
       engineeringBoundary:
         true
@@ -2703,8 +2937,23 @@ async function executeEngineeringWorkflow(
         workflowId:
           workflowState.workflowId,
 
+        requestId:
+          workflowState.requestId,
+
+        projectId:
+          workflowState.projectId,
+
         error:
-          normalized.message
+          normalized.message,
+
+        errorName:
+          normalized.name,
+
+        code:
+          normalized.code,
+
+        stack:
+          normalized.stack
 
       }
     );
@@ -2774,10 +3023,13 @@ function canDeployAfterEngineering(
 
   }
 
-  if (
-    !isEngineeringPromoted(
+  const evidence =
+    getAuthoritativeEvidence(
       engineeringResult
-    )
+    );
+
+  if (
+    !evidence.valid
   ) {
 
     return {
@@ -2786,7 +3038,9 @@ function canDeployAfterEngineering(
         false,
 
       reason:
-        "Deployment blocked because Engineering Orchestrator did not produce a verified PROMOTED build."
+        `Deployment blocked because authoritative PROMOTED evidence is incomplete: ${evidence.reason}`,
+
+      evidence
 
     };
 
@@ -2798,7 +3052,9 @@ function canDeployAfterEngineering(
       true,
 
     reason:
-      "Engineering build reached verified PROMOTED state."
+      "Engineering build reached authoritative PROMOTED state.",
+
+    evidence
 
   };
 
@@ -2843,13 +3099,9 @@ async function checkEnvironmentGate(
 
   const result =
     await runAgent(
-
       workflowState,
-
       "environment-readiness",
-
       environmentAgent,
-
       {
 
         action:
@@ -2871,9 +3123,7 @@ async function checkEnvironmentGate(
           workflowState.requestId
 
       }
-
     );
-
 
   if (
     !isSuccessful(result)
@@ -2898,12 +3148,10 @@ async function checkEnvironmentGate(
 
   }
 
-
   const readiness =
     result.readiness ||
     result.data?.readiness ||
     null;
-
 
   if (
     readiness &&
@@ -2927,7 +3175,6 @@ async function checkEnvironmentGate(
     };
 
   }
-
 
   return {
 
@@ -3565,7 +3812,6 @@ async function triggerAutoFixFromDeploymentFailure(
 
       );
 
-
     if (
       !isSuccessful(
         logResult
@@ -3593,7 +3839,6 @@ async function triggerAutoFixFromDeploymentFailure(
       };
 
     }
-
 
     const autoFixResult =
       await runAgent(
@@ -3701,13 +3946,11 @@ async function triggerAutoFixFromDeploymentFailure(
 
       );
 
-
     const triggered =
       autoFixResult?.triggered === true ||
       autoFixResult?.data?.triggered === true ||
       autoFixResult?.autoFixTriggered === true ||
       autoFixResult?.data?.autoFixTriggered === true;
-
 
     return {
 
@@ -3752,7 +3995,13 @@ async function triggerAutoFixFromDeploymentFailure(
       deploymentId,
 
       error:
-        normalized.message
+        normalized.message,
+
+      errorName:
+        normalized.name,
+
+      code:
+        normalized.code
 
     };
 
@@ -3899,6 +4148,18 @@ async function runAgent(
       error:
         normalized.message,
 
+      errorName:
+        normalized.name,
+
+      code:
+        normalized.code,
+
+      status:
+        normalized.status,
+
+      stack:
+        normalized.stack,
+
       details:
         normalized
 
@@ -3921,7 +4182,13 @@ async function runAgent(
         stage,
 
         error:
-          normalized.message
+          normalized.message,
+
+        errorName:
+          normalized.name,
+
+        code:
+          normalized.code
 
       }
     );
@@ -4008,7 +4275,6 @@ async function masterAgent(
   let autoFixResult =
     null;
 
-
   try {
 
     logInfo(
@@ -4055,14 +4321,14 @@ async function masterAgent(
 
     }
 
-
     const normalizedUser =
       normalizedRequest.user ||
       {};
 
     const userId =
       getUserId(
-        normalizedUser
+        normalizedUser,
+        normalizedRequest
       );
 
     const projectId =
@@ -4073,6 +4339,10 @@ async function masterAgent(
     normalizedRequest.projectId =
       projectId;
 
+
+    /* =====================================================
+       WORKFLOW STATE
+    ===================================================== */
 
     workflowState =
       createWorkflowState(
@@ -4222,7 +4492,6 @@ async function masterAgent(
 
     }
 
-
     if (
       normalizedRequest.type === "deploy"
     ) {
@@ -4248,7 +4517,6 @@ async function masterAgent(
       };
 
     }
-
 
     if (
       normalizedRequest.type === "environment"
@@ -4290,7 +4558,6 @@ async function masterAgent(
         normalizedRequest
       );
 
-
     workflowState.primaryIntent =
       workflow.type;
 
@@ -4312,7 +4579,6 @@ async function masterAgent(
         null
       );
 
-
     if (
       workflow.requiresDeploy &&
       !workflowState.environmentName
@@ -4322,7 +4588,6 @@ async function masterAgent(
         "production";
 
     }
-
 
     logInfo(
       "Master workflow selected",
@@ -4398,7 +4663,6 @@ async function masterAgent(
 
         );
 
-
       if (
         !isSuccessful(
           environmentResult
@@ -4473,7 +4737,6 @@ async function masterAgent(
           )
 
         );
-
 
       if (
         !isSuccessful(
@@ -4558,7 +4821,6 @@ async function masterAgent(
 
         );
 
-
       if (
         !isSuccessful(
           planning
@@ -4594,7 +4856,6 @@ async function masterAgent(
         };
 
       }
-
 
       planningData =
         getPlanningData(
@@ -4642,7 +4903,6 @@ async function masterAgent(
 
         );
 
-
       if (
         !isSuccessful(
           githubDeploymentResult
@@ -4683,7 +4943,7 @@ async function masterAgent(
 
 
     /* =====================================================
-       BUILD GENERATION + ENGINEERING SYSTEM
+       BUILD GENERATION + ENGINEERING
     ===================================================== */
 
     if (
@@ -4774,12 +5034,10 @@ async function masterAgent(
 
         );
 
-
       const builderContract =
         validateBuildResult(
           buildResult
         );
-
 
       if (
         !builderContract.valid
@@ -4821,7 +5079,6 @@ async function masterAgent(
       currentStage =
         "engineering-orchestration";
 
-
       engineeringResult =
         await executeEngineeringWorkflow(
 
@@ -4842,16 +5099,10 @@ async function masterAgent(
         );
 
 
-      /*
-       * Builder output may be replaced by a repaired
-       * version returned by Engineering Orchestrator.
-       */
-
       const engineeringFiles =
         extractEngineeringFiles(
           engineeringResult
         );
-
 
       if (
         engineeringFiles.length > 0
@@ -4900,6 +5151,10 @@ async function masterAgent(
             engineeringResult
           );
 
+        const evidence =
+          getAuthoritativeEvidence(
+            engineeringResult
+          );
 
         logError(
           "Engineering Build Pipeline Failed",
@@ -4916,13 +5171,16 @@ async function masterAgent(
 
             error:
               engineeringResult?.error ||
+              evidence.reason ||
               "Engineering pipeline did not reach PROMOTED state.",
 
-            failure
+            failure,
+
+            authoritativeEvidence:
+              evidence
 
           }
         );
-
 
         return {
 
@@ -4934,6 +5192,7 @@ async function masterAgent(
 
           error:
             engineeringResult?.error ||
+            evidence.reason ||
             "Engineering pipeline did not produce a verified promoted build.",
 
           stage:
@@ -4951,12 +5210,16 @@ async function masterAgent(
           engineering:
             sanitizeForContext(
               engineeringResult
+            ),
+
+          authoritativeEvidence:
+            sanitizeForContext(
+              evidence
             )
 
         };
 
       }
-
 
       logSuccess(
         "Engineering Build Pipeline Passed",
@@ -4974,6 +5237,7 @@ async function masterAgent(
           buildId:
             engineeringResult?.buildId ||
             engineeringResult?.data?.buildId ||
+            engineeringResult?.authoritativeEvidence?.buildId ||
             null
 
         }
@@ -5036,7 +5300,6 @@ async function masterAgent(
           }
 
         );
-
 
       if (
         !isSuccessful(
@@ -5129,7 +5392,6 @@ async function masterAgent(
           }
 
         );
-
 
       if (
         !isSuccessful(
@@ -5252,7 +5514,6 @@ async function masterAgent(
           normalizedRequest
         );
 
-
       if (
         !gate.allowed
       ) {
@@ -5281,7 +5542,6 @@ async function masterAgent(
 
       }
 
-
       currentStage =
         "subscription";
 
@@ -5289,7 +5549,6 @@ async function masterAgent(
         getPaymentContext(
           normalizedRequest
         );
-
 
       subscriptionResult =
         await runAgent(
@@ -5360,7 +5619,6 @@ async function masterAgent(
       currentStage =
         "deployment-build-gate";
 
-
       const buildGate =
         canDeployAfterEngineering(
 
@@ -5369,7 +5627,6 @@ async function masterAgent(
           engineeringResult
 
         );
-
 
       if (
         !buildGate.allowed
@@ -5400,6 +5657,11 @@ async function masterAgent(
           engineering:
             sanitizeForContext(
               engineeringResult
+            ),
+
+          authoritativeEvidence:
+            sanitizeForContext(
+              buildGate.evidence
             )
 
         };
@@ -5414,7 +5676,6 @@ async function masterAgent(
       currentStage =
         "deployment-environment-gate";
 
-
       const environmentGate =
         await checkEnvironmentGate(
 
@@ -5425,7 +5686,6 @@ async function masterAgent(
           workflowState
 
         );
-
 
       if (
         !environmentGate.allowed
@@ -5466,7 +5726,6 @@ async function masterAgent(
 
       }
 
-
       environmentResult =
         environmentGate.result ||
         null;
@@ -5479,7 +5738,6 @@ async function masterAgent(
       currentStage =
         "deployment-environment-snapshot";
 
-
       const snapshotResult =
         await createEnvironmentSnapshot(
 
@@ -5488,7 +5746,6 @@ async function masterAgent(
           environmentGate.environment
 
         );
-
 
       if (
         !isSuccessful(
@@ -5533,7 +5790,6 @@ async function masterAgent(
 
       currentStage =
         "deploy";
-
 
       deploymentResult =
         await runAgent(
@@ -5664,7 +5920,6 @@ async function masterAgent(
         currentStage =
           "deployment-auto-fix";
 
-
         autoFixResult =
           await triggerAutoFixFromDeploymentFailure(
 
@@ -5681,7 +5936,6 @@ async function masterAgent(
             deploymentResult
 
           );
-
 
         return {
 
@@ -5733,7 +5987,6 @@ async function masterAgent(
       currentStage =
         "environment-deployed";
 
-
       const environmentDeployedResult =
         await markEnvironmentDeployed(
 
@@ -5744,7 +5997,6 @@ async function masterAgent(
           deploymentResult
 
         );
-
 
       if (
         !isSuccessful(
@@ -5771,7 +6023,6 @@ async function masterAgent(
         );
 
       }
-
 
       logSuccess(
         "Deployment Gate Passed",
@@ -5811,7 +6062,6 @@ async function masterAgent(
           deploymentResult,
           projectId
         );
-
 
       if (
         !deploymentId
@@ -5906,7 +6156,6 @@ async function masterAgent(
           projectId
         );
 
-
       if (
         !deploymentId
       ) {
@@ -5996,10 +6245,8 @@ async function masterAgent(
         ? "degraded"
         : "completed";
 
-
     workflowState.metrics.completedAt =
       new Date();
-
 
     workflowState.metrics.durationMs =
       Date.now() -
@@ -6052,6 +6299,13 @@ async function masterAgent(
       engineeringFailure:
         sanitizeForContext(
           workflowState.engineeringFailure
+        ),
+
+      authoritativeEvidence:
+        sanitizeForContext(
+          getAuthoritativeEvidence(
+            engineeringResult
+          )
         ),
 
       githubResult:
@@ -6141,7 +6395,6 @@ async function masterAgent(
     let reply =
       "";
 
-
     try {
 
       const completion =
@@ -6183,9 +6436,13 @@ Rules:
     - Docker started
     - an artifact object exists
 
-12. A build may be reported as successful only when
-    Engineering Orchestrator reached PROMOTED state and
-    authoritative verification passed.
+12. A build may be reported as successful only when:
+    - Engineering Orchestrator reached PROMOTED
+    - authoritative verification passed
+    - validationMode is authoritative
+    - buildId exists
+    - artifact storage key/path exists
+    - artifact checksum exists
 
 13. Never call static validation authoritative.
 
@@ -6259,6 +6516,14 @@ ENGINEERING:
 
 ${safeJson(
   engineeringResult
+)}
+
+AUTHORITATIVE EVIDENCE:
+
+${safeJson(
+  getAuthoritativeEvidence(
+    engineeringResult
+  )
 )}
 
 BUILD:
@@ -6344,7 +6609,6 @@ ${safeJson(
 
         });
 
-
       if (
         completion?.success === true
       ) {
@@ -6389,13 +6653,13 @@ ${safeJson(
       const deploymentUrl =
         deploymentResult?.deployment?.url ||
         deploymentResult?.data?.url ||
+        deploymentResult?.url ||
         null;
 
       const engineeringPassed =
         isEngineeringPromoted(
           engineeringResult
         );
-
 
       reply =
         [
@@ -6456,6 +6720,13 @@ ${safeJson(
             engineeringResult
           ),
 
+        authoritativeEvidence:
+          sanitizeForContext(
+            getAuthoritativeEvidence(
+              engineeringResult
+            )
+          ),
+
         durationMs:
           Date.now() -
           startedAt
@@ -6487,7 +6758,6 @@ ${safeJson(
         error
       );
 
-
     if (
       workflowState
     ) {
@@ -6507,7 +6777,6 @@ ${safeJson(
 
     }
 
-
     logError(
       "Master Agent Failed",
       {
@@ -6520,11 +6789,19 @@ ${safeJson(
           currentStage,
 
         error:
-          normalized.message
+          normalized.message,
+
+        errorName:
+          normalized.name,
+
+        code:
+          normalized.code,
+
+        stack:
+          normalized.stack
 
       }
     );
-
 
     return {
 
@@ -6537,8 +6814,17 @@ ${safeJson(
       error:
         normalized.message,
 
+      errorName:
+        normalized.name,
+
       code:
         normalized.code,
+
+      status:
+        normalized.status,
+
+      stack:
+        normalized.stack,
 
       stage:
         currentStage,
@@ -6561,6 +6847,13 @@ ${safeJson(
         engineering:
           sanitizeForContext(
             engineeringResult
+          ),
+
+        authoritativeEvidence:
+          sanitizeForContext(
+            getAuthoritativeEvidence(
+              engineeringResult
+            )
           ),
 
         buildResult:
@@ -6909,15 +7202,6 @@ masterAgent.workflowContract = {
    LEGACY BUILD CONTRACT
 ========================================================= */
 
-/*
- * Legacy AuthoritativeBuildService is intentionally NOT
- * imported by Master Agent anymore.
- *
- * Compatibility must be handled only inside the Engineering
- * Executor / Orchestrator boundary if required during
- * migration.
- */
-
 masterAgent.legacyBuildArchitecture = {
 
   masterDirectAuthoritativeBuild:
@@ -7000,6 +7284,44 @@ masterAgent.engineeringContract = {
     false,
 
   stateIsSourceOfTruth:
+    true
+
+};
+
+
+/* =========================================================
+   VERSION / DIAGNOSTIC CONTRACT
+========================================================= */
+
+masterAgent.diagnosticContract = {
+
+  version:
+    "7.1.0",
+
+  engineeringPromotionAuthority:
+    "engineeringOrchestrator",
+
+  authoritativeValidationMode:
+    "authoritative",
+
+  requiredPromotionEvidence: [
+
+    "success=true",
+    "state=PROMOTED",
+    "promoted=true",
+    "verified=true",
+    "authoritative=true",
+    "validationMode=authoritative",
+    "buildId",
+    "artifact.storageKey|artifact.path|artifact.key",
+    "artifact.checksum"
+
+  ],
+
+  masterDoesNotExecuteBuild:
+    true,
+
+  masterDoesNotPromoteBuild:
     true
 
 };
