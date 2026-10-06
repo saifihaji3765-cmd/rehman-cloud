@@ -7,10 +7,18 @@
  *   services/engineering/engineeringOrchestrator.js
  *
  * Version:
- *   1.2.0
+ *   1.3.0
  *
  * Role:
  *   Engineering Control Plane / Workflow Orchestrator
+ *
+ * Authority:
+ *   Engineering Executor
+ *
+ * Success Rule:
+ *   AI/static/master output NEVER proves success.
+ *   Only authoritative execution + verification + artifact evidence
+ *   can reach PASSED/PROMOTED.
  *
  * Architecture:
  *
@@ -18,11 +26,9 @@
  *        ↓
  *   Engineering Run
  *        ↓
- *   State Machine
+ *   Analysis
  *        ↓
  *   Checkpoint
- *        ↓
- *   Master Analysis
  *        ↓
  *   Authoritative Executor
  *        ↓
@@ -36,51 +42,32 @@
  *    ↓
  * Repair
  *    ↓
+ * Checkpoint
+ *    ↓
  * Rebuild
  *    ↓
  * Verify
  *    ↓
  * Retry / Rollback / Escalate
  *
- * IMPORTANT:
- *
- * This orchestrator NEVER declares success based on:
- *
- *   - AI response
- *   - static validation
- *   - syntax confidence
- *   - repair confidence
- *   - Master Agent opinion
- *   - generated files alone
- *
- * PASSED requires authoritative execution evidence.
- *
- * PROMOTED requires authoritative verification + artifact evidence.
- *
  * ================================================================
  */
 
 "use strict";
 
-
 /* ================================================================
    MODULE IDENTITY
 ================================================================ */
 
-const ORCHESTRATOR_VERSION =
-  "1.2.0";
+const ORCHESTRATOR_VERSION = "1.3.0";
 
-const ENGINEERING_SYSTEM_VERSION =
-  "2.0.0";
-
+const ENGINEERING_SYSTEM_VERSION = "2.0.0";
 
 /* ================================================================
    NODE MODULES
 ================================================================ */
 
-const crypto =
-  require("crypto");
-
+const crypto = require("crypto");
 
 /* ================================================================
    DEPENDENCIES
@@ -92,564 +79,404 @@ let engineeringIntelligence = null;
 let masterAgent = null;
 let legacyAuthoritativeBuildService = null;
 
-
 /* ================================================================
    SAFE REQUIRE
 ================================================================ */
 
 function safeRequire(modulePath) {
-
   try {
-
     return require(modulePath);
-
   } catch (error) {
-
     return null;
-
   }
-
 }
-
 
 /* ================================================================
    DEPENDENCY LOADING
 ================================================================ */
 
 function loadDependencies() {
-
   if (!engineeringState) {
-
-    engineeringState =
-      safeRequire("./engineeringState");
-
+    engineeringState = safeRequire("./engineeringState");
   }
-
 
   if (!engineeringExecutor) {
-
-    engineeringExecutor =
-      safeRequire("./engineeringExecutor");
-
+    engineeringExecutor = safeRequire("./engineeringExecutor");
   }
-
 
   if (!engineeringIntelligence) {
-
-    engineeringIntelligence =
-      safeRequire("./engineeringIntelligence");
-
+    engineeringIntelligence = safeRequire("./engineeringIntelligence");
   }
 
-
-  /*
-   * Master Agent is intentionally loaded from known locations only.
-   */
-
   if (!masterAgent) {
-
     const candidates = [
-
       "../../agents/masterAgent",
       "../../agent/masterAgent",
       "../../masterAgent",
       "../masterAgent",
-
     ];
 
-
     for (const candidate of candidates) {
-
-      const loaded =
-        safeRequire(candidate);
-
+      const loaded = safeRequire(candidate);
 
       if (loaded) {
-
-        masterAgent =
-          loaded;
-
+        masterAgent = loaded;
         break;
-
       }
-
     }
-
   }
-
 
   /*
    * Legacy service is migration-only.
+   * It is NEVER preferred over Engineering Executor.
    */
-
   if (!legacyAuthoritativeBuildService) {
-
     const candidates = [
-
       "../authoritativeBuildService",
       "../../services/authoritativeBuildService",
       "../../authoritativeBuildService",
-
     ];
 
-
     for (const candidate of candidates) {
-
-      const loaded =
-        safeRequire(candidate);
-
+      const loaded = safeRequire(candidate);
 
       if (loaded) {
-
-        legacyAuthoritativeBuildService =
-          loaded;
-
+        legacyAuthoritativeBuildService = loaded;
         break;
-
       }
-
     }
-
   }
 
-
   return {
-
     engineeringState,
     engineeringExecutor,
     engineeringIntelligence,
     masterAgent,
     legacyAuthoritativeBuildService,
-
   };
-
 }
-
 
 /* ================================================================
    STATES
 ================================================================ */
 
 const STATES = Object.freeze({
-
-  CREATED:
-    "CREATED",
-
-  ANALYZING:
-    "ANALYZING",
-
-  EXECUTING:
-    "EXECUTING",
-
-  FAILED:
-    "FAILED",
-
-  DIAGNOSING:
-    "DIAGNOSING",
-
-  REPAIRING:
-    "REPAIRING",
-
-  VERIFYING:
-    "VERIFYING",
-
-  PASSED:
-    "PASSED",
-
-  ROLLBACK:
-    "ROLLBACK",
-
-  ESCALATED:
-    "ESCALATED",
-
-  PROMOTED:
-    "PROMOTED",
-
+  CREATED: "CREATED",
+  ANALYZING: "ANALYZING",
+  EXECUTING: "EXECUTING",
+  FAILED: "FAILED",
+  DIAGNOSING: "DIAGNOSING",
+  REPAIRING: "REPAIRING",
+  VERIFYING: "VERIFYING",
+  PASSED: "PASSED",
+  ROLLBACK: "ROLLBACK",
+  ESCALATED: "ESCALATED",
+  PROMOTED: "PROMOTED",
 });
-
 
 /* ================================================================
    TERMINAL STATES
 ================================================================ */
 
-const TERMINAL_STATES =
-  new Set([
-
-    STATES.ESCALATED,
-    STATES.PROMOTED,
-
-  ]);
-
+const TERMINAL_STATES = new Set([
+  STATES.ESCALATED,
+  STATES.PROMOTED,
+]);
 
 /* ================================================================
    STATE TRANSITION GRAPH
 ================================================================ */
 
-const ALLOWED_TRANSITIONS =
-  Object.freeze({
+const ALLOWED_TRANSITIONS = Object.freeze({
+  CREATED: [
+    STATES.ANALYZING,
+    STATES.ESCALATED,
+  ],
 
-    CREATED: [
+  ANALYZING: [
+    STATES.EXECUTING,
+    STATES.ROLLBACK,
+    STATES.ESCALATED,
+  ],
 
-      STATES.ANALYZING,
-      STATES.ESCALATED,
+  EXECUTING: [
+    STATES.VERIFYING,
+    STATES.FAILED,
+    STATES.ROLLBACK,
+    STATES.ESCALATED,
+  ],
 
-    ],
+  FAILED: [
+    STATES.DIAGNOSING,
+    STATES.EXECUTING,
+    STATES.ROLLBACK,
+    STATES.ESCALATED,
+  ],
 
-    ANALYZING: [
+  DIAGNOSING: [
+    STATES.REPAIRING,
+    STATES.EXECUTING,
+    STATES.ROLLBACK,
+    STATES.ESCALATED,
+  ],
 
-      STATES.EXECUTING,
-      STATES.ROLLBACK,
-      STATES.ESCALATED,
+  REPAIRING: [
+    STATES.EXECUTING,
+    STATES.VERIFYING,
+    STATES.FAILED,
+    STATES.ROLLBACK,
+    STATES.ESCALATED,
+  ],
 
-    ],
+  VERIFYING: [
+    STATES.PASSED,
+    STATES.FAILED,
+    STATES.ROLLBACK,
+    STATES.ESCALATED,
+  ],
 
-    EXECUTING: [
+  PASSED: [
+    STATES.PROMOTED,
+    STATES.ROLLBACK,
+  ],
 
-      STATES.VERIFYING,
-      STATES.FAILED,
-      STATES.ROLLBACK,
-      STATES.ESCALATED,
+  ROLLBACK: [
+    STATES.ANALYZING,
+    STATES.EXECUTING,
+    STATES.ESCALATED,
+  ],
 
-    ],
+  ESCALATED: [],
 
-    FAILED: [
-
-      STATES.DIAGNOSING,
-      STATES.EXECUTING,
-      STATES.ROLLBACK,
-      STATES.ESCALATED,
-
-    ],
-
-    DIAGNOSING: [
-
-      STATES.REPAIRING,
-      STATES.EXECUTING,
-      STATES.ROLLBACK,
-      STATES.ESCALATED,
-
-    ],
-
-    REPAIRING: [
-
-      STATES.EXECUTING,
-      STATES.VERIFYING,
-      STATES.FAILED,
-      STATES.ROLLBACK,
-      STATES.ESCALATED,
-
-    ],
-
-    VERIFYING: [
-
-      STATES.PASSED,
-      STATES.FAILED,
-      STATES.ROLLBACK,
-      STATES.ESCALATED,
-
-    ],
-
-    PASSED: [
-
-      STATES.PROMOTED,
-      STATES.ROLLBACK,
-
-    ],
-
-    ROLLBACK: [
-
-      STATES.ANALYZING,
-      STATES.EXECUTING,
-      STATES.ESCALATED,
-
-    ],
-
-    ESCALATED: [],
-
-    PROMOTED: [],
-
-  });
-
+  PROMOTED: [],
+});
 
 /* ================================================================
    DEFAULT POLICY
 ================================================================ */
 
-const DEFAULT_POLICY =
-  Object.freeze({
+const DEFAULT_POLICY = Object.freeze({
+  MAX_ATTEMPTS: 5,
 
-    MAX_ATTEMPTS:
-      5,
+  MAX_REPAIR_ATTEMPTS: 3,
 
-    MAX_REPAIR_ATTEMPTS:
-      3,
+  MAX_DIAGNOSIS_ATTEMPTS: 3,
 
-    MAX_DIAGNOSIS_ATTEMPTS:
-      3,
+  MAX_EXECUTION_TIME_MS: 15 * 60 * 1000,
 
-    MAX_EXECUTION_TIME_MS:
-      15 * 60 * 1000,
+  MAX_REPAIR_FILES: 25,
 
-    MAX_REPAIR_FILES:
-      25,
+  MAX_DEPENDENCY_CHANGES: 15,
 
-    MAX_DEPENDENCY_CHANGES:
-      15,
+  MAX_SCOPE_EXPANSION: 1.5,
 
-    MAX_SCOPE_EXPANSION:
-      1.5,
+  MAX_AUTO_SCALE: 4,
 
-    MAX_AUTO_SCALE:
-      4,
+  MAX_ROLLBACKS: 2,
 
-    MAX_ROLLBACKS:
-      2,
+  MAX_CHECKPOINTS: 25,
 
-    MAX_CHECKPOINTS:
-      25,
+  RETRY_BASE_DELAY_MS: 1000,
 
-    RETRY_BASE_DELAY_MS:
-      1000,
+  RETRY_MAX_DELAY_MS: 30000,
 
-    RETRY_MAX_DELAY_MS:
-      30000,
-
-    RETRY_JITTER_MS:
-      500,
-
-  });
-
+  RETRY_JITTER_MS: 500,
+});
 
 /* ================================================================
    FAILURE POLICY
 ================================================================ */
 
-const RETRYABLE_FAILURES =
-  new Set([
+const RETRYABLE_FAILURES = new Set([
+  "timeout",
+  "network",
+  "temporary",
+  "process-terminated",
+  "resource",
+  "infrastructure",
+  "service-unavailable",
+  "rate-limit",
+]);
 
-    "timeout",
-    "network",
-    "temporary",
-    "process-terminated",
-    "resource",
-    "infrastructure",
-    "service-unavailable",
-    "rate-limit",
-
-  ]);
-
-
-const NON_RETRYABLE_FAILURES =
-  new Set([
-
-    "syntax",
-    "invalid-project",
-    "invalid-command",
-    "permission",
-    "security",
-    "policy",
-    "configuration",
-    "authentication",
-    "authorization",
-    "unsupported",
-
-  ]);
-
+const NON_RETRYABLE_FAILURES = new Set([
+  "syntax",
+  "invalid-project",
+  "invalid-command",
+  "permission",
+  "security",
+  "policy",
+  "configuration",
+  "authentication",
+  "authorization",
+  "unsupported",
+]);
 
 /* ================================================================
    IDENTIFIER
 ================================================================ */
 
 function createId(prefix) {
-
   return [
-
     prefix,
-
     Date.now().toString(36),
-
-    crypto
-      .randomBytes(8)
-      .toString("hex"),
-
+    crypto.randomBytes(8).toString("hex"),
   ].join("-");
-
 }
-
 
 /* ================================================================
    CLONE
 ================================================================ */
 
 function clone(value) {
-
-  if (
-    value ===
-    undefined
-  ) {
-
+  if (value === undefined) {
     return undefined;
-
   }
 
-
-  if (
-    value ===
-    null
-  ) {
-
+  if (value === null) {
     return null;
-
   }
 
-
-  return JSON.parse(
-    JSON.stringify(value)
-  );
-
+  return JSON.parse(JSON.stringify(value));
 }
-
 
 /* ================================================================
    FILE HASH
 ================================================================ */
 
 function calculateFilesHash(files) {
+  const normalized = Array.isArray(files)
+    ? files.map((file) => ({
+        path: String(
+          file?.path ||
+            file?.name ||
+            ""
+        ),
 
-  const normalized =
-    Array.isArray(files)
-      ? files.map(file => ({
+        content:
+          typeof file?.content === "string"
+            ? file.content
+            : String(file?.content || ""),
+      }))
+    : [];
 
-          path:
-            String(
-              file?.path ||
-              file?.name ||
-              ""
-            ),
-
-          content:
-            typeof file?.content === "string"
-              ? file.content
-              : String(
-                  file?.content ||
-                  ""
-                ),
-
-        }))
-      : [];
-
-
-  normalized.sort(
-    (a, b) =>
-      a.path.localeCompare(
-        b.path
-      )
+  normalized.sort((a, b) =>
+    a.path.localeCompare(b.path)
   );
-
 
   return crypto
     .createHash("sha256")
-    .update(
-      JSON.stringify(
-        normalized
-      )
-    )
+    .update(JSON.stringify(normalized))
     .digest("hex");
-
 }
-
 
 /* ================================================================
    POSITIVE INTEGER
 ================================================================ */
 
-function positiveInteger(
-  value,
-  fallback
-) {
-
-  const parsed =
-    Number(value);
-
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
 
   if (
     !Number.isFinite(parsed) ||
     parsed < 1
   ) {
-
     return fallback;
-
   }
 
-
   return Math.floor(parsed);
-
 }
-
 
 /* ================================================================
    POLICY NORMALIZATION
 ================================================================ */
 
-function normalizePolicy(
-  supplied
-) {
-
-  const input =
-    supplied || {};
-
+function normalizePolicy(supplied) {
+  const input = supplied || {};
 
   const policy = {
-
     ...DEFAULT_POLICY,
-
   };
 
-
-  for (
-    const key
-    of Object.keys(policy)
-  ) {
-
-    if (
-      input[key] !==
-      undefined
-    ) {
-
-      policy[key] =
-        positiveInteger(
-          input[key],
-          policy[key]
-        );
-
+  for (const key of Object.keys(policy)) {
+    if (input[key] === undefined) {
+      continue;
     }
 
+    if (key === "MAX_SCOPE_EXPANSION") {
+      const value = Number(input[key]);
+
+      if (Number.isFinite(value)) {
+        policy[key] = Math.max(
+          1,
+          value
+        );
+      }
+
+      continue;
+    }
+
+    policy[key] = positiveInteger(
+      input[key],
+      policy[key]
+    );
   }
 
+  /*
+   * If State exposes global limits, never allow the request policy
+   * to exceed them.
+   */
+  loadDependencies();
 
-  if (
-    Number.isFinite(
-      Number(
-        input.MAX_SCOPE_EXPANSION
-      )
-    )
-  ) {
+  const globalLimits =
+    engineeringState?.ENGINEERING_LIMITS ||
+    engineeringState?.LIMITS ||
+    null;
 
-    policy.MAX_SCOPE_EXPANSION =
-      Math.max(
-        1,
-        Number(
-          input.MAX_SCOPE_EXPANSION
-        )
-      );
+  if (globalLimits) {
+    const boundedKeys = [
+      "MAX_ATTEMPTS",
+      "MAX_REPAIR_ATTEMPTS",
+      "MAX_DIAGNOSIS_ATTEMPTS",
+      "MAX_EXECUTION_TIME_MS",
+      "MAX_REPAIR_FILES",
+      "MAX_DEPENDENCY_CHANGES",
+      "MAX_SCOPE_EXPANSION",
+      "MAX_AUTO_SCALE",
+      "MAX_ROLLBACKS",
+      "MAX_CHECKPOINTS",
+    ];
 
+    for (const key of boundedKeys) {
+      if (
+        globalLimits[key] === undefined ||
+        policy[key] === undefined
+      ) {
+        continue;
+      }
+
+      const globalValue =
+        Number(globalLimits[key]);
+
+      if (!Number.isFinite(globalValue)) {
+        continue;
+      }
+
+      if (key === "MAX_SCOPE_EXPANSION") {
+        policy[key] = Math.min(
+          policy[key],
+          Math.max(1, globalValue)
+        );
+      } else {
+        policy[key] = Math.min(
+          policy[key],
+          Math.max(1, globalValue)
+        );
+      }
+    }
   }
-
 
   return policy;
-
 }
-
 
 /* ================================================================
    FAILURE NORMALIZATION
@@ -659,83 +486,44 @@ function normalizeFailure(
   error,
   fallbackCategory
 ) {
-
   if (!error) {
-
     return {
-
       category:
-        fallbackCategory ||
-        "unknown",
+        fallbackCategory || "unknown",
 
       message:
         "Unknown engineering failure",
 
-      retryable:
-        false,
+      retryable: false,
 
       affectedFiles: [],
+
       errors: [],
-
     };
-
   }
 
-
-  const category =
-    String(
-
-      error.category ||
+  const category = String(
+    error.category ||
       error.failureCategory ||
       fallbackCategory ||
       "unknown"
+  ).toLowerCase();
 
-    ).toLowerCase();
+  let retryable = error.retryable;
 
-
-  let retryable =
-    error.retryable;
-
-
-  if (
-    typeof retryable !==
-    "boolean"
-  ) {
-
-    if (
-      RETRYABLE_FAILURES.has(
-        category
-      )
+  if (typeof retryable !== "boolean") {
+    if (RETRYABLE_FAILURES.has(category)) {
+      retryable = true;
+    } else if (
+      NON_RETRYABLE_FAILURES.has(category)
     ) {
-
-      retryable =
-        true;
-
+      retryable = false;
+    } else {
+      retryable = false;
     }
-
-    else if (
-      NON_RETRYABLE_FAILURES.has(
-        category
-      )
-    ) {
-
-      retryable =
-        false;
-
-    }
-
-    else {
-
-      retryable =
-        false;
-
-    }
-
   }
 
-
   return {
-
     category,
 
     message:
@@ -746,105 +534,78 @@ function normalizeFailure(
     retryable,
 
     failureStage:
-      error.failureStage ||
-      null,
+      error.failureStage || null,
 
     failureCategory:
-      error.failureCategory ||
-      category,
+      error.failureCategory || category,
 
     authoritative:
-      error.authoritative ===
-      true,
+      error.authoritative === true,
 
     validationMode:
-      error.validationMode ||
-      null,
+      error.validationMode || null,
 
     buildId:
-      error.buildId ||
-      null,
+      error.buildId || null,
 
     sourceHash:
-      error.sourceHash ||
-      null,
+      error.sourceHash || null,
 
     buildCommand:
-      error.buildCommand ||
-      null,
+      error.buildCommand || null,
 
     installCommand:
-      error.installCommand ||
-      null,
+      error.installCommand || null,
 
     affectedFiles:
-      Array.isArray(
-        error.affectedFiles
-      )
+      Array.isArray(error.affectedFiles)
         ? error.affectedFiles
         : [],
 
     errors:
-      Array.isArray(
-        error.errors
-      )
+      Array.isArray(error.errors)
         ? error.errors
         : [],
 
     stdout:
-      error.stdout ||
-      "",
+      typeof error.stdout === "string"
+        ? error.stdout
+        : "",
 
     stderr:
-      error.stderr ||
-      "",
+      typeof error.stderr === "string"
+        ? error.stderr
+        : "",
 
     exitCode:
-      Number.isInteger(
-        error.exitCode
-      )
+      Number.isInteger(error.exitCode)
         ? error.exitCode
         : null,
 
     signal:
-      error.signal ||
-      null,
+      error.signal || null,
 
     timedOut:
-      Boolean(
-        error.timedOut
-      ),
+      Boolean(error.timedOut),
 
     resourceViolation:
-      Boolean(
-        error.resourceViolation
-      ),
-
+      Boolean(error.resourceViolation),
   };
-
 }
-
 
 /* ================================================================
    JOB NORMALIZATION
 ================================================================ */
 
-function normalizeJob(
-  request
-) {
-
+function normalizeJob(request) {
   if (
     !request ||
-    typeof request !==
-    "object"
+    typeof request !== "object"
   ) {
-
     throw new TypeError(
       "Engineering job request is required"
     );
-
   }
-
 
   const projectId =
     request.projectId ||
@@ -852,66 +613,47 @@ function normalizeJob(
     request.project?.id ||
     null;
 
-
   const userId =
     request.userId ||
     request.user?._id ||
     request.user?.id ||
     null;
 
-
-  const files =
-    Array.isArray(
-      request.files
-    )
-      ? clone(
-          request.files
-        )
-      : [];
-
+  const files = Array.isArray(
+    request.files
+  )
+    ? clone(request.files)
+    : [];
 
   if (!projectId) {
-
     throw new Error(
       "Engineering job requires projectId"
     );
-
   }
 
-
   if (!userId) {
-
     throw new Error(
       "Engineering job requires userId"
     );
-
   }
-
 
   if (
     files.length === 0 &&
-    request.allowEmptyWorkspace !==
-      true
+    request.allowEmptyWorkspace !== true
   ) {
-
     throw new Error(
       "Engineering job requires project files"
     );
-
   }
 
-
   return {
-
     jobId:
       request.jobId ||
       createId("eng-job"),
 
-    projectId:
-      String(projectId),
+    projectId: String(projectId),
 
-    userId:
-      String(userId),
+    userId: String(userId),
 
     projectName:
       request.projectName ||
@@ -930,35 +672,25 @@ function normalizeJob(
 
     files,
 
-    planning:
-      clone(
-        request.planning ||
-        null
-      ),
+    planning: clone(
+      request.planning || null
+    ),
 
-    intent:
-      clone(
-        request.intent ||
-        null
-      ),
+    intent: clone(
+      request.intent || null
+    ),
 
-    builder:
-      clone(
-        request.builder ||
-        null
-      ),
+    builder: clone(
+      request.builder || null
+    ),
 
-    manifest:
-      clone(
-        request.manifest ||
-        null
-      ),
+    manifest: clone(
+      request.manifest || null
+    ),
 
-    projectData:
-      clone(
-        request.projectData ||
-        {}
-      ),
+    projectData: clone(
+      request.projectData || {}
+    ),
 
     framework:
       request.framework ||
@@ -971,46 +703,33 @@ function normalizeJob(
       null,
 
     branch:
-      request.branch ||
-      "engineering",
+      request.branch || "engineering",
 
     baseCommit:
-      request.baseCommit ||
-      null,
+      request.baseCommit || null,
 
-    environment:
-      clone(
-        request.environment ||
-        {}
-      ),
+    environment: clone(
+      request.environment || {}
+    ),
 
-    metadata:
-      clone(
-        request.metadata ||
-        {}
-      ),
+    metadata: clone(
+      request.metadata || {}
+    ),
 
-    policy:
-      normalizePolicy(
-        request.policy
-      ),
+    policy: normalizePolicy(
+      request.policy
+    ),
 
     allowLegacyAdapter:
-      request.allowLegacyAdapter ===
-      true,
+      request.allowLegacyAdapter === true,
 
     allowAutoScale:
-      request.allowAutoScale !==
-      false,
+      request.allowAutoScale !== false,
 
     dryRun:
-      request.dryRun ===
-      true,
-
+      request.dryRun === true,
   };
-
 }
-
 
 /* ================================================================
    STATE CALL
@@ -1020,107 +739,61 @@ function stateCall(
   methodNames,
   args
 ) {
-
   loadDependencies();
 
-
-  if (
-    !engineeringState
-  ) {
-
+  if (!engineeringState) {
     return null;
-
   }
 
-
-  for (
-    const methodName
-    of methodNames
-  ) {
-
+  for (const methodName of methodNames) {
     const method =
-      engineeringState[
-        methodName
-      ];
+      engineeringState[methodName];
 
-
-    if (
-      typeof method !==
-      "function"
-    ) {
-
+    if (typeof method !== "function") {
       continue;
-
     }
 
-
     try {
-
       return method.apply(
         engineeringState,
         args
       );
-
     } catch (error) {
-
       return {
-
-        success:
-          false,
-
-        error:
-          error.message,
-
+        success: false,
+        error: error.message,
       };
-
     }
-
   }
 
-
   return null;
-
 }
 
-
 /* ================================================================
-   CREATE RUN
+   CREATE RUN RECORD
 ================================================================ */
 
-function createRunRecord(
-  job
-) {
+function createRunRecord(job) {
+  const runId = createId("eng-run");
 
-  const runId =
-    createId(
-      "eng-run"
-    );
-
+  const now = Date.now();
 
   const run = {
-
     runId,
 
-    jobId:
-      job.jobId,
+    jobId: job.jobId,
 
-    projectId:
-      job.projectId,
+    projectId: job.projectId,
 
-    userId:
-      job.userId,
+    userId: job.userId,
 
-    projectName:
-      job.projectName,
+    projectName: job.projectName,
 
-    operation:
-      job.operation,
+    operation: job.operation,
 
-    goal:
-      job.goal,
+    goal: job.goal,
 
-    state:
-      STATES.CREATED,
+    state: STATES.CREATED,
 
     version:
       ENGINEERING_SYSTEM_VERSION,
@@ -1128,44 +801,31 @@ function createRunRecord(
     orchestratorVersion:
       ORCHESTRATOR_VERSION,
 
-    policy:
-      clone(
-        job.policy
-      ),
+    policy: clone(job.policy),
 
-    attempts:
-      0,
+    attempts: 0,
 
-    repairAttempts:
-      0,
+    repairAttempts: 0,
 
-    diagnosisAttempts:
-      0,
+    diagnosisAttempts: 0,
 
-    rollbackCount:
-      0,
+    rollbackCount: 0,
 
-    checkpointCount:
-      0,
+    checkpointCount: 0,
 
-    retryCount:
-      0,
+    retryCount: 0,
 
-    scopeExpansion:
-      1,
+    scopeExpansion: 1,
 
-    autoScaleLevel:
-      1,
+    autoScaleLevel: 1,
 
-    currentFiles:
-      clone(
-        job.files
-      ),
+    currentFiles: clone(
+      job.files
+    ),
 
-    originalFiles:
-      clone(
-        job.files
-      ),
+    originalFiles: clone(
+      job.files
+    ),
 
     checkpoints: [],
 
@@ -1180,52 +840,47 @@ function createRunRecord(
     audit: [],
 
     startedAt:
-      new Date().toISOString(),
+      new Date(now).toISOString(),
 
-    completedAt:
-      null,
+    completedAt: null,
 
-    promotedAt:
-      null,
+    promotedAt: null,
 
-    lastError:
-      null,
+    lastError: null,
 
-    authoritative:
-      false,
+    authoritative: false,
 
-    passed:
-      false,
+    passed: false,
 
-    promoted:
-      false,
+    promoted: false,
 
-    escalated:
-      false,
+    escalated: false,
 
-    rollbackRequired:
-      false,
+    rollbackRequired: false,
 
-    result:
-      null,
+    result: null,
 
-    job:
-      clone(job),
+    job: clone(job),
 
-    planning:
-      clone(job.planning),
+    planning: clone(
+      job.planning
+    ),
 
-    intent:
-      clone(job.intent),
+    intent: clone(
+      job.intent
+    ),
 
-    builder:
-      clone(job.builder),
+    builder: clone(
+      job.builder
+    ),
 
-    manifest:
-      clone(job.manifest),
+    manifest: clone(
+      job.manifest
+    ),
 
-    projectData:
-      clone(job.projectData),
+    projectData: clone(
+      job.projectData
+    ),
 
     framework:
       job.framework,
@@ -1235,34 +890,41 @@ function createRunRecord(
 
     deadlineAt:
       new Date(
-        Date.now() +
-        job.policy.MAX_EXECUTION_TIME_MS
+        now +
+          job.policy.MAX_EXECUTION_TIME_MS
       ).toISOString(),
 
+    cancellationRequested: false,
+
+    resumedFrom:
+      job.metadata?.resumedFrom ||
+      null,
+
+    recovery:
+      job.metadata?.recovery === true,
   };
 
-
-  stateCall(
-
+  const result = stateCall(
     [
       "createRun",
       "createEngineeringRun",
       "initializeRun",
-
     ],
-
-    [
-      run,
-
-    ]
-
+    [run]
   );
 
+  if (
+    result &&
+    result.success === false
+  ) {
+    throw new Error(
+      result.error ||
+        "Engineering State failed to create run"
+    );
+  }
 
   return run;
-
 }
-
 
 /* ================================================================
    AUDIT
@@ -1273,73 +935,42 @@ function audit(
   event,
   data
 ) {
-
   const record = {
+    eventId: createId("audit"),
 
-    eventId:
-      createId(
-        "audit"
-      ),
-
-    runId:
-      run.runId,
+    runId: run.runId,
 
     timestamp:
       new Date().toISOString(),
 
     event,
 
-    state:
-      run.state,
+    state: run.state,
 
     attempt:
-      run.attempts ||
-      0,
+      run.attempts || 0,
 
-    data:
-      clone(
-        data ||
-        {}
-      ),
-
+    data: clone(data || {}),
   };
 
-
-  if (
-    Array.isArray(
-      run.audit
-    )
-  ) {
-
-    run.audit.push(
-      record
-    );
-
+  if (Array.isArray(run.audit)) {
+    run.audit.push(record);
   }
 
-
   stateCall(
-
     [
       "recordAuditEvent",
       "addAuditEvent",
       "appendAudit",
-
     ],
-
     [
       run.runId,
       record,
-
     ]
-
   );
 
-
   return record;
-
 }
-
 
 /* ================================================================
    STATE TRANSITION
@@ -1351,23 +982,17 @@ function transition(
   reason,
   metadata
 ) {
-
   const currentState =
     run.state;
-
 
   if (
     currentState ===
     nextState
   ) {
-
     return {
+      from: currentState,
 
-      from:
-        currentState,
-
-      to:
-        nextState,
+      to: nextState,
 
       reason:
         reason ||
@@ -1376,109 +1001,71 @@ function transition(
       timestamp:
         new Date().toISOString(),
 
-      metadata:
-        clone(
-          metadata ||
-          {}
-        ),
+      metadata: clone(
+        metadata || {}
+      ),
 
-      noop:
-        true,
-
+      noop: true,
     };
-
   }
-
 
   const allowed =
     ALLOWED_TRANSITIONS[
       currentState
     ] || [];
 
-
   if (
     !allowed.includes(
       nextState
     )
   ) {
-
     throw new Error(
-
-      `Illegal engineering state transition: ` +
-      `${currentState} → ${nextState}`
-
+      `Illegal engineering state transition: ${currentState} → ${nextState}`
     );
-
   }
 
-
   const transitionRecord = {
+    from: currentState,
 
-    from:
-      currentState,
-
-    to:
-      nextState,
+    to: nextState,
 
     reason:
-      reason ||
-      null,
+      reason || null,
 
     timestamp:
       new Date().toISOString(),
 
-    metadata:
-      clone(
-        metadata ||
-        {}
-      ),
-
+    metadata: clone(
+      metadata || {}
+    ),
   };
 
-
-  const stateResult =
-    stateCall(
-
-      [
-        "transitionState",
-        "transitionEngineeringState",
-        "transitionRun",
-        "setState",
-
-      ],
-
-      [
-        run.runId,
-        nextState,
-        transitionRecord,
-
-      ]
-
-    );
-
-
-  /*
-   * Local state changes only after the State service accepts the
-   * transition or when no persistent State implementation exists.
-   */
+  const stateResult = stateCall(
+    [
+      "transitionState",
+      "transitionEngineeringState",
+      "transitionRun",
+      "setState",
+    ],
+    [
+      run.runId,
+      nextState,
+      transitionRecord,
+    ]
+  );
 
   if (
     stateResult &&
-    stateResult.success ===
-    false
+    stateResult.success === false
   ) {
-
     throw new Error(
       stateResult.error ||
-      "Engineering state transition failed"
+        "Engineering state transition failed"
     );
-
   }
-
 
   run.state =
     nextState;
-
 
   audit(
     run,
@@ -1486,80 +1073,49 @@ function transition(
     transitionRecord
   );
 
-
   return transitionRecord;
-
 }
-
 
 /* ================================================================
    ATTEMPT / BUDGET
 ================================================================ */
 
-function hasAttemptBudget(
-  run
-) {
-
+function hasAttemptBudget(run) {
   return (
     run.attempts <
     run.policy.MAX_ATTEMPTS
   );
-
 }
 
-
-function hasRepairBudget(
-  run
-) {
-
+function hasRepairBudget(run) {
   return (
     run.repairAttempts <
     run.policy.MAX_REPAIR_ATTEMPTS
   );
-
 }
 
-
-function hasDiagnosisBudget(
-  run
-) {
-
+function hasDiagnosisBudget(run) {
   return (
     run.diagnosisAttempts <
     run.policy.MAX_DIAGNOSIS_ATTEMPTS
   );
-
 }
 
-
-function hasRollbackBudget(
-  run
-) {
-
+function hasRollbackBudget(run) {
   return (
     run.rollbackCount <
     run.policy.MAX_ROLLBACKS
   );
-
 }
-
 
 /* ================================================================
    DEADLINE
 ================================================================ */
 
-function isRunDeadlineExceeded(
-  run
-) {
-
-  if (
-    !run.deadlineAt
-  ) {
-
+function isRunDeadlineExceeded(run) {
+  if (!run.deadlineAt) {
     return false;
-
   }
-
 
   return (
     Date.now() >=
@@ -1567,9 +1123,35 @@ function isRunDeadlineExceeded(
       run.deadlineAt
     ).getTime()
   );
-
 }
 
+function getRemainingExecutionTime(run) {
+  if (!run.deadlineAt) {
+    return run.policy
+      .MAX_EXECUTION_TIME_MS;
+  }
+
+  const remaining =
+    new Date(
+      run.deadlineAt
+    ).getTime() -
+    Date.now();
+
+  return Math.max(
+    0,
+    remaining
+  );
+}
+
+/* ================================================================
+   CANCELLATION
+================================================================ */
+
+function isCancellationRequested(run) {
+  return (
+    run.cancellationRequested === true
+  );
+}
 
 /* ================================================================
    SCOPE CHECK
@@ -1579,7 +1161,6 @@ function withinScope(
   run,
   candidateFiles
 ) {
-
   const original =
     Math.max(
       1,
@@ -1590,7 +1171,6 @@ function withinScope(
         : 1
     );
 
-
   const current =
     Array.isArray(
       candidateFiles
@@ -1598,19 +1178,18 @@ function withinScope(
       ? candidateFiles.length
       : 0;
 
-
   const ratio =
     current /
     original;
 
+  run.scopeExpansion =
+    ratio;
 
   return (
     ratio <=
     run.policy.MAX_SCOPE_EXPANSION
   );
-
 }
-
 
 /* ================================================================
    CHECKPOINT
@@ -1620,25 +1199,18 @@ async function createCheckpoint(
   run,
   reason
 ) {
-
   if (
     run.checkpointCount >=
     run.policy.MAX_CHECKPOINTS
   ) {
-
     throw new Error(
       "Maximum engineering checkpoints exceeded"
     );
-
   }
 
-
   const checkpoint = {
-
     checkpointId:
-      createId(
-        "checkpoint"
-      ),
+      createId("checkpoint"),
 
     runId:
       run.runId,
@@ -1656,66 +1228,49 @@ async function createCheckpoint(
     state:
       run.state,
 
-    files:
-      clone(
-        run.currentFiles
-      ),
+    files: clone(
+      run.currentFiles
+    ),
 
     sourceHash:
       calculateFilesHash(
         run.currentFiles
       ),
-
   };
 
-
-  const result =
-    stateCall(
-
-      [
-        "createCheckpoint",
-        "recordCheckpoint",
-        "saveCheckpoint",
-
-      ],
-
-      [
-        run.runId,
-        checkpoint,
-
-      ]
-
-    );
-
+  const result = stateCall(
+    [
+      "createCheckpoint",
+      "recordCheckpoint",
+      "saveCheckpoint",
+    ],
+    [
+      run.runId,
+      checkpoint,
+    ]
+  );
 
   if (
     result &&
-    result.success ===
-    false
+    result.success === false
   ) {
-
     throw new Error(
       result.error ||
-      "Checkpoint persistence failed"
+        "Checkpoint persistence failed"
     );
-
   }
-
 
   run.checkpoints.push(
     checkpoint
   );
 
-
   run.checkpointCount +=
     1;
-
 
   audit(
     run,
     "CHECKPOINT_CREATED",
     {
-
       checkpointId:
         checkpoint.checkpointId,
 
@@ -1724,16 +1279,11 @@ async function createCheckpoint(
 
       reason:
         checkpoint.reason,
-
     }
-
   );
 
-
   return checkpoint;
-
 }
-
 
 /* ================================================================
    ROLLBACK
@@ -1744,28 +1294,29 @@ async function rollbackToCheckpoint(
   checkpoint,
   reason
 ) {
-
   if (!checkpoint) {
-
     throw new Error(
       "Rollback checkpoint is required"
     );
-
   }
 
-
   if (
-    !hasRollbackBudget(
-      run
-    )
+    !hasRollbackBudget(run)
   ) {
-
     throw new Error(
       "Maximum rollback limit exceeded"
     );
-
   }
 
+  if (
+    TERMINAL_STATES.has(
+      run.state
+    )
+  ) {
+    throw new Error(
+      "Cannot rollback a terminal engineering run"
+    );
+  }
 
   transition(
     run,
@@ -1774,29 +1325,22 @@ async function rollbackToCheckpoint(
       "rollback-requested"
   );
 
-
-  run.rollbackCount +=
-    1;
-
-
   const previousFiles =
     clone(
       run.currentFiles
     );
-
 
   run.currentFiles =
     clone(
       checkpoint.files
     );
 
+  run.rollbackCount +=
+    1;
 
   const rollbackRecord = {
-
     rollbackId:
-      createId(
-        "rollback"
-      ),
+      createId("rollback"),
 
     checkpointId:
       checkpoint.checkpointId,
@@ -1808,8 +1352,7 @@ async function rollbackToCheckpoint(
       run.attempts,
 
     reason:
-      reason ||
-      null,
+      reason || null,
 
     restoredSourceHash:
       checkpoint.sourceHash,
@@ -1821,78 +1364,56 @@ async function rollbackToCheckpoint(
 
     timestamp:
       new Date().toISOString(),
-
   };
-
 
   const stateResult =
     stateCall(
-
       [
         "recordRollback",
         "rollbackRun",
         "restoreCheckpoint",
-
       ],
-
       [
         run.runId,
         rollbackRecord,
         checkpoint,
-
       ]
-
     );
-
 
   if (
     stateResult &&
-    stateResult.success ===
-    false
+    stateResult.success === false
   ) {
-
     throw new Error(
       stateResult.error ||
-      "Rollback persistence failed"
+        "Rollback persistence failed"
     );
-
   }
 
-
-  /*
-   * If the Executor provides a workspace restore operation, use it.
-   */
-
   loadDependencies();
-
 
   if (
     engineeringExecutor &&
     typeof engineeringExecutor.restoreCheckpoint ===
       "function"
   ) {
-
-    await engineeringExecutor
-      .restoreCheckpoint({
-
+    await engineeringExecutor.restoreCheckpoint(
+      {
         runId:
           run.runId,
 
         projectId:
           run.projectId,
 
-        files:
-          clone(
-            checkpoint.files
-          ),
+        files: clone(
+          checkpoint.files
+        ),
 
         sourceHash:
           checkpoint.sourceHash,
-
-      });
-
+      }
+    );
   }
-
 
   audit(
     run,
@@ -1900,123 +1421,84 @@ async function rollbackToCheckpoint(
     rollbackRecord
   );
 
-
   return rollbackRecord;
-
 }
-
 
 /* ================================================================
    RETRY
 ================================================================ */
 
-function calculateRetryDelay(
-  run
-) {
-
+function calculateRetryDelay(run) {
   const exponent =
     Math.max(
       0,
       run.retryCount - 1
     );
 
-
   const base =
     Math.min(
-
       run.policy.RETRY_MAX_DELAY_MS,
-
       run.policy.RETRY_BASE_DELAY_MS *
-      Math.pow(
-        2,
-        exponent
-      )
-
+        Math.pow(2, exponent)
     );
-
 
   const jitter =
     Math.floor(
       Math.random() *
-      run.policy.RETRY_JITTER_MS
+        run.policy.RETRY_JITTER_MS
     );
 
-
-  return (
-    base +
-    jitter
-  );
-
+  return base + jitter;
 }
 
-
-function sleep(
-  milliseconds
-) {
-
+function sleep(milliseconds) {
   if (
     !milliseconds ||
     milliseconds <= 0
   ) {
-
     return Promise.resolve();
-
   }
 
-
   return new Promise(
-    resolve =>
+    (resolve) =>
       setTimeout(
         resolve,
         milliseconds
       )
   );
-
 }
-
 
 function shouldRetry(
   run,
   failure
 ) {
-
   if (
     !failure ||
-    failure.retryable !==
-      true
+    failure.retryable !== true
   ) {
-
     return false;
-
   }
-
 
   if (
-    !hasAttemptBudget(
-      run
-    )
+    !hasAttemptBudget(run)
   ) {
-
     return false;
-
   }
-
 
   if (
-    isRunDeadlineExceeded(
-      run
-    )
+    isRunDeadlineExceeded(run)
   ) {
-
     return false;
-
   }
 
+  if (
+    isCancellationRequested(run)
+  ) {
+    return false;
+  }
 
   return true;
-
 }
-
 
 /* ================================================================
    FAILURE RECORD
@@ -2026,19 +1508,14 @@ function recordFailure(
   run,
   failure
 ) {
-
   const normalized =
     normalizeFailure(
       failure
     );
 
-
   const record = {
-
     failureId:
-      createId(
-        "failure"
-      ),
+      createId("failure"),
 
     runId:
       run.runId,
@@ -2050,64 +1527,45 @@ function recordFailure(
       new Date().toISOString(),
 
     ...normalized,
-
   };
-
 
   run.failures.push(
     record
   );
 
-
   run.lastError =
     record;
 
-
-  const result =
-    stateCall(
-
-      [
-        "recordFailure",
-        "addFailure",
-        "recordFailureRecord",
-
-      ],
-
-      [
-        run.runId,
-        record,
-
-      ]
-
-    );
-
+  const result = stateCall(
+    [
+      "recordFailure",
+      "addFailure",
+      "recordFailureRecord",
+    ],
+    [
+      run.runId,
+      record,
+    ]
+  );
 
   if (
     result &&
-    result.success ===
-      false
+    result.success === false
   ) {
-
     audit(
       run,
       "STATE_FAILURE_RECORD_ERROR",
       {
-
         error:
           result.error,
-
       }
-
     );
-
   }
-
 
   audit(
     run,
     "FAILURE_RECORDED",
     {
-
       failureId:
         record.failureId,
 
@@ -2119,16 +1577,11 @@ function recordFailure(
 
       affectedFiles:
         record.affectedFiles,
-
     }
-
   );
 
-
   return record;
-
 }
-
 
 /* ================================================================
    EXECUTION RECORD
@@ -2138,13 +1591,9 @@ function recordExecution(
   run,
   result
 ) {
-
   const record = {
-
     executionId:
-      createId(
-        "execution"
-      ),
+      createId("execution"),
 
     runId:
       run.runId,
@@ -2156,12 +1605,10 @@ function recordExecution(
       new Date().toISOString(),
 
     success:
-      result?.success ===
-      true,
+      result?.success === true,
 
     authoritative:
-      result?.authoritative ===
-      true,
+      result?.authoritative === true,
 
     validationMode:
       result?.validationMode ||
@@ -2176,12 +1623,14 @@ function recordExecution(
       null,
 
     failureCategory:
-      result?.repairContext?.failureCategory ||
+      result?.repairContext
+        ?.failureCategory ||
       result?.failureCategory ||
       null,
 
     failureStage:
-      result?.repairContext?.failureStage ||
+      result?.repairContext
+        ?.failureStage ||
       result?.failureStage ||
       null,
 
@@ -2212,48 +1661,36 @@ function recordExecution(
           )
         : null,
 
-    artifact:
-      clone(
-        result?.artifact ||
+    artifact: clone(
+      result?.artifact ||
         null
-      ),
+    ),
 
-    metadata:
-      clone(
-        result?.metadata ||
+    metadata: clone(
+      result?.metadata ||
         {}
-      ),
-
+    ),
   };
-
 
   run.executions.push(
     record
   );
 
-
   stateCall(
-
     [
       "recordExecution",
       "addExecutionRecord",
-
     ],
-
     [
       run.runId,
       record,
-
     ]
-
   );
-
 
   audit(
     run,
     "EXECUTION_RECORDED",
     {
-
       executionId:
         record.executionId,
 
@@ -2265,16 +1702,11 @@ function recordExecution(
 
       buildId:
         record.buildId,
-
     }
-
   );
 
-
   return record;
-
 }
-
 
 /* ================================================================
    AUTHORITATIVE SUCCESS
@@ -2283,83 +1715,50 @@ function recordExecution(
 function isAuthoritativeSuccess(
   result
 ) {
-
   if (
     !result ||
-    result.success !==
-      true
+    result.success !== true
   ) {
-
     return false;
-
   }
-
 
   if (
-    result.authoritative !==
-      true
+    result.authoritative !== true
   ) {
-
     return false;
-
   }
-
 
   if (
     result.validationMode !==
-      "authoritative"
+    "authoritative"
   ) {
-
     return false;
-
   }
 
-
-  if (
-    !result.buildId
-  ) {
-
+  if (!result.buildId) {
     return false;
-
   }
-
 
   const artifact =
     result.artifact;
 
-
-  if (
-    !artifact
-  ) {
-
+  if (!artifact) {
     return false;
-
   }
-
 
   if (
     !artifact.storageKey &&
     !artifact.path
   ) {
-
     return false;
-
   }
 
-
-  if (
-    !artifact.checksum
-  ) {
-
+  if (!artifact.checksum) {
     return false;
-
   }
-
 
   return true;
-
 }
-
 
 /* ================================================================
    EXECUTOR
@@ -2368,36 +1767,43 @@ function isAuthoritativeSuccess(
 async function executeBuild(
   run
 ) {
-
   loadDependencies();
 
-
-  if (
-    !engineeringExecutor
-  ) {
-
+  if (!engineeringExecutor) {
     throw new Error(
       "engineeringExecutor is unavailable"
     );
-
   }
-
 
   if (
     typeof engineeringExecutor.executeBuild !==
-      "function"
+    "function"
   ) {
-
     throw new Error(
       "engineeringExecutor.executeBuild is unavailable"
     );
-
   }
 
+  const remainingTime =
+    getRemainingExecutionTime(
+      run
+    );
 
-  return engineeringExecutor
-    .executeBuild({
+  if (remainingTime <= 0) {
+    throw Object.assign(
+      new Error(
+        "Engineering execution deadline exceeded"
+      ),
+      {
+        category: "timeout",
+        retryable: false,
+        timedOut: true,
+      }
+    );
+  }
 
+  return engineeringExecutor.executeBuild(
+    {
       projectId:
         run.projectId,
 
@@ -2407,28 +1813,21 @@ async function executeBuild(
       projectName:
         run.projectName,
 
-      files:
-        clone(
-          run.currentFiles
-        ),
+      files: clone(
+        run.currentFiles
+      ),
 
-      planning:
-        clone(
-          run.planning ||
-          null
-        ),
+      planning: clone(
+        run.planning || null
+      ),
 
-      manifest:
-        clone(
-          run.manifest ||
-          null
-        ),
+      manifest: clone(
+        run.manifest || null
+      ),
 
-      projectData:
-        clone(
-          run.projectData ||
-          {}
-        ),
+      projectData: clone(
+        run.projectData || {}
+      ),
 
       framework:
         run.framework ||
@@ -2445,19 +1844,23 @@ async function executeBuild(
         run.runId,
 
       timeoutMs:
-        run.policy.MAX_EXECUTION_TIME_MS,
+        remainingTime,
 
       resourcePolicy: {
-
         maxCpu:
           run.policy.MAX_AUTO_SCALE,
-
       },
 
-    });
+      engineeringPolicy:
+        clone(run.policy),
 
+      cancellationRequested:
+        isCancellationRequested(
+          run
+        ),
+    }
+  );
 }
-
 
 /* ================================================================
    LEGACY BUILD
@@ -2466,60 +1869,50 @@ async function executeBuild(
 async function executeLegacyBuild(
   run
 ) {
-
   loadDependencies();
-
 
   if (
     !run.job?.allowLegacyAdapter
   ) {
-
     return null;
-
   }
-
 
   if (
     !legacyAuthoritativeBuildService
   ) {
-
     return null;
-
   }
 
-
   const execute =
-    legacyAuthoritativeBuildService.executeBuild ||
-    legacyAuthoritativeBuildService.buildProject;
-
+    legacyAuthoritativeBuildService
+      .executeBuild ||
+    legacyAuthoritativeBuildService
+      .buildProject;
 
   if (
     typeof execute !==
-      "function"
+    "function"
   ) {
-
     return null;
-
   }
-
 
   audit(
     run,
     "LEGACY_AUTHORITY_ADAPTER_USED",
     {
-
       serviceVersion:
         legacyAuthoritativeBuildService
           .SERVICE_VERSION ||
         null,
-
     }
-
   );
 
+  const remainingTime =
+    getRemainingExecutionTime(
+      run
+    );
 
   return execute({
-
     projectId:
       run.projectId,
 
@@ -2529,28 +1922,21 @@ async function executeLegacyBuild(
     projectName:
       run.projectName,
 
-    files:
-      clone(
-        run.currentFiles
-      ),
+    files: clone(
+      run.currentFiles
+    ),
 
-    planning:
-      clone(
-        run.planning ||
-        null
-      ),
+    planning: clone(
+      run.planning || null
+    ),
 
-    manifest:
-      clone(
-        run.manifest ||
-        null
-      ),
+    manifest: clone(
+      run.manifest || null
+    ),
 
-    projectData:
-      clone(
-        run.projectData ||
-        {}
-      ),
+    projectData: clone(
+      run.projectData || {}
+    ),
 
     framework:
       run.framework ||
@@ -2566,78 +1952,44 @@ async function executeLegacyBuild(
     runId:
       run.runId,
 
+    timeoutMs:
+      remainingTime,
   });
-
 }
-
 
 /* ================================================================
    MASTER AGENT
 ================================================================ */
 
-/**
- * IMPORTANT:
- *
- * Master Agent integration is intentionally isolated here.
- *
- * Once the real Master Agent code is supplied, this adapter will be
- * locked to its exact production contract instead of guessing.
- */
-
 async function analyzeWithMaster(
   run
 ) {
-
   loadDependencies();
 
-
-  if (
-    !masterAgent
-  ) {
-
+  if (!masterAgent) {
     return {
-
-      success:
-        true,
-
-      skipped:
-        true,
-
+      success: true,
+      skipped: true,
       reason:
         "Master Agent unavailable",
-
     };
-
   }
 
-
   const candidates = [
-
     "analyzeEngineeringJob",
     "analyzeBuild",
-
   ];
 
-
-  for (
-    const name
-    of candidates
-  ) {
-
+  for (const name of candidates) {
     if (
       typeof masterAgent[name] !==
-        "function"
+      "function"
     ) {
-
       continue;
-
     }
 
-
     const context = {
-
-      engineeringRun:
-        true,
+      engineeringRun: true,
 
       runId:
         run.runId,
@@ -2657,40 +2009,29 @@ async function analyzeWithMaster(
       goal:
         run.goal,
 
-      files:
-        clone(
-          run.currentFiles
-        ),
+      files: clone(
+        run.currentFiles
+      ),
 
-      planning:
-        clone(
-          run.planning ||
-          null
-        ),
+      planning: clone(
+        run.planning || null
+      ),
 
-      intent:
-        clone(
-          run.intent ||
-          null
-        ),
+      intent: clone(
+        run.intent || null
+      ),
 
-      builder:
-        clone(
-          run.builder ||
-          null
-        ),
+      builder: clone(
+        run.builder || null
+      ),
 
-      manifest:
-        clone(
-          run.manifest ||
-          null
-        ),
+      manifest: clone(
+        run.manifest || null
+      ),
 
-      projectData:
-        clone(
-          run.projectData ||
-          {}
-        ),
+      projectData: clone(
+        run.projectData || {}
+      ),
 
       framework:
         run.framework ||
@@ -2701,42 +2042,25 @@ async function analyzeWithMaster(
         null,
 
       engineeringPolicy:
-        clone(
-          run.policy
-        ),
-
+        clone(run.policy),
     };
-
 
     return (
-      await masterAgent[name](
+      (await masterAgent[name](
         context
-      )
-    ) || {
-
-      success:
-        true,
-
-    };
-
+      )) || {
+        success: true,
+      }
+    );
   }
 
-
   return {
-
-    success:
-      true,
-
-    skipped:
-      true,
-
+    success: true,
+    skipped: true,
     reason:
       "No dedicated Master engineering analysis contract yet",
-
   };
-
 }
-
 
 /* ================================================================
    INTELLIGENCE — DIAGNOSIS
@@ -2746,49 +2070,41 @@ async function diagnoseFailure(
   run,
   failure
 ) {
-
   loadDependencies();
-
 
   if (
     !engineeringIntelligence
   ) {
-
     return {
-
-      success:
-        false,
-
+      success: false,
       error:
         "Engineering Intelligence unavailable",
-
     };
-
   }
-
 
   if (
     typeof engineeringIntelligence
       .diagnoseFailure !==
-      "function"
+    "function"
   ) {
-
     return {
-
-      success:
-        false,
-
+      success: false,
       error:
         "Engineering Intelligence diagnosis contract unavailable",
-
     };
-
   }
 
+  const knownRepairs =
+    typeof engineeringIntelligence
+      .findKnownRepair ===
+    "function"
+      ? engineeringIntelligence.findKnownRepair(
+          failure
+        )
+      : [];
 
   return engineeringIntelligence
     .diagnoseFailure({
-
       runId:
         run.runId,
 
@@ -2798,39 +2114,23 @@ async function diagnoseFailure(
       attempt:
         run.attempts,
 
-      files:
-        clone(
-          run.currentFiles
-        ),
+      files: clone(
+        run.currentFiles
+      ),
 
-      failure:
-        clone(
-          failure
-        ),
+      failure: clone(
+        failure
+      ),
 
-      authoritative:
-        true,
+      authoritative: true,
 
-      planning:
-        clone(
-          run.planning ||
-          null
-        ),
+      planning: clone(
+        run.planning || null
+      ),
 
-      knownRepairs:
-        typeof engineeringIntelligence
-          .findKnownRepair ===
-          "function"
-          ? engineeringIntelligence
-              .findKnownRepair(
-                failure
-              )
-          : [],
-
+      knownRepairs,
     });
-
 }
-
 
 /* ================================================================
    INTELLIGENCE — REPAIR
@@ -2841,49 +2141,32 @@ async function repairFailure(
   failure,
   diagnosis
 ) {
-
   loadDependencies();
-
 
   if (
     !engineeringIntelligence
   ) {
-
     return {
-
-      success:
-        false,
-
+      success: false,
       error:
         "Engineering Intelligence unavailable",
-
     };
-
   }
-
 
   if (
     typeof engineeringIntelligence
       .repairFailure !==
-      "function"
+    "function"
   ) {
-
     return {
-
-      success:
-        false,
-
+      success: false,
       error:
         "Engineering Intelligence repair contract unavailable",
-
     };
-
   }
-
 
   return engineeringIntelligence
     .repairFailure({
-
       runId:
         run.runId,
 
@@ -2896,32 +2179,25 @@ async function repairFailure(
       repairAttempt:
         run.repairAttempts,
 
-      files:
-        clone(
-          run.currentFiles
-        ),
+      files: clone(
+        run.currentFiles
+      ),
 
-      failure:
-        clone(
-          failure
-        ),
+      failure: clone(
+        failure
+      ),
 
-      diagnosis:
-        clone(
-          diagnosis
-        ),
+      diagnosis: clone(
+        diagnosis
+      ),
 
-      planning:
-        clone(
-          run.planning ||
-          null
-        ),
+      planning: clone(
+        run.planning || null
+      ),
 
-      authoritative:
-        true,
+      authoritative: true,
 
       limits: {
-
         MAX_REPAIR_FILES:
           run.policy.MAX_REPAIR_FILES,
 
@@ -2930,13 +2206,9 @@ async function repairFailure(
 
         MAX_SCOPE_EXPANSION:
           run.policy.MAX_SCOPE_EXPANSION,
-
       },
-
     });
-
 }
-
 
 /* ================================================================
    APPLY REPAIR
@@ -2946,26 +2218,17 @@ function applyRepair(
   run,
   repair
 ) {
-
   if (
     !repair ||
-    repair.success !==
-      true
+    repair.success !== true
   ) {
-
     return {
-
-      success:
-        false,
-
+      success: false,
       reason:
         repair?.error ||
         "Repair result was not successful",
-
     };
-
   }
-
 
   const candidateFiles =
     repair.files ||
@@ -2973,25 +2236,17 @@ function applyRepair(
     repair.changedFiles ||
     null;
 
-
   if (
     !Array.isArray(
       candidateFiles
     )
   ) {
-
     return {
-
-      success:
-        false,
-
+      success: false,
       reason:
         "Repair produced no complete file set",
-
     };
-
   }
-
 
   if (
     !withinScope(
@@ -2999,19 +2254,12 @@ function applyRepair(
       candidateFiles
     )
   ) {
-
     return {
-
-      success:
-        false,
-
+      success: false,
       reason:
         "Repair exceeded MAX_SCOPE_EXPANSION",
-
     };
-
   }
-
 
   const changedFiles =
     Array.isArray(
@@ -3020,93 +2268,88 @@ function applyRepair(
       ? repair.changedFiles
       : candidateFiles;
 
-
   if (
     changedFiles.length >
     run.policy.MAX_REPAIR_FILES
   ) {
-
     return {
-
-      success:
-        false,
-
+      success: false,
       reason:
         "Repair exceeded MAX_REPAIR_FILES",
-
     };
-
   }
 
+  loadDependencies();
 
-  /*
-   * Intelligence v1.1.0 performs the actual package.json diff.
-   * Orchestrator therefore does not trust an AI-declared dependency
-   * number as authoritative.
-   */
+  let dependencyChanges;
 
-  const dependencyChanges =
+  if (
+    engineeringIntelligence &&
     typeof engineeringIntelligence
-      ?.calculateDependencyChanges ===
+      .calculateDependencyChanges ===
       "function"
+  ) {
+    dependencyChanges =
+      engineeringIntelligence.calculateDependencyChanges(
+        run.currentFiles,
+        candidateFiles
+      );
+  } else {
+    dependencyChanges = Number(
+      repair.dependencyChanges ||
+        repair.metadata
+          ?.dependencyChanges ||
+        0
+    );
+  }
 
-      ? engineeringIntelligence
-          .calculateDependencyChanges(
-            run.currentFiles,
-            candidateFiles
-          )
-
-      : Number(
-          repair.dependencyChanges ||
-          repair.metadata?.dependencyChanges ||
-          0
-        );
-
+  if (
+    !Number.isFinite(
+      dependencyChanges
+    )
+  ) {
+    dependencyChanges = 0;
+  }
 
   if (
     dependencyChanges >
     run.policy.MAX_DEPENDENCY_CHANGES
   ) {
-
     return {
-
-      success:
-        false,
-
+      success: false,
       reason:
         "Repair exceeded MAX_DEPENDENCY_CHANGES",
-
       dependencyChanges,
-
     };
-
   }
-
 
   const sourceHashBefore =
     calculateFilesHash(
       run.currentFiles
     );
 
-
   const sourceHashAfter =
     calculateFilesHash(
       candidateFiles
     );
 
+  if (
+    sourceHashBefore ===
+    sourceHashAfter
+  ) {
+    return {
+      success: false,
+      reason:
+        "Repair produced no source change",
+    };
+  }
 
   run.currentFiles =
-    clone(
-      candidateFiles
-    );
-
+    clone(candidateFiles);
 
   const repairRecord = {
-
     repairId:
-      createId(
-        "repair"
-      ),
+      createId("repair"),
 
     runId:
       run.runId,
@@ -3117,10 +2360,9 @@ function applyRepair(
     repairAttempt:
       run.repairAttempts,
 
-    changedFiles:
-      clone(
-        changedFiles
-      ),
+    changedFiles: clone(
+      changedFiles
+    ),
 
     dependencyChanges,
 
@@ -3130,37 +2372,27 @@ function applyRepair(
 
     timestamp:
       new Date().toISOString(),
-
   };
-
 
   run.repairs.push(
     repairRecord
   );
 
-
   stateCall(
-
     [
       "recordRepair",
       "addRepairRecord",
-
     ],
-
     [
       run.runId,
       repairRecord,
-
     ]
-
   );
-
 
   audit(
     run,
     "REPAIR_APPLIED",
     {
-
       repairId:
         repairRecord.repairId,
 
@@ -3172,23 +2404,14 @@ function applyRepair(
       sourceHashBefore,
 
       sourceHashAfter,
-
     }
-
   );
 
-
   return {
-
-    success:
-      true,
-
+    success: true,
     repairRecord,
-
   };
-
 }
-
 
 /* ================================================================
    VERIFICATION
@@ -3198,13 +2421,9 @@ function recordVerification(
   run,
   result
 ) {
-
   const verification = {
-
     verificationId:
-      createId(
-        "verify"
-      ),
+      createId("verify"),
 
     runId:
       run.runId,
@@ -3240,52 +2459,42 @@ function recordVerification(
       result?.sourceHash ||
       null,
 
-    errors:
-      clone(
-        result?.errors ||
-        []
-      ),
+    errors: clone(
+      result?.errors || []
+    ),
 
     failureCategory:
-      result?.repairContext?.failureCategory ||
+      result?.repairContext
+        ?.failureCategory ||
       result?.failureCategory ||
       null,
 
     failureStage:
-      result?.repairContext?.failureStage ||
+      result?.repairContext
+        ?.failureStage ||
       result?.failureStage ||
       null,
-
   };
-
 
   run.verifications.push(
     verification
   );
 
-
   stateCall(
-
     [
       "recordVerification",
       "addVerificationRecord",
-
     ],
-
     [
       run.runId,
       verification,
-
     ]
-
   );
-
 
   audit(
     run,
     "VERIFICATION_RECORDED",
     {
-
       verificationId:
         verification.verificationId,
 
@@ -3297,34 +2506,21 @@ function recordVerification(
 
       buildId:
         verification.buildId,
-
     }
-
   );
 
-
   return verification;
-
 }
-
 
 /* ================================================================
    AUTHORITATIVE REPAIR LEARNING
 ================================================================ */
 
-/**
- * Intelligence learns ONLY after authoritative execution.
- *
- * AI saying "repair worked" is not sufficient.
- */
-
 function recordAuthoritativeRepairOutcome(
   run,
   result
 ) {
-
   loadDependencies();
-
 
   if (
     !engineeringIntelligence ||
@@ -3332,27 +2528,19 @@ function recordAuthoritativeRepairOutcome(
       .recordAuthoritativeRepairOutcome !==
       "function"
   ) {
-
     return null;
-
   }
-
 
   const lastRepair =
     run.repairs[
       run.repairs.length - 1
     ] || null;
 
-
   if (!lastRepair) {
-
     return null;
-
   }
 
-
   const outcome = {
-
     runId:
       run.runId,
 
@@ -3376,27 +2564,21 @@ function recordAuthoritativeRepairOutcome(
         result
       ),
 
-    result:
-      clone(
-        result
-      ),
+    result: clone(
+      result
+    ),
 
-    failure:
-      clone(
-        run.lastError ||
+    failure: clone(
+      run.lastError ||
         null
-      ),
-
+    ),
   };
-
 
   return engineeringIntelligence
     .recordAuthoritativeRepairOutcome(
       outcome
     );
-
 }
-
 
 /* ================================================================
    PROMOTION
@@ -3406,94 +2588,77 @@ function canPromote(
   run,
   result
 ) {
-
   if (
     !isAuthoritativeSuccess(
       result
     )
   ) {
-
     return {
-
-      promote:
-        false,
-
+      promote: false,
       reason:
         "Authoritative execution evidence is incomplete",
-
     };
-
   }
-
 
   if (
     run.state !==
     STATES.PASSED
   ) {
-
     return {
-
-      promote:
-        false,
-
+      promote: false,
       reason:
         `Run is not in PASSED state: ${run.state}`,
-
     };
-
   }
-
 
   if (
     run.rollbackRequired
   ) {
-
     return {
-
-      promote:
-        false,
-
+      promote: false,
       reason:
         "Run requires rollback",
-
     };
-
   }
 
+  const lastVerification =
+    run.verifications[
+      run.verifications.length - 1
+    ];
+
+  if (
+    !lastVerification ||
+    lastVerification.passed !== true
+  ) {
+    return {
+      promote: false,
+      reason:
+        "Authoritative verification evidence is incomplete",
+    };
+  }
 
   return {
-
-    promote:
-      true,
-
+    promote: true,
     reason:
       "Authoritative execution, artifact and verification passed",
-
   };
-
 }
-
 
 function promote(
   run,
   result
 ) {
-
   const decision =
     canPromote(
       run,
       result
     );
 
-
   if (
     !decision.promote
   ) {
-
     return decision;
-
   }
-
 
   transition(
     run,
@@ -3501,12 +2666,9 @@ function promote(
     decision.reason
   );
 
+  run.promoted = true;
 
-  run.promoted =
-    true;
-
-  run.passed =
-    true;
+  run.passed = true;
 
   run.authoritative =
     true;
@@ -3514,63 +2676,42 @@ function promote(
   run.promotedAt =
     new Date().toISOString();
 
-
   run.result =
-    clone(
-      result
-    );
-
+    clone(result);
 
   stateCall(
-
     [
       "promoteRun",
       "finalizePromotion",
       "markPromoted",
-
     ],
-
     [
       run.runId,
       result,
-
     ]
-
   );
-
 
   audit(
     run,
     "FINAL_PROMOTION",
     {
-
       buildId:
         result.buildId,
 
       sourceHash:
         result.sourceHash,
 
-      artifact:
-        clone(
-          result.artifact
-        ),
-
+      artifact: clone(
+        result.artifact
+      ),
     }
-
   );
 
-
   return {
-
-    promote:
-      true,
-
+    promote: true,
     result,
-
   };
-
 }
-
 
 /* ================================================================
    ESCALATION
@@ -3581,124 +2722,82 @@ function escalate(
   reason,
   failure
 ) {
-
   if (
     run.state !==
-      STATES.ESCALATED
+    STATES.ESCALATED
   ) {
+    const allowed =
+      ALLOWED_TRANSITIONS[
+        run.state
+      ] || [];
 
     if (
-      !ALLOWED_TRANSITIONS[
-        run.state
-      ]?.includes(
+      allowed.includes(
         STATES.ESCALATED
       )
     ) {
-
-      /*
-       * A terminal/non-transitionable state cannot be moved.
-       * We still return a failed result without fabricating success.
-       */
-
-      run.escalated =
-        true;
-
-    }
-
-    else {
-
       transition(
         run,
         STATES.ESCALATED,
         reason
       );
-
     }
-
   }
 
+  run.escalated = true;
 
-  run.escalated =
-    true;
-
-  run.passed =
-    false;
+  run.passed = false;
 
   run.authoritative =
     false;
 
-  run.promoted =
-    false;
+  run.promoted = false;
 
   run.completedAt =
     new Date().toISOString();
 
-
   run.result = {
+    success: false,
 
-    success:
-      false,
+    status: "escalated",
 
-    status:
-      "escalated",
+    authoritative: false,
 
-    authoritative:
-      false,
-
-    promoted:
-      false,
+    promoted: false,
 
     reason,
 
-    failure:
-      clone(
-        failure ||
-        null
-      ),
-
+    failure: clone(
+      failure || null
+    ),
   };
 
-
   stateCall(
-
     [
       "escalateRun",
       "markEscalated",
       "finalizeRun",
-
     ],
-
     [
       run.runId,
       run.result,
-
     ]
-
   );
-
 
   audit(
     run,
     "RUN_ESCALATED",
     {
-
       reason,
 
-      failure:
-        clone(
-          failure ||
-          null
-        ),
-
+      failure: clone(
+        failure || null
+      ),
     }
-
   );
 
-
   return run.result;
-
 }
-
 
 /* ================================================================
    VERIFY EXECUTION
@@ -3708,81 +2807,57 @@ async function verifyExecution(
   run,
   result
 ) {
-
   const verification =
     recordVerification(
       run,
       result
     );
 
-
   /*
-   * Intelligence learns from the authoritative result only after
-   * verification has determined the actual outcome.
+   * Learning occurs only after actual authoritative verification.
    */
-
   if (
     run.repairAttempts > 0
   ) {
-
     try {
-
       recordAuthoritativeRepairOutcome(
         run,
         result
       );
-
     } catch (error) {
-
       audit(
         run,
         "REPAIR_LEARNING_ERROR",
         {
-
           error:
             error.message,
-
         }
-
       );
-
     }
-
   }
-
 
   if (
     verification.passed
   ) {
-
     transition(
       run,
       STATES.PASSED,
       "Authoritative verification passed"
     );
 
-
-    run.passed =
-      true;
+    run.passed = true;
 
     run.authoritative =
       true;
 
-
     return {
+      success: true,
 
-      success:
-        true,
-
-      passed:
-        true,
+      passed: true,
 
       verification,
-
     };
-
   }
-
 
   transition(
     run,
@@ -3790,28 +2865,19 @@ async function verifyExecution(
     "Authoritative verification failed"
   );
 
-
-  run.passed =
-    false;
+  run.passed = false;
 
   run.authoritative =
     false;
 
-
   return {
+    success: false,
 
-    success:
-      false,
-
-    passed:
-      false,
+    passed: false,
 
     verification,
-
   };
-
 }
-
 
 /* ================================================================
    EXECUTION ATTEMPT
@@ -3820,66 +2886,66 @@ async function verifyExecution(
 async function performExecutionAttempt(
   run
 ) {
-
   if (
-    !hasAttemptBudget(
-      run
-    )
+    !hasAttemptBudget(run)
   ) {
-
-    throw new Error(
-      "MAX_ATTEMPTS exhausted"
+    throw Object.assign(
+      new Error(
+        "MAX_ATTEMPTS exhausted"
+      ),
+      {
+        category:
+          "policy",
+        retryable: false,
+      }
     );
-
   }
 
-
   if (
-    isRunDeadlineExceeded(
-      run
-    )
+    isRunDeadlineExceeded(run)
   ) {
-
     throw Object.assign(
-
       new Error(
         "Engineering run execution deadline exceeded"
       ),
-
       {
-
-        category:
-          "timeout",
-
-        retryable:
-          false,
-
-        timedOut:
-          true,
-
+        category: "timeout",
+        retryable: false,
+        timedOut: true,
       }
-
     );
-
   }
 
+  if (
+    isCancellationRequested(run)
+  ) {
+    throw Object.assign(
+      new Error(
+        "Engineering run cancellation requested"
+      ),
+      {
+        category:
+          "cancelled",
+        retryable: false,
+      }
+    );
+  }
 
-  run.attempts +=
-    1;
-
+  run.attempts += 1;
 
   audit(
     run,
     "EXECUTION_ATTEMPT_STARTED",
     {
-
       attempt:
         run.attempts,
 
+      remainingExecutionTimeMs:
+        getRemainingExecutionTime(
+          run
+        ),
     }
-
   );
-
 
   transition(
     run,
@@ -3887,86 +2953,69 @@ async function performExecutionAttempt(
     "Starting authoritative execution"
   );
 
-
   let result;
 
-
   try {
-
     /*
-     * New Engineering Executor is ALWAYS first authority.
+     * Engineering Executor is ALWAYS first authority.
      */
-
     result =
-      await executeBuild(
-        run
-      );
-
-
+      await executeBuild(run);
   } catch (executorError) {
-
     audit(
       run,
       "ENGINEERING_EXECUTOR_ERROR",
       {
-
         message:
           executorError.message,
 
         category:
           executorError.category ||
           null,
-
       }
-
     );
-
-
-    /*
-     * IMPORTANT:
-     *
-     * We do NOT automatically switch to legacy service merely
-     * because a build failed.
-     *
-     * Legacy is only for migration when the new executor contract
-     * itself is unavailable.
-     */
 
     const executorUnavailable =
       /unavailable/i.test(
         String(
           executorError.message ||
-          ""
+            ""
         )
       );
 
-
+    /*
+     * Legacy service is only a migration adapter.
+     */
     if (
       executorUnavailable &&
       run.job?.allowLegacyAdapter
     ) {
-
       result =
         await executeLegacyBuild(
           run
         );
-
-    }
-
-    else {
-
+    } else {
       throw executorError;
-
     }
-
   }
 
+  if (!result) {
+    throw Object.assign(
+      new Error(
+        "Engineering Executor returned no result"
+      ),
+      {
+        category:
+          "infrastructure",
+        retryable: false,
+      }
+    );
+  }
 
   recordExecution(
     run,
     result
   );
-
 
   transition(
     run,
@@ -3974,11 +3023,8 @@ async function performExecutionAttempt(
     "Authoritative execution completed"
   );
 
-
   return result;
-
 }
-
 
 /* ================================================================
    FAILURE → DIAGNOSIS → REPAIR
@@ -3986,84 +3032,65 @@ async function performExecutionAttempt(
 
 async function handleFailure(
   run,
-  resultOrFailure
+  resultOrFailure,
+  options = {}
 ) {
-
-  /*
-   * If the execution result already contains authoritative failure
-   * context, use it directly.
-   */
-
   const rawFailure =
     resultOrFailure?.repairContext ||
     resultOrFailure?.failure ||
     resultOrFailure;
 
+  /*
+   * Failure may already have been persisted by the caller.
+   * Avoid duplicate failure records.
+   */
+  let failure =
+    options.failureRecord ||
+    null;
 
-  const failure =
-    recordFailure(
-      run,
-      rawFailure
-    );
-
+  if (!failure) {
+    failure =
+      recordFailure(
+        run,
+        rawFailure
+      );
+  }
 
   if (
     run.state !==
     STATES.FAILED
   ) {
-
     transition(
       run,
       STATES.FAILED,
       failure.message
     );
-
   }
 
-
-  /*
-   * First determine whether a repair is possible.
-   */
-
   if (
-    !hasRepairBudget(
-      run
-    )
+    isCancellationRequested(run)
   ) {
-
     return {
+      retry: false,
 
-      retry:
-        false,
-
-      escalated:
-        true,
+      escalated: true,
 
       result:
         escalate(
           run,
-          "Repair attempt limit exhausted",
+          "Engineering run cancelled",
           failure
         ),
-
     };
-
   }
 
-
   if (
-    !hasDiagnosisBudget(
-      run
-    )
+    !hasDiagnosisBudget(run)
   ) {
-
     return {
+      retry: false,
 
-      retry:
-        false,
-
-      escalated:
-        true,
+      escalated: true,
 
       result:
         escalate(
@@ -4071,11 +3098,25 @@ async function handleFailure(
           "Diagnosis attempt limit exhausted",
           failure
         ),
-
     };
-
   }
 
+  if (
+    !hasRepairBudget(run)
+  ) {
+    return {
+      retry: false,
+
+      escalated: true,
+
+      result:
+        escalate(
+          run,
+          "Repair attempt limit exhausted",
+          failure
+        ),
+    };
+  }
 
   transition(
     run,
@@ -4083,57 +3124,45 @@ async function handleFailure(
     "Starting authoritative failure diagnosis"
   );
 
-
   run.diagnosisAttempts +=
     1;
 
-
   let diagnosis;
 
-
   try {
-
     diagnosis =
       await diagnoseFailure(
         run,
         failure
       );
-
   } catch (error) {
-
     diagnosis = {
-
-      success:
-        false,
-
+      success: false,
       error:
         error.message,
-
     };
-
   }
-
 
   audit(
     run,
     "FAILURE_DIAGNOSED",
-    diagnosis
-  );
+    {
+      success:
+        diagnosis?.success !== false,
 
+      diagnosis:
+        clone(diagnosis),
+    }
+  );
 
   if (
     !diagnosis ||
-    diagnosis.success ===
-      false
+    diagnosis.success === false
   ) {
-
     return {
+      retry: false,
 
-      retry:
-        false,
-
-      escalated:
-        true,
+      escalated: true,
 
       result:
         escalate(
@@ -4141,37 +3170,8 @@ async function handleFailure(
           "Failure diagnosis failed",
           failure
         ),
-
     };
-
   }
-
-
-  if (
-    !hasRepairBudget(
-      run
-    )
-  ) {
-
-    return {
-
-      retry:
-        false,
-
-      escalated:
-        true,
-
-      result:
-        escalate(
-          run,
-          "Repair budget exhausted",
-          failure
-        ),
-
-    };
-
-  }
-
 
   transition(
     run,
@@ -4179,54 +3179,37 @@ async function handleFailure(
     "Applying controlled engineering repair"
   );
 
-
   run.repairAttempts +=
     1;
 
-
   let repair;
 
-
   try {
-
     repair =
       await repairFailure(
         run,
         failure,
         diagnosis
       );
-
   } catch (error) {
-
     repair = {
-
-      success:
-        false,
-
+      success: false,
       error:
         error.message,
-
     };
-
   }
-
 
   audit(
     run,
     "REPAIR_GENERATED",
     {
-
       success:
-        repair?.success ===
-        true,
+        repair?.success === true,
 
       repairAttempt:
         run.repairAttempts,
-
     }
-
   );
-
 
   const applied =
     applyRepair(
@@ -4234,18 +3217,13 @@ async function handleFailure(
       repair
     );
 
-
   if (
     !applied.success
   ) {
-
     return {
+      retry: false,
 
-      retry:
-        false,
-
-      escalated:
-        true,
+      escalated: true,
 
       result:
         escalate(
@@ -4254,23 +3232,13 @@ async function handleFailure(
             "Repair could not be safely applied",
           failure
         ),
-
     };
-
   }
-
 
   await createCheckpoint(
     run,
     "post-repair-before-rebuild"
   );
-
-
-  /*
-   * Repair creates a new source state.
-   *
-   * The next authoritative build must start from that state.
-   */
 
   transition(
     run,
@@ -4278,14 +3246,10 @@ async function handleFailure(
     "Rebuilding repaired source tree"
   );
 
-
   return {
+    retry: true,
 
-    retry:
-      true,
-
-    repaired:
-      true,
+    repaired: true,
 
     failure,
 
@@ -4295,11 +3259,8 @@ async function handleFailure(
 
     repairRecord:
       applied.repairRecord,
-
   };
-
 }
-
 
 /* ================================================================
    RETRY HANDLER
@@ -4309,79 +3270,81 @@ async function retryIfAllowed(
   run,
   failure
 ) {
-
   if (
     !shouldRetry(
       run,
       failure
     )
   ) {
-
     return false;
-
   }
-
 
   run.retryCount +=
     1;
-
 
   const delay =
     calculateRetryDelay(
       run
     );
 
+  /*
+   * Never sleep beyond the overall deadline.
+   */
+  const remaining =
+    getRemainingExecutionTime(
+      run
+    );
+
+  if (
+    remaining <= 0
+  ) {
+    return false;
+  }
+
+  const effectiveDelay =
+    Math.min(
+      delay,
+      remaining
+    );
 
   audit(
     run,
     "RETRY_SCHEDULED",
     {
-
       retryCount:
         run.retryCount,
 
       delayMs:
-        delay,
+        effectiveDelay,
 
       category:
         failure.category,
-
     }
-
   );
-
 
   await sleep(
-    delay
+    effectiveDelay
   );
 
-
-  /*
-   * Correct state transition:
-   *
-   * FAILED → EXECUTING
-   *
-   * is explicitly legal in v1.2.0.
-   */
+  if (
+    isRunDeadlineExceeded(run)
+  ) {
+    return false;
+  }
 
   if (
     run.state ===
     STATES.FAILED
   ) {
-
     transition(
       run,
       STATES.EXECUTING,
       "Retrying transient engineering failure"
     );
-
   }
 
-
   return true;
-
 }
-
 
 /* ================================================================
    AUTO SCALE
@@ -4391,119 +3354,90 @@ function evaluateAutoScale(
   run,
   result
 ) {
-
   if (
     !run.job?.allowAutoScale
   ) {
-
     return {
-
-      scaled:
-        false,
+      scaled: false,
 
       level:
         run.autoScaleLevel,
 
       reason:
         "Auto-scale disabled",
-
     };
-
   }
-
 
   if (
     run.autoScaleLevel >=
     run.policy.MAX_AUTO_SCALE
   ) {
-
     return {
-
-      scaled:
-        false,
+      scaled: false,
 
       level:
         run.autoScaleLevel,
 
       reason:
         "MAX_AUTO_SCALE reached",
-
     };
-
   }
-
 
   const metadata =
     result?.metadata ||
     {};
-
 
   const resource =
     metadata.resourceUsage ||
     result?.resourceUsage ||
     null;
 
-
   if (!resource) {
-
     return {
-
-      scaled:
-        false,
+      scaled: false,
 
       level:
         run.autoScaleLevel,
 
       reason:
         "No resource pressure evidence",
-
     };
-
   }
-
 
   const cpu =
     Number(
       resource.cpuPercent
     );
 
-
   const memory =
     Number(
       resource.memoryPercent
     );
 
-
   if (
-    (!Number.isFinite(cpu) || cpu < 80) &&
-    (!Number.isFinite(memory) || memory < 80)
+    (!Number.isFinite(cpu) ||
+      cpu < 80) &&
+    (!Number.isFinite(memory) ||
+      memory < 80)
   ) {
-
     return {
-
-      scaled:
-        false,
+      scaled: false,
 
       level:
         run.autoScaleLevel,
 
       reason:
         "Resource pressure below threshold",
-
     };
-
   }
-
 
   run.autoScaleLevel +=
     1;
-
 
   audit(
     run,
     "AUTO_SCALE_REQUESTED",
     {
-
       level:
         run.autoScaleLevel,
 
@@ -4512,32 +3446,22 @@ function evaluateAutoScale(
 
       memoryPercent:
         memory,
-
     }
-
   );
 
-
   /*
-   * Actual resource scaling remains an Executor concern.
-   * Orchestrator only authorizes a level within the policy.
+   * Actual resource application belongs to Executor.
    */
-
   return {
-
-    scaled:
-      true,
+    scaled: true,
 
     level:
       run.autoScaleLevel,
 
     reason:
       "Resource pressure detected",
-
   };
-
 }
-
 
 /* ================================================================
    START JOB
@@ -4546,27 +3470,22 @@ function evaluateAutoScale(
 async function startJob(
   request
 ) {
-
   loadDependencies();
-
 
   const job =
     normalizeJob(
       request
     );
 
-
   const run =
     createRunRecord(
       job
     );
 
-
   audit(
     run,
     "ENGINEERING_JOB_ACCEPTED",
     {
-
       operation:
         job.operation,
 
@@ -4580,107 +3499,84 @@ async function startJob(
         clone(
           job.policy
         ),
-
     }
-
   );
 
-
   return run;
-
 }
-
 
 /* ================================================================
    MAIN RUN
 ================================================================ */
 
-async function run(
-  request
-) {
-
-  const run =
+async function run(request) {
+  const runRecord =
     await startJob(
       request
     );
 
-
   try {
-
     /* ============================================================
        PHASE 1 — ANALYSIS
     ============================================================ */
 
     transition(
-      run,
+      runRecord,
       STATES.ANALYZING,
       "Engineering analysis started"
     );
 
-
     await createCheckpoint(
-      run,
+      runRecord,
       "pre-analysis"
     );
 
-
     let masterResult;
 
-
     try {
-
       masterResult =
         await analyzeWithMaster(
-          run
+          runRecord
         );
-
     } catch (error) {
-
       masterResult = {
-
-        success:
-          false,
+        success: false,
 
         error:
           error.message,
-
       };
-
     }
 
-
     audit(
-      run,
+      runRecord,
       "MASTER_ANALYSIS_COMPLETED",
       {
-
         success:
           masterResult?.success !==
-            false,
+          false,
 
         skipped:
           masterResult?.skipped ||
           false,
-
       }
-
     );
 
-
+    /*
+     * Master analysis is advisory/control-plane analysis.
+     * It does not prove build success.
+     */
     if (
       masterResult &&
       masterResult.success ===
         false &&
       !masterResult.skipped
     ) {
-
       return finalizeRun(
-        run,
+        runRecord,
         escalate(
-          run,
+          runRecord,
           "Master Agent analysis failed",
           {
-
             category:
               "master-agent",
 
@@ -4688,15 +3584,11 @@ async function run(
               masterResult.error ||
               "Master Agent analysis failed",
 
-            retryable:
-              false,
-
+            retryable: false,
           }
         )
       );
-
     }
-
 
     /* ============================================================
        PHASE 2 — AUTHORITATIVE ENGINEERING LOOP
@@ -4704,32 +3596,58 @@ async function run(
 
     while (
       hasAttemptBudget(
-        run
+        runRecord
       )
     ) {
-
       if (
         TERMINAL_STATES.has(
-          run.state
+          runRecord.state
         )
       ) {
-
         break;
-
       }
 
+      if (
+        isCancellationRequested(
+          runRecord
+        )
+      ) {
+        const cancellationFailure =
+          recordFailure(
+            runRecord,
+            {
+              category:
+                "cancelled",
+
+              failureStage:
+                "orchestrator",
+
+              message:
+                "Engineering run cancellation requested",
+
+              retryable: false,
+            }
+          );
+
+        return finalizeRun(
+          runRecord,
+          escalate(
+            runRecord,
+            "Engineering run cancelled",
+            cancellationFailure
+          )
+        );
+      }
 
       if (
         isRunDeadlineExceeded(
-          run
+          runRecord
         )
       ) {
-
         const timeoutFailure =
           recordFailure(
-            run,
+            runRecord,
             {
-
               category:
                 "timeout",
 
@@ -4739,135 +3657,113 @@ async function run(
               message:
                 "Engineering run deadline exceeded",
 
-              retryable:
-                false,
+              retryable: false,
 
-              timedOut:
-                true,
-
+              timedOut: true,
             }
           );
 
-
         return finalizeRun(
-          run,
+          runRecord,
           escalate(
-            run,
+            runRecord,
             "Engineering execution deadline exceeded",
             timeoutFailure
           )
         );
-
       }
 
-
       let result;
-
 
       /* ==========================================================
          EXECUTION
       ========================================================== */
 
       try {
-
         result =
           await performExecutionAttempt(
-            run
+            runRecord
           );
-
       } catch (error) {
-
         /*
-         * The exception itself is the authoritative execution
-         * failure. Record exactly once.
+         * Exception is authoritative execution failure.
+         * Record exactly once here.
          */
-
         const failure =
           recordFailure(
-            run,
+            runRecord,
             error
           );
 
-
         if (
-          run.state !==
+          runRecord.state !==
           STATES.FAILED
         ) {
-
           transition(
-            run,
+            runRecord,
             STATES.FAILED,
             failure.message
           );
-
         }
 
-
         /*
-         * Try controlled diagnosis/repair.
+         * Controlled repair is attempted first.
          */
-
         if (
           hasRepairBudget(
-            run
+            runRecord
+          ) &&
+          hasDiagnosisBudget(
+            runRecord
           )
         ) {
-
           const repairOutcome =
             await handleFailure(
-              run,
-              failure
+              runRecord,
+              failure,
+              {
+                failureRecord:
+                  failure,
+              }
             );
-
 
           if (
             repairOutcome?.retry
           ) {
-
             continue;
-
           }
-
         }
 
-
         /*
-         * Finally allow transient retry if applicable.
+         * Only transient failures reach ordinary retry.
          */
-
         if (
           await retryIfAllowed(
-            run,
+            runRecord,
             failure
           )
         ) {
-
           continue;
-
         }
 
-
         return finalizeRun(
-          run,
+          runRecord,
           escalate(
-            run,
+            runRecord,
             "Engineering execution failed",
             failure
           )
         );
-
       }
-
 
       /* ==========================================================
          RESOURCE EVALUATION
       ========================================================== */
 
       evaluateAutoScale(
-        run,
+        runRecord,
         result
       );
-
 
       /* ==========================================================
          VERIFICATION
@@ -4875,45 +3771,37 @@ async function run(
 
       const verification =
         await verifyExecution(
-          run,
+          runRecord,
           result
         );
-
 
       if (
         verification.passed
       ) {
-
         const promotion =
           promote(
-            run,
+            runRecord,
             result
           );
-
 
         if (
           promotion.promote
         ) {
-
           return finalizeRun(
-            run,
+            runRecord,
             result
           );
-
         }
 
-
         return finalizeRun(
-          run,
+          runRecord,
           escalate(
-            run,
+            runRecord,
             promotion.reason,
             result
           )
         );
-
       }
-
 
       /* ==========================================================
          FAILURE → DIAGNOSIS → REPAIR
@@ -4921,132 +3809,105 @@ async function run(
 
       const failureResult =
         await handleFailure(
-          run,
+          runRecord,
           result
         );
-
 
       if (
         failureResult?.retry
       ) {
-
         continue;
-
       }
-
 
       /* ==========================================================
          TRANSIENT RETRY
       ========================================================== */
 
       const failure =
-        run.lastError;
-
+        runRecord.lastError;
 
       if (
         await retryIfAllowed(
-          run,
+          runRecord,
           failure
         )
       ) {
-
         continue;
-
       }
 
-
       return finalizeRun(
-        run,
+        runRecord,
         escalate(
-          run,
+          runRecord,
           "Engineering retry policy exhausted",
           failure
         )
       );
-
     }
-
 
     /* ============================================================
        ATTEMPT LIMIT
     ============================================================ */
 
     return finalizeRun(
-      run,
+      runRecord,
       escalate(
-        run,
+        runRecord,
         "MAX_ATTEMPTS exhausted",
-        run.lastError
+        runRecord.lastError
       )
     );
-
   } catch (error) {
-
     /* ============================================================
        GLOBAL ORCHESTRATOR FAILURE
     ============================================================ */
 
     const failure =
       recordFailure(
-        run,
+        runRecord,
         {
-
           category:
             "orchestrator",
 
           message:
             error.message,
 
-          retryable:
-            false,
-
+          retryable: false,
         }
       );
 
-
     return finalizeRun(
-      run,
+      runRecord,
       escalate(
-        run,
+        runRecord,
         "Engineering orchestrator failure",
         failure
       )
     );
-
   }
-
 }
-
 
 /* ================================================================
    FINALIZE
 ================================================================ */
 
 function finalizeRun(
-  run,
+  runRecord,
   terminalResult
 ) {
-
-  run.completedAt =
-    run.completedAt ||
+  runRecord.completedAt =
+    runRecord.completedAt ||
     new Date().toISOString();
 
-
   /*
-   * Never infer success from state alone.
+   * Success can NEVER be inferred from state.
    */
-
   const authoritative =
-    run.authoritative ===
-      true &&
-    run.passed ===
-      true &&
-    run.promoted ===
-      true;
+    runRecord.authoritative === true &&
+    runRecord.passed === true &&
+    runRecord.promoted === true;
 
-
-  const result = {
-
+  const finalResult = {
     success:
       authoritative,
 
@@ -5056,63 +3917,58 @@ function finalizeRun(
         : "failed",
 
     runId:
-      run.runId,
+      runRecord.runId,
 
     jobId:
-      run.jobId,
+      runRecord.jobId,
 
     projectId:
-      run.projectId,
+      runRecord.projectId,
 
     state:
-      run.state,
+      runRecord.state,
 
     authoritative,
 
     passed:
-      run.passed ===
-      true,
+      runRecord.passed === true,
 
     promoted:
-      run.promoted ===
-      true,
+      runRecord.promoted === true,
 
     escalated:
-      run.escalated ===
-      true,
+      runRecord.escalated === true,
 
     attempts:
-      run.attempts,
+      runRecord.attempts,
 
     repairAttempts:
-      run.repairAttempts,
+      runRecord.repairAttempts,
 
     diagnosisAttempts:
-      run.diagnosisAttempts,
+      runRecord.diagnosisAttempts,
 
     rollbackCount:
-      run.rollbackCount,
+      runRecord.rollbackCount,
 
     checkpointCount:
-      run.checkpointCount,
+      runRecord.checkpointCount,
 
     autoScaleLevel:
-      run.autoScaleLevel,
+      runRecord.autoScaleLevel,
 
     sourceHash:
       calculateFilesHash(
-        run.currentFiles
+        runRecord.currentFiles
       ),
 
-    result:
-      clone(
-        terminalResult ||
-        run.result ||
+    result: clone(
+      terminalResult ||
+        runRecord.result ||
         null
-      ),
+    ),
 
     metadata: {
-
       orchestratorVersion:
         ORCHESTRATOR_VERSION,
 
@@ -5120,41 +3976,57 @@ function finalizeRun(
         ENGINEERING_SYSTEM_VERSION,
 
       completedAt:
-        run.completedAt,
-
+        runRecord.completedAt,
     },
-
   };
 
+  /*
+   * Defensive final gate.
+   *
+   * Even if some downstream state implementation accidentally
+   * reports PROMOTED, the public result cannot become successful
+   * without authoritative evidence.
+   */
+  if (
+    finalResult.success &&
+    !isAuthoritativeSuccess(
+      terminalResult ||
+        runRecord.result
+    )
+  ) {
+    finalResult.success =
+      false;
 
-  run.result =
-    clone(
-      result
-    );
+    finalResult.status =
+      "failed";
 
+    finalResult.authoritative =
+      false;
+
+    finalResult.passed =
+      false;
+
+    finalResult.promoted =
+      false;
+  }
+
+  runRecord.result =
+    clone(finalResult);
 
   stateCall(
-
     [
       "completeRun",
       "finalizeRun",
       "saveRun",
-
     ],
-
     [
-      run.runId,
-      result,
-
+      runRecord.runId,
+      finalResult,
     ]
-
   );
 
-
-  return result;
-
+  return finalResult;
 }
-
 
 /* ================================================================
    CANCEL
@@ -5164,12 +4036,9 @@ async function cancelRun(
   runId,
   reason
 ) {
-
   loadDependencies();
 
-
   const cancellation = {
-
     runId,
 
     reason:
@@ -5178,94 +4047,62 @@ async function cancelRun(
 
     timestamp:
       new Date().toISOString(),
-
   };
-
 
   const stateResult =
     stateCall(
-
       [
         "cancelRun",
         "requestCancellation",
         "markCancelled",
-
       ],
-
       [
         runId,
         cancellation,
-
       ]
-
     );
-
 
   if (
     stateResult &&
-    stateResult.success ===
-      false
+    stateResult.success === false
   ) {
-
     return {
-
-      success:
-        false,
+      success: false,
 
       error:
         stateResult.error,
-
     };
-
   }
-
 
   if (
     engineeringExecutor &&
     typeof engineeringExecutor.cancel ===
       "function"
   ) {
-
     try {
-
-      await engineeringExecutor
-        .cancel(
-          runId
-        );
-
+      await engineeringExecutor.cancel(
+        runId
+      );
     } catch (error) {
-
       return {
-
-        success:
-          false,
+        success: false,
 
         runId,
 
         error:
           error.message,
-
       };
-
     }
-
   }
 
-
   return {
-
-    success:
-      true,
+    success: true,
 
     runId,
 
-    cancelled:
-      true,
-
+    cancelled: true,
   };
-
 }
-
 
 /* ================================================================
    RESUME
@@ -5274,33 +4111,24 @@ async function cancelRun(
 async function resume(
   request
 ) {
-
   if (
     !request ||
     !request.run
   ) {
-
     throw new Error(
       "Resume requires an existing engineering run"
     );
-
   }
 
-
   const existing =
-    clone(
-      request.run
-    );
-
+    clone(request.run);
 
   if (
     TERMINAL_STATES.has(
       existing.state
     )
   ) {
-
     return {
-
       success:
         existing.state ===
         STATES.PROMOTED,
@@ -5310,133 +4138,324 @@ async function resume(
 
       runId:
         existing.runId,
-
     };
-
   }
 
-
   /*
-   * Resume uses the persisted source tree and policy.
-   */
-
-  const job = {
-
-    ...(existing.job || {}),
-
-    jobId:
-      existing.jobId,
-
-    projectId:
-      existing.projectId,
-
-    userId:
-      existing.userId,
-
-    projectName:
-      existing.projectName,
-
-    files:
-      clone(
-        existing.currentFiles
-      ),
-
-    planning:
-      clone(
-        existing.planning
-      ),
-
-    intent:
-      clone(
-        existing.intent
-      ),
-
-    builder:
-      clone(
-        existing.builder
-      ),
-
-    manifest:
-      clone(
-        existing.manifest
-      ),
-
-    projectData:
-      clone(
-        existing.projectData
-      ),
-
-    framework:
-      existing.framework,
-
-    packageManager:
-      existing.packageManager,
-
-    policy:
-      clone(
-        existing.policy
-      ),
-
-  };
-
-
-  /*
-   * Do not silently create a different logical run.
+   * Preserve the existing logical run ID.
    *
-   * A resumed run gets a recovery marker and is executed through a
-   * new orchestration invocation while preserving its source state.
+   * Recovery must not silently create a second independent
+   * engineering identity.
    */
+  const runRecord =
+    existing;
+
+  runRecord.recovery = true;
+
+  runRecord.resumedAt =
+    new Date().toISOString();
 
   audit(
-    existing,
+    runRecord,
     "RUN_RESUME_REQUESTED",
     {
-
-      previousRunId:
-        existing.runId,
+      runId:
+        runRecord.runId,
 
       previousState:
-        existing.state,
+        runRecord.state,
 
+      attempts:
+        runRecord.attempts,
+
+      remainingExecutionTimeMs:
+        getRemainingExecutionTime(
+          runRecord
+        ),
     }
-
   );
 
+  /*
+   * If the previous run was in a recoverable failed/rollback state,
+   * normalize it into an executable state.
+   */
+  if (
+    runRecord.state ===
+      STATES.FAILED ||
+    runRecord.state ===
+      STATES.ROLLBACK
+  ) {
+    transition(
+      runRecord,
+      STATES.ANALYZING,
+      "Engineering run resumed"
+    );
+  }
 
-  return run({
+  /*
+   * Continue using the same run record.
+   */
+  try {
+    while (
+      hasAttemptBudget(
+        runRecord
+      )
+    ) {
+      if (
+        TERMINAL_STATES.has(
+          runRecord.state
+        )
+      ) {
+        break;
+      }
 
-    ...job,
+      if (
+        isRunDeadlineExceeded(
+          runRecord
+        )
+      ) {
+        const failure =
+          recordFailure(
+            runRecord,
+            {
+              category:
+                "timeout",
 
-    metadata: {
+              message:
+                "Engineering run deadline exceeded during resume",
 
-      ...(job.metadata || {}),
+              retryable: false,
 
-      resumedFrom:
-        existing.runId,
+              timedOut: true,
+            }
+          );
 
-      recovery:
-        true,
+        return finalizeRun(
+          runRecord,
+          escalate(
+            runRecord,
+            "Engineering execution deadline exceeded during resume",
+            failure
+          )
+        );
+      }
 
-    },
+      if (
+        runRecord.state ===
+        STATES.ANALYZING
+      ) {
+        await createCheckpoint(
+          runRecord,
+          "resume-analysis"
+        );
 
-  });
+        const masterResult =
+          await analyzeWithMaster(
+            runRecord
+          );
 
+        if (
+          masterResult &&
+          masterResult.success ===
+            false &&
+          !masterResult.skipped
+        ) {
+          return finalizeRun(
+            runRecord,
+            escalate(
+              runRecord,
+              "Master Agent analysis failed during resume",
+              masterResult
+            )
+          );
+        }
+      }
+
+      let result;
+
+      try {
+        result =
+          await performExecutionAttempt(
+            runRecord
+          );
+      } catch (error) {
+        const failure =
+          recordFailure(
+            runRecord,
+            error
+          );
+
+        if (
+          runRecord.state !==
+          STATES.FAILED
+        ) {
+          transition(
+            runRecord,
+            STATES.FAILED,
+            failure.message
+          );
+        }
+
+        if (
+          hasDiagnosisBudget(
+            runRecord
+          ) &&
+          hasRepairBudget(
+            runRecord
+          )
+        ) {
+          const repairOutcome =
+            await handleFailure(
+              runRecord,
+              failure,
+              {
+                failureRecord:
+                  failure,
+              }
+            );
+
+          if (
+            repairOutcome?.retry
+          ) {
+            continue;
+          }
+        }
+
+        if (
+          await retryIfAllowed(
+            runRecord,
+            failure
+          )
+        ) {
+          continue;
+        }
+
+        return finalizeRun(
+          runRecord,
+          escalate(
+            runRecord,
+            "Engineering resume execution failed",
+            failure
+          )
+        );
+      }
+
+      evaluateAutoScale(
+        runRecord,
+        result
+      );
+
+      const verification =
+        await verifyExecution(
+          runRecord,
+          result
+        );
+
+      if (
+        verification.passed
+      ) {
+        const promotion =
+          promote(
+            runRecord,
+            result
+          );
+
+        if (
+          promotion.promote
+        ) {
+          return finalizeRun(
+            runRecord,
+            result
+          );
+        }
+
+        return finalizeRun(
+          runRecord,
+          escalate(
+            runRecord,
+            promotion.reason,
+            result
+          )
+        );
+      }
+
+      const failureResult =
+        await handleFailure(
+          runRecord,
+          result
+        );
+
+      if (
+        failureResult?.retry
+      ) {
+        continue;
+      }
+
+      const failure =
+        runRecord.lastError;
+
+      if (
+        await retryIfAllowed(
+          runRecord,
+          failure
+        )
+      ) {
+        continue;
+      }
+
+      return finalizeRun(
+        runRecord,
+        escalate(
+          runRecord,
+          "Engineering resume retry policy exhausted",
+          failure
+        )
+      );
+    }
+
+    return finalizeRun(
+      runRecord,
+      escalate(
+        runRecord,
+        "MAX_ATTEMPTS exhausted during resume",
+        runRecord.lastError
+      )
+    );
+  } catch (error) {
+    const failure =
+      recordFailure(
+        runRecord,
+        {
+          category:
+            "orchestrator",
+
+          message:
+            error.message,
+
+          retryable: false,
+        }
+      );
+
+    return finalizeRun(
+      runRecord,
+      escalate(
+        runRecord,
+        "Engineering resume orchestrator failure",
+        failure
+      )
+    );
+  }
 }
-
 
 /* ================================================================
    HEALTH
 ================================================================ */
 
 function getHealth() {
-
   loadDependencies();
 
-
   return {
-
-    success:
-      true,
+    success: true,
 
     service:
       "engineeringOrchestrator",
@@ -5448,7 +4467,6 @@ function getHealth() {
       ENGINEERING_SYSTEM_VERSION,
 
     dependencies: {
-
       state:
         Boolean(
           engineeringState
@@ -5473,8 +4491,10 @@ function getHealth() {
         Boolean(
           legacyAuthoritativeBuildService
         ),
-
     },
+
+    authority:
+      "engineeringExecutor",
 
     authoritativePromotion:
       true,
@@ -5482,22 +4502,33 @@ function getHealth() {
     fakeSuccessAllowed:
       false,
 
+    staticValidationCanPromote:
+      false,
+
+    aiCanPromote:
+      false,
+
+    masterCanPromote:
+      false,
+
+    artifactRequired:
+      true,
+
+    checksumRequired:
+      true,
+
     terminalStates:
       Array.from(
         TERMINAL_STATES
       ),
-
   };
-
 }
-
 
 /* ================================================================
    PUBLIC CONTRACT
 ================================================================ */
 
 module.exports = {
-
   ORCHESTRATOR_VERSION,
 
   ENGINEERING_SYSTEM_VERSION,
@@ -5567,5 +4598,4 @@ module.exports = {
   finalizeRun,
 
   getHealth,
-
 };
