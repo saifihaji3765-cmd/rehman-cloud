@@ -1,6 +1,6 @@
 /*
  * ZYRIONOS — ENGINEERING AGENT
- * Version: 1.0.0
+ * Version: 1.1.0
  *
  * Single engineering control-plane agent.
  *
@@ -9,8 +9,10 @@
  * - state machine
  * - preflight validation
  * - workspace preparation
+ * - dependency installation
  * - build execution
- * - diagnostics
+ * - failure classification
+ * - AI-assisted diagnosis
  * - repair/retry
  * - checkpoints
  * - rollback
@@ -36,9 +38,9 @@ const { spawn } = require("child_process");
 
 /* =========================================================
    CONSTANTS
-   ========================================================= */
+========================================================= */
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const AGENT_NAME = "engineeringAgent";
 
 const STATES = Object.freeze({
@@ -65,14 +67,24 @@ const LIMITS = Object.freeze({
   maxRepairAttempts: 3,
   maxCheckpoints: 10,
   maxFiles: 5000,
-  maxFileSize: 5 * 1024 * 1024,
-  maxTotalSourceSize: 100 * 1024 * 1024,
+
+  maxFileSize:
+    5 * 1024 * 1024,
+
+  maxTotalSourceSize:
+    100 * 1024 * 1024,
+
   maxStdout: 12000,
   maxStderr: 20000,
   maxErrorLength: 12000,
-  maxExecutionMs: 15 * 60 * 1000,
+
+  maxExecutionMs:
+    15 * 60 * 1000,
+
   maxRepairFiles: 25,
-  maxArtifactSize: 500 * 1024 * 1024
+
+  maxArtifactSize:
+    500 * 1024 * 1024
 });
 
 const TRANSITIONS = Object.freeze({
@@ -138,12 +150,13 @@ const TRANSITIONS = Object.freeze({
   ]),
 
   ESCALATED: new Set(),
+
   PROMOTED: new Set()
 });
 
 /* =========================================================
    OPTIONAL DEPENDENCIES
-   ========================================================= */
+========================================================= */
 
 function optionalRequire(modulePath) {
   try {
@@ -154,23 +167,32 @@ function optionalRequire(modulePath) {
 }
 
 const logger =
-  optionalRequire("../services/loggerService");
+  optionalRequire(
+    "../services/loggerService"
+  );
 
 const aiProvider =
-  optionalRequire("../services/ai/aiProviderService");
+  optionalRequire(
+    "../services/ai/aiProviderService"
+  );
 
 const buildValidationService =
-  optionalRequire("../services/buildValidationService");
+  optionalRequire(
+    "../services/buildValidationService"
+  );
 
 /* =========================================================
    BASIC HELPERS
-   ========================================================= */
+========================================================= */
 
 function now() {
   return new Date().toISOString();
 }
 
-function cleanString(value, max = 10000) {
+function cleanString(
+  value,
+  max = 10000
+) {
   return String(value ?? "")
     .replace(/\u0000/g, "")
     .trim()
@@ -180,26 +202,36 @@ function cleanString(value, max = 10000) {
 function safeError(error) {
   if (!error) {
     return {
-      message: "Unknown engineering error",
-      name: "Error"
+      message:
+        "Unknown engineering error",
+      name: "Error",
+      code: "",
+      stack: ""
     };
   }
 
   return {
     message: cleanString(
-      error.message || String(error),
+      error.message ||
+        String(error),
       LIMITS.maxErrorLength
     ),
+
     name: cleanString(
-      error.name || "Error",
+      error.name ||
+        "Error",
       200
     ),
+
     code: cleanString(
-      error.code || "",
+      error.code ||
+        "",
       200
     ),
+
     stack: cleanString(
-      error.stack || "",
+      error.stack ||
+        "",
       12000
     )
   };
@@ -214,7 +246,10 @@ function hashBuffer(buffer) {
 
 function hashString(value) {
   return hashBuffer(
-    Buffer.from(String(value), "utf8")
+    Buffer.from(
+      String(value),
+      "utf8"
+    )
   );
 }
 
@@ -226,81 +261,153 @@ function generateId(prefix) {
 
 function clone(value) {
   try {
-    return JSON.parse(JSON.stringify(value));
+    return JSON.parse(
+      JSON.stringify(value)
+    );
   } catch {
     return value;
   }
 }
 
-function truncate(value, max) {
-  const text = String(value ?? "");
+function truncate(
+  value,
+  max
+) {
+  const text =
+    String(value ?? "");
 
-  if (text.length <= max) {
+  if (
+    text.length <= max
+  ) {
     return text;
   }
 
-  return `${text.slice(0, max)}\n...[truncated]`;
+  return (
+    text.slice(0, max) +
+    "\n...[truncated]"
+  );
 }
 
-function logInfo(message, data) {
+/* =========================================================
+   LOGGING
+========================================================= */
+
+function logInfo(
+  message,
+  data
+) {
   try {
-    if (logger?.info) {
-      logger.info(message, data);
+    if (
+      logger &&
+      typeof logger.info ===
+        "function"
+    ) {
+      logger.info(
+        message,
+        data
+      );
       return;
     }
 
-    console.log(message, data || "");
+    console.log(
+      message,
+      data || ""
+    );
   } catch {}
 }
 
-function logSuccess(message, data) {
+function logSuccess(
+  message,
+  data
+) {
   try {
-    if (logger?.success) {
-      logger.success(message, data);
+    if (
+      logger &&
+      typeof logger.success ===
+        "function"
+    ) {
+      logger.success(
+        message,
+        data
+      );
       return;
     }
 
-    console.log(message, data || "");
+    console.log(
+      message,
+      data || ""
+    );
   } catch {}
 }
 
-function logWarning(message, data) {
+function logWarning(
+  message,
+  data
+) {
   try {
-    if (logger?.warning) {
-      logger.warning(message, data);
+    if (
+      logger &&
+      typeof logger.warning ===
+        "function"
+    ) {
+      logger.warning(
+        message,
+        data
+      );
       return;
     }
 
-    console.warn(message, data || "");
+    console.warn(
+      message,
+      data || ""
+    );
   } catch {}
 }
 
-function logError(message, data) {
+function logError(
+  message,
+  data
+) {
   try {
-    if (logger?.error) {
-      logger.error(message, data);
+    if (
+      logger &&
+      typeof logger.error ===
+        "function"
+    ) {
+      logger.error(
+        message,
+        data
+      );
       return;
     }
 
-    console.error(message, data || "");
+    console.error(
+      message,
+      data || ""
+    );
   } catch {}
 }
 
 /* =========================================================
    FILE NORMALIZATION
-   ========================================================= */
+========================================================= */
 
 function normalizeFile(raw) {
-  if (!raw || typeof raw !== "object") {
+  if (
+    !raw ||
+    typeof raw !== "object"
+  ) {
     return null;
   }
 
-  const rawPath = cleanString(
-    raw.path || raw.name,
-    500
-  )
-    .replace(/\\/g, "/")
-    .replace(/^\/+/, "");
+  const rawPath =
+    cleanString(
+      raw.path ||
+        raw.name,
+      500
+    )
+      .replace(/\\/g, "/")
+      .replace(/^\/+/, "");
 
   if (!rawPath) {
     return null;
@@ -318,17 +425,22 @@ function normalizeFile(raw) {
   }
 
   const content =
-    raw.content === undefined ||
+    raw.content ===
+      undefined ||
     raw.content === null
       ? ""
       : String(raw.content);
 
-  const size = Buffer.byteLength(
-    content,
-    "utf8"
-  );
+  const size =
+    Buffer.byteLength(
+      content,
+      "utf8"
+    );
 
-  if (size > LIMITS.maxFileSize) {
+  if (
+    size >
+    LIMITS.maxFileSize
+  ) {
     throw new Error(
       `File exceeds maximum allowed size: ${rawPath}`
     );
@@ -336,33 +448,62 @@ function normalizeFile(raw) {
 
   return {
     path: rawPath,
+
     name:
       cleanString(
         raw.name ||
-        path.basename(rawPath),
+          path.basename(
+            rawPath
+          ),
         200
       ),
+
     content,
+
     language:
-      cleanString(raw.language || "", 50),
+      cleanString(
+        raw.language ||
+          "",
+        50
+      ),
+
     type:
-      cleanString(raw.type || "file", 50),
+      cleanString(
+        raw.type ||
+          "file",
+        50
+      ),
+
     isEntryPoint:
-      Boolean(raw.isEntryPoint),
+      Boolean(
+        raw.isEntryPoint
+      ),
+
     isGenerated:
-      raw.isGenerated === undefined
+      raw.isGenerated ===
+      undefined
         ? true
-        : Boolean(raw.isGenerated),
+        : Boolean(
+            raw.isGenerated
+          ),
+
     size
   };
 }
 
-function normalizeFiles(files) {
-  if (!Array.isArray(files)) {
+function normalizeFiles(
+  files
+) {
+  if (
+    !Array.isArray(files)
+  ) {
     return [];
   }
 
-  if (files.length > LIMITS.maxFiles) {
+  if (
+    files.length >
+    LIMITS.maxFiles
+  ) {
     throw new Error(
       `Project contains too many files. Maximum: ${LIMITS.maxFiles}`
     );
@@ -370,23 +511,33 @@ function normalizeFiles(files) {
 
   const result = [];
   const seen = new Set();
+
   let totalSize = 0;
 
-  for (const raw of files) {
-    const file = normalizeFile(raw);
+  for (
+    const raw of files
+  ) {
+    const file =
+      normalizeFile(raw);
 
     if (!file) {
       continue;
     }
 
-    if (seen.has(file.path)) {
+    if (
+      seen.has(file.path)
+    ) {
       throw new Error(
         `Duplicate project file: ${file.path}`
       );
     }
 
-    seen.add(file.path);
-    totalSize += file.size;
+    seen.add(
+      file.path
+    );
+
+    totalSize +=
+      file.size;
 
     if (
       totalSize >
@@ -405,61 +556,64 @@ function normalizeFiles(files) {
 
 /* =========================================================
    JOB NORMALIZATION
-   ========================================================= */
+========================================================= */
 
-function normalizeJob(input = {}) {
-  const files = normalizeFiles(
-    input.files ||
-    input.project?.files ||
-    input.build?.files ||
-    []
-  );
+function normalizeJob(
+  input = {}
+) {
+  const files =
+    normalizeFiles(
+      input.files ||
+        input.project?.files ||
+        input.build?.files ||
+        []
+    );
 
   const projectId =
     cleanString(
       input.projectId ||
-      input.project?.id ||
-      "local-project",
+        input.project?.id ||
+        "local-project",
       200
     );
 
   const userId =
     cleanString(
       input.userId ||
-      input.user?.id ||
-      "system",
+        input.user?.id ||
+        "system",
       200
     );
 
   const workspacePath =
     cleanString(
       input.workspacePath ||
-      input.workspace ||
-      "",
+        input.workspace ||
+        "",
       2000
     );
 
   const projectName =
     cleanString(
       input.projectName ||
-      input.project?.name ||
-      "zyrionos-project",
+        input.project?.name ||
+        "zyrionos-project",
       200
     );
 
   const buildCommand =
     cleanString(
       input.buildCommand ||
-      input.project?.buildCommand ||
-      "npm run build",
+        input.project?.buildCommand ||
+        "npm run build",
       500
     );
 
   const installCommand =
     cleanString(
       input.installCommand ||
-      input.project?.installCommand ||
-      "npm install",
+        input.project?.installCommand ||
+        "npm install",
       500
     );
 
@@ -468,45 +622,49 @@ function normalizeJob(input = {}) {
 
     jobId:
       cleanString(
-        input.jobId || generateId("job"),
+        input.jobId ||
+          generateId("job"),
         200
       ),
 
     projectId,
+
     userId,
+
     projectName,
 
     prompt:
       cleanString(
         input.prompt ||
-        input.userPrompt ||
-        "",
+          input.userPrompt ||
+          "",
         12000
       ),
 
     framework:
       cleanString(
         input.framework ||
-        input.project?.framework ||
-        "",
+          input.project?.framework ||
+          "",
         100
       ),
 
     packageManager:
       cleanString(
         input.packageManager ||
-        "npm",
+          "npm",
         50
       ),
 
     nodeVersion:
       cleanString(
         input.nodeVersion ||
-        process.version,
+          process.version,
         100
       ),
 
     buildCommand,
+
     installCommand,
 
     workspacePath,
@@ -514,15 +672,26 @@ function normalizeJob(input = {}) {
     files,
 
     allowEmptyWorkspace:
-      Boolean(input.allowEmptyWorkspace),
+      Boolean(
+        input.allowEmptyWorkspace
+      ),
 
     autoRepair:
-      input.autoRepair !== false,
+      input.autoRepair !==
+      false,
+
+    allowNewFiles:
+      Boolean(
+        input.allowNewFiles
+      ),
 
     maxAttempts:
       Math.min(
         Math.max(
-          Number(input.maxAttempts) || LIMITS.maxAttempts,
+          Number(
+            input.maxAttempts
+          ) ||
+            LIMITS.maxAttempts,
           1
         ),
         LIMITS.maxAttempts
@@ -532,74 +701,115 @@ function normalizeJob(input = {}) {
 
 /* =========================================================
    INTERNAL STATE
-   ========================================================= */
+========================================================= */
 
-function createContext(job) {
+function createContext(
+  job
+) {
   return {
-    runId: generateId("run"),
-    buildId: null,
+    runId:
+      generateId("run"),
+
+    buildId:
+      null,
 
     job,
 
-    state: STATES.CREATED,
+    state:
+      STATES.CREATED,
 
-    startedAt: now(),
-    updatedAt: now(),
+    startedAt:
+      now(),
+
+    updatedAt:
+      now(),
+
+    transitions: [],
 
     attempts: [],
+
     failures: [],
+
     diagnoses: [],
+
     repairs: [],
+
     checkpoints: [],
+
     rollbacks: [],
+
     executions: [],
+
     verifications: [],
+
     artifacts: [],
 
     currentAttempt: 0,
+
     repairAttempts: 0,
 
     authoritative: false,
+
     verified: false,
+
     promoted: false,
 
-    validationMode: null,
+    validationMode:
+      null,
 
     workspacePath:
-      job.workspacePath || null,
+      job.workspacePath ||
+      null,
 
-    finalError: null
+    finalError:
+      null
   };
 }
 
-function transition(ctx, next, metadata = {}) {
-  const current = ctx.state;
+function transition(
+  ctx,
+  next,
+  metadata = {}
+) {
+  const current =
+    ctx.state;
 
-  if (current === next) {
+  if (
+    current === next
+  ) {
     return;
   }
 
   const allowed =
     TRANSITIONS[current];
 
-  if (!allowed || !allowed.has(next)) {
+  if (
+    !allowed ||
+    !allowed.has(next)
+  ) {
     throw new Error(
       `Invalid engineering transition: ${current} -> ${next}`
     );
   }
 
-  ctx.state = next;
-  ctx.updatedAt = now();
+  ctx.state =
+    next;
 
-  if (!ctx.transitions) {
-    ctx.transitions = [];
-  }
+  ctx.updatedAt =
+    now();
 
   ctx.transitions.push({
-    from: current,
-    to: next,
-    timestamp: now(),
-    metadata: clone(metadata)
+    from:
+      current,
+
+    to:
+      next,
+
+    timestamp:
+      now(),
+
+    metadata:
+      clone(metadata)
   });
 
   logInfo(
@@ -610,10 +820,14 @@ function transition(ctx, next, metadata = {}) {
 
 /* =========================================================
    WORKSPACE
-   ========================================================= */
+========================================================= */
 
-async function ensureWorkspace(ctx) {
-  if (ctx.workspacePath) {
+async function ensureWorkspace(
+  ctx
+) {
+  if (
+    ctx.workspacePath
+  ) {
     await fsp.mkdir(
       ctx.workspacePath,
       {
@@ -653,13 +867,19 @@ function safeWorkspacePath(
   relativePath
 ) {
   const normalized =
-    relativePath
+    String(
+      relativePath || ""
+    )
       .replace(/\\/g, "/")
       .replace(/^\/+/, "");
 
   if (
-    normalized.includes("..") ||
-    path.isAbsolute(normalized)
+    normalized.includes(
+      ".."
+    ) ||
+    path.isAbsolute(
+      normalized
+    )
   ) {
     throw new Error(
       `Unsafe workspace path: ${relativePath}`
@@ -673,12 +893,18 @@ function safeWorkspacePath(
     );
 
   const root =
-    path.resolve(workspace) +
-    path.sep;
+    path.resolve(
+      workspace
+    ) + path.sep;
 
   if (
-    resolved !== path.resolve(workspace) &&
-    !resolved.startsWith(root)
+    resolved !==
+      path.resolve(
+        workspace
+      ) &&
+    !resolved.startsWith(
+      root
+    )
   ) {
     throw new Error(
       `Workspace escape detected: ${relativePath}`
@@ -688,11 +914,17 @@ function safeWorkspacePath(
   return resolved;
 }
 
-async function writeSourceFiles(ctx) {
+async function writeSourceFiles(
+  ctx
+) {
   const workspace =
-    await ensureWorkspace(ctx);
+    await ensureWorkspace(
+      ctx
+    );
 
-  for (const file of ctx.job.files) {
+  for (
+    const file of ctx.job.files
+  ) {
     const target =
       safeWorkspacePath(
         workspace,
@@ -700,7 +932,9 @@ async function writeSourceFiles(ctx) {
       );
 
     await fsp.mkdir(
-      path.dirname(target),
+      path.dirname(
+        target
+      ),
       {
         recursive: true
       }
@@ -717,12 +951,17 @@ async function writeSourceFiles(ctx) {
 }
 
 /* =========================================================
-   STATIC PREFLIGHT
-   ========================================================= */
+   PREFLIGHT
+========================================================= */
 
-function validateCommand(command) {
+function validateCommand(
+  command
+) {
   const value =
-    cleanString(command, 500);
+    cleanString(
+      command,
+      500
+    );
 
   if (!value) {
     throw new Error(
@@ -740,8 +979,13 @@ function validateCommand(command) {
     /\bformat\b.*\bdrive\b/i
   ];
 
-  for (const pattern of dangerousPatterns) {
-    if (pattern.test(value)) {
+  for (
+    const pattern of
+      dangerousPatterns
+  ) {
+    if (
+      pattern.test(value)
+    ) {
       throw new Error(
         "Unsafe build command rejected"
       );
@@ -751,11 +995,14 @@ function validateCommand(command) {
   return value;
 }
 
-function parsePackageJson(files) {
+function parsePackageJson(
+  files
+) {
   const packageFile =
     files.find(
       file =>
-        file.path === "package.json"
+        file.path ===
+        "package.json"
     );
 
   if (!packageFile) {
@@ -766,14 +1013,18 @@ function parsePackageJson(files) {
     return JSON.parse(
       packageFile.content
     );
-  } catch (error) {
+  } catch (
+    error
+  ) {
     throw new Error(
       `Invalid package.json: ${error.message}`
     );
   }
 }
 
-async function preflight(ctx) {
+async function preflight(
+  ctx
+) {
   const files =
     ctx.job.files;
 
@@ -799,28 +1050,36 @@ async function preflight(ctx) {
   }
 
   const packageJson =
-    parsePackageJson(files);
+    parsePackageJson(
+      files
+    );
 
-  if (packageJson) {
-    if (
-      packageJson.scripts &&
-      packageJson.scripts.build
-    ) {
-      ctx.job.buildCommand =
-        ctx.job.buildCommand ||
-        `${ctx.job.packageManager} run build`;
-    }
+  if (
+    packageJson &&
+    packageJson.scripts &&
+    packageJson.scripts.build
+  ) {
+    ctx.job.buildCommand =
+      ctx.job.buildCommand ||
+      `${ctx.job.packageManager} run build`;
   }
 
   const paths =
-    files.map(file => file.path);
+    files.map(
+      file =>
+        file.path
+    );
 
   const packageCount =
     paths.filter(
-      p => p === "package.json"
+      p =>
+        p ===
+        "package.json"
     ).length;
 
-  if (packageCount > 1) {
+  if (
+    packageCount > 1
+  ) {
     throw new Error(
       "Multiple package.json files detected"
     );
@@ -828,12 +1087,21 @@ async function preflight(ctx) {
 
   return {
     success: true,
-    fileCount: files.length,
-    totalBytes: files.reduce(
-      (sum, file) =>
-        sum + file.size,
-      0
-    ),
+
+    fileCount:
+      files.length,
+
+    totalBytes:
+      files.reduce(
+        (
+          sum,
+          file
+        ) =>
+          sum +
+          file.size,
+        0
+      ),
+
     packageJsonPresent:
       Boolean(packageJson)
   };
@@ -841,7 +1109,7 @@ async function preflight(ctx) {
 
 /* =========================================================
    CHECKPOINTS
-   ========================================================= */
+========================================================= */
 
 async function createCheckpoint(
   ctx,
@@ -857,17 +1125,47 @@ async function createCheckpoint(
   }
 
   const checkpoint = {
-    id: generateId("checkpoint"),
+    id:
+      generateId(
+        "checkpoint"
+      ),
+
     label:
-      cleanString(label, 200),
-    timestamp: now(),
-    files: ctx.job.files.map(
-      file => ({
-        path: file.path,
-        checksum:
-          hashString(file.content)
-      })
-    )
+      cleanString(
+        label,
+        200
+      ),
+
+    timestamp:
+      now(),
+
+    files:
+      ctx.job.files.map(
+        file => ({
+          path:
+            file.path,
+
+          name:
+            file.name,
+
+          content:
+            file.content,
+
+          language:
+            file.language,
+
+          type:
+            file.type,
+
+          size:
+            file.size,
+
+          checksum:
+            hashString(
+              file.content
+            )
+        })
+      )
   };
 
   ctx.checkpoints.push(
@@ -878,142 +1176,245 @@ async function createCheckpoint(
 }
 
 /* =========================================================
-   EXECUTION
-   ========================================================= */
+   COMMAND EXECUTION
+========================================================= */
 
 function executeCommand(
   command,
   cwd,
   timeoutMs
 ) {
-  return new Promise(resolve => {
-    const started =
-      Date.now();
+  return new Promise(
+    resolve => {
+      const started =
+        Date.now();
 
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
+      let stdout = "";
+      let stderr = "";
+      let timedOut =
+        false;
 
-    const child =
-      spawn(
-        command,
-        {
-          cwd,
-          shell: true,
-          env: {
-            ...process.env,
-            CI: "true",
-            NODE_ENV:
-              process.env.NODE_ENV ||
-              "production"
+      let settled =
+        false;
+
+      const child =
+        spawn(
+          command,
+          {
+            cwd,
+
+            shell:
+              true,
+
+            env: {
+              ...process.env,
+
+              CI:
+                "true",
+
+              NODE_ENV:
+                process.env.NODE_ENV ||
+                "production"
+            },
+
+            stdio: [
+              "ignore",
+              "pipe",
+              "pipe"
+            ]
+          }
+        );
+
+      const finish =
+        result => {
+          if (
+            settled
+          ) {
+            return;
+          }
+
+          settled =
+            true;
+
+          resolve(
+            result
+          );
+        };
+
+      const timer =
+        setTimeout(
+          () => {
+            timedOut =
+              true;
+
+            try {
+              child.kill(
+                "SIGTERM"
+              );
+            } catch {}
+
+            setTimeout(
+              () => {
+                try {
+                  child.kill(
+                    "SIGKILL"
+                  );
+                } catch {}
+              },
+              5000
+            );
           },
-          stdio: [
-            "ignore",
-            "pipe",
-            "pipe"
-          ]
+          timeoutMs
+        );
+
+      child.stdout.on(
+        "data",
+        chunk => {
+          stdout =
+            truncate(
+              stdout +
+                chunk.toString(),
+              LIMITS.maxStdout
+            );
         }
       );
 
-    const timer =
-      setTimeout(() => {
-        timedOut = true;
-
-        try {
-          child.kill(
-            "SIGTERM"
-          );
-        } catch {}
-
-        setTimeout(() => {
-          try {
-            child.kill(
-              "SIGKILL"
+      child.stderr.on(
+        "data",
+        chunk => {
+          stderr =
+            truncate(
+              stderr +
+                chunk.toString(),
+              LIMITS.maxStderr
             );
-          } catch {}
-        }, 5000);
-      }, timeoutMs);
+        }
+      );
 
-    child.stdout.on(
-      "data",
-      chunk => {
-        stdout =
-          truncate(
-            stdout +
-              chunk.toString(),
-            LIMITS.maxStdout
+      child.on(
+        "error",
+        error => {
+          clearTimeout(
+            timer
           );
-      }
-    );
 
-    child.stderr.on(
-      "data",
-      chunk => {
-        stderr =
-          truncate(
-            stderr +
-              chunk.toString(),
-            LIMITS.maxStderr
-          );
-      }
-    );
+          finish({
+            success:
+              false,
 
-    child.on(
-      "error",
-      error => {
-        clearTimeout(timer);
+            exitCode:
+              null,
 
-        resolve({
-          success: false,
-          exitCode: null,
-          signal: null,
-          stdout,
-          stderr,
-          durationMs:
-            Date.now() - started,
-          timedOut,
-          error: safeError(error)
-        });
-      }
-    );
+            signal:
+              null,
 
-    child.on(
-      "close",
-      (
-        exitCode,
-        signal
-      ) => {
-        clearTimeout(timer);
+            stdout,
 
-        resolve({
-          success:
-            !timedOut &&
-            exitCode === 0,
+            stderr,
+
+            durationMs:
+              Date.now() -
+              started,
+
+            timedOut,
+
+            error:
+              safeError(
+                error
+              )
+          });
+        }
+      );
+
+      child.on(
+        "close",
+        (
           exitCode,
-          signal,
-          stdout,
-          stderr,
-          durationMs:
-            Date.now() - started,
-          timedOut,
-          error:
-            timedOut
-              ? {
-                  name:
-                    "TimeoutError",
-                  message:
-                    "Engineering command timed out"
-                }
-              : null
-        });
-      }
-    );
-  });
+          signal
+        ) => {
+          clearTimeout(
+            timer
+          );
+
+          finish({
+            success:
+              !timedOut &&
+              exitCode === 0,
+
+            exitCode,
+
+            signal,
+
+            stdout,
+
+            stderr,
+
+            durationMs:
+              Date.now() -
+              started,
+
+            timedOut,
+
+            error:
+              timedOut
+                ? {
+                    name:
+                      "TimeoutError",
+
+                    message:
+                      "Engineering command timed out",
+
+                    code:
+                      "ENGINEERING_COMMAND_TIMEOUT",
+
+                    stack:
+                      ""
+                  }
+                : exitCode !== 0
+                ? {
+                    name:
+                      "BuildProcessError",
+
+                    message:
+                      stderr ||
+                      stdout ||
+                      `Command exited with code ${exitCode}`,
+
+                    code:
+                      `EXIT_${exitCode}`,
+
+                    stack:
+                      ""
+                  }
+                : null
+          });
+        }
+      );
+    }
+  );
 }
 
-async function executeBuild(ctx) {
+/* =========================================================
+   BUILD EXECUTION
+========================================================= */
+
+async function executeBuild(
+  ctx
+) {
   const workspace =
-    await writeSourceFiles(ctx);
+    await writeSourceFiles(
+      ctx
+    );
+
+  logInfo(
+    "Engineering: Installing dependencies",
+    {
+      runId:
+        ctx.runId,
+      command:
+        ctx.job.installCommand
+    }
+  );
 
   const install =
     await executeCommand(
@@ -1026,18 +1427,47 @@ async function executeBuild(ctx) {
     );
 
   ctx.executions.push({
-    type: "install",
-    timestamp: now(),
+    type:
+      "install",
+
+    timestamp:
+      now(),
+
     ...install
   });
 
-  if (!install.success) {
+  if (
+    !install.success
+  ) {
     return {
-      success: false,
-      phase: "install",
+      success:
+        false,
+
+      phase:
+        "install",
+
       ...install
     };
   }
+
+  logSuccess(
+    "Engineering: Dependencies installed",
+    {
+      runId:
+        ctx.runId
+    }
+  );
+
+  logInfo(
+    "Engineering: Running production build",
+    {
+      runId:
+        ctx.runId,
+
+      command:
+        ctx.job.buildCommand
+    }
+  );
 
   const build =
     await executeCommand(
@@ -1047,23 +1477,65 @@ async function executeBuild(ctx) {
     );
 
   ctx.executions.push({
-    type: "build",
-    timestamp: now(),
+    type:
+      "build",
+
+    timestamp:
+      now(),
+
     ...build
   });
 
+  if (
+    build.success
+  ) {
+    logSuccess(
+      "Engineering: Production build completed",
+      {
+        runId:
+          ctx.runId,
+
+        durationMs:
+          build.durationMs
+      }
+    );
+  } else {
+    logError(
+      "Engineering: Production build failed",
+      {
+        runId:
+          ctx.runId,
+
+        exitCode:
+          build.exitCode,
+
+        stderr:
+          truncate(
+            build.stderr,
+            5000
+          )
+      }
+    );
+  }
+
   return {
-    success: build.success,
-    phase: "build",
+    success:
+      build.success,
+
+    phase:
+      "build",
+
     ...build
   };
 }
 
 /* =========================================================
-   FAILURE DIAGNOSIS
-   ========================================================= */
+   FAILURE CLASSIFICATION
+========================================================= */
 
-function classifyFailure(result) {
+function classifyFailure(
+  result
+) {
   const text =
     [
       result?.stderr,
@@ -1141,79 +1613,439 @@ function classifyFailure(result) {
   return "build_failure";
 }
 
-async function diagnose(ctx, result) {
-  const category =
-    classifyFailure(result);
+/* =========================================================
+   AI PROVIDER NORMALIZATION
+========================================================= */
 
-  const diagnosis = {
-    id: generateId("diagnosis"),
-    timestamp: now(),
-    category,
-    phase: result.phase,
-    confidence: 0.75,
-    message:
-      cleanString(
-        result.error?.message ||
-        result.stderr ||
-        "Build failed",
-        LIMITS.maxErrorLength
-      )
-  };
+/*
+ * IMPORTANT:
+ *
+ * The centralized ZyrionOS AI provider expects
+ * chat messages, not a raw prompt string.
+ *
+ * Previous implementation:
+ *
+ *   generateText(prompt)
+ *
+ * caused:
+ *
+ *   "AI messages are required"
+ *
+ * This adapter always sends:
+ *
+ *   generateText({
+ *      messages: [...]
+ *   })
+ *
+ * and preserves provider failures as advisory
+ * diagnosis errors.
+ */
 
-  /*
-   * AI diagnosis is advisory only.
-   * It can never promote a build.
-   */
+async function requestAIDiagnosis(
+  ctx,
+  category,
+  result
+) {
   if (
-    aiProvider &&
-    typeof aiProvider.generateText ===
+    !aiProvider ||
+    typeof aiProvider.generateText !==
       "function"
   ) {
-    try {
-      const prompt = `
-You are diagnosing a software build failure.
+    return {
+      success:
+        false,
 
-Failure category:
-${category}
+      available:
+        false,
 
-STDERR:
-${truncate(result.stderr, 10000)}
+      error: {
+        name:
+          "AIProviderUnavailable",
 
-STDOUT:
-${truncate(result.stdout, 6000)}
+        message:
+          "Centralized AI provider is unavailable",
 
-Return concise JSON:
-{
-  "rootCause": "...",
-  "repairable": true,
-  "reason": "...",
-  "files": ["..."]
-}
-`;
+        code:
+          "AI_PROVIDER_UNAVAILABLE",
 
-      const aiResult =
-        await aiProvider.generateText(
-          prompt
-        );
-
-      let parsed = null;
-
-      try {
-        parsed =
-          typeof aiResult ===
-          "string"
-            ? JSON.parse(aiResult)
-            : aiResult;
-      } catch {}
-
-      if (parsed) {
-        diagnosis.ai =
-          clone(parsed);
+        stack:
+          ""
       }
-    } catch (error) {
-      diagnosis.aiError =
-        safeError(error);
+    };
+  }
+
+  const systemMessage = [
+    "You are ZyrionOS Engineering Diagnosis Agent.",
+    "Diagnose software build failures only.",
+    "Do not claim that a build succeeded.",
+    "Do not invent execution results.",
+    "Return strict JSON only.",
+    "",
+    "Required JSON shape:",
+    "{",
+    '  "rootCause": "string",',
+    '  "repairable": true,',
+    '  "reason": "string",',
+    '  "files": ["path"]',
+    "}"
+  ].join("\n");
+
+  const userMessage = [
+    "Engineering build failure diagnosis.",
+    "",
+    `Failure category: ${category}`,
+    `Phase: ${result?.phase || "unknown"}`,
+    `Exit code: ${result?.exitCode ?? "null"}`,
+    `Signal: ${result?.signal || "null"}`,
+    `Timed out: ${Boolean(result?.timedOut)}`,
+    "",
+    "STDERR:",
+    truncate(
+      result?.stderr || "",
+      10000
+    ),
+    "",
+    "STDOUT:",
+    truncate(
+      result?.stdout || "",
+      6000
+    ),
+    "",
+    "Process error:",
+    JSON.stringify(
+      result?.error || null
+    )
+  ].join("\n");
+
+  const messages = [
+    {
+      role:
+        "system",
+
+      content:
+        systemMessage
+    },
+
+    {
+      role:
+        "user",
+
+      content:
+        userMessage
     }
+  ];
+
+  try {
+    logInfo(
+      "Engineering: Requesting AI diagnosis",
+      {
+        runId:
+          ctx.runId,
+
+        category,
+
+        messageCount:
+          messages.length
+      }
+    );
+
+    /*
+     * PRIMARY CONTRACT
+     *
+     * Centralized provider receives an object
+     * containing messages.
+     */
+    const response =
+      await aiProvider.generateText({
+        messages,
+
+        temperature:
+          0,
+
+        maxTokens:
+          1200,
+
+        responseFormat:
+          "json"
+      });
+
+    return {
+      success:
+        true,
+
+      available:
+        true,
+
+      response
+    };
+  } catch (
+    error
+  ) {
+    /*
+     * IMPORTANT:
+     * Provider failure is captured.
+     * It must NEVER replace the original
+     * engineering/build failure.
+     */
+
+    logWarning(
+      "Engineering: AI diagnosis failed",
+      {
+        runId:
+          ctx.runId,
+
+        category,
+
+        error:
+          safeError(
+            error
+          )
+      }
+    );
+
+    return {
+      success:
+        false,
+
+      available:
+        true,
+
+      error:
+        safeError(
+          error
+        )
+    };
+  }
+}
+
+function parseAIResponse(
+  response
+) {
+  if (
+    response ===
+      null ||
+    response ===
+      undefined
+  ) {
+    return null;
+  }
+
+  let value =
+    response;
+
+  /*
+   * Common provider wrappers.
+   */
+  if (
+    value &&
+    typeof value ===
+      "object"
+  ) {
+    if (
+      value.data !==
+        undefined
+    ) {
+      value =
+        value.data;
+    } else if (
+      value.text !==
+        undefined
+    ) {
+      value =
+        value.text;
+    } else if (
+      value.content !==
+        undefined
+    ) {
+      value =
+        value.content;
+    } else if (
+      value.output !==
+        undefined
+    ) {
+      value =
+        value.output;
+    }
+  }
+
+  if (
+    typeof value !==
+      "string"
+  ) {
+    return (
+      value &&
+      typeof value ===
+        "object"
+        ? value
+        : null
+    );
+  }
+
+  let text =
+    value.trim();
+
+  /*
+   * Remove accidental markdown fences.
+   */
+  text =
+    text
+      .replace(
+        /^```json\s*/i,
+        ""
+      )
+      .replace(
+        /^```\s*/i,
+        ""
+      )
+      .replace(
+        /\s*```$/i,
+        ""
+      )
+      .trim();
+
+  try {
+    return JSON.parse(
+      text
+    );
+  } catch {
+    /*
+     * Try to extract the first JSON object.
+     */
+    const start =
+      text.indexOf(
+        "{"
+      );
+
+    const end =
+      text.lastIndexOf(
+        "}"
+      );
+
+    if (
+      start >= 0 &&
+      end > start
+    ) {
+      try {
+        return JSON.parse(
+          text.slice(
+            start,
+            end + 1
+          )
+        );
+      } catch {}
+    }
+
+    return null;
+  }
+}
+
+/* =========================================================
+   FAILURE DIAGNOSIS
+========================================================= */
+
+async function diagnose(
+  ctx,
+  result
+) {
+  const category =
+    classifyFailure(
+      result
+    );
+
+  const originalError =
+    result?.error
+      ? safeError(
+          result.error
+        )
+      : {
+          name:
+            "BuildFailure",
+
+          message:
+            cleanString(
+              result?.stderr ||
+                result?.stdout ||
+                "Build failed",
+              LIMITS.maxErrorLength
+            ),
+
+          code:
+            `ENGINEERING_${String(
+              category
+            ).toUpperCase()}`,
+
+          stack:
+            ""
+        };
+
+  const diagnosis = {
+    id:
+      generateId(
+        "diagnosis"
+      ),
+
+    timestamp:
+      now(),
+
+    category,
+
+    phase:
+      result?.phase ||
+      "unknown",
+
+    confidence:
+      0.75,
+
+    originalFailure:
+      originalError,
+
+    message:
+      originalError.message,
+
+    aiStatus:
+      "not_attempted",
+
+    aiError:
+      null,
+
+    ai:
+      null
+  };
+
+  const aiResult =
+    await requestAIDiagnosis(
+      ctx,
+      category,
+      result
+    );
+
+  if (
+    aiResult.success
+  ) {
+    const parsed =
+      parseAIResponse(
+        aiResult.response
+      );
+
+    if (parsed) {
+      diagnosis.ai =
+        clone(parsed);
+
+      diagnosis.aiStatus =
+        "success";
+    } else {
+      diagnosis.aiStatus =
+        "invalid_response";
+    }
+  } else {
+    diagnosis.aiStatus =
+      aiResult.available
+        ? "failed"
+        : "unavailable";
+
+    diagnosis.aiError =
+      aiResult.error ||
+      null;
   }
 
   ctx.diagnoses.push(
@@ -1225,7 +2057,7 @@ Return concise JSON:
 
 /* =========================================================
    REPAIR
-   ========================================================= */
+========================================================= */
 
 function extractRepairableFiles(
   ctx,
@@ -1241,16 +2073,24 @@ function extractRepairableFiles(
   const allowed =
     new Set(
       ctx.job.files.map(
-        file => file.path
+        file =>
+          file.path
       )
     );
 
   return names
-    .map(file =>
-      cleanString(file, 500)
+    .map(
+      file =>
+        cleanString(
+          file,
+          500
+        )
     )
-    .filter(file =>
-      allowed.has(file)
+    .filter(
+      file =>
+        allowed.has(
+          file
+        )
     )
     .slice(
       0,
@@ -1269,46 +2109,54 @@ async function attemptRepair(
       LIMITS.maxRepairAttempts
   ) {
     return {
-      success: false,
+      success:
+        false,
+
       reason:
         "repair_limit_or_policy"
     };
   }
 
   if (
-    diagnosis?.ai?.repairable === false
+    diagnosis?.ai?.repairable ===
+    false
   ) {
     return {
-      success: false,
+      success:
+        false,
+
       reason:
         "failure_not_repairable"
     };
   }
 
-  ctx.repairAttempts += 1;
-
   /*
-   * Repair is intentionally conservative.
-   * The Engineering Agent never invents source
-   * changes from an untrusted response.
-   *
-   * Supported repair payload:
-   *
-   * {
-   *   files: [
-   *     { path, content }
-   *   ]
-   * }
-   *
-   * supplied through job.repairProvider.
+   * If AI diagnosis itself failed,
+   * do NOT manufacture a repair.
    */
+  if (
+    !diagnosis?.ai
+  ) {
+    return {
+      success:
+        false,
+
+      reason:
+        "diagnosis_ai_unavailable_or_invalid"
+    };
+  }
+
+  ctx.repairAttempts +=
+    1;
 
   if (
     typeof ctx.job.repairProvider !==
     "function"
   ) {
     return {
-      success: false,
+      success:
+        false,
+
       reason:
         "repair_provider_unavailable"
     };
@@ -1317,11 +2165,24 @@ async function attemptRepair(
   try {
     const response =
       await ctx.job.repairProvider({
-        job: clone(ctx.job),
-        diagnosis: clone(diagnosis),
-        failure: clone(failure),
+        job:
+          clone(
+            ctx.job
+          ),
+
+        diagnosis:
+          clone(
+            diagnosis
+          ),
+
+        failure:
+          clone(
+            failure
+          ),
+
         attempt:
           ctx.currentAttempt,
+
         repairAttempt:
           ctx.repairAttempts
       });
@@ -1334,10 +2195,13 @@ async function attemptRepair(
         : [];
 
     if (
-      repairFiles.length === 0
+      repairFiles.length ===
+      0
     ) {
       return {
-        success: false,
+        success:
+          false,
+
         reason:
           "repair_provider_returned_no_files"
       };
@@ -1348,7 +2212,9 @@ async function attemptRepair(
       LIMITS.maxRepairFiles
     ) {
       return {
-        success: false,
+        success:
+          false,
+
         reason:
           "repair_scope_exceeded"
       };
@@ -1364,38 +2230,48 @@ async function attemptRepair(
         )
       );
 
-    const changed = [];
+    const changed =
+      [];
 
     for (
-      const rawFile of repairFiles
+      const rawFile of
+        repairFiles
     ) {
       const file =
-        normalizeFile(rawFile);
+        normalizeFile(
+          rawFile
+        );
 
       if (!file) {
         continue;
       }
 
       if (
-        !existing.has(file.path)
+        !existing.has(
+          file.path
+        )
       ) {
-        /*
-         * New files are allowed only when
-         * explicitly authorized by the job.
-         */
         if (
           !ctx.job.allowNewFiles
         ) {
           continue;
         }
 
-        ctx.job.files.push(file);
-        changed.push(file.path);
+        ctx.job.files.push(
+          file
+        );
+
+        changed.push(
+          file.path
+        );
+
         continue;
       }
 
       const current =
-        existing.get(file.path);
+        existing.get(
+          file.path
+        );
 
       if (
         current.content !==
@@ -1414,23 +2290,36 @@ async function attemptRepair(
     }
 
     if (
-      changed.length === 0
+      changed.length ===
+      0
     ) {
       return {
-        success: false,
+        success:
+          false,
+
         reason:
           "repair_made_no_source_change"
       };
     }
 
     const repair = {
-      id: generateId("repair"),
-      timestamp: now(),
+      id:
+        generateId(
+          "repair"
+        ),
+
+      timestamp:
+        now(),
+
       attempt:
         ctx.currentAttempt,
+
       repairAttempt:
         ctx.repairAttempts,
-      changedFiles: changed,
+
+      changedFiles:
+        changed,
+
       category:
         diagnosis.category
     };
@@ -1440,23 +2329,32 @@ async function attemptRepair(
     );
 
     return {
-      success: true,
+      success:
+        true,
+
       ...repair
     };
-  } catch (error) {
+  } catch (
+    error
+  ) {
     return {
-      success: false,
+      success:
+        false,
+
       reason:
         "repair_provider_error",
+
       error:
-        safeError(error)
+        safeError(
+          error
+        )
     };
   }
 }
 
 /* =========================================================
    ROLLBACK
-   ========================================================= */
+========================================================= */
 
 async function rollback(
   ctx,
@@ -1466,45 +2364,171 @@ async function rollback(
     return false;
   }
 
+  const checkpointMap =
+    new Map(
+      checkpoint.files.map(
+        file => [
+          file.path,
+          file
+        ]
+      )
+    );
+
+  ctx.job.files =
+    Array.from(
+      checkpointMap.values()
+    ).map(
+      file => ({
+        path:
+          file.path,
+
+        name:
+          file.name ||
+          path.basename(
+            file.path
+          ),
+
+        content:
+          file.content ||
+          "",
+
+        language:
+          file.language ||
+          "",
+
+        type:
+          file.type ||
+          "file",
+
+        size:
+          Buffer.byteLength(
+            file.content ||
+              "",
+            "utf8"
+          ),
+
+        isGenerated:
+          true
+      })
+    );
+
   ctx.rollbacks.push({
-    id: generateId("rollback"),
-    timestamp: now(),
+    id:
+      generateId(
+        "rollback"
+      ),
+
+    timestamp:
+      now(),
+
     checkpointId:
       checkpoint.id
   });
 
-  ctx.job.files =
-    ctx.job.files.map(
-      file => {
-        const original =
-          checkpoint.files.find(
-            item =>
-              item.path ===
-              file.path
-          );
+  logInfo(
+    "Engineering: Source rolled back to checkpoint",
+    {
+      runId:
+        ctx.runId,
 
-        return original
-          ? {
-              ...file,
-              /*
-               * Content cannot be reconstructed
-               * from a checksum. Therefore rollback
-               * requires the checkpoint to carry source.
-               */
-              content:
-                original.content ??
-                file.content
-            }
-          : file;
-      }
-    );
+      checkpointId:
+        checkpoint.id
+    }
+  );
 
   return true;
 }
 
 /* =========================================================
    ARTIFACT
-   ========================================================= */
+========================================================= */
+
+async function collectDirectoryFiles(
+  directory
+) {
+  const result =
+    [];
+
+  async function walk(
+    current
+  ) {
+    const entries =
+      await fsp.readdir(
+        current,
+        {
+          withFileTypes:
+            true
+        }
+      );
+
+    for (
+      const entry of
+        entries
+    ) {
+      const full =
+        path.join(
+          current,
+          entry.name
+        );
+
+      if (
+        entry.isDirectory()
+      ) {
+        await walk(
+          full
+        );
+
+        continue;
+      }
+
+      const stat =
+        await fsp.stat(
+          full
+        );
+
+      if (
+        stat.size >
+        LIMITS.maxArtifactSize
+      ) {
+        throw new Error(
+          `Artifact file too large: ${entry.name}`
+        );
+      }
+
+      const data =
+        await fsp.readFile(
+          full
+        );
+
+      result.push({
+        path:
+          path
+            .relative(
+              directory,
+              full
+            )
+            .replace(
+              /\\/g,
+              "/"
+            ),
+
+        size:
+          stat.size,
+
+        checksum:
+          hashBuffer(
+            data
+          )
+      });
+    }
+  }
+
+  await walk(
+    directory
+  );
+
+  return result;
+}
 
 async function collectBuildArtifacts(
   ctx
@@ -1518,136 +2542,72 @@ async function collectBuildArtifacts(
     );
   }
 
-  const outputDirectory =
+  /*
+   * Respect explicit outputDirectory first.
+   * Then detect common framework output
+   * directories.
+   */
+  const configured =
     cleanString(
       ctx.job.outputDirectory ||
-      "dist",
+        "",
       500
     );
 
-  const candidate =
-    safeWorkspacePath(
-      workspace,
-      outputDirectory
+  const candidates =
+    configured
+      ? [
+          configured,
+          "dist",
+          "build",
+          ".next",
+          "out"
+        ]
+      : [
+          "dist",
+          "build",
+          ".next",
+          "out"
+        ];
+
+  const unique =
+    Array.from(
+      new Set(
+        candidates
+      )
     );
 
-  let stat;
-
-  try {
-    stat =
-      await fsp.stat(candidate);
-  } catch {
-    /*
-     * Some frameworks use different output
-     * directories. Search for common production
-     * outputs rather than falsely declaring failure.
-     */
-    const candidates = [
-      "dist",
-      "build",
-      ".next",
-      "out"
-    ];
-
-    for (
-      const item of candidates
-    ) {
-      try {
-        const p =
-          safeWorkspacePath(
-            workspace,
-            item
-          );
-
-        const s =
-          await fsp.stat(p);
-
-        if (s.isDirectory()) {
-          return collectDirectoryArtifact(
-            ctx,
-            p,
-            item
-          );
-        }
-      } catch {}
-    }
-
-    throw new Error(
-      "Production build artifact directory was not found"
-    );
-  }
-
-  if (!stat.isDirectory()) {
-    throw new Error(
-      "Build output is not a directory"
-    );
-  }
-
-  return collectDirectoryArtifact(
-    ctx,
-    candidate,
-    outputDirectory
-  );
-}
-
-async function collectDirectoryFiles(
-  directory
-) {
-  const result = [];
-
-  async function walk(current) {
-    const entries =
-      await fsp.readdir(
-        current,
-        {
-          withFileTypes: true
-        }
-      );
-
-    for (const entry of entries) {
-      const full =
-        path.join(
-          current,
-          entry.name
+  for (
+    const item of unique
+  ) {
+    try {
+      const candidate =
+        safeWorkspacePath(
+          workspace,
+          item
         );
-
-      if (entry.isDirectory()) {
-        await walk(full);
-        continue;
-      }
 
       const stat =
-        await fsp.stat(full);
+        await fsp.stat(
+          candidate
+        );
 
       if (
-        stat.size >
-        LIMITS.maxArtifactSize
+        stat.isDirectory()
       ) {
-        throw new Error(
-          `Artifact file too large: ${entry.name}`
+        return collectDirectoryArtifact(
+          ctx,
+          candidate,
+          item
         );
       }
-
-      const data =
-        await fsp.readFile(full);
-
-      result.push({
-        path:
-          path.relative(
-            directory,
-            full
-          ).replace(/\\/g, "/"),
-        size:
-          stat.size,
-        checksum:
-          hashBuffer(data)
-      });
-    }
+    } catch {}
   }
 
-  await walk(directory);
-
-  return result;
+  throw new Error(
+    "Production build artifact directory was not found. Checked: " +
+      unique.join(", ")
+  );
 }
 
 async function collectDirectoryArtifact(
@@ -1660,33 +2620,54 @@ async function collectDirectoryArtifact(
       directory
     );
 
-  if (files.length === 0) {
+  if (
+    files.length ===
+    0
+  ) {
     throw new Error(
       "Build artifact directory is empty"
     );
   }
 
+  /*
+   * Deterministic artifact manifest.
+   */
   const manifest =
     JSON.stringify(
       {
         buildId:
           ctx.buildId,
-        generatedAt:
-          now(),
+
         output:
           outputName,
-        files
+
+        files:
+          files
+            .slice()
+            .sort(
+              (
+                a,
+                b
+              ) =>
+                a.path.localeCompare(
+                  b.path
+                )
+            )
       },
       null,
       2
     );
 
   const checksum =
-    hashString(manifest);
+    hashString(
+      manifest
+    );
 
   const artifact = {
     id:
-      generateId("artifact"),
+      generateId(
+        "artifact"
+      ),
 
     buildId:
       ctx.buildId,
@@ -1706,9 +2687,11 @@ async function collectDirectoryArtifact(
         "utf8"
       ),
 
-    verified: true,
+    verified:
+      true,
 
-    authoritative: true,
+    authoritative:
+      true,
 
     validationMode:
       "authoritative",
@@ -1726,7 +2709,7 @@ async function collectDirectoryArtifact(
 
 /* =========================================================
    AUTHORITATIVE VALIDATION
-   ========================================================= */
+========================================================= */
 
 async function authoritativeValidation(
   ctx,
@@ -1738,7 +2721,9 @@ async function authoritativeValidation(
     !execution.success
   ) {
     return {
-      success: false,
+      success:
+        false,
+
       reason:
         "Build execution was not successful"
     };
@@ -1749,17 +2734,20 @@ async function authoritativeValidation(
     !artifact.verified
   ) {
     return {
-      success: false,
+      success:
+        false,
+
       reason:
         "Artifact is missing or unverified"
     };
   }
 
   /*
-   * Optional static validation can add evidence,
-   * but it can NEVER replace real build execution.
+   * Optional static validation is supplementary only.
+   * It can never replace real build execution.
    */
-  let staticValidation = null;
+  let staticValidation =
+    null;
 
   if (
     buildValidationService &&
@@ -1768,62 +2756,88 @@ async function authoritativeValidation(
   ) {
     try {
       staticValidation =
-        await buildValidationService
-          .validateProject({
+        await buildValidationService.validateProject(
+          {
             files:
               ctx.job.files,
+
             projectData:
               ctx.job,
+
             plan:
               ctx.job.plan,
+
             manifest:
               ctx.job.manifest
-          });
-    } catch (error) {
+          }
+        );
+    } catch (
+      error
+    ) {
       staticValidation = {
-        success: false,
+        success:
+          false,
+
         error:
-          safeError(error)
+          safeError(
+            error
+          )
       };
     }
   }
 
   const evidence = {
-    success: true,
-    authoritative: true,
-    verified: true,
+    success:
+      true,
+
+    authoritative:
+      true,
+
+    verified:
+      true,
+
     validationMode:
       "authoritative",
+
     buildId:
       ctx.buildId,
+
     artifact: {
       storageKey:
         artifact.storageKey,
+
       checksum:
         artifact.checksum,
+
       size:
         artifact.size
     },
+
     execution: {
       phase:
         execution.phase,
+
       exitCode:
         execution.exitCode,
+
       durationMs:
         execution.durationMs
     },
+
     staticValidation
   };
 
   return {
-    success: true,
+    success:
+      true,
+
     evidence
   };
 }
 
 /* =========================================================
    VERIFICATION
-   ========================================================= */
+========================================================= */
 
 async function verify(
   ctx,
@@ -1833,7 +2847,9 @@ async function verify(
     !execution?.success
   ) {
     return {
-      success: false,
+      success:
+        false,
+
       reason:
         "Execution did not succeed"
     };
@@ -1857,38 +2873,67 @@ async function verify(
     return authoritative;
   }
 
-  ctx.verified = true;
-  ctx.authoritative = true;
+  ctx.verified =
+    true;
+
+  ctx.authoritative =
+    true;
+
   ctx.validationMode =
     "authoritative";
 
-  ctx.verifications.push({
+  const verification = {
     id:
-      generateId("verification"),
-    timestamp: now(),
-    success: true,
-    authoritative: true,
+      generateId(
+        "verification"
+      ),
+
+    timestamp:
+      now(),
+
+    success:
+      true,
+
+    authoritative:
+      true,
+
+    verified:
+      true,
+
     validationMode:
       "authoritative",
+
     buildId:
       ctx.buildId,
+
     checksum:
       artifact.checksum
-  });
+  };
+
+  ctx.verifications.push(
+    verification
+  );
 
   return {
-    success: true,
+    success:
+      true,
+
     artifact,
+
     evidence:
-      authoritative.evidence
+      authoritative.evidence,
+
+    verification
   };
 }
 
 /* =========================================================
-   PROMOTION
-   ========================================================= */
+   PROMOTION GATE
+========================================================= */
 
-function promotionGate(ctx) {
+function promotionGate(
+  ctx
+) {
   const artifact =
     ctx.artifacts[
       ctx.artifacts.length - 1
@@ -1900,38 +2945,62 @@ function promotionGate(ctx) {
     ];
 
   const valid =
-    ctx.state === STATES.PASSED &&
-    Boolean(ctx.buildId) &&
-    Boolean(artifact) &&
+    ctx.state ===
+      STATES.PASSED &&
+
+    Boolean(
+      ctx.buildId
+    ) &&
+
+    Boolean(
+      artifact
+    ) &&
+
     Boolean(
       artifact.storageKey
     ) &&
+
     Boolean(
       artifact.checksum
     ) &&
-    artifact.verified === true &&
-    artifact.authoritative === true &&
-    verification?.success === true &&
-    verification?.authoritative === true &&
+
+    artifact.verified ===
+      true &&
+
+    artifact.authoritative ===
+      true &&
+
+    verification?.success ===
+      true &&
+
+    verification?.verified ===
+      true &&
+
+    verification?.authoritative ===
+      true &&
+
     verification?.validationMode ===
       "authoritative";
 
   if (!valid) {
     return {
-      success: false,
+      success:
+        false,
+
       reason:
         "Authoritative promotion evidence is incomplete"
     };
   }
 
   return {
-    success: true
+    success:
+      true
   };
 }
 
 /* =========================================================
    FAILURE RESULT
-   ========================================================= */
+========================================================= */
 
 function failureResult(
   ctx,
@@ -1939,22 +3008,32 @@ function failureResult(
   extra = {}
 ) {
   const normalized =
-    safeError(error);
+    safeError(
+      error
+    );
 
   ctx.finalError =
     normalized;
 
   return {
-    success: false,
+    success:
+      false,
 
     state:
       ctx.state,
 
-    promoted: false,
+    promoted:
+      false,
+
     verified:
-      Boolean(ctx.verified),
+      Boolean(
+        ctx.verified
+      ),
+
     authoritative:
-      Boolean(ctx.authoritative),
+      Boolean(
+        ctx.authoritative
+      ),
 
     validationMode:
       ctx.validationMode,
@@ -2000,8 +3079,8 @@ function failureResult(
       ] ||
       null,
 
-    authoritativeEvidence:
-      null,
+    failures:
+      ctx.failures,
 
     engineeringBoundary:
       true,
@@ -2009,19 +3088,25 @@ function failureResult(
     metadata: {
       agent:
         AGENT_NAME,
+
       version:
         VERSION,
+
       attempts:
         ctx.currentAttempt,
+
       repairAttempts:
-        ctx.repairAttempts
+        ctx.repairAttempts,
+
+      transitions:
+        ctx.transitions
     }
   };
 }
 
 /* =========================================================
    SUCCESS RESULT
-   ========================================================= */
+========================================================= */
 
 function successResult(
   ctx,
@@ -2029,14 +3114,20 @@ function successResult(
   evidence
 ) {
   return {
-    success: true,
+    success:
+      true,
 
     state:
       STATES.PROMOTED,
 
-    promoted: true,
-    verified: true,
-    authoritative: true,
+    promoted:
+      true,
+
+    verified:
+      true,
+
+    authoritative:
+      true,
 
     validationMode:
       "authoritative",
@@ -2050,23 +3141,35 @@ function successResult(
     artifact: {
       storageKey:
         artifact.storageKey,
+
       path:
         artifact.storageKey,
+
       key:
         artifact.storageKey,
+
       checksum:
         artifact.checksum,
+
       size:
         artifact.size,
-      verified: true,
-      authoritative: true
+
+      verified:
+        true,
+
+      authoritative:
+        true
     },
 
     files:
       ctx.job.files.map(
         file => ({
-          path: file.path,
-          size: file.size,
+          path:
+            file.path,
+
+          size:
+            file.size,
+
           checksum:
             hashString(
               file.content
@@ -2088,14 +3191,19 @@ function successResult(
     metadata: {
       agent:
         AGENT_NAME,
+
       version:
         VERSION,
+
       attempts:
         ctx.currentAttempt,
+
       repairAttempts:
         ctx.repairAttempts,
+
       startedAt:
         ctx.startedAt,
+
       completedAt:
         now()
     }
@@ -2103,36 +3211,253 @@ function successResult(
 }
 
 /* =========================================================
+   FAILURE HANDLER
+========================================================= */
+
+async function handleBuildFailure(
+  ctx,
+  execution
+) {
+  /*
+   * ALWAYS preserve original failure first.
+   */
+  const originalFailure = {
+    phase:
+      execution.phase,
+
+    error:
+      execution.error
+        ? safeError(
+            execution.error
+          )
+        : null,
+
+    stderr:
+      execution.stderr,
+
+    stdout:
+      execution.stdout,
+
+    exitCode:
+      execution.exitCode,
+
+    signal:
+      execution.signal,
+
+    timedOut:
+      execution.timedOut,
+
+    durationMs:
+      execution.durationMs
+  };
+
+  ctx.failures.push({
+    timestamp:
+      now(),
+
+    ...clone(
+      originalFailure
+    )
+  });
+
+  /*
+   * If this is the final attempt,
+   * diagnose once and escalate.
+   */
+  if (
+    ctx.currentAttempt >=
+    ctx.job.maxAttempts
+  ) {
+    transition(
+      ctx,
+      STATES.FAILED,
+      {
+        attempt:
+          ctx.currentAttempt
+      }
+    );
+
+    /*
+     * IMPORTANT:
+     * Enter DIAGNOSING before AI diagnosis.
+     */
+    transition(
+      ctx,
+      STATES.DIAGNOSING,
+      {
+        attempt:
+          ctx.currentAttempt
+      }
+    );
+
+    const diagnosis =
+      await diagnose(
+        ctx,
+        execution
+      );
+
+    transition(
+      ctx,
+      STATES.ESCALATED,
+      {
+        reason:
+          "maximum_attempts_reached"
+      }
+    );
+
+    /*
+     * Original execution error remains
+     * the primary failure.
+     */
+    return failureResult(
+      ctx,
+      execution.error ||
+        new Error(
+          execution.stderr ||
+            "Engineering build failed"
+        ),
+      {
+        failure:
+          originalFailure,
+
+        diagnosis
+      }
+    );
+  }
+
+  transition(
+    ctx,
+    STATES.FAILED,
+    {
+      attempt:
+        ctx.currentAttempt
+    }
+  );
+
+  transition(
+    ctx,
+    STATES.DIAGNOSING,
+    {
+      attempt:
+        ctx.currentAttempt
+    }
+  );
+
+  const diagnosis =
+    await diagnose(
+      ctx,
+      execution
+    );
+
+  /*
+   * If diagnosis AI failed,
+   * do not invent a repair.
+   */
+  const repair =
+    await attemptRepair(
+      ctx,
+      diagnosis,
+      originalFailure
+    );
+
+  if (
+    !repair.success
+  ) {
+    transition(
+      ctx,
+      STATES.ESCALATED,
+      {
+        reason:
+          repair.reason
+      }
+    );
+
+    return failureResult(
+      ctx,
+      execution.error ||
+        new Error(
+          execution.stderr ||
+            "Engineering build failed"
+        ),
+      {
+        failure:
+          originalFailure,
+
+        diagnosis,
+
+        repairFailure:
+          repair
+      }
+    );
+  }
+
+  transition(
+    ctx,
+    STATES.REPAIRING,
+    {
+      changedFiles:
+        repair.changedFiles
+    }
+  );
+
+  logSuccess(
+    "Engineering: Repair applied",
+    {
+      runId:
+        ctx.runId,
+
+      changedFiles:
+        repair.changedFiles
+    }
+  );
+
+  return {
+    success:
+      true,
+
+    repaired:
+      true
+  };
+}
+
+/* =========================================================
    MAIN ENGINEERING PIPELINE
-   ========================================================= */
+========================================================= */
 
 async function engineeringAgent(
   input = {}
 ) {
-  let ctx = null;
+  let ctx =
+    null;
 
   try {
     const job =
-      normalizeJob(input);
+      normalizeJob(
+        input
+      );
 
     ctx =
-      createContext(job);
+      createContext(
+        job
+      );
 
     logInfo(
       "Engineering Agent Started",
       {
         runId:
           ctx.runId,
+
         projectId:
           job.projectId,
+
         projectName:
           job.projectName
       }
     );
 
-    /* -----------------------------------------------------
+    /* =====================================================
        ANALYSIS
-       ----------------------------------------------------- */
+    ===================================================== */
 
     transition(
       ctx,
@@ -2140,29 +3465,33 @@ async function engineeringAgent(
     );
 
     const preflightResult =
-      await preflight(ctx);
+      await preflight(
+        ctx
+      );
+
+    ctx.preflight =
+      preflightResult;
 
     await createCheckpoint(
       ctx,
       "pre-analysis"
     );
 
-    ctx.preflight =
-      preflightResult;
-
-    /* -----------------------------------------------------
+    /* =====================================================
        EXECUTION LOOP
-       ----------------------------------------------------- */
+    ===================================================== */
 
     while (
       ctx.currentAttempt <
       job.maxAttempts
     ) {
-      ctx.currentAttempt += 1;
+      ctx.currentAttempt +=
+        1;
 
       const attempt = {
         number:
           ctx.currentAttempt,
+
         startedAt:
           now()
       };
@@ -2171,38 +3500,25 @@ async function engineeringAgent(
         attempt
       );
 
-      try {
-        transition(
-          ctx,
-          STATES.EXECUTING,
-          {
-            attempt:
-              ctx.currentAttempt
-          }
-        );
-      } catch {
-        if (
-          ctx.state !==
-          STATES.EXECUTING
-        ) {
-          transition(
-            ctx,
-            STATES.EXECUTING,
-            {
-              attempt:
-                ctx.currentAttempt
-            }
-          );
-        }
-      }
-
-      await createCheckpoint(
+      transition(
         ctx,
-        `attempt-${ctx.currentAttempt}-before-build`
+        STATES.EXECUTING,
+        {
+          attempt:
+            ctx.currentAttempt
+        }
       );
 
+      const checkpoint =
+        await createCheckpoint(
+          ctx,
+          `attempt-${ctx.currentAttempt}-before-build`
+        );
+
       const execution =
-        await executeBuild(ctx);
+        await executeBuild(
+          ctx
+        );
 
       attempt.completedAt =
         now();
@@ -2210,22 +3526,36 @@ async function engineeringAgent(
       attempt.success =
         execution.success;
 
+      attempt.phase =
+        execution.phase;
+
+      attempt.exitCode =
+        execution.exitCode;
+
+      /*
+       * ===================================================
+       * BUILD SUCCESS
+       * ===================================================
+       */
+
       if (
         execution.success
       ) {
-        /* -----------------------------------------------
-           VERIFICATION
-           ----------------------------------------------- */
-
         transition(
           ctx,
           STATES.VERIFYING
         );
 
-        try {
-          ctx.buildId =
-            generateId("build");
+        /*
+         * Build identity must exist before artifact
+         * creation and authoritative evidence.
+         */
+        ctx.buildId =
+          generateId(
+            "build"
+          );
 
+        try {
           const verification =
             await verify(
               ctx,
@@ -2237,25 +3567,23 @@ async function engineeringAgent(
           ) {
             throw new Error(
               verification.reason ||
-              "Authoritative verification failed"
+                "Authoritative verification failed"
             );
           }
 
-          /* ---------------------------------------------
-             PASSED
-             --------------------------------------------- */
-
           transition(
             ctx,
-            STATES.PASSED
+            STATES.PASSED,
+            {
+              buildId:
+                ctx.buildId
+            }
           );
 
-          /* ---------------------------------------------
-             PROMOTION
-             --------------------------------------------- */
-
           const promotion =
-            promotionGate(ctx);
+            promotionGate(
+              ctx
+            );
 
           if (
             !promotion.success
@@ -2274,64 +3602,120 @@ async function engineeringAgent(
             }
           );
 
-          ctx.promoted = true;
+          ctx.promoted =
+            true;
 
           logSuccess(
             "Engineering Build Promoted",
             {
               runId:
                 ctx.runId,
+
               buildId:
                 ctx.buildId
             }
           );
 
-          return successResult(
-            ctx,
+          const artifact =
             ctx.artifacts[
               ctx.artifacts.length - 1
-            ],
-            ctx.verifications[
-              ctx.verifications.length - 1
-            ]
-              ? {
-                  success: true,
-                  authoritative:
-                    true,
-                  verified:
-                    true,
-                  validationMode:
-                    "authoritative",
-                  buildId:
-                    ctx.buildId,
-                  artifact: {
-                    storageKey:
-                      ctx.artifacts[
-                        ctx.artifacts.length - 1
-                      ].storageKey,
-                    checksum:
-                      ctx.artifacts[
-                        ctx.artifacts.length - 1
-                      ].checksum
-                  }
-                }
-              : null
+            ];
+
+          const evidence = {
+            success:
+              true,
+
+            authoritative:
+              true,
+
+            verified:
+              true,
+
+            validationMode:
+              "authoritative",
+
+            buildId:
+              ctx.buildId,
+
+            artifact: {
+              storageKey:
+                artifact.storageKey,
+
+              checksum:
+                artifact.checksum,
+
+              size:
+                artifact.size
+            }
+          };
+
+          return successResult(
+            ctx,
+            artifact,
+            evidence
           );
-        } catch (verificationError) {
+        } catch (
+          verificationError
+        ) {
+          const verificationFailure =
+            safeError(
+              verificationError
+            );
+
           ctx.failures.push({
-            timestamp: now(),
+            timestamp:
+              now(),
+
             phase:
               "verification",
+
             error:
-              safeError(
-                verificationError
-              )
+              verificationFailure
           });
 
+          /*
+           * Do not run diagnosis before entering
+           * DIAGNOSING.
+           */
           if (
             ctx.currentAttempt >=
             job.maxAttempts
           ) {
+            transition(
+              ctx,
+              STATES.FAILED,
+              {
+                phase:
+                  "verification"
+              }
+            );
+
+            transition(
+              ctx,
+              STATES.DIAGNOSING
+            );
+
+            const diagnosis =
+              await diagnose(
+                ctx,
+                {
+                  success:
+                    false,
+
+                  phase:
+                    "verification",
+
+                  stderr:
+                    verificationFailure.message,
+
+                  stdout:
+                    "",
+
+                  error:
+                    verificationError
+                }
+              );
+
             transition(
               ctx,
               STATES.ESCALATED
@@ -2342,37 +3726,47 @@ async function engineeringAgent(
               verificationError,
               {
                 failure:
-                  "authoritative_verification_failure"
+                  "authoritative_verification_failure",
+
+                diagnosis
               }
             );
           }
 
           transition(
             ctx,
-            STATES.FAILED
+            STATES.FAILED,
+            {
+              phase:
+                "verification"
+            }
+          );
+
+          transition(
+            ctx,
+            STATES.DIAGNOSING
           );
 
           const diagnosis =
             await diagnose(
               ctx,
               {
-                success: false,
+                success:
+                  false,
+
                 phase:
                   "verification",
+
                 stderr:
-                  verificationError.message,
-                stdout: "",
+                  verificationFailure.message,
+
+                stdout:
+                  "",
+
                 error:
-                  safeError(
-                    verificationError
-                  )
+                  verificationError
               }
             );
-
-          transition(
-            ctx,
-            STATES.DIAGNOSING
-          );
 
           const repair =
             await attemptRepair(
@@ -2386,7 +3780,11 @@ async function engineeringAgent(
           ) {
             transition(
               ctx,
-              STATES.ESCALATED
+              STATES.ESCALATED,
+              {
+                reason:
+                  repair.reason
+              }
             );
 
             return failureResult(
@@ -2394,157 +3792,70 @@ async function engineeringAgent(
               verificationError,
               {
                 failure:
-                  "verification_failed_and_repair_unavailable",
-                diagnosis
+                  "verification_failed",
+
+                diagnosis,
+
+                repairFailure:
+                  repair
               }
             );
           }
 
           transition(
             ctx,
-            STATES.REPAIRING
+            STATES.REPAIRING,
+            {
+              changedFiles:
+                repair.changedFiles
+            }
           );
 
           continue;
         }
       }
 
-      /* ---------------------------------------------------
+      /* ===================================================
          BUILD FAILURE
-         --------------------------------------------------- */
+      =================================================== */
 
-      ctx.failures.push({
-        timestamp: now(),
-        phase:
-          execution.phase,
-        error:
-          execution.error,
-        stderr:
-          execution.stderr,
-        stdout:
-          execution.stdout,
-        exitCode:
-          execution.exitCode
-      });
-
-      if (
-        ctx.currentAttempt >=
-        job.maxAttempts
-      ) {
-        transition(
-          ctx,
-          STATES.FAILED
-        );
-
-        const finalDiagnosis =
-          await diagnose(
-            ctx,
-            execution
-          );
-
-        transition(
-          ctx,
-          STATES.ESCALATED
-        );
-
-        return failureResult(
-          ctx,
-          execution.error ||
-            new Error(
-              execution.stderr ||
-              "Engineering build failed"
-            ),
-          {
-            failure:
-              execution,
-            diagnosis:
-              finalDiagnosis
-          }
-        );
-      }
-
-      transition(
-        ctx,
-        STATES.FAILED
-      );
-
-      const diagnosis =
-        await diagnose(
+      const failureHandled =
+        await handleBuildFailure(
           ctx,
           execution
         );
 
-      transition(
-        ctx,
-        STATES.DIAGNOSING
-      );
-
-      /*
-       * Checkpoint before repair.
-       */
-      const repairCheckpoint =
-        ctx.checkpoints[
-          ctx.checkpoints.length - 1
-        ];
-
-      const repair =
-        await attemptRepair(
-          ctx,
-          diagnosis,
-          execution
-        );
-
       if (
-        !repair.success
+        !failureHandled.success
       ) {
-        /*
-         * No safe repair.
-         * Do not blindly continue retrying.
-         */
-        transition(
-          ctx,
-          STATES.ESCALATED
-        );
-
-        return failureResult(
-          ctx,
-          execution.error ||
-            new Error(
-              execution.stderr ||
-              "Engineering build failed"
-            ),
-          {
-            failure:
-              execution,
-            diagnosis
-          }
-        );
+        return failureHandled;
       }
 
-      transition(
-        ctx,
-        STATES.REPAIRING
-      );
-
       /*
-       * If repair provider changed files,
-       * rebuild from repaired source.
+       * Repair was successful.
+       * The next loop iteration executes the repaired
+       * source from scratch.
        */
-      if (
-        repairCheckpoint &&
-        repair.changedFiles?.length === 0
-      ) {
-        await rollback(
-          ctx,
-          repairCheckpoint
-        );
-      }
+      continue;
     }
 
-    transition(
-      ctx,
-      STATES.ESCALATED
-    );
+    /*
+     * Defensive terminal path.
+     */
+    if (
+      !TERMINAL_STATES.has(
+        ctx.state
+      )
+    ) {
+      transition(
+        ctx,
+        STATES.ESCALATED,
+        {
+          reason:
+            "attempt_limit_exceeded"
+        }
+      );
+    }
 
     return failureResult(
       ctx,
@@ -2556,7 +3867,9 @@ async function engineeringAgent(
           "attempt_limit_exceeded"
       }
     );
-  } catch (error) {
+  } catch (
+    error
+  ) {
     if (ctx) {
       try {
         if (
@@ -2566,18 +3879,31 @@ async function engineeringAgent(
         ) {
           transition(
             ctx,
-            STATES.ESCALATED
+            STATES.ESCALATED,
+            {
+              reason:
+                "engineering_agent_exception"
+            }
           );
         }
       } catch {}
+
+      const normalized =
+        safeError(
+          error
+        );
 
       logError(
         "Engineering Agent Failed",
         {
           runId:
             ctx.runId,
+
+          state:
+            ctx.state,
+
           error:
-            safeError(error)
+            normalized
         }
       );
 
@@ -2591,28 +3917,49 @@ async function engineeringAgent(
       );
     }
 
+    const normalized =
+      safeError(
+        error
+      );
+
     return {
-      success: false,
+      success:
+        false,
+
       state:
         STATES.ESCALATED,
-      promoted: false,
-      verified: false,
-      authoritative: false,
+
+      promoted:
+        false,
+
+      verified:
+        false,
+
+      authoritative:
+        false,
+
       validationMode:
         null,
+
       engineeringBoundary:
         true,
+
       error:
-        safeError(error).message,
+        normalized.message,
+
       errorName:
-        safeError(error).name,
+        normalized.name,
+
       errorCode:
-        safeError(error).code,
+        normalized.code,
+
       stack:
-        safeError(error).stack,
+        normalized.stack,
+
       metadata: {
         agent:
           AGENT_NAME,
+
         version:
           VERSION
       }
@@ -2622,7 +3969,7 @@ async function engineeringAgent(
 
 /* =========================================================
    PUBLIC METADATA
-   ========================================================= */
+========================================================= */
 
 engineeringAgent.agentName =
   AGENT_NAME;
@@ -2646,7 +3993,8 @@ engineeringAgent.capabilities = [
   "dependency-installation",
   "build-execution",
   "failure-classification",
-  "diagnosis",
+  "ai-diagnosis",
+  "diagnosis-failure-preservation",
   "repair",
   "retry",
   "checkpoint",
@@ -2684,7 +4032,16 @@ engineeringAgent.contract = {
     false,
 
   providerArchitecture:
-    "centralized-ai-provider-service"
+    "centralized-ai-provider-service",
+
+  diagnosisArchitecture:
+    "advisory-ai-preserves-original-failure",
+
+  originalFailurePreserved:
+    true,
+
+  aiMayDeclareBuildSuccess:
+    false
 };
 
 module.exports =
