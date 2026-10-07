@@ -3,7 +3,7 @@
  * ZYRIONOS MASTER AGENT
  * =========================================================
  *
- * Version: 7.1.0
+ * Version: 7.2.0
  *
  * CEO / GLOBAL CONTROL PLANE
  *
@@ -15,9 +15,14 @@
  * - deployment gates
  * - final result aggregation
  *
- * Engineering Orchestrator owns:
+ * Engineering is owned exclusively by:
+ * - agents/engineeringAgent.js
+ *
+ * Engineering Agent owns:
  * - engineering lifecycle
+ * - state management
  * - execution
+ * - build validation
  * - authoritative build
  * - diagnosis
  * - repair
@@ -25,6 +30,8 @@
  * - checkpoint
  * - rollback
  * - verification
+ * - artifact creation
+ * - artifact verification
  * - promotion
  * - escalation
  *
@@ -34,6 +41,11 @@
  * - production builds
  * - runtime processes
  * - test processes
+ * - artifact creation
+ * - artifact verification
+ * - engineering promotion
+ *
+ * Master ONLY consumes the Engineering Agent contract.
  *
  * =========================================================
  */
@@ -45,43 +57,77 @@
    CORE AGENTS
 ========================================================= */
 
-const intentAgent = require("./intentAgent");
-const planningAgent = require("./planningAgent");
-const builderAgent = require("./builderAgent");
-const fixAgent = require("./fixAgent");
-const fileAgent = require("./fileAgent");
-const memoryAgent = require("./memoryAgent");
-const environmentAgent = require("./environmentAgent");
-const logAgent = require("./logAgent");
+const intentAgent =
+  require("./intentAgent");
+
+const planningAgent =
+  require("./planningAgent");
+
+const builderAgent =
+  require("./builderAgent");
+
+const fixAgent =
+  require("./fixAgent");
+
+const fileAgent =
+  require("./fileAgent");
+
+const memoryAgent =
+  require("./memoryAgent");
+
+const environmentAgent =
+  require("./environmentAgent");
+
+const logAgent =
+  require("./logAgent");
 
 
 /* =========================================================
    GITHUB
 ========================================================= */
 
-const githubAgent = require("./githubAgent");
-const githubDeploymentAgent = require("./githubDeploymentAgent");
+const githubAgent =
+  require("./githubAgent");
+
+const githubDeploymentAgent =
+  require("./githubDeploymentAgent");
 
 
 /* =========================================================
    INFRASTRUCTURE
 ========================================================= */
 
-const dockerAgent = require("./dockerAgent");
-const awsAgent = require("./awsAgent");
-const domainAgent = require("./domainAgent");
-const sslAgent = require("./sslAgent");
-const monitoringAgent = require("./monitoringAgent");
-const scalingAgent = require("./scalingAgent");
+const dockerAgent =
+  require("./dockerAgent");
+
+const awsAgent =
+  require("./awsAgent");
+
+const domainAgent =
+  require("./domainAgent");
+
+const sslAgent =
+  require("./sslAgent");
+
+const monitoringAgent =
+  require("./monitoringAgent");
+
+const scalingAgent =
+  require("./scalingAgent");
 
 
 /* =========================================================
    BUSINESS
 ========================================================= */
 
-const billingAgent = require("./billingAgent");
-const subscriptionAgent = require("./subscriptionAgent");
-const deployAgent = require("./deployAgent");
+const billingAgent =
+  require("./billingAgent");
+
+const subscriptionAgent =
+  require("./subscriptionAgent");
+
+const deployAgent =
+  require("./deployAgent");
 
 
 /* =========================================================
@@ -114,6 +160,29 @@ const whatsappControlAgent =
 
 
 /* =========================================================
+   ENGINEERING
+========================================================= */
+
+/*
+ * IMPORTANT:
+ *
+ * Engineering is now exposed to Master through ONE public
+ * agent only.
+ *
+ * No Engineering State / Executor / Intelligence /
+ * Orchestrator service is imported here.
+ *
+ * No separate Authoritative Build Validation service is
+ * imported here.
+ *
+ * All engineering internals belong to engineeringAgent.
+ */
+
+const engineeringAgent =
+  require("./engineeringAgent");
+
+
+/* =========================================================
    SERVICES
 ========================================================= */
 
@@ -127,28 +196,11 @@ const {
 
 
 /* =========================================================
-   ENGINEERING SYSTEM
-========================================================= */
-
-const engineeringOrchestrator =
-  require("../services/engineering/engineeringOrchestrator");
-
-const engineeringState =
-  require("../services/engineering/engineeringState");
-
-const engineeringIntelligence =
-  require("../services/engineering/engineeringIntelligence");
-
-const engineeringExecutor =
-  require("../services/engineering/engineeringExecutor");
-
-
-/* =========================================================
    CONSTANTS
 ========================================================= */
 
 const MASTER_VERSION =
-  "7.1.0";
+  "7.2.0";
 
 const MAX_PROMPT_LENGTH =
   12000;
@@ -161,18 +213,6 @@ const MAX_AGENT_RESULTS =
 
 const MAX_FINAL_RESPONSE_TOKENS =
   1800;
-
-const MAX_DIAGNOSTIC_ERRORS =
-  100;
-
-const MAX_AFFECTED_FILES =
-  100;
-
-const MAX_STDOUT_LENGTH =
-  12000;
-
-const MAX_STDERR_LENGTH =
-  20000;
 
 const VALID_ENVIRONMENTS =
   new Set([
@@ -211,6 +251,9 @@ const agentRegistry = {
 
   builder:
     builderAgent,
+
+  engineering:
+    engineeringAgent,
 
   fix:
     fixAgent,
@@ -282,19 +325,7 @@ const agentRegistry = {
     emergencyAgent,
 
   whatsappControl:
-    whatsappControlAgent,
-
-  engineeringOrchestrator:
-    engineeringOrchestrator,
-
-  engineeringState:
-    engineeringState,
-
-  engineeringIntelligence:
-    engineeringIntelligence,
-
-  engineeringExecutor:
-    engineeringExecutor
+    whatsappControlAgent
 
 };
 
@@ -581,7 +612,10 @@ function normalizeError(
 
     stack:
       typeof error.stack === "string"
-        ? error.stack.slice(0, 20000)
+        ? error.stack.slice(
+            0,
+            20000
+          )
         : null
 
   };
@@ -1696,7 +1730,7 @@ function validateBuildResult(
 
 
 /* =========================================================
-   ENGINEERING FILE CONTRACT
+   ENGINEERING FILE NORMALIZATION
 ========================================================= */
 
 function normalizeEngineeringFiles(
@@ -1764,7 +1798,7 @@ function normalizeEngineeringFiles(
 
 
 /* =========================================================
-   ENGINEERING RESULT EXTRACTION
+   ENGINEERING RESULT FILE EXTRACTION
 ========================================================= */
 
 function extractEngineeringFiles(
@@ -2071,24 +2105,38 @@ function getAuthoritativeEvidence(
 
     const missing = [];
 
-    if (result.success !== true) {
-      missing.push("success=true");
+    if (
+      result.success !== true
+    ) {
+      missing.push(
+        "success=true"
+      );
     }
 
-    if (state !== "PROMOTED") {
-      missing.push("state=PROMOTED");
+    if (
+      state !== "PROMOTED"
+    ) {
+      missing.push(
+        "state=PROMOTED"
+      );
     }
 
     if (!promoted) {
-      missing.push("promoted=true");
+      missing.push(
+        "promoted=true"
+      );
     }
 
     if (!authoritative) {
-      missing.push("authoritative=true");
+      missing.push(
+        "authoritative=true"
+      );
     }
 
     if (!verified) {
-      missing.push("verified=true");
+      missing.push(
+        "verified=true"
+      );
     }
 
     if (
@@ -2101,7 +2149,9 @@ function getAuthoritativeEvidence(
     }
 
     if (!buildId) {
-      missing.push("buildId");
+      missing.push(
+        "buildId"
+      );
     }
 
     if (!storageKey) {
@@ -2111,7 +2161,9 @@ function getAuthoritativeEvidence(
     }
 
     if (!checksum) {
-      missing.push("artifact.checksum");
+      missing.push(
+        "artifact.checksum"
+      );
     }
 
     return {
@@ -2232,7 +2284,7 @@ function isEngineeringFailure(
 
 
 /* =========================================================
-   ENGINEERING PAYLOAD
+   ENGINEERING JOB
 ========================================================= */
 
 function createEngineeringJob(
@@ -2369,8 +2421,14 @@ function createEngineeringJob(
 
 
 /* =========================================================
-   ENGINEERING ORCHESTRATOR ADAPTER
+   ENGINEERING AGENT ADAPTER
 ========================================================= */
+
+/*
+ * Master has NO knowledge of Engineering internals.
+ *
+ * Engineering Agent is the only engineering boundary.
+ */
 
 async function executeEngineeringWorkflow(
   workflowState,
@@ -2383,7 +2441,7 @@ async function executeEngineeringWorkflow(
 ) {
 
   workflowState.currentStage =
-    "engineering-orchestration";
+    "engineering";
 
   const job =
     createEngineeringJob(
@@ -2423,12 +2481,14 @@ async function executeEngineeringWorkflow(
 
       complexity:
         job.complexity
+
     },
     "completed"
   );
 
   if (
-    !engineeringOrchestrator
+    typeof engineeringAgent !==
+    "function"
   ) {
 
     const failure = {
@@ -2443,7 +2503,7 @@ async function executeEngineeringWorkflow(
         "service_unavailable",
 
       error:
-        "Engineering Orchestrator is unavailable.",
+        "Engineering Agent is unavailable.",
 
       engineeringBoundary:
         true
@@ -2458,7 +2518,7 @@ async function executeEngineeringWorkflow(
 
     recordStage(
       workflowState,
-      "engineering-orchestration",
+      "engineering",
       failure,
       "failed"
     );
@@ -2470,7 +2530,7 @@ async function executeEngineeringWorkflow(
   try {
 
     logInfo(
-      "Master → Engineering Orchestrator",
+      "Master → Engineering Agent",
       {
 
         workflowId:
@@ -2491,77 +2551,17 @@ async function executeEngineeringWorkflow(
       }
     );
 
-    let result = null;
-
-    if (
-      typeof engineeringOrchestrator.run ===
-      "function"
-    ) {
-
-      result =
-        await engineeringOrchestrator.run(
-          job
-        );
-
-    } else if (
-      typeof engineeringOrchestrator.execute ===
-      "function"
-    ) {
-
-      result =
-        await engineeringOrchestrator.execute(
-          job
-        );
-
-    } else if (
-      typeof engineeringOrchestrator.build ===
-      "function"
-    ) {
-
-      result =
-        await engineeringOrchestrator.build(
-          job
-        );
-
-    } else if (
-      typeof engineeringOrchestrator ===
-      "function"
-    ) {
-
-      result =
-        await engineeringOrchestrator(
-          job
-        );
-
-    } else {
-
-      result = {
-
-        success:
-          false,
-
-        state:
-          "ESCALATED",
-
-        status:
-          "service_unavailable",
-
-        error:
-          "Engineering Orchestrator exposes no supported execution entrypoint.",
-
-        engineeringBoundary:
-          true
-
-      };
-
-    }
+    const result =
+      await engineeringAgent(
+        job
+      );
 
     if (
       !result ||
       typeof result !== "object"
     ) {
 
-      result = {
+      const failure = {
 
         success:
           false,
@@ -2573,12 +2573,27 @@ async function executeEngineeringWorkflow(
           "invalid_result",
 
         error:
-          "Engineering Orchestrator returned an invalid result.",
+          "Engineering Agent returned an invalid result.",
 
         engineeringBoundary:
           true
 
       };
+
+      workflowState.engineeringStatus =
+        "ESCALATED";
+
+      workflowState.engineeringFailure =
+        failure;
+
+      recordStage(
+        workflowState,
+        "engineering",
+        failure,
+        "failed"
+      );
+
+      return failure;
 
     }
 
@@ -2687,7 +2702,7 @@ async function executeEngineeringWorkflow(
 
       recordStage(
         workflowState,
-        "engineering-orchestration",
+        "engineering",
         {
 
           success:
@@ -2711,21 +2726,22 @@ async function executeEngineeringWorkflow(
           buildId:
             authoritativeEvidence.buildId,
 
-          artifact:
-            {
-              storageKey:
-                authoritativeEvidence.storageKey,
+          artifact: {
 
-              checksum:
-                authoritativeEvidence.checksum
-            }
+            storageKey:
+              authoritativeEvidence.storageKey,
+
+            checksum:
+              authoritativeEvidence.checksum
+
+          }
 
         },
         "completed"
       );
 
       logSuccess(
-        "Master ← Engineering Orchestrator PROMOTED",
+        "Master ← Engineering Agent PROMOTED",
         {
 
           workflowId:
@@ -2825,13 +2841,13 @@ async function executeEngineeringWorkflow(
 
     recordStage(
       workflowState,
-      "engineering-orchestration",
+      "engineering",
       failureResult,
       "failed"
     );
 
     logError(
-      "Master ← Engineering Orchestrator FAILED",
+      "Master ← Engineering Agent FAILED",
       {
 
         workflowId:
@@ -2869,8 +2885,7 @@ async function executeEngineeringWorkflow(
           result?.data?.dependencyLoadErrors ||
           null,
 
-        authoritativeEvidence:
-          authoritativeEvidence
+        authoritativeEvidence
 
       }
     );
@@ -2925,13 +2940,13 @@ async function executeEngineeringWorkflow(
 
     recordStage(
       workflowState,
-      "engineering-orchestration",
+      "engineering",
       failure,
       "failed"
     );
 
     logError(
-      "Engineering Orchestrator Exception",
+      "Engineering Agent Exception",
       {
 
         workflowId:
@@ -3017,7 +3032,7 @@ function canDeployAfterEngineering(
         false,
 
       reason:
-        "Deployment blocked because Engineering Orchestrator returned no result."
+        "Deployment blocked because Engineering Agent returned no result."
 
     };
 
@@ -4280,11 +4295,18 @@ async function masterAgent(
     logInfo(
       "ZyrionOS Master Agent Started",
       {
+
         version:
           MASTER_VERSION,
 
         engineeringSystem:
-          "enabled"
+          "engineering-agent",
+
+        engineeringVersion:
+          engineeringAgent?.version ||
+          engineeringAgent?.agentVersion ||
+          null
+
       }
     );
 
@@ -4429,7 +4451,6 @@ async function masterAgent(
         }
 
       );
-
 
     if (
       !isSuccessful(intent)
@@ -5073,11 +5094,11 @@ async function masterAgent(
 
 
       /* ---------------------------------------------------
-         ENGINEERING ORCHESTRATOR
+         ENGINEERING AGENT
       --------------------------------------------------- */
 
       currentStage =
-        "engineering-orchestration";
+        "engineering";
 
       engineeringResult =
         await executeEngineeringWorkflow(
@@ -5196,7 +5217,7 @@ async function masterAgent(
             "Engineering pipeline did not produce a verified promoted build.",
 
           stage:
-            "engineering-orchestration",
+            "engineering",
 
           workflow:
             workflowState,
@@ -6414,7 +6435,7 @@ You are the final communication layer of ZyrionOS.
 The backend is the source of truth.
 
 Engineering builds are controlled exclusively by
-Engineering Orchestrator.
+Engineering Agent.
 
 Rules:
 
@@ -6437,14 +6458,14 @@ Rules:
     - an artifact object exists
 
 12. A build may be reported as successful only when:
-    - Engineering Orchestrator reached PROMOTED
+    - Engineering Agent reached PROMOTED
     - authoritative verification passed
     - validationMode is authoritative
     - buildId exists
     - artifact storage key/path exists
     - artifact checksum exists
 
-13. Never call static validation authoritative.
+13. Never claim static validation authoritative.
 
 14. Never claim deployment success unless:
     deploymentResult.success=true.
@@ -6959,55 +6980,49 @@ masterAgent.engineeringOwnership = {
 
   ],
 
-  engineeringOrchestrator: [
+  engineeringAgent: [
 
     "engineering_run_lifecycle",
+    "engineering_state_management",
+
     "execution_orchestration",
-    "failure_diagnosis_loop",
-    "repair_loop",
-    "retry_policy",
-    "checkpoint_coordination",
-    "rollback_coordination",
-    "verification",
-    "promotion",
-    "escalation"
-
-  ],
-
-  engineeringExecutor: [
-
     "dependency_installation",
     "build_execution",
     "test_execution",
     "runtime_execution",
     "preview_execution",
     "docker_execution",
+
     "timeouts",
     "resource_limits",
     "process_termination",
     "stdout_stderr_capture",
+
+    "build_validation",
+    "authoritative_build_validation",
+
     "artifact_creation",
-    "artifact_verification"
-
-  ],
-
-  engineeringIntelligence: [
+    "artifact_verification",
 
     "failure_classification",
     "root_cause_analysis",
     "failure_signatures",
+
+    "failure_diagnosis",
     "repair_strategy",
     "repair_validation",
     "repair_memory",
     "regression_detection",
-    "resource_analysis",
-    "auto_scale_recommendation"
 
-  ],
+    "retry_policy",
 
-  engineeringState: [
+    "checkpoint_coordination",
+    "rollback_coordination",
 
-    "engineering_run_state",
+    "verification",
+    "promotion",
+    "escalation",
+
     "attempt_records",
     "execution_records",
     "failure_records",
@@ -7019,7 +7034,10 @@ masterAgent.engineeringOwnership = {
     "rollback_records",
     "audit_events",
     "state_transitions",
-    "successful_patterns"
+    "successful_patterns",
+
+    "resource_analysis",
+    "auto_scale_recommendation"
 
   ],
 
@@ -7062,6 +7080,15 @@ masterAgent.security = {
   directBuildExecution:
     false,
 
+  directArtifactCreation:
+    false,
+
+  directArtifactVerification:
+    false,
+
+  directEngineeringPromotion:
+    false,
+
   environmentSecretsExposedToMaster:
     false,
 
@@ -7072,22 +7099,25 @@ masterAgent.security = {
     "centralized-ai-provider-service",
 
   buildArchitecture:
-    "engineering-orchestrator",
+    "engineering-agent",
 
   executionArchitecture:
-    "engineering-executor",
+    "engineering-agent",
 
   intelligenceArchitecture:
-    "engineering-intelligence",
+    "engineering-agent",
 
   stateArchitecture:
-    "engineering-state",
+    "engineering-agent",
+
+  validationArchitecture:
+    "engineering-agent",
 
   artifactAuthority:
-    "engineering-executor",
+    "engineering-agent",
 
   promotionAuthority:
-    "engineering-orchestrator"
+    "engineering-agent"
 
 };
 
@@ -7104,7 +7134,7 @@ masterAgent.workflowContract = {
     "intent",
     "planning",
     "builder",
-    "engineering-orchestration",
+    "engineering",
     "ANALYZING",
     "EXECUTING",
     "DIAGNOSING",
@@ -7121,7 +7151,7 @@ masterAgent.workflowContract = {
     "intent",
     "planning",
     "builder",
-    "engineering-orchestration",
+    "engineering",
     "PROMOTED",
     "environment-readiness",
     "environment-snapshot",
@@ -7146,7 +7176,7 @@ masterAgent.workflowContract = {
     "github-deployment",
     "planning",
     "builder",
-    "engineering-orchestration",
+    "engineering",
     "PROMOTED",
     "environment-readiness",
     "environment-snapshot",
@@ -7220,10 +7250,16 @@ masterAgent.legacyBuildArchitecture = {
     false,
 
   adapterLocation:
-    "engineeringExecutor",
+    "engineeringAgent",
 
   finalOwner:
-    "engineeringOrchestrator"
+    "engineeringAgent",
+
+  legacyAuthoritativeBuildService:
+    "removed",
+
+  separateAuthoritativeBuildValidation:
+    false
 
 };
 
@@ -7235,14 +7271,34 @@ masterAgent.legacyBuildArchitecture = {
 masterAgent.engineeringContract = {
 
   version:
-    "2.0.0",
+    "3.0.0",
+
+  publicEntryPoint:
+    "agents/engineeringAgent.js",
 
   files: [
 
-    "engineeringState.js",
-    "engineeringExecutor.js",
-    "engineeringIntelligence.js",
-    "engineeringOrchestrator.js"
+    "engineeringAgent.js"
+
+  ],
+
+  internalResponsibilities: [
+
+    "state",
+    "execution",
+    "intelligence",
+    "diagnosis",
+    "repair",
+    "retry",
+    "checkpoint",
+    "rollback",
+    "verification",
+    "build-validation",
+    "authoritative-build-validation",
+    "artifact-creation",
+    "artifact-verification",
+    "promotion",
+    "escalation"
 
   ],
 
@@ -7274,17 +7330,17 @@ masterAgent.engineeringContract = {
   masterMayDeclareBuildSuccess:
     false,
 
-  orchestratorMayDeclareBuildSuccess:
+  engineeringAgentMayDeclareBuildSuccess:
     true,
 
-  executorMayExecuteBuild:
+  engineeringAgentMayExecuteBuild:
     true,
-
-  intelligenceMayDeclareBuildSuccess:
-    false,
 
   stateIsSourceOfTruth:
-    true
+    true,
+
+  separateAuthoritativeBuildService:
+    false
 
 };
 
@@ -7296,10 +7352,22 @@ masterAgent.engineeringContract = {
 masterAgent.diagnosticContract = {
 
   version:
-    "7.1.0",
+    MASTER_VERSION,
 
   engineeringPromotionAuthority:
-    "engineeringOrchestrator",
+    "engineeringAgent",
+
+  engineeringBuildAuthority:
+    "engineeringAgent",
+
+  engineeringExecutionAuthority:
+    "engineeringAgent",
+
+  engineeringValidationAuthority:
+    "engineeringAgent",
+
+  artifactAuthority:
+    "engineeringAgent",
 
   authoritativeValidationMode:
     "authoritative",
@@ -7321,8 +7389,53 @@ masterAgent.diagnosticContract = {
   masterDoesNotExecuteBuild:
     true,
 
+  masterDoesNotValidateBuild:
+    true,
+
+  masterDoesNotCreateArtifact:
+    true,
+
+  masterDoesNotVerifyArtifact:
+    true,
+
   masterDoesNotPromoteBuild:
     true
+
+};
+
+
+/* =========================================================
+   ARCHITECTURE CONTRACT
+========================================================= */
+
+masterAgent.architecture = {
+
+  controlPlane:
+    "masterAgent",
+
+  engineeringBoundary:
+    "engineeringAgent",
+
+  engineeringEntryPoint:
+    "./engineeringAgent",
+
+  engineeringPublicApi:
+    "callable-function",
+
+  engineeringInternalsExposedToMaster:
+    false,
+
+  separateEngineeringServicesExposedToMaster:
+    false,
+
+  separateAuthoritativeBuildValidation:
+    false,
+
+  deploymentGate:
+    "authoritative-engineering-promotion",
+
+  providerArchitecture:
+    "centralized-ai-provider-service"
 
 };
 
