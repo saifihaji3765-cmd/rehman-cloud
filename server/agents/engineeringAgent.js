@@ -1,32 +1,8 @@
 /*
  * ZYRIONOS — ENGINEERING AGENT
- * Version: 2.0.0
+ * Version: 2.1.0
  *
- * Single Engineering Control Plane.
- *
- * Master Agent must treat this agent as the ONLY engineering boundary.
- *
- * Responsibilities:
- * - job normalization
- * - engineering state machine
- * - preflight validation
- * - workspace preparation
- * - dependency installation
- * - production build execution
- * - failure classification
- * - AI diagnosis
- * - AI-assisted repair
- * - retry
- * - checkpoints
- * - rollback
- * - artifact collection
- * - artifact integrity verification
- * - authoritative build validation
- * - verification
- * - promotion
- * - escalation
- *
- * Architecture:
+ * SINGLE ENGINEERING CONTROL PLANE
  *
  * Master Agent
  *      ↓
@@ -45,6 +21,8 @@
  *      ├── Promotion
  *      └── Escalation
  *
+ * Engineering Agent is the ONLY engineering boundary.
+ *
  * CommonJS
  */
 
@@ -61,7 +39,7 @@ const { spawn } = require("child_process");
    CONSTANTS
 ========================================================= */
 
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
 const AGENT_NAME = "engineeringAgent";
 
 const STATES = Object.freeze({
@@ -85,7 +63,6 @@ const TERMINAL_STATES = new Set([
 
 const LIMITS = Object.freeze({
   maxAttempts: 5,
-
   maxRepairAttempts: 3,
 
   maxCheckpoints: 20,
@@ -99,13 +76,13 @@ const LIMITS = Object.freeze({
     100 * 1024 * 1024,
 
   maxStdout:
-    12000,
-
-  maxStderr:
     20000,
 
+  maxStderr:
+    30000,
+
   maxErrorLength:
-    12000,
+    15000,
 
   installTimeoutMs:
     10 * 60 * 1000,
@@ -122,6 +99,9 @@ const LIMITS = Object.freeze({
   maxRepairFileSize:
     5 * 1024 * 1024,
 
+  maxRepairSourceBytes:
+    25 * 1024 * 1024,
+
   maxArtifactFileSize:
     500 * 1024 * 1024,
 
@@ -131,8 +111,14 @@ const LIMITS = Object.freeze({
   maxArtifactFiles:
     20000,
 
-  maxAiTokens:
+  diagnosisAiTokens:
     2500,
+
+  repairAiTokens:
+    6500,
+
+  maxRepairResponseChars:
+    50000,
 
   killGraceMs:
     5000
@@ -360,35 +346,105 @@ function sleep(ms) {
    LOGGING
 ========================================================= */
 
-function logInfo(
+/*
+ * IMPORTANT:
+ * Some logger implementations serialize metadata poorly.
+ * Therefore important diagnostic evidence is also encoded
+ * into the message itself.
+ */
+
+function stringifyLogData(
+  data
+) {
+  if (
+    data === undefined ||
+    data === null
+  ) {
+    return "";
+  }
+
+  try {
+    return JSON.stringify(
+      data
+    );
+  } catch {
+    return String(data);
+  }
+}
+
+function emitLog(
+  level,
   message,
   data
 ) {
+  const suffix =
+    data !== undefined &&
+    data !== null
+      ? ` | ${stringifyLogData(
+          data
+        )}`
+      : "";
+
+  const finalMessage =
+    `${message}${suffix}`;
+
   try {
     if (
       logger &&
-      typeof logger.info ===
+      typeof logger[level] ===
         "function"
     ) {
-      logger.info(
-        message,
-        data
+      logger[level](
+        finalMessage
       );
 
       return;
     }
-
-    console.log(
-      message,
-      data || ""
-    );
   } catch {}
+
+  if (
+    level === "error"
+  ) {
+    console.error(
+      finalMessage
+    );
+    return;
+  }
+
+  if (
+    level === "warning" ||
+    level === "warn"
+  ) {
+    console.warn(
+      finalMessage
+    );
+    return;
+  }
+
+  console.log(
+    finalMessage
+  );
+}
+
+function logInfo(
+  message,
+  data
+) {
+  emitLog(
+    "info",
+    message,
+    data
+  );
 }
 
 function logSuccess(
   message,
   data
 ) {
+  /*
+   * Some logger services expose success(),
+   * some do not.
+   */
   try {
     if (
       logger &&
@@ -396,68 +452,57 @@ function logSuccess(
         "function"
     ) {
       logger.success(
-        message,
-        data
+        data !== undefined
+          ? `${message} | ${stringifyLogData(
+              data
+            )}`
+          : message
       );
 
       return;
     }
-
-    console.log(
-      message,
-      data || ""
-    );
   } catch {}
+
+  emitLog(
+    "info",
+    `[SUCCESS] ${message}`,
+    data
+  );
 }
 
 function logWarning(
   message,
   data
 ) {
-  try {
-    if (
-      logger &&
-      typeof logger.warning ===
-        "function"
-    ) {
-      logger.warning(
-        message,
-        data
-      );
-
-      return;
-    }
-
-    console.warn(
+  if (
+    logger &&
+    typeof logger.warning ===
+      "function"
+  ) {
+    emitLog(
+      "warning",
       message,
-      data || ""
+      data
     );
-  } catch {}
+    return;
+  }
+
+  emitLog(
+    "warning",
+    message,
+    data
+  );
 }
 
 function logError(
   message,
   data
 ) {
-  try {
-    if (
-      logger &&
-      typeof logger.error ===
-        "function"
-    ) {
-      logger.error(
-        message,
-        data
-      );
-
-      return;
-    }
-
-    console.error(
-      message,
-      data || ""
-    );
-  } catch {}
+  emitLog(
+    "error",
+    message,
+    data
+  );
 }
 
 /* =========================================================
@@ -669,6 +714,40 @@ function normalizeFiles(
 }
 
 /* =========================================================
+   PACKAGE MANAGER
+========================================================= */
+
+function detectPackageManager(
+  files
+) {
+  const paths =
+    new Set(
+      files.map(
+        file =>
+          file.path
+      )
+    );
+
+  if (
+    paths.has(
+      "pnpm-lock.yaml"
+    )
+  ) {
+    return "pnpm";
+  }
+
+  if (
+    paths.has(
+      "yarn.lock"
+    )
+  ) {
+    return "yarn";
+  }
+
+  return "npm";
+}
+
+/* =========================================================
    JOB NORMALIZATION
 ========================================================= */
 
@@ -715,11 +794,20 @@ function normalizeJob(
       200
     );
 
+  const packageManager =
+    cleanString(
+      input.packageManager ||
+        detectPackageManager(
+          files
+        ),
+      50
+    );
+
   const buildCommand =
     cleanString(
       input.buildCommand ||
         input.project?.buildCommand ||
-        "npm run build",
+        `${packageManager} run build`,
       500
     );
 
@@ -727,18 +815,8 @@ function normalizeJob(
     cleanString(
       input.installCommand ||
         input.project?.installCommand ||
-        "npm install",
+        `${packageManager} install`,
       500
-    );
-
-  const packageManager =
-    cleanString(
-      input.packageManager ||
-        detectPackageManager(
-          files
-        ) ||
-        "npm",
-      50
     );
 
   return {
@@ -824,36 +902,6 @@ function normalizeJob(
         LIMITS.maxAttempts
       )
   };
-}
-
-function detectPackageManager(
-  files
-) {
-  const paths =
-    new Set(
-      files.map(
-        file =>
-          file.path
-      )
-    );
-
-  if (
-    paths.has(
-      "pnpm-lock.yaml"
-    )
-  ) {
-    return "pnpm";
-  }
-
-  if (
-    paths.has(
-      "yarn.lock"
-    )
-  ) {
-    return "yarn";
-  }
-
-  return "npm";
 }
 
 /* =========================================================
@@ -1175,10 +1223,6 @@ function validateCommand(
     );
   }
 
-  /*
-   * Engineering commands are project commands,
-   * not arbitrary system administration commands.
-   */
   const dangerousPatterns = [
     /\brm\s+-rf\s+\/(?:\s|$)/i,
     /\brm\s+-rf\s+--no-preserve-root/i,
@@ -1406,18 +1450,24 @@ async function createCheckpoint(
     checkpoint
   );
 
-  return checkpoint;
-}
+  logInfo(
+    "Engineering: Checkpoint created",
+    {
+      runId:
+        ctx.runId,
 
-function latestCheckpoint(
-  ctx
-) {
-  return (
-    ctx.checkpoints[
-      ctx.checkpoints.length - 1
-    ] ||
-    null
+      checkpointId:
+        checkpoint.id,
+
+      label:
+        checkpoint.label,
+
+      fileCount:
+        checkpoint.files.length
+    }
   );
+
+  return checkpoint;
 }
 
 /* =========================================================
@@ -1548,6 +1598,14 @@ function executeCommand(
           () => {
             timedOut =
               true;
+
+            logWarning(
+              "Engineering: Command timeout reached",
+              {
+                command,
+                timeoutMs
+              }
+            );
 
             try {
               child.kill(
@@ -1701,50 +1759,90 @@ function executeCommand(
 }
 
 /* =========================================================
-   EXECUTION LOGGING
+   EXECUTION DIAGNOSTICS
 ========================================================= */
+
+function buildExecutionEvidence(
+  execution
+) {
+  return {
+    success:
+      Boolean(
+        execution?.success
+      ),
+
+    phase:
+      execution?.phase ||
+      null,
+
+    exitCode:
+      execution?.exitCode ??
+      null,
+
+    signal:
+      execution?.signal ||
+      null,
+
+    timedOut:
+      Boolean(
+        execution?.timedOut
+      ),
+
+    durationMs:
+      execution?.durationMs ||
+      0,
+
+    error:
+      execution?.error
+        ? safeError(
+            execution.error
+          )
+        : null,
+
+    stderr:
+      truncate(
+        execution?.stderr ||
+          "",
+        LIMITS.maxStderr
+      ),
+
+    stdout:
+      truncate(
+        execution?.stdout ||
+          "",
+        LIMITS.maxStdout
+      )
+  };
+}
 
 function logExecutionFailure(
   ctx,
   phase,
   execution
 ) {
+  const evidence =
+    buildExecutionEvidence(
+      execution
+    );
+
+  /*
+   * Deliberately use a STRING payload
+   * so ECS logger output cannot hide stderr.
+   */
   logError(
-    `Engineering: ${phase} failed`,
-    {
-      runId:
-        ctx.runId,
-
-      attempt:
-        ctx.currentAttempt,
-
-      exitCode:
-        execution.exitCode,
-
-      signal:
-        execution.signal,
-
-      timedOut:
-        execution.timedOut,
-
-      durationMs:
-        execution.durationMs,
-
-      error:
-        execution.error,
-
-      stderr:
-        truncate(
-          execution.stderr,
-          8000
-        ),
-
-      stdout:
-        truncate(
-          execution.stdout,
-          5000
-        )
-    }
+    `Engineering: ${phase} failed | ` +
+      `runId=${ctx.runId} | ` +
+      `buildId=${ctx.buildId} | ` +
+      `attempt=${ctx.currentAttempt} | ` +
+      `exitCode=${evidence.exitCode} | ` +
+      `signal=${evidence.signal} | ` +
+      `timedOut=${evidence.timedOut} | ` +
+      `durationMs=${evidence.durationMs}\n` +
+      `ERROR:\n${JSON.stringify(
+        evidence.error
+      )}\n` +
+      `STDERR:\n${evidence.stderr}\n` +
+      `STDOUT:\n${evidence.stdout}`
   );
 }
 
@@ -1760,11 +1858,9 @@ async function executeBuild(
       ctx
     );
 
-  /*
-   * -----------------------------
-   * INSTALL
-   * -----------------------------
-   */
+  /* -------------------------------------------------------
+     INSTALL
+  ------------------------------------------------------- */
 
   const installTimeout =
     ensureRunBudget(
@@ -1777,6 +1873,9 @@ async function executeBuild(
     {
       runId:
         ctx.runId,
+
+      buildId:
+        ctx.buildId,
 
       attempt:
         ctx.currentAttempt,
@@ -1837,6 +1936,9 @@ async function executeBuild(
       runId:
         ctx.runId,
 
+      buildId:
+        ctx.buildId,
+
       attempt:
         ctx.currentAttempt,
 
@@ -1845,11 +1947,9 @@ async function executeBuild(
     }
   );
 
-  /*
-   * -----------------------------
-   * PRODUCTION BUILD
-   * -----------------------------
-   */
+  /* -------------------------------------------------------
+     PRODUCTION BUILD
+  ------------------------------------------------------- */
 
   const buildTimeout =
     ensureRunBudget(
@@ -1862,6 +1962,9 @@ async function executeBuild(
     {
       runId:
         ctx.runId,
+
+      buildId:
+        ctx.buildId,
 
       attempt:
         ctx.currentAttempt,
@@ -1911,8 +2014,14 @@ async function executeBuild(
         runId:
           ctx.runId,
 
+        buildId:
+          ctx.buildId,
+
         attempt:
           ctx.currentAttempt,
+
+        exitCode:
+          build.exitCode,
 
         durationMs:
           build.durationMs
@@ -2197,7 +2306,7 @@ async function requestAIDiagnosis(
     "Analyze software build failures only.",
     "Never claim a build succeeded.",
     "Never invent execution results.",
-    "Use the supplied stderr/stdout as the primary evidence.",
+    "Use stderr/stdout as primary evidence.",
     "Return strict JSON only.",
     "",
     "Required JSON:",
@@ -2242,7 +2351,7 @@ async function requestAIDiagnosis(
     truncate(
       result?.stderr ||
         "",
-      10000
+      15000
     ),
 
     "",
@@ -2252,7 +2361,7 @@ async function requestAIDiagnosis(
     truncate(
       result?.stdout ||
         "",
-      6000
+      10000
     ),
 
     "",
@@ -2265,24 +2374,6 @@ async function requestAIDiagnosis(
     )
   ].join("\n");
 
-  const messages = [
-    {
-      role:
-        "system",
-
-      content:
-        systemMessage
-    },
-
-    {
-      role:
-        "user",
-
-      content:
-        userMessage
-    }
-  ];
-
   try {
     logInfo(
       "Engineering: Requesting AI diagnosis",
@@ -2290,201 +2381,10 @@ async function requestAIDiagnosis(
         runId:
           ctx.runId,
 
+        buildId:
+          ctx.buildId,
+
         category
-      }
-    );
-
-    const response =
-      await aiProvider.generateText({
-        messages,
-
-        temperature:
-          0,
-
-        maxTokens:
-          LIMITS.maxAiTokens,
-
-        responseFormat:
-          "json"
-      });
-
-    return {
-      success:
-        true,
-
-      available:
-        true,
-
-      response
-    };
-  } catch (
-    error
-  ) {
-    logWarning(
-      "Engineering: AI diagnosis failed",
-      {
-        runId:
-          ctx.runId,
-
-        category,
-
-        error:
-          safeError(
-            error
-          )
-      }
-    );
-
-    return {
-      success:
-        false,
-
-      available:
-        true,
-
-      error:
-        safeError(
-          error
-        )
-    };
-  }
-}
-
-/* =========================================================
-   AI REPAIR
-========================================================= */
-
-async function requestAIRepair(
-  ctx,
-  diagnosis,
-  failure
-) {
-  if (
-    !aiProvider ||
-    typeof aiProvider.generateText !==
-      "function"
-  ) {
-    return {
-      success:
-        false,
-
-      reason:
-        "ai_provider_unavailable"
-    };
-  }
-
-  const currentFiles =
-    ctx.job.files.map(
-      file => ({
-        path:
-          file.path,
-
-        content:
-          file.content,
-
-        language:
-          file.language,
-
-        type:
-          file.type
-      })
-    );
-
-  const allowedFiles =
-    Array.isArray(
-      diagnosis?.ai?.files
-    )
-      ? diagnosis.ai.files
-          .map(
-            file =>
-              cleanString(
-                file,
-                500
-              )
-          )
-          .filter(
-            Boolean
-          )
-      : [];
-
-  const systemMessage = [
-    "You are the ZyrionOS Engineering Repair Engine.",
-    "Repair ONLY the supplied build failure.",
-    "Do not redesign the project.",
-    "Do not invent dependencies unless the error clearly requires them.",
-    "Do not modify unrelated files.",
-    "Do not claim the build is successful.",
-    "Return strict JSON only.",
-    "",
-    "Required JSON:",
-    "{",
-    '  "repairable": true,',
-    '  "reason": "string",',
-    '  "files": [',
-    "    {",
-    '      "path": "relative/path",',
-    '      "content": "complete file content"',
-    "    }",
-    "  ]",
-    "}",
-    "",
-    "Only return files that must actually change."
-  ].join("\n");
-
-  const userMessage = [
-    "REPAIR REQUEST",
-
-    `Failure category: ${
-      diagnosis?.category ||
-      "unknown"
-    }`,
-
-    `Root cause: ${
-      diagnosis?.ai?.rootCause ||
-      diagnosis?.message ||
-      "unknown"
-    }`,
-
-    `Repair reason: ${
-      diagnosis?.ai?.reason ||
-      ""
-    }`,
-
-    "",
-
-    "ALLOWED DIAGNOSED FILES:",
-
-    JSON.stringify(
-      allowedFiles
-    ),
-
-    "",
-
-    "FAILURE:",
-
-    JSON.stringify(
-      failure ||
-        null
-    ),
-
-    "",
-
-    "CURRENT PROJECT FILES:",
-
-    JSON.stringify(
-      currentFiles
-    )
-  ].join("\n");
-
-  try {
-    logInfo(
-      "Engineering: Requesting AI repair",
-      {
-        runId:
-          ctx.runId,
-
-        repairAttempt:
-          ctx.repairAttempts + 1
       }
     );
 
@@ -2512,11 +2412,452 @@ async function requestAIRepair(
           0,
 
         maxTokens:
-          LIMITS.maxAiTokens,
+          LIMITS.diagnosisAiTokens,
 
         responseFormat:
           "json"
       });
+
+    return {
+      success:
+        true,
+
+      available:
+        true,
+
+      response
+    };
+  } catch (
+    error
+  ) {
+    logWarning(
+      "Engineering: AI diagnosis failed",
+      {
+        runId:
+          ctx.runId,
+
+        buildId:
+          ctx.buildId,
+
+        category,
+
+        error:
+          safeError(
+            error
+          )
+      }
+    );
+
+    return {
+      success:
+        false,
+
+      available:
+        true,
+
+      error:
+        safeError(
+          error
+        )
+    };
+  }
+}
+
+/* =========================================================
+   AI REPAIR SCOPE
+========================================================= */
+
+function getRepairScope(
+  ctx,
+  diagnosis
+) {
+  const existingMap =
+    new Map(
+      ctx.job.files.map(
+        file => [
+          file.path,
+          file
+        ]
+      )
+    );
+
+  const diagnosed =
+    Array.isArray(
+      diagnosis?.ai?.files
+    )
+      ? diagnosis.ai.files
+          .map(
+            file =>
+              cleanString(
+                file,
+                1000
+              )
+          )
+          .filter(
+            Boolean
+          )
+      : [];
+
+  /*
+   * If AI diagnosis names files,
+   * ONLY those files are sent to repair.
+   *
+   * If diagnosis has no files, repair is
+   * intentionally refused instead of sending
+   * the entire project blindly.
+   */
+  if (
+    diagnosed.length ===
+    0
+  ) {
+    return {
+      success:
+        false,
+
+      reason:
+        "diagnosis_did_not_identify_repair_files"
+    };
+  }
+
+  const files =
+    diagnosed
+      .filter(
+        file =>
+          existingMap.has(
+            file
+          )
+      )
+      .map(
+        file =>
+          existingMap.get(
+            file
+          )
+      );
+
+  if (
+    files.length ===
+    0
+  ) {
+    return {
+      success:
+        false,
+
+      reason:
+        "diagnosed_files_not_found_in_project"
+    };
+  }
+
+  let totalBytes =
+    0;
+
+  for (
+    const file of files
+  ) {
+    totalBytes +=
+      Buffer.byteLength(
+        file.content,
+        "utf8"
+      );
+  }
+
+  if (
+    totalBytes >
+    LIMITS.maxRepairSourceBytes
+  ) {
+    return {
+      success:
+        false,
+
+      reason:
+        "repair_source_scope_too_large"
+    };
+  }
+
+  return {
+    success:
+      true,
+
+    files,
+
+    paths:
+      files.map(
+        file =>
+          file.path
+      )
+  };
+}
+
+/* =========================================================
+   AI REPAIR
+========================================================= */
+
+async function requestAIRepair(
+  ctx,
+  diagnosis,
+  failure
+) {
+  if (
+    !aiProvider ||
+    typeof aiProvider.generateText !==
+      "function"
+  ) {
+    return {
+      success:
+        false,
+
+      reason:
+        "ai_provider_unavailable"
+    };
+  }
+
+  const scope =
+    getRepairScope(
+      ctx,
+      diagnosis
+    );
+
+  if (
+    !scope.success
+  ) {
+    logWarning(
+      "Engineering: AI repair scope rejected",
+      {
+        runId:
+          ctx.runId,
+
+        buildId:
+          ctx.buildId,
+
+        reason:
+          scope.reason
+      }
+    );
+
+    return {
+      success:
+        false,
+
+      reason:
+        scope.reason
+    };
+  }
+
+  const currentFiles =
+    scope.files.map(
+      file => ({
+        path:
+          file.path,
+
+        content:
+          truncate(
+            file.content,
+            LIMITS.maxRepairFileSize
+          ),
+
+        language:
+          file.language,
+
+        type:
+          file.type
+      })
+    );
+
+  const systemMessage = [
+    "You are the ZyrionOS Engineering Repair Engine.",
+    "Repair ONLY the supplied build failure.",
+    "Do not redesign the project.",
+    "Do not modify unrelated files.",
+    "Do not invent dependencies unless the evidence requires them.",
+    "Only modify files included in the supplied repair scope.",
+    "Return COMPLETE replacement content for every changed file.",
+    "If no safe repair is possible, return repairable=false.",
+    "Never claim the build succeeded.",
+    "Return strict JSON only.",
+    "",
+    "Required JSON:",
+    "{",
+    '  "repairable": true,',
+    '  "reason": "string",',
+    '  "files": [',
+    "    {",
+    '      "path": "relative/path",',
+    '      "content": "complete file content"',
+    "    }",
+    "  ]",
+    "}",
+    "",
+    "If repairable=false:",
+    "{",
+    '  "repairable": false,',
+    '  "reason": "string",',
+    '  "files": []',
+    "}"
+  ].join("\n");
+
+  const userMessage = [
+    "REPAIR REQUEST",
+
+    `Failure category: ${
+      diagnosis?.category ||
+      "unknown"
+    }`,
+
+    `Root cause: ${
+      diagnosis?.ai?.rootCause ||
+      diagnosis?.message ||
+      "unknown"
+    }`,
+
+    `Repair reason: ${
+      diagnosis?.ai?.reason ||
+      ""
+    }`,
+
+    "",
+
+    "REPAIR SCOPE:",
+
+    JSON.stringify(
+      scope.paths
+    ),
+
+    "",
+
+    "FAILURE EVIDENCE:",
+
+    JSON.stringify(
+      {
+        phase:
+          failure?.phase,
+
+        category:
+          failure?.category,
+
+        exitCode:
+          failure?.exitCode,
+
+        signal:
+          failure?.signal,
+
+        timedOut:
+          failure?.timedOut,
+
+        stderr:
+          truncate(
+            failure?.stderr ||
+              "",
+            12000
+          ),
+
+        stdout:
+          truncate(
+            failure?.stdout ||
+              "",
+            8000
+          ),
+
+        error:
+          failure?.error ||
+          null
+      }
+    ),
+
+    "",
+
+    "FILES IN REPAIR SCOPE:",
+
+    JSON.stringify(
+      currentFiles
+    )
+  ].join("\n");
+
+  try {
+    logInfo(
+      "Engineering: Requesting AI repair",
+      {
+        runId:
+          ctx.runId,
+
+        buildId:
+          ctx.buildId,
+
+        repairAttempt:
+          ctx.repairAttempts + 1,
+
+        files:
+          scope.paths
+      }
+    );
+
+    const response =
+      await aiProvider.generateText({
+        messages: [
+          {
+            role:
+              "system",
+
+            content:
+              systemMessage
+          },
+
+          {
+            role:
+              "user",
+
+            content:
+              userMessage
+          }
+        ],
+
+        temperature:
+          0,
+
+        maxTokens:
+          LIMITS.repairAiTokens,
+
+        responseFormat:
+          "json"
+      });
+
+    const raw =
+      unwrapAIResponse(
+        response
+      );
+
+    const rawText =
+      typeof raw ===
+        "string"
+        ? raw
+        : JSON.stringify(
+            raw
+          );
+
+    logInfo(
+      "Engineering: AI repair response received",
+      {
+        runId:
+          ctx.runId,
+
+        buildId:
+          ctx.buildId,
+
+        responseLength:
+          rawText.length
+      }
+    );
+
+    if (
+      rawText.length >
+      LIMITS.maxRepairResponseChars
+    ) {
+      return {
+        success:
+          false,
+
+        reason:
+          "repair_response_too_large"
+      };
+    }
 
     const parsed =
       parseAIJson(
@@ -2524,6 +2865,23 @@ async function requestAIRepair(
       );
 
     if (!parsed) {
+      logWarning(
+        "Engineering: AI repair returned invalid JSON",
+        {
+          runId:
+            ctx.runId,
+
+          buildId:
+            ctx.buildId,
+
+          response:
+            truncate(
+              rawText,
+              5000
+            )
+        }
+      );
+
       return {
         success:
           false,
@@ -2532,6 +2890,51 @@ async function requestAIRepair(
           "invalid_ai_repair_response"
       };
     }
+
+    if (
+      parsed.repairable ===
+      false
+    ) {
+      return {
+        success:
+          false,
+
+        reason:
+          cleanString(
+            parsed.reason ||
+              "ai_declared_not_repairable",
+            2000
+          )
+      };
+    }
+
+    if (
+      !Array.isArray(
+        parsed.files
+      )
+    ) {
+      return {
+        success:
+          false,
+
+        reason:
+          "ai_repair_files_missing"
+      };
+    }
+
+    logInfo(
+      "Engineering: AI repair JSON accepted",
+      {
+        runId:
+          ctx.runId,
+
+        buildId:
+          ctx.buildId,
+
+        returnedFiles:
+          parsed.files.length
+      }
+    );
 
     return {
       success:
@@ -2544,10 +2947,13 @@ async function requestAIRepair(
     error
   ) {
     logWarning(
-      "Engineering: AI repair failed",
+      "Engineering: AI repair provider failed",
       {
         runId:
           ctx.runId,
+
+        buildId:
+          ctx.buildId,
 
         error:
           safeError(
@@ -2690,64 +3096,40 @@ async function diagnose(
     diagnosis
   );
 
+  logInfo(
+    "Engineering: Diagnosis completed",
+    {
+      runId:
+        ctx.runId,
+
+      buildId:
+        ctx.buildId,
+
+      category,
+
+      aiStatus:
+        diagnosis.aiStatus,
+
+      rootCause:
+        diagnosis.ai?.rootCause ||
+        null,
+
+      repairable:
+        diagnosis.ai?.repairable ??
+        null,
+
+      files:
+        diagnosis.ai?.files ||
+        []
+    }
+  );
+
   return diagnosis;
 }
 
 /* =========================================================
    REPAIR VALIDATION
 ========================================================= */
-
-function getAllowedRepairPaths(
-  ctx,
-  diagnosis
-) {
-  const existing =
-    new Set(
-      ctx.job.files.map(
-        file =>
-          file.path
-      )
-    );
-
-  const diagnosed =
-    Array.isArray(
-      diagnosis?.ai?.files
-    )
-      ? diagnosis.ai.files
-          .map(
-            file =>
-              cleanString(
-                file,
-                1000
-              )
-          )
-          .filter(
-            Boolean
-          )
-      : [];
-
-  /*
-   * If diagnosis names files,
-   * repair is limited to those files.
-   */
-  if (
-    diagnosed.length > 0
-  ) {
-    return {
-      existing,
-      diagnosed:
-        new Set(
-          diagnosed
-        )
-    };
-  }
-
-  return {
-    existing,
-    diagnosed:
-      null
-  };
-}
 
 function applyRepairFiles(
   ctx,
@@ -2787,13 +3169,44 @@ function applyRepairFiles(
     };
   }
 
-  const {
-    existing,
-    diagnosed
-  } =
-    getAllowedRepairPaths(
-      ctx,
-      diagnosis
+  const diagnosed =
+    new Set(
+      Array.isArray(
+        diagnosis?.ai?.files
+      )
+        ? diagnosis.ai.files
+            .map(
+              file =>
+                cleanString(
+                  file,
+                  1000
+                )
+            )
+            .filter(
+              Boolean
+            )
+        : []
+    );
+
+  if (
+    diagnosed.size ===
+    0
+  ) {
+    return {
+      success:
+        false,
+
+      reason:
+        "repair_scope_missing_from_diagnosis"
+    };
+  }
+
+  const existing =
+    new Set(
+      ctx.job.files.map(
+        file =>
+          file.path
+      )
     );
 
   const existingMap =
@@ -2826,6 +3239,11 @@ function applyRepairFiles(
       error
     ) {
       rejectedFiles.push({
+        path:
+          raw?.path ||
+          raw?.name ||
+          null,
+
         reason:
           "invalid_file",
 
@@ -2842,8 +3260,10 @@ function applyRepairFiles(
       continue;
     }
 
+    /*
+     * Hard scope enforcement.
+     */
     if (
-      diagnosed &&
       !diagnosed.has(
         file.path
       )
@@ -2859,6 +3279,9 @@ function applyRepairFiles(
       continue;
     }
 
+    /*
+     * New files are forbidden unless explicitly enabled.
+     */
     if (
       !existing.has(
         file.path
@@ -2940,6 +3363,11 @@ function applyRepairFiles(
     };
   }
 
+  /*
+   * If AI returned some rejected files but also
+   * valid changes, keep the valid changes and
+   * preserve rejection evidence.
+   */
   return {
     success:
       true,
@@ -3009,10 +3437,6 @@ async function attemptRepair(
     };
   }
 
-  /*
-   * IMPORTANT:
-   * Checkpoint BEFORE changing source.
-   */
   const repairCheckpoint =
     await createCheckpoint(
       ctx,
@@ -3032,10 +3456,31 @@ async function attemptRepair(
   if (
     !response.success
   ) {
+    logWarning(
+      "Engineering: AI repair was not applied",
+      {
+        runId:
+          ctx.runId,
+
+        buildId:
+          ctx.buildId,
+
+        repairAttempt:
+          ctx.repairAttempts,
+
+        reason:
+          response.reason,
+
+        error:
+          response.error ||
+          null
+      }
+    );
+
     await safeRollback(
       ctx,
       repairCheckpoint,
-      "repair-provider-failure"
+      "repair-provider-or-response-failure"
     );
 
     return {
@@ -3061,6 +3506,27 @@ async function attemptRepair(
   if (
     !applied.success
   ) {
+    logWarning(
+      "Engineering: AI repair rejected after validation",
+      {
+        runId:
+          ctx.runId,
+
+        buildId:
+          ctx.buildId,
+
+        repairAttempt:
+          ctx.repairAttempts,
+
+        reason:
+          applied.reason,
+
+        rejectedFiles:
+          applied.rejectedFiles ||
+          []
+      }
+    );
+
     await safeRollback(
       ctx,
       repairCheckpoint,
@@ -3122,12 +3588,30 @@ async function attemptRepair(
       runId:
         ctx.runId,
 
+      buildId:
+        ctx.buildId,
+
       repairAttempt:
         ctx.repairAttempts,
 
       changedFiles:
-        repair.changedFiles
+        repair.changedFiles,
+
+      rejectedFiles:
+        repair.rejectedFiles
     }
+  );
+
+  /*
+   * Create a post-repair checkpoint.
+   *
+   * This is useful for evidence and rollback
+   * analysis, while the pre-repair checkpoint
+   * remains the rollback source.
+   */
+  await createCheckpoint(
+    ctx,
+    `post-repair-${ctx.repairAttempts}`
   );
 
   return {
@@ -3204,10 +3688,6 @@ async function rollback(
   ctx.job.files =
     restored;
 
-  /*
-   * If workspace already exists,
-   * physically restore the checkpoint.
-   */
   if (
     ctx.workspacePath
   ) {
@@ -3260,6 +3740,9 @@ async function rollback(
     {
       runId:
         ctx.runId,
+
+      buildId:
+        ctx.buildId,
 
       checkpointId:
         checkpoint.id,
@@ -3319,6 +3802,9 @@ async function safeRollback(
       {
         runId:
           ctx.runId,
+
+        buildId:
+          ctx.buildId,
 
         reason,
 
@@ -3394,10 +3880,6 @@ async function collectDirectoryFiles(
           entry.name
         );
 
-      /*
-       * Ignore symlinks completely.
-       * They must not become artifact escapes.
-       */
       if (
         entry.isSymbolicLink()
       ) {
@@ -3641,9 +4123,6 @@ async function createVerifiedArtifact(
     );
   }
 
-  /*
-   * Build ID must already exist.
-   */
   if (
     !ctx.buildId
   ) {
@@ -3683,9 +4162,6 @@ async function createVerifiedArtifact(
     }
   );
 
-  /*
-   * Copy the actual build output.
-   */
   await copyDirectory(
     outputDirectory,
     artifactOutput
@@ -3757,10 +4233,6 @@ async function createVerifiedArtifact(
     "utf8"
   );
 
-  /*
-   * Re-read manifest so artifact evidence
-   * represents persisted bytes, not an assumption.
-   */
   const persistedManifest =
     await fsp.readFile(
       manifestPath
@@ -3780,9 +4252,6 @@ async function createVerifiedArtifact(
     );
   }
 
-  /*
-   * Re-verify every persisted artifact file.
-   */
   for (
     const file of
       manifestFiles
@@ -3883,6 +4352,29 @@ async function createVerifiedArtifact(
     artifact
   );
 
+  logSuccess(
+    "Engineering: Artifact verified",
+    {
+      runId:
+        ctx.runId,
+
+      buildId:
+        ctx.buildId,
+
+      storageKey:
+        artifact.storageKey,
+
+      checksum:
+        artifact.checksum,
+
+      fileCount:
+        artifact.files.length,
+
+      size:
+        artifact.size
+    }
+  );
+
   return artifact;
 }
 
@@ -3895,18 +4387,6 @@ async function authoritativeValidation(
   execution,
   artifact
 ) {
-  /*
-   * Authoritative means:
-   *
-   * 1. Real install/build execution succeeded.
-   * 2. Build produced output.
-   * 3. Artifact was persisted.
-   * 4. Artifact manifest was persisted.
-   * 5. Every artifact file checksum was verified.
-   *
-   * AI/static analysis can never replace these.
-   */
-
   if (
     !execution ||
     !execution.success
@@ -3968,6 +4448,29 @@ async function authoritativeValidation(
 
         reason:
           "Artifact manifest is not a file"
+      };
+    }
+
+    const persisted =
+      await fsp.readFile(
+        manifestPath
+      );
+
+    const checksum =
+      hashBuffer(
+        persisted
+      );
+
+    if (
+      checksum !==
+      artifact.checksum
+    ) {
+      return {
+        success:
+          false,
+
+        reason:
+          "Persisted artifact manifest checksum mismatch"
       };
     }
   } catch (
@@ -4126,6 +4629,23 @@ async function verify(
 
   ctx.verifications.push(
     verification
+  );
+
+  logSuccess(
+    "Engineering: Authoritative verification passed",
+    {
+      runId:
+        ctx.runId,
+
+      buildId:
+        ctx.buildId,
+
+      artifact:
+        artifact.storageKey,
+
+      checksum:
+        artifact.checksum
+    }
   );
 
   return {
@@ -4448,7 +4968,7 @@ function successResult(
 }
 
 /* =========================================================
-   FINAL FAILURE HELPER
+   ESCALATION
 ========================================================= */
 
 async function escalate(
@@ -4484,6 +5004,27 @@ async function escalate(
         now();
     }
   }
+
+  logError(
+    "Engineering: Escalated",
+    {
+      runId:
+        ctx.runId,
+
+      buildId:
+        ctx.buildId,
+
+      reason,
+
+      state:
+        ctx.state,
+
+      error:
+        safeError(
+          error
+        )
+    }
+  );
 
   return failureResult(
     ctx,
@@ -4560,9 +5101,34 @@ async function handleBuildFailure(
   });
 
   /*
-   * Always diagnose the actual failure
-   * before deciding repair/escalation.
+   * Always expose actual build evidence.
    */
+  logError(
+    "Engineering: Build failure evidence",
+    {
+      runId:
+        ctx.runId,
+
+      buildId:
+        ctx.buildId,
+
+      attempt:
+        ctx.currentAttempt,
+
+      category:
+        originalFailure.category,
+
+      exitCode:
+        originalFailure.exitCode,
+
+      stderr:
+        originalFailure.stderr,
+
+      stdout:
+        originalFailure.stdout
+    }
+  );
+
   transition(
     ctx,
     STATES.FAILED,
@@ -4633,12 +5199,10 @@ async function handleBuildFailure(
   if (
     !repair.success
   ) {
-    await safeRollback(
-      ctx,
-      checkpoint,
-      "repair-failed"
-    );
-
+    /*
+     * attemptRepair already performs
+     * rollback when appropriate.
+     */
     return escalate(
       ctx,
       repair.reason ||
@@ -4680,6 +5244,9 @@ async function handleBuildFailure(
     {
       runId:
         ctx.runId,
+
+      buildId:
+        ctx.buildId,
 
       attempt:
         ctx.currentAttempt,
@@ -4877,9 +5444,8 @@ async function engineeringAgent(
       );
 
     /*
-     * Every engineering run gets a build ID
-     * immediately. This gives failures a stable
-     * engineering identity too.
+     * Stable build identity exists from
+     * the beginning of the run.
      */
     ctx.buildId =
       generateId(
@@ -4902,7 +5468,10 @@ async function engineeringAgent(
           job.projectName,
 
         maxAttempts:
-          job.maxAttempts
+          job.maxAttempts,
+
+        autoRepair:
+          job.autoRepair
       }
     );
 
@@ -4922,6 +5491,29 @@ async function engineeringAgent(
 
     ctx.preflight =
       preflightResult;
+
+    logSuccess(
+      "Engineering: Preflight passed",
+      {
+        runId:
+          ctx.runId,
+
+        buildId:
+          ctx.buildId,
+
+        fileCount:
+          preflightResult.fileCount,
+
+        packageManager:
+          preflightResult.packageManager,
+
+        installCommand:
+          preflightResult.installCommand,
+
+        buildCommand:
+          preflightResult.buildCommand
+      }
+    );
 
     await createCheckpoint(
       ctx,
@@ -5023,6 +5615,23 @@ async function engineeringAgent(
               error
             )
         };
+
+        logError(
+          "Engineering: Unexpected execution exception",
+          {
+            runId:
+              ctx.runId,
+
+            buildId:
+              ctx.buildId,
+
+            attempt:
+              ctx.currentAttempt,
+
+            error:
+              execution.error
+          }
+        );
       }
 
       attempt.completedAt =
@@ -5041,11 +5650,9 @@ async function engineeringAgent(
         execution.error ||
         null;
 
-      /*
-       * ===================================================
-       * BUILD SUCCESS
-       * ===================================================
-       */
+      /* ===================================================
+         BUILD SUCCESS
+      =================================================== */
 
       if (
         execution.success
@@ -5142,12 +5749,6 @@ async function engineeringAgent(
         } catch (
           verificationError
         ) {
-          /*
-           * The build itself succeeded but
-           * authoritative verification failed.
-           *
-           * Never promote.
-           */
           logError(
             "Engineering: Authoritative verification failed",
             {
@@ -5164,11 +5765,6 @@ async function engineeringAgent(
             }
           );
 
-          /*
-           * Restore source to the exact source
-           * that produced the attempted build
-           * before any AI repair.
-           */
           await safeRollback(
             ctx,
             checkpoint,
@@ -5191,11 +5787,9 @@ async function engineeringAgent(
         }
       }
 
-      /*
-       * ===================================================
-       * BUILD FAILURE
-       * ===================================================
-       */
+      /* ===================================================
+         BUILD FAILURE
+      =================================================== */
 
       const failureHandled =
         await handleBuildFailure(
@@ -5211,18 +5805,13 @@ async function engineeringAgent(
       }
 
       /*
-       * Repair was applied.
-       *
-       * Next loop iteration writes the repaired
-       * source to workspace and performs a clean
-       * install/build cycle.
+       * Repair was accepted.
+       * Next iteration writes repaired source
+       * and performs a clean install/build.
        */
       continue;
     }
 
-    /*
-     * Defensive terminal path.
-     */
     return escalate(
       ctx,
       "attempt_limit_exceeded",
@@ -5256,10 +5845,6 @@ async function engineeringAgent(
         }
       );
 
-      /*
-       * If an unexpected exception happens,
-       * preserve engineering boundary semantics.
-       */
       if (
         !TERMINAL_STATES.has(
           ctx.state
@@ -5376,10 +5961,10 @@ engineeringAgent.capabilities = [
   "workspace-management",
   "dependency-installation",
   "production-build-execution",
+  "execution-evidence",
   "failure-classification",
   "ai-diagnosis",
-  "ai-repair",
-  "diagnosis-failure-preservation",
+  "scoped-ai-repair",
   "repair-validation",
   "retry",
   "checkpoint",
