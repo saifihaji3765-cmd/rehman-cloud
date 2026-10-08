@@ -2,52 +2,48 @@
    ZYRIONOS PLANNING AGENT
    ---------------------------------------------------------
    VERSION:
-   3.0.0
+   4.0.0
 
    ROLE:
-   Intent → Requirement Analysis → Proportional
-   Implementation Blueprint → Builder Contract
+   Intent → Requirement Analysis → Architecture
+   Decomposition → Implementation Blueprint → Builder Contract
 
    CORE PRINCIPLE:
 
        USER REQUEST
             ↓
-       REQUIREMENT SCOPE
+       REQUIREMENT ANALYSIS
             ↓
        PROJECT SCALE
             ↓
-       COMPLEXITY
+       ARCHITECTURE DEPTH
             ↓
-       ONLY REQUIRED MODULES
+       NECESSARY MODULES
             ↓
-       ONLY REQUIRED DEPENDENCIES
+       NECESSARY DEPENDENCIES
             ↓
-       IMPLEMENTATION PLAN
+       DYNAMIC IMPLEMENTATION PHASES
+            ↓
+       BUILDER CONTRACT
             ↓
        BUILDER
 
+   DESIGN PRINCIPLE:
+
+       MINIMUM UNNECESSARY ARCHITECTURE
+       +
+       MAXIMUM NECESSARY ARCHITECTURE
+
    IMPORTANT:
 
-   The Planning Agent MUST NOT inflate a simple request
-   into an enterprise architecture.
+   Small requests MUST remain small.
 
-   Example:
+   Large/system requests MUST NOT be artificially
+   reduced because of arbitrary module/phase/file
+   ceilings.
 
-   "Build a counter app"
-
-   MUST NOT automatically create:
-
-   - authentication
-   - database
-   - payment
-   - AI
-   - queues
-   - microservices
-   - monitoring
-   - scaling architecture
-   - multiple implementation phases
-
-   Unless the user explicitly requires them.
+   Architecture is determined by actual requirements,
+   dependencies, risks and boundaries.
 
    DOES NOT:
 
@@ -91,7 +87,7 @@ const {
 ========================================================= */
 
 const PLANNING_AGENT_VERSION =
-  "3.0.0";
+  "4.0.0";
 
 
 /* =========================================================
@@ -146,186 +142,141 @@ const VALID_PROJECT_SCALES = [
 
 
 /* =========================================================
-   LIMITS
-========================================================= */
-
-const MAX_PROMPT_LENGTH =
-  12000;
-
-const MAX_MEMORY_LENGTH =
-  4000;
-
-const MAX_USER_CONTEXT_LENGTH =
-  1500;
-
-const MAX_PROJECT_NAME_LENGTH =
-  200;
-
-const MAX_DESCRIPTION_LENGTH =
-  6000;
-
-const MAX_FRAMEWORK_LENGTH =
-  200;
-
-const MAX_STRING_ITEM_LENGTH =
-  1000;
-
-
-/* =========================================================
-   GLOBAL SAFETY LIMITS
-========================================================= */
-
-const MAX_MODULES =
-  100;
-
-const MAX_PHASES =
-  100;
-
-const MAX_DEPENDENCIES =
-  300;
-
-const MAX_ACCEPTANCE_CRITERIA =
-  200;
-
-const MAX_RISKS =
-  100;
-
-
-/* =========================================================
-   SCOPE LIMITS
+   HARD SAFETY LIMITS
    ---------------------------------------------------------
-   These are intentionally proportional.
+   These are NOT architecture ceilings.
 
-   A simple task should NEVER receive the same
-   architectural budget as a large system.
+   They are parser / memory / abuse protection limits.
+
+   A large system is allowed to exceed normal planning
+   budgets conceptually, but one single AI response still
+   cannot be allowed to consume unbounded memory.
 ========================================================= */
 
-const SCOPE_LIMITS = {
+const HARD_LIMITS = {
 
-  none: {
+  maxPromptLength:
+    12000,
 
-    modules:
-      0,
+  maxMemoryLength:
+    5000,
 
-    phases:
-      0,
+  maxUserContextLength:
+    2000,
 
-    dependencies:
-      0,
+  maxProjectNameLength:
+    200,
 
-    acceptanceCriteria:
-      10,
+  maxDescriptionLength:
+    8000,
 
-    projectStructure:
-      30
+  maxFrameworkLength:
+    200,
 
-  },
+  maxStringItemLength:
+    1500,
 
+  maxModules:
+    1000,
 
-  task: {
+  maxPhases:
+    500,
 
-    modules:
-      3,
+  maxDependencies:
+    3000,
 
-    phases:
-      1,
+  maxAcceptanceCriteria:
+    1000,
 
-    dependencies:
-      5,
+  maxRisks:
+    500,
 
-    acceptanceCriteria:
-      10,
+  maxProjectStructure:
+    5000,
 
-    projectStructure:
-      30
+  maxRequirements:
+    2000,
 
-  },
+  maxSecurity:
+    500,
 
+  maxScalability:
+    500,
 
-  feature: {
+  maxPerformance:
+    500,
 
-    modules:
-      8,
+  maxEnvironmentRequirements:
+    500,
 
-    phases:
-      2,
+  maxValidationStrategy:
+    500,
 
-    dependencies:
-      15,
+  maxAssumptions:
+    500,
 
-    acceptanceCriteria:
-      20,
+  maxNonGoals:
+    500,
 
-    projectStructure:
-      60
+  maxAiSystems:
+    100,
 
-  },
+  maxFrontendPages:
+    500,
 
+  maxBackendRoutes:
+    1000,
 
-  application: {
+  maxDatabaseCollections:
+    1000,
 
-    modules:
-      20,
+  maxAuthProviders:
+    100,
 
-    phases:
-      6,
+  maxDeploymentServices:
+    500,
 
-    dependencies:
-      50,
+  maxModuleResponsibilities:
+    100,
 
-    acceptanceCriteria:
-      50,
+  maxModuleFiles:
+    300,
 
-    projectStructure:
-      150
+  maxModuleDependencies:
+    100,
 
-  },
+  maxModuleExports:
+    200,
 
+  maxModuleInputs:
+    100,
 
-  large_project: {
+  maxModuleOutputs:
+    100,
 
-    modules:
-      60,
+  maxPhaseModules:
+    200,
 
-    phases:
-      20,
+  maxPhaseDependencies:
+    200,
 
-    dependencies:
-      150,
+  maxPhasePrerequisites:
+    200,
 
-    acceptanceCriteria:
-      100,
+  maxPhaseValidation:
+    200,
 
-    projectStructure:
-      500
+  maxDependencyReasonLength:
+    1500,
 
-  },
-
-
-  system: {
-
-    modules:
-      100,
-
-    phases:
-      100,
-
-    dependencies:
-      300,
-
-    acceptanceCriteria:
-      200,
-
-    projectStructure:
-      1000
-
-  }
+  maxTokens:
+    12000
 
 };
 
 
 /* =========================================================
-   COMPLEXITY WEIGHTS
+   COMPLEXITY RANK
 ========================================================= */
 
 const COMPLEXITY_RANK = {
@@ -375,7 +326,7 @@ const SCALE_RANK = {
 
 function cleanString(
   value,
-  maxLength = 4000
+  maxLength = HARD_LIMITS.maxStringItemLength
 ) {
 
   if (
@@ -443,7 +394,8 @@ function safeJson(
 function normalizeStringArray(
   value,
   maxItems = 100,
-  maxItemLength = MAX_STRING_ITEM_LENGTH
+  maxItemLength =
+    HARD_LIMITS.maxStringItemLength
 ) {
 
   if (
@@ -545,30 +497,34 @@ function normalizeObject(
 
   }
 
+
   return value;
 
 }
 
 
 /* =========================================================
-   NORMALIZE UNIQUE STRINGS
+   UNIQUE STRINGS
 ========================================================= */
 
 function uniqueStrings(
   values,
-  maxItems = 100
+  maxItems = 100,
+  maxItemLength =
+    HARD_LIMITS.maxStringItemLength
 ) {
 
   return normalizeStringArray(
     values,
-    maxItems
+    maxItems,
+    maxItemLength
   );
 
 }
 
 
 /* =========================================================
-   NORMALIZE SIMPLE OBJECT LIST
+   NORMALIZE OBJECT LIST
 ========================================================= */
 
 function normalizeObjectList(
@@ -650,7 +606,8 @@ function normalizeObjectList(
 ========================================================= */
 
 function normalizeProjectScale(
-  value
+  value,
+  fallback = "application"
 ) {
 
   const scale =
@@ -672,7 +629,7 @@ function normalizeProjectScale(
   }
 
 
-  return "application";
+  return fallback;
 
 }
 
@@ -682,7 +639,8 @@ function normalizeProjectScale(
 ========================================================= */
 
 function normalizeComplexity(
-  value
+  value,
+  fallback = "medium"
 ) {
 
   const complexity =
@@ -704,69 +662,61 @@ function normalizeComplexity(
   }
 
 
-  return "medium";
+  return fallback;
 
 }
 
 
 /* =========================================================
-   CLAMP SCALE
+   GET SCALE RANK
 ========================================================= */
 
-function clampScale(
-  requestedScale,
-  allowedScale
-) {
-
-  const requestedRank =
-    SCALE_RANK[
-      requestedScale
-    ] ??
-    SCALE_RANK.application;
-
-
-  const allowedRank =
-    SCALE_RANK[
-      allowedScale
-    ] ??
-    SCALE_RANK.application;
-
-
-  if (
-    requestedRank >
-    allowedRank
-  ) {
-
-    return allowedScale;
-
-  }
-
-
-  return requestedScale;
-
-}
-
-
-/* =========================================================
-   SCOPE LIMIT
-========================================================= */
-
-function getScopeLimits(
-  projectScale
+function getScaleRank(
+  scale
 ) {
 
   return (
-    SCOPE_LIMITS[
-      projectScale
-    ] ||
-    SCOPE_LIMITS.application
+    SCALE_RANK[
+      scale
+    ] ??
+    SCALE_RANK.application
   );
 
 }
 
 
 /* =========================================================
-   DEFAULT PLAN
+   GET SCALE FROM RANK
+========================================================= */
+
+function scaleFromRank(
+  rank
+) {
+
+  for (
+    const scale of
+    VALID_PROJECT_SCALES
+  ) {
+
+    if (
+      SCALE_RANK[scale] ===
+      rank
+    ) {
+
+      return scale;
+
+    }
+
+  }
+
+
+  return "application";
+
+}
+
+
+/* =========================================================
+   CREATE DEFAULT PLAN
 ========================================================= */
 
 function createDefaultPlan(
@@ -782,7 +732,7 @@ function createDefaultPlan(
   return {
 
     planVersion:
-      3,
+      4,
 
     agentVersion:
       PLANNING_AGENT_VERSION,
@@ -793,7 +743,7 @@ function createDefaultPlan(
     description:
       cleanString(
         prompt,
-        MAX_DESCRIPTION_LENGTH
+        HARD_LIMITS.maxDescriptionLength
       ),
 
     framework:
@@ -941,14 +891,14 @@ function normalizeModule(
   const id =
     cleanString(
       value.id,
-      100
+      150
     );
 
 
   const name =
     cleanString(
       value.name,
-      200
+      250
     );
 
 
@@ -978,7 +928,7 @@ function normalizeModule(
     )
       .slice(
         0,
-        100
+        150
       );
 
 
@@ -994,49 +944,54 @@ function normalizeModule(
     purpose:
       cleanString(
         value.purpose,
-        1200
+        2000
       ),
 
     type:
       cleanString(
         value.type,
-        100
+        150
       ),
 
     responsibilities:
       uniqueStrings(
         value.responsibilities,
-        30
+        HARD_LIMITS.maxModuleResponsibilities
       ),
 
     files:
       uniqueStrings(
         value.files,
-        100
+        HARD_LIMITS.maxModuleFiles,
+        500
       ),
 
     dependencies:
       uniqueStrings(
         value.dependencies,
-        50
+        HARD_LIMITS.maxModuleDependencies,
+        250
       ),
 
     exports:
       uniqueStrings(
         value.exports,
-        100
+        HARD_LIMITS.maxModuleExports,
+        250
       ),
 
     inputs:
       uniqueStrings(
         value.inputs,
-        50
+        HARD_LIMITS.maxModuleInputs,
+        250
       ),
 
     outputs:
       uniqueStrings(
         value.outputs,
-        50
+        HARD_LIMITS.maxModuleOutputs,
+        250
       )
 
   };
@@ -1061,14 +1016,14 @@ function normalizeDependency(
   const from =
     cleanString(
       value.from,
-      200
+      250
     );
 
 
   const to =
     cleanString(
       value.to,
-      200
+      250
     );
 
 
@@ -1100,14 +1055,14 @@ function normalizeDependency(
     type:
       cleanString(
         value.type,
-        100
+        150
       ) ||
       "runtime",
 
     reason:
       cleanString(
         value.reason,
-        1000
+        HARD_LIMITS.maxDependencyReasonLength
       )
 
   };
@@ -1133,7 +1088,7 @@ function normalizeImplementationPhase(
   const id =
     cleanString(
       value.id,
-      100
+      150
     ) ||
     `phase-${index + 1}`;
 
@@ -1141,7 +1096,7 @@ function normalizeImplementationPhase(
   const name =
     cleanString(
       value.name,
-      200
+      300
     );
 
 
@@ -1169,7 +1124,7 @@ function normalizeImplementationPhase(
     purpose:
       cleanString(
         value.purpose,
-        1200
+        2000
       ),
 
     order:
@@ -1182,25 +1137,29 @@ function normalizeImplementationPhase(
     modules:
       uniqueStrings(
         value.modules,
-        50
+        HARD_LIMITS.maxPhaseModules,
+        250
       ),
 
     dependencies:
       uniqueStrings(
         value.dependencies,
-        50
+        HARD_LIMITS.maxPhaseDependencies,
+        250
       ),
 
     prerequisites:
       uniqueStrings(
         value.prerequisites,
-        50
+        HARD_LIMITS.maxPhasePrerequisites,
+        250
       ),
 
     validation:
       uniqueStrings(
         value.validation,
-        50
+        HARD_LIMITS.maxPhaseValidation,
+        1500
       )
 
   };
@@ -1225,7 +1184,7 @@ function normalizeAcceptanceCriterion(
     const description =
       cleanString(
         criterion,
-        1200
+        1500
       );
 
 
@@ -1265,7 +1224,7 @@ function normalizeAcceptanceCriterion(
   const description =
     cleanString(
       value.description,
-      1200
+      1500
     );
 
 
@@ -1283,7 +1242,7 @@ function normalizeAcceptanceCriterion(
     id:
       cleanString(
         value.id,
-        100
+        150
       ) ||
       `AC-${index + 1}`,
 
@@ -1299,7 +1258,7 @@ function normalizeAcceptanceCriterion(
     verification:
       cleanString(
         value.verification,
-        1000
+        1500
       )
 
   };
@@ -1324,7 +1283,7 @@ function normalizeRisk(
     const description =
       cleanString(
         risk,
-        1200
+        1500
       );
 
 
@@ -1364,7 +1323,7 @@ function normalizeRisk(
   const description =
     cleanString(
       value.description,
-      1200
+      1500
     );
 
 
@@ -1382,7 +1341,7 @@ function normalizeRisk(
     id:
       cleanString(
         value.id,
-        100
+        150
       ) ||
       `RISK-${index + 1}`,
 
@@ -1391,7 +1350,7 @@ function normalizeRisk(
     mitigation:
       cleanString(
         value.mitigation,
-        1200
+        1500
       ),
 
     severity:
@@ -1434,54 +1393,88 @@ function normalizePlan(
   }
 
 
-  /*
-   * -------------------------------------------------------
-   * FIRST:
-   * Determine the actual allowed project scope.
-   * -------------------------------------------------------
-   */
+  /* =====================================================
+     SCALE AUTHORITY
+     -----------------------------------------------------
+     Intent provides an initial classification.
+
+     Planning performs the actual requirement analysis.
+
+     Planning MAY increase scope when the user request
+     objectively requires it.
+
+     Planning MUST NOT inflate scope without evidence.
+  ===================================================== */
 
   const aiScale =
     normalizeProjectScale(
-      parsed.projectScale
+      parsed.projectScale,
+      "application"
     );
 
 
   const intentScale =
     normalizeProjectScale(
-      intent?.projectScale
+      intent?.projectScale,
+      "application"
     );
 
 
-  /*
-   * Intent is stronger than an arbitrary model guess.
-   *
-   * If Intent Agent has already classified a request
-   * as task/feature/application/etc., Planning respects
-   * that classification.
-   */
+  const promptText =
+    cleanString(
+      prompt,
+      HARD_LIMITS.maxPromptLength
+    )
+      .toLowerCase();
+
+
+  const architectureSignals = [
+
+    "platform",
+    "saas",
+    "enterprise",
+    "ecosystem",
+    "operating system",
+    "company os",
+    "autonomous",
+    "multi-agent",
+    "orchestration",
+    "microservices",
+    "distributed system",
+    "infrastructure",
+    "billing",
+    "teams",
+    "organizations",
+    "marketplace",
+    "workflow engine",
+    "deployment platform",
+    "developer platform",
+    "ai platform"
+
+  ];
+
+
+  const explicitLargeSignal =
+    architectureSignals.some(
+      signal =>
+        promptText.includes(
+          signal
+        )
+    );
+
 
   let projectScale =
-    intentScale !==
-      "application" ||
-    !parsed.projectScale
-      ? intentScale
-      : aiScale;
+    aiScale;
 
 
   /*
-   * If AI tried to inflate the project beyond the
-   * request's known intent, clamp it.
+   * If Intent has a stronger classification,
+   * respect it as the minimum known scope.
    */
 
   if (
-    intentScale &&
-    SCALE_RANK[
-      projectScale
-    ] >
-    SCALE_RANK[
-      intentScale
-    ]
+    getScaleRank(intentScale) >
+    getScaleRank(projectScale)
   ) {
 
     projectScale =
@@ -1491,10 +1484,39 @@ function normalizePlan(
 
 
   /*
-   * Direct build requests without Intent Agent:
-   *
-   * application is the safe default.
+   * Explicit large/system language is allowed to
+   * promote architecture.
    */
+
+  if (
+    explicitLargeSignal &&
+    getScaleRank(projectScale) <
+    SCALE_RANK.large_project
+  ) {
+
+    projectScale =
+      "large_project";
+
+  }
+
+
+  /*
+   * A system classification from Intent or Planning
+   * is never downgraded by a lower AI guess.
+   */
+
+  if (
+    getScaleRank(intentScale) >=
+    SCALE_RANK.system ||
+    getScaleRank(aiScale) >=
+    SCALE_RANK.system
+  ) {
+
+    projectScale =
+      "system";
+
+  }
+
 
   if (
     !VALID_PROJECT_SCALES.includes(
@@ -1506,12 +1528,6 @@ function normalizePlan(
       "application";
 
   }
-
-
-  const scope =
-    getScopeLimits(
-      projectScale
-    );
 
 
   /* =====================================================
@@ -1560,20 +1576,16 @@ function normalizePlan(
 
   let complexity =
     normalizeComplexity(
-      parsed.complexity
+      parsed.complexity,
+      "medium"
     );
 
 
-  /*
-   * Never allow a low-scope request to become high
-   * complexity just because the AI wrote "high".
-   */
-
   if (
     projectScale ===
-    "none" ||
+      "none" ||
     projectScale ===
-    "task"
+      "task"
   ) {
 
     complexity =
@@ -1581,32 +1593,26 @@ function normalizePlan(
 
   }
 
-
   else if (
     projectScale ===
     "feature"
   ) {
 
-    if (
+    complexity =
       COMPLEXITY_RANK[
         complexity
       ] >
       COMPLEXITY_RANK.medium
-    ) {
-
-      complexity =
-        "medium";
-
-    }
+        ? "medium"
+        : complexity;
 
   }
 
-
   else if (
     projectScale ===
-    "large_project" ||
+      "large_project" ||
     projectScale ===
-    "system"
+      "system"
   ) {
 
     complexity =
@@ -1622,65 +1628,48 @@ function normalizePlan(
   const projectName =
     cleanString(
       parsed.projectName,
-      MAX_PROJECT_NAME_LENGTH
+      HARD_LIMITS.maxProjectNameLength
     );
 
 
   const description =
     cleanString(
       parsed.description,
-      MAX_DESCRIPTION_LENGTH
+      HARD_LIMITS.maxDescriptionLength
     );
 
 
   const framework =
     cleanString(
       parsed.framework,
-      MAX_FRAMEWORK_LENGTH
+      HARD_LIMITS.maxFrameworkLength
     );
 
 
   /* =====================================================
-     NORMALIZE MODULES
+     DYNAMIC ARCHITECTURE NORMALIZATION
   ===================================================== */
 
   const modules =
     normalizeObjectList(
       parsed.modules,
-      Math.min(
-        MAX_MODULES,
-        scope.modules
-      ),
+      HARD_LIMITS.maxModules,
       normalizeModule
     );
 
 
-  /* =====================================================
-     NORMALIZE DEPENDENCIES
-  ===================================================== */
-
   const dependencies =
     normalizeObjectList(
       parsed.dependencies,
-      Math.min(
-        MAX_DEPENDENCIES,
-        scope.dependencies
-      ),
+      HARD_LIMITS.maxDependencies,
       normalizeDependency
     );
 
 
-  /* =====================================================
-     NORMALIZE PHASES
-  ===================================================== */
-
   const implementationPhases =
     normalizeObjectList(
       parsed.implementationPhases,
-      Math.min(
-        MAX_PHASES,
-        scope.phases
-      ),
+      HARD_LIMITS.maxPhases,
       normalizeImplementationPhase
     );
 
@@ -1715,10 +1704,7 @@ function normalizePlan(
 
       .slice(
         0,
-        Math.min(
-          MAX_ACCEPTANCE_CRITERIA,
-          scope.acceptanceCriteria
-        )
+        HARD_LIMITS.maxAcceptanceCriteria
       );
 
 
@@ -1752,7 +1738,7 @@ function normalizePlan(
 
       .slice(
         0,
-        MAX_RISKS
+        HARD_LIMITS.maxRisks
       );
 
 
@@ -1763,10 +1749,8 @@ function normalizePlan(
   const projectStructure =
     normalizeStringArray(
       parsed.projectStructure,
-      Math.min(
-        1000,
-        scope.projectStructure
-      )
+      HARD_LIMITS.maxProjectStructure,
+      500
     );
 
 
@@ -1777,7 +1761,8 @@ function normalizePlan(
   const requirements =
     normalizeStringArray(
       parsed.requirements,
-      scope.acceptanceCriteria * 2
+      HARD_LIMITS.maxRequirements,
+      1500
     );
 
 
@@ -1798,7 +1783,7 @@ function normalizePlan(
       ? Math.max(
           1,
           Math.min(
-            10,
+            20,
             Math.floor(
               requestedBatchSize
             )
@@ -1808,44 +1793,14 @@ function normalizePlan(
 
 
   /* =====================================================
-     SIMPLE PROJECT RULE
+     MINIMAL-SCOPE FEATURE REMOVAL
      -----------------------------------------------------
-     These fields must remain empty unless the user
-     actually needs them.
+     Only small projects get automatic infrastructure
+     suppression.
+
+     Large/system plans retain what their requirements
+     justify.
   ===================================================== */
-
-  const normalizedDatabaseType =
-    cleanString(
-      database.type,
-      MAX_FRAMEWORK_LENGTH
-    );
-
-
-  const normalizedAuthProviders =
-    normalizeStringArray(
-      authentication.providers,
-      10
-    );
-
-
-  const normalizedAiSystems =
-    normalizeStringArray(
-      parsed.aiSystems,
-      10
-    );
-
-
-  const normalizedDeploymentProvider =
-    cleanString(
-      deployment.provider,
-      MAX_FRAMEWORK_LENGTH
-    );
-
-
-  /*
-   * If the request is a small task and AI hallucinated
-   * infrastructure, remove it.
-   */
 
   const isMinimalScope =
     projectScale ===
@@ -1854,15 +1809,38 @@ function normalizePlan(
       "task";
 
 
-  const isFeatureScope =
-    projectScale ===
-    "feature";
+  const normalizedDatabaseType =
+    cleanString(
+      database.type,
+      HARD_LIMITS.maxFrameworkLength
+    );
+
+
+  const normalizedAuthProviders =
+    normalizeStringArray(
+      authentication.providers,
+      HARD_LIMITS.maxAuthProviders
+    );
+
+
+  const normalizedAiSystems =
+    normalizeStringArray(
+      parsed.aiSystems,
+      HARD_LIMITS.maxAiSystems
+    );
+
+
+  const normalizedDeploymentProvider =
+    cleanString(
+      deployment.provider,
+      HARD_LIMITS.maxFrameworkLength
+    );
 
 
   return {
 
     planVersion:
-      3,
+      4,
 
     agentVersion:
       PLANNING_AGENT_VERSION,
@@ -1879,7 +1857,7 @@ function normalizePlan(
       framework ||
       cleanString(
         frontend.framework,
-        MAX_FRAMEWORK_LENGTH
+        HARD_LIMITS.maxFrameworkLength
       ),
 
     projectScale,
@@ -1891,13 +1869,14 @@ function normalizePlan(
       framework:
         cleanString(
           frontend.framework,
-          MAX_FRAMEWORK_LENGTH
+          HARD_LIMITS.maxFrameworkLength
         ),
 
       pages:
         normalizeStringArray(
           frontend.pages,
-          100
+          HARD_LIMITS.maxFrontendPages,
+          500
         )
 
     },
@@ -1907,13 +1886,14 @@ function normalizePlan(
       framework:
         cleanString(
           backend.framework,
-          MAX_FRAMEWORK_LENGTH
+          HARD_LIMITS.maxFrameworkLength
         ),
 
       routes:
         normalizeStringArray(
           backend.routes,
-          100
+          HARD_LIMITS.maxBackendRoutes,
+          500
         )
 
     },
@@ -1930,7 +1910,8 @@ function normalizePlan(
           ? []
           : normalizeStringArray(
               database.collections,
-              100
+              HARD_LIMITS.maxDatabaseCollections,
+              500
             )
 
     },
@@ -1961,7 +1942,8 @@ function normalizePlan(
           ? []
           : normalizeStringArray(
               deployment.services,
-              100
+              HARD_LIMITS.maxDeploymentServices,
+              500
             )
 
     },
@@ -1973,7 +1955,8 @@ function normalizePlan(
     security:
       normalizeStringArray(
         parsed.security,
-        50
+        HARD_LIMITS.maxSecurity,
+        1500
       ),
 
     scalability:
@@ -1981,13 +1964,15 @@ function normalizePlan(
         ? []
         : normalizeStringArray(
             parsed.scalability,
-            50
+            HARD_LIMITS.maxScalability,
+            1500
           ),
 
     performance:
       normalizeStringArray(
         parsed.performance,
-        50
+        HARD_LIMITS.maxPerformance,
+        1500
       ),
 
     modules,
@@ -2001,13 +1986,15 @@ function normalizePlan(
     environmentRequirements:
       normalizeStringArray(
         parsed.environmentRequirements,
-        50
+        HARD_LIMITS.maxEnvironmentRequirements,
+        1500
       ),
 
     validationStrategy:
       normalizeStringArray(
         parsed.validationStrategy,
-        50
+        HARD_LIMITS.maxValidationStrategy,
+        1500
       ),
 
     risks,
@@ -2015,13 +2002,15 @@ function normalizePlan(
     explicitNonGoals:
       normalizeStringArray(
         parsed.explicitNonGoals,
-        50
+        HARD_LIMITS.maxNonGoals,
+        1500
       ),
 
     assumptions:
       normalizeStringArray(
         parsed.assumptions,
-        50
+        HARD_LIMITS.maxAssumptions,
+        1500
       ),
 
     buildStrategy: {
@@ -2144,134 +2133,132 @@ function validatePlan(
   }
 
 
-  if (
-    !Array.isArray(
+  const requiredArrays = [
+
+    [
+      "projectStructure",
       plan.projectStructure
-    )
-  ) {
+    ],
 
-    errors.push(
-      "projectStructure must be an array."
-    );
-
-  }
-
-
-  if (
-    !Array.isArray(
+    [
+      "requirements",
       plan.requirements
-    )
-  ) {
+    ],
 
-    errors.push(
-      "requirements must be an array."
-    );
-
-  }
-
-
-  if (
-    !Array.isArray(
+    [
+      "modules",
       plan.modules
-    )
-  ) {
+    ],
 
-    errors.push(
-      "modules must be an array."
-    );
-
-  }
-
-
-  if (
-    !Array.isArray(
+    [
+      "dependencies",
       plan.dependencies
-    )
-  ) {
+    ],
 
-    errors.push(
-      "dependencies must be an array."
-    );
-
-  }
-
-
-  if (
-    !Array.isArray(
+    [
+      "implementationPhases",
       plan.implementationPhases
-    )
+    ],
+
+    [
+      "acceptanceCriteria",
+      plan.acceptanceCriteria
+    ]
+
+  ];
+
+
+  for (
+    const [
+      field,
+      value
+    ] of requiredArrays
+  ) {
+
+    if (
+      !Array.isArray(
+        value
+      )
+    ) {
+
+      errors.push(
+        `${field} must be an array.`
+      );
+
+    }
+
+  }
+
+
+  /* =====================================================
+     HARD SAFETY LIMITS
+     -----------------------------------------------------
+     These protect the runtime, NOT project architecture.
+  ===================================================== */
+
+  if (
+    Array.isArray(
+      plan.modules
+    ) &&
+    plan.modules.length >
+    HARD_LIMITS.maxModules
   ) {
 
     errors.push(
-      "implementationPhases must be an array."
+      `Plan exceeds runtime module safety limit of ${HARD_LIMITS.maxModules}.`
     );
 
   }
 
 
   if (
-    !Array.isArray(
-      plan.acceptanceCriteria
-    )
+    Array.isArray(
+      plan.dependencies
+    ) &&
+    plan.dependencies.length >
+    HARD_LIMITS.maxDependencies
   ) {
 
     errors.push(
-      "acceptanceCriteria must be an array."
+      `Plan exceeds runtime dependency safety limit of ${HARD_LIMITS.maxDependencies}.`
+    );
+
+  }
+
+
+  if (
+    Array.isArray(
+      plan.implementationPhases
+    ) &&
+    plan.implementationPhases.length >
+    HARD_LIMITS.maxPhases
+  ) {
+
+    errors.push(
+      `Plan exceeds runtime phase safety limit of ${HARD_LIMITS.maxPhases}.`
+    );
+
+  }
+
+
+  if (
+    Array.isArray(
+      plan.projectStructure
+    ) &&
+    plan.projectStructure.length >
+    HARD_LIMITS.maxProjectStructure
+  ) {
+
+    errors.push(
+      `Plan exceeds runtime project structure safety limit of ${HARD_LIMITS.maxProjectStructure}.`
     );
 
   }
 
 
   /* =====================================================
-     SCOPE PROPORTIONALITY VALIDATION
+     SMALL PROJECT PROTECTION
   ===================================================== */
-
-  const scope =
-    getScopeLimits(
-      plan.projectScale
-    );
-
-
-  if (
-    plan.modules.length >
-    scope.modules
-  ) {
-
-    errors.push(
-      `Plan exceeds module budget for ${plan.projectScale}.`
-    );
-
-  }
-
-
-  if (
-    plan.dependencies.length >
-    scope.dependencies
-  ) {
-
-    errors.push(
-      `Plan exceeds dependency budget for ${plan.projectScale}.`
-    );
-
-  }
-
-
-  if (
-    plan.implementationPhases.length >
-    scope.phases
-  ) {
-
-    errors.push(
-      `Plan exceeds phase budget for ${plan.projectScale}.`
-    );
-
-  }
-
-
-  /*
-   * Small tasks should not contain architecture
-   * that implies a distributed system.
-   */
 
   if (
     (
@@ -2297,42 +2284,126 @@ function validatePlan(
   }
 
 
-  /*
-   * Large projects require decomposition.
-   */
+  /* =====================================================
+     FEATURE PROTECTION
+  ===================================================== */
 
   if (
-    (
-      plan.projectScale ===
-      "large_project" ||
-      plan.projectScale ===
-      "system"
-    ) &&
-    plan.modules.length ===
-    0
+    plan.projectScale ===
+    "feature"
   ) {
 
-    errors.push(
-      "Large project requires module decomposition."
-    );
+    if (
+      plan.modules.length >
+      8
+    ) {
+
+      errors.push(
+        "Feature project contains disproportionate module count."
+      );
+
+    }
+
+
+    if (
+      plan.implementationPhases.length >
+      4
+    ) {
+
+      errors.push(
+        "Feature project contains disproportionate phase count."
+      );
+
+    }
 
   }
 
 
-  if (
-    (
-      plan.projectScale ===
+  /* =====================================================
+     LARGE/SYSTEM VALIDATION
+     -----------------------------------------------------
+     NO ARTIFICIAL LOWER/UPPER ARCHITECTURAL BUDGET.
+
+     A large project may legitimately have:
+       1 phase
+       10 phases
+       100 phases
+
+     depending on its actual requirements.
+
+     We only require enough decomposition to make the
+     architecture executable.
+  ===================================================== */
+
+  const isLarge =
+    plan.projectScale ===
       "large_project" ||
-      plan.projectScale ===
-      "system"
-    ) &&
-    plan.implementationPhases.length ===
-    0
+    plan.projectScale ===
+      "system";
+
+
+  if (
+    isLarge
   ) {
 
-    errors.push(
-      "Large project requires implementation phases."
-    );
+    if (
+      plan.modules.length ===
+      0
+    ) {
+
+      errors.push(
+        "Large/system project requires module decomposition."
+      );
+
+    }
+
+
+    if (
+      plan.requirements.length ===
+      0
+    ) {
+
+      errors.push(
+        "Large/system project requires explicit requirements."
+      );
+
+    }
+
+
+    if (
+      plan.acceptanceCriteria.length ===
+      0
+    ) {
+
+      errors.push(
+        "Large/system project requires testable acceptance criteria."
+      );
+
+    }
+
+
+    /*
+     * Phase requirement remains, but only when the
+     * project actually needs staged implementation.
+
+     * If there are multiple independent modules, phases
+     * are expected.
+
+     * For a genuinely compact large request, one phase
+     * is valid.
+     */
+
+    if (
+      plan.modules.length > 1 &&
+      plan.implementationPhases.length ===
+      0
+    ) {
+
+      errors.push(
+        "Large/system project with multiple modules requires at least one implementation phase."
+      );
+
+    }
 
   }
 
@@ -2348,10 +2419,11 @@ function validatePlan(
 
 const PLANNING_SYSTEM_PROMPT = `
 
-You are the ZyrionOS Planning Agent.
+You are the ZyrionOS Planning Agent v4.
 
-Your job is to convert the CURRENT USER REQUEST into
-a precise, proportional implementation blueprint.
+Your responsibility is to convert the CURRENT USER
+REQUEST into a complete, deterministic, builder-ready
+architecture blueprint.
 
 You are NOT the Builder.
 
@@ -2361,25 +2433,33 @@ You DO NOT generate final file contents.
 
 You DO NOT deploy anything.
 
-You DO NOT claim that anything succeeded.
+You DO NOT claim success.
 
 You DO NOT create credentials or secrets.
 
-=========================================================
-MOST IMPORTANT RULE
-=========================================================
-
-ARCHITECTURE MUST BE PROPORTIONAL TO THE USER REQUEST.
-
-Do NOT make a simple request complex.
-
-The requested scope is the source of truth.
+You DO NOT directly select an AI provider.
 
 =========================================================
-SCOPE LEVELS
+CORE ARCHITECTURAL PRINCIPLE
 =========================================================
 
-Use these levels:
+Architecture must be:
+
+    MINIMUM UNNECESSARY ARCHITECTURE
+    +
+    MAXIMUM NECESSARY ARCHITECTURE
+
+Do NOT underbuild a large system.
+
+Do NOT overbuild a small feature.
+
+The USER REQUEST is the ultimate source of truth.
+
+=========================================================
+PROJECT SCALE
+=========================================================
+
+Available scales:
 
 none
 task
@@ -2388,180 +2468,268 @@ application
 large_project
 system
 
-Use the SMALLEST level that completely satisfies
-the request.
+Use the smallest scale that fully satisfies the
+request.
 
-Examples:
+HOWEVER:
 
-"Create a calculator"
-→ task
+If the request objectively requires a large project,
+use large_project.
 
-"Add dark mode to my dashboard"
-→ feature
+If the request objectively describes a platform,
+ecosystem, operating system, autonomous organization,
+distributed architecture, orchestration system or
+deep infrastructure system, use system.
 
-"Build a task management web application"
-→ application
+Never downgrade a genuinely large request merely
+because a smaller blueprint is easier to generate.
 
-"Build a complete SaaS platform with teams,
-billing, analytics and admin"
-→ large_project
+=========================================================
+LARGE PROJECT CAPABILITY
+=========================================================
 
+IMPORTANT:
+
+There is NO arbitrary architectural budget.
+
+Do NOT think:
+
+"large_project means exactly 60 modules."
+
+Do NOT think:
+
+"system means exactly 100 modules."
+
+Those are not rules.
+
+Determine the actual architecture from the request.
+
+A large system may require:
+
+- 10 modules
+- 50 modules
+- 150 modules
+- 300 modules
+- hundreds of dependencies
+- many implementation phases
+
+if the requirements objectively justify them.
+
+Do not artificially reduce the architecture.
+
+At the same time, do not invent modules simply to
+make the architecture look enterprise-grade.
+
+Every module must have a real responsibility.
+
+=========================================================
+RECURSIVE DECOMPOSITION
+=========================================================
+
+For large/system requests, think hierarchically:
+
+SYSTEM
+ ↓
+DOMAINS
+ ↓
+SUBSYSTEMS
+ ↓
+MODULES
+ ↓
+FILES
+ ↓
+DEPENDENCIES
+ ↓
+IMPLEMENTATION PHASES
+
+Use module IDs and dependency relationships to make
+this decomposition deterministic.
+
+If a domain is complex, represent its subsystems as
+separate modules.
+
+Do not collapse an entire large platform into
+three vague modules.
+
+=========================================================
+INTENT VS PLANNING AUTHORITY
+=========================================================
+
+Intent Agent provides an initial classification.
+
+Planning Agent performs requirement analysis.
+
+Therefore:
+
+Intent is a strong signal.
+
+Planning is the architectural authority.
+
+If the user request objectively requires a larger
+system than Intent initially classified, promote the
+project scale.
+
+Example:
+
+Intent:
+application
+
+User:
 "Build an autonomous AI company operating system
-with agents, orchestration, deployments, billing,
-memory and infrastructure"
-→ system
+with agents, memory, orchestration, billing,
+deployment and infrastructure."
+
+Planning:
+system
+
+Do NOT downgrade the request just because Intent
+initially selected application.
 
 =========================================================
 ANTI-INFLATION RULE
 =========================================================
 
-Never increase scope just because a technology
-could theoretically be useful.
+Do NOT add unrelated functionality.
 
 Do NOT add:
 
-- database
 - authentication
-- AI
+- database
 - payments
+- AI
 - queues
-- microservices
 - Redis
+- microservices
 - monitoring
 - analytics
-- deployment infrastructure
 - admin dashboards
-- background workers
+- workers
+- deployment infrastructure
 
 unless:
 
-1. the user explicitly requests it, OR
-2. it is objectively required for the requested
-   functionality to work.
+1. explicitly requested, OR
+2. objectively required for the requested behavior.
 
 =========================================================
-SIMPLE TASK RULE
+SMALL REQUESTS
 =========================================================
 
 For task-level requests:
 
-- Prefer 1–3 modules.
-- Prefer 0–5 dependencies.
-- Prefer 0–1 implementation phase.
-- Keep project structure small.
-- Do not create unnecessary architecture.
-- Do not create a database unless required.
-- Do not create authentication unless required.
-- Do not create backend services unless required.
+- keep architecture small
+- 1–3 modules is normally enough
+- normally 0–1 phase
+- avoid unnecessary backend
+- avoid unnecessary database
+- avoid unnecessary authentication
 
 Example:
 
-USER:
-"Build a counter app."
+"Build a counter."
 
-GOOD:
+Use:
 
 projectScale:
-"task"
+task
 
 complexity:
-"low"
+low
 
-modules:
-[
-  "counter-ui"
-]
+Do NOT create:
 
-phases:
-[
-  "implementation"
-]
-
-BAD:
-
-modules:
-[
-  "authentication",
-  "database",
-  "api",
-  "analytics",
-  "monitoring",
-  "deployment",
-  "notification-service"
-]
+authentication
+database
+analytics
+queues
+workers
+monitoring
 
 =========================================================
-FEATURE RULE
+FEATURE REQUESTS
 =========================================================
 
-For feature-level requests:
+For feature requests:
 
-- Focus only on the requested feature.
-- Reuse the existing architecture when possible.
-- Do not redesign unrelated systems.
-- Prefer 1–8 modules.
-- Prefer 0–2 implementation phases.
+Reuse existing architecture where possible.
+
+Do not redesign unrelated systems.
+
+Only create the modules needed for the feature.
 
 =========================================================
-APPLICATION RULE
+APPLICATION REQUESTS
 =========================================================
 
-For application-level requests:
+Create a complete practical application architecture.
 
-Create a proper but practical architecture.
-
-Identify only the layers actually needed:
+Consider only the layers actually required:
 
 - frontend
 - backend
 - data
 - authentication
 - integrations
+- background processing
 
 Do not automatically create microservices.
 
 =========================================================
-LARGE PROJECT RULE
+LARGE PROJECTS
 =========================================================
 
-Large projects must be decomposed.
+Large projects require serious decomposition.
 
-Use:
+Consider:
 
-1. Modules
-2. Dependencies
-3. Implementation phases
-4. Acceptance criteria
-5. Validation strategy
+- domains
+- subsystems
+- modules
+- dependencies
+- implementation phases
+- acceptance criteria
+- validation
+- security
+- scalability
+- performance
+- operational requirements
 
-Each module needs a concrete reason to exist.
+Do not collapse a large product into a tiny plan.
 
 =========================================================
-SYSTEM RULE
+SYSTEM PROJECTS
 =========================================================
 
-System-level requests may use deep architecture.
+System projects may require deep architecture.
 
 Examples:
 
 - orchestration
 - agents
+- workflows
 - queues
 - workers
 - persistence
 - authentication
+- authorization
 - observability
 - deployment
 - infrastructure
+- APIs
+- event processing
+- integrations
+- artifact systems
+- validation
+- recovery
+- scaling
 
-BUT only when the user actually requests a system
-of that scope.
+Only include what the user actually requires.
 
 =========================================================
-MODULE RULE
+MODULE CONTRACT
 =========================================================
 
-Each module should contain:
+Every module MUST contain:
 
 - id
 - name
@@ -2574,137 +2742,183 @@ Each module should contain:
 - inputs
 - outputs
 
-Do NOT create modules merely to make the plan
-look sophisticated.
+Each module must represent a real architectural
+responsibility.
 
-Every module must have a real responsibility.
+Do not create decorative modules.
 
 =========================================================
-DEPENDENCY RULE
+DEPENDENCY CONTRACT
 =========================================================
 
-Dependencies must represent actual relationships.
+Dependencies represent real relationships.
 
 Good:
 
 frontend → api
+
 api → service
+
 service → database
+
+builder → engineering
+
+engineering → artifact
 
 Bad:
 
 frontend → analytics
+
 analytics → notifications
+
 notifications → queue
+
 queue → redis
 
-when none of these were requested.
+when none are required.
 
 Avoid circular dependencies.
 
 =========================================================
-PHASE RULE
+PHASE CONTRACT
 =========================================================
 
-Do not create phases for a task that can be
-implemented directly.
+Implementation phases represent actual dependency
+or delivery boundaries.
 
-Use multiple phases only when dependencies,
-size or risk justify them.
+For large systems, phases can be numerous.
+
+Possible structure:
+
+Phase 1:
+foundation
+
+Phase 2:
+identity
+
+Phase 3:
+core domain
+
+Phase 4:
+AI orchestration
+
+Phase 5:
+execution
+
+Phase 6:
+validation
+
+Phase 7:
+deployment
+
+Phase 8:
+observability
+
+Phase N:
+hardening
+
+Do NOT create phases merely for appearance.
+
+Do NOT limit the number of phases artificially.
 
 =========================================================
-PROJECT STRUCTURE RULE
+PROJECT STRUCTURE
 =========================================================
 
-projectStructure describes approved files/folders
-needed by the project.
-
-Do not generate speculative files.
+projectStructure must contain only files/folders
+actually required by the blueprint.
 
 Do not generate:
 
 - demo files
-- duplicate components
-- unused services
-- unused configs
 - fake APIs
-- placeholder infrastructure
+- unused services
+- duplicate components
+- speculative infrastructure
 
 =========================================================
-REQUIREMENTS RULE
+REQUIREMENTS
 =========================================================
 
-requirements must be directly traceable to
-the user request.
+Every requirement must be traceable to the user's
+request.
 
-Every requirement should answer:
-
-"What does the application actually need to do?"
-
-=========================================================
-DATABASE RULE
-=========================================================
-
-Use a database ONLY when:
-
-- the user requests persistent data, OR
-- persistent server-side state is objectively
-  required.
-
-A static frontend does NOT need a database.
+For large projects, requirements should cover all
+major requested capabilities.
 
 =========================================================
-AUTHENTICATION RULE
+DATABASE
 =========================================================
 
-Use authentication ONLY when:
+Use a database only when:
 
-- the user requests accounts/login, OR
+- persistent data is requested, OR
+- server-side persistent state is objectively required.
+
+=========================================================
+AUTHENTICATION
+=========================================================
+
+Use authentication only when:
+
+- accounts/login are requested, OR
 - private user-specific resources require it.
 
 =========================================================
-AI RULE
+AI
 =========================================================
 
-Use AI systems ONLY when:
+Use AI systems only when:
 
-- the user requests AI functionality, OR
-- AI is objectively required by the requested feature.
+- AI is requested, OR
+- AI is objectively required.
 
-Never add AI just because ZyrionOS itself uses AI.
-
-=========================================================
-DEPLOYMENT RULE
-=========================================================
-
-Do not add deployment architecture unless:
-
-- the user requests deployment, OR
-- deployment configuration is explicitly part of
-  the requested application.
+Never add AI simply because ZyrionOS itself uses AI.
 
 =========================================================
-SECURITY RULE
+DEPLOYMENT
 =========================================================
 
-Security requirements must be relevant.
+Include deployment architecture only when:
+
+- requested, OR
+- required by the requested application behavior.
+
+=========================================================
+SECURITY
+=========================================================
+
+Security must be proportional but meaningful.
+
+Large/system projects should identify relevant:
+
+- authentication
+- authorization
+- secret handling
+- input validation
+- isolation
+- auditability
+- abuse prevention
+
+when applicable.
+
+=========================================================
+SCALABILITY
+=========================================================
+
+For large/system projects, identify real scaling
+requirements.
 
 Examples:
 
-- input validation
-- authorization
-- secret handling
+- horizontal workers
+- queues
+- caching
+- stateless services
+- partitioning
+- asynchronous processing
 
-Do not generate an enormous security architecture
-for a static calculator.
-
-=========================================================
-PERFORMANCE RULE
-=========================================================
-
-Only include meaningful performance considerations.
-
-Do not invent arbitrary benchmarks.
+Only when justified.
 
 =========================================================
 ACCEPTANCE CRITERIA
@@ -2714,13 +2928,51 @@ Acceptance criteria must be observable and testable.
 
 GOOD:
 
-"User can add a task."
+"User can create a project."
 
-"Task remains after page reload."
+"Build artifact is verified before promotion."
+
+"Preview health endpoint reports runtime status."
 
 BAD:
 
-"Application should be high quality."
+"System should be excellent."
+
+=========================================================
+VALIDATION STRATEGY
+=========================================================
+
+Validation must explain how the resulting system
+can be verified.
+
+For large systems include appropriate layers such as:
+
+- unit validation
+- integration validation
+- contract validation
+- build validation
+- security validation
+- runtime validation
+
+only where relevant.
+
+=========================================================
+RISKS
+=========================================================
+
+Identify real implementation risks.
+
+Do not invent meaningless risks.
+
+=========================================================
+ASSUMPTIONS
+=========================================================
+
+Make only reasonable assumptions.
+
+Record them explicitly.
+
+Never silently invent major requirements.
 
 =========================================================
 NON-GOALS
@@ -2728,45 +2980,21 @@ NON-GOALS
 
 Use explicitNonGoals to prevent scope creep.
 
-Example:
-
-"Do not add authentication."
-
-"Do not add payment processing."
-
-=========================================================
-ASSUMPTIONS
-=========================================================
-
-Make only small assumptions.
-
-Record them explicitly.
-
-Never silently invent major product requirements.
-
-=========================================================
-PROVIDER INDEPENDENCE
-=========================================================
-
-Never mention a specific AI provider unless
-the USER explicitly requests one.
-
-The aiProviderService handles provider selection.
-
 =========================================================
 BUILDER CONTRACT
 =========================================================
 
-The Builder will use this plan to create the
-project manifest and source files.
+The Builder will consume this plan.
 
 Therefore:
 
-- keep file structure deterministic
-- keep dependencies explicit
-- keep modules meaningful
-- keep architecture proportional
-- do not generate source code
+- IDs must be deterministic.
+- Dependencies must be explicit.
+- Modules must have real boundaries.
+- Files must be intentional.
+- Phases must be ordered.
+- Validation must be testable.
+- Architecture must be internally consistent.
 
 =========================================================
 OUTPUT
@@ -2774,10 +3002,10 @@ OUTPUT
 
 Return ONLY valid JSON.
 
-Use this exact top-level structure:
+Use exactly this top-level structure:
 
 {
-  "planVersion": 3,
+  "planVersion": 4,
   "projectName": "",
   "description": "",
   "framework": "",
@@ -2844,24 +3072,28 @@ Use this exact top-level structure:
 }
 
 =========================================================
-FINAL CHECK BEFORE RESPONSE
+FINAL INTERNAL CHECK
 =========================================================
 
-Before returning JSON, ask internally:
+Before returning JSON:
 
-1. Did I add anything the user did not request?
-2. Can any module be removed without breaking the request?
-3. Can any phase be removed?
-4. Does this require a database?
-5. Does this require authentication?
-6. Does this require AI?
-7. Does this require deployment infrastructure?
-8. Is complexity proportional to the request?
-9. Is projectScale the smallest valid scope?
-10. Can Builder directly use this plan?
+1. What exactly did the user ask for?
+2. Is the project scale sufficient?
+3. Did I accidentally downgrade a large request?
+4. Did I accidentally inflate a small request?
+5. Does every module have a real responsibility?
+6. Does every dependency represent a real relationship?
+7. Are phases actually useful?
+8. Are all major requirements represented?
+9. Can Builder deterministically execute this blueprint?
+10. Is the architecture internally consistent?
 
-If the answer to 1 is YES,
-remove the unnecessary feature.
+If something is unnecessary, remove it.
+
+If something is necessary, include it.
+
+Never reduce necessary architecture merely to satisfy
+an arbitrary numeric budget.
 
 `;
 
@@ -2913,7 +3145,7 @@ async function planningAgent(
       projectIdea =
         cleanString(
           data,
-          MAX_PROMPT_LENGTH
+          HARD_LIMITS.maxPromptLength
         );
 
     }
@@ -2926,7 +3158,7 @@ async function planningAgent(
       projectIdea =
         cleanString(
           data.prompt,
-          MAX_PROMPT_LENGTH
+          HARD_LIMITS.maxPromptLength
         );
 
       intent =
@@ -3061,7 +3293,7 @@ async function planningAgent(
         )
           .slice(
             0,
-            MAX_MEMORY_LENGTH
+            HARD_LIMITS.maxMemoryLength
           );
 
     }
@@ -3097,7 +3329,7 @@ async function planningAgent(
         )
           .slice(
             0,
-            MAX_USER_CONTEXT_LENGTH
+            HARD_LIMITS.maxUserContextLength
           );
 
     }
@@ -3109,13 +3341,15 @@ async function planningAgent(
 
     const requestedScale =
       normalizeProjectScale(
-        intentData.projectScale
+        intentData.projectScale,
+        "application"
       );
 
 
     const requestedComplexity =
       normalizeComplexity(
-        intentData.complexity
+        intentData.complexity,
+        "medium"
       );
 
 
@@ -3131,10 +3365,10 @@ async function planningAgent(
       await generateJSON({
 
         maxTokens:
-          6500,
+          HARD_LIMITS.maxTokens,
 
         thinkingLevel:
-          "medium",
+          "high",
 
         messages: [
 
@@ -3165,11 +3399,11 @@ ${safeJson(
   intentData
 )}
 
-REQUESTED PROJECT SCALE:
+INITIAL PROJECT SCALE FROM INTENT:
 
 ${requestedScale}
 
-REQUESTED COMPLEXITY:
+INITIAL COMPLEXITY FROM INTENT:
 
 ${requestedComplexity}
 
@@ -3181,16 +3415,42 @@ SAFE USER CONTEXT:
 
 ${userSummary}
 
-Create the smallest complete implementation
-blueprint that satisfies the request.
+=========================================================
+PLANNING TASK
+=========================================================
 
-Do not add unrelated features.
+Perform full requirement and architecture analysis.
+
+The Intent Agent classification is an initial signal,
+not an artificial ceiling.
+
+If the request requires a larger architecture,
+promote the project scale.
+
+If the request is genuinely small,
+keep the architecture small.
+
+For large/system requests:
+
+- decompose the system
+- identify meaningful modules
+- identify real dependencies
+- define implementation phases
+- define acceptance criteria
+- define validation strategy
+- identify risks
+- identify required project structure
+
+Do not artificially reduce a large architecture to
+fit a fixed number of modules or phases.
+
+Do not invent unrelated features.
 
 Do not generate source code.
 
 Do not generate final file contents.
 
-Do not inflate project complexity.
+Return only the requested JSON object.
 
 `
 
@@ -3438,134 +3698,17 @@ Do not inflate project complexity.
 
 
     /* =====================================================
-       SCOPE SAFETY CHECK
+       FINAL ARCHITECTURE CONSISTENCY
     ===================================================== */
 
     currentStage =
-      "scope-validation";
-
-
-    const scope =
-      getScopeLimits(
-        normalizedPlan.projectScale
-      );
+      "architecture-consistency";
 
 
     /*
-     * Hard final safety check.
-     *
-     * Even if normalization changes later,
-     * the returned plan cannot exceed its scope budget.
+     * Ensure large/system projects cannot accidentally
+     * return a low-complexity plan.
      */
-
-    if (
-      normalizedPlan.modules.length >
-      scope.modules
-    ) {
-
-      return {
-
-        success:
-          false,
-
-        message:
-          "Planning scope exceeded",
-
-        error:
-          `Module count exceeds ${normalizedPlan.projectScale} scope limit.`,
-
-        stage:
-          currentStage,
-
-        metadata: {
-
-          agentVersion:
-            PLANNING_AGENT_VERSION,
-
-          durationMs:
-            Date.now() -
-            startedAt
-
-        }
-
-      };
-
-    }
-
-
-    if (
-      normalizedPlan.dependencies.length >
-      scope.dependencies
-    ) {
-
-      return {
-
-        success:
-          false,
-
-        message:
-          "Planning scope exceeded",
-
-        error:
-          `Dependency count exceeds ${normalizedPlan.projectScale} scope limit.`,
-
-        stage:
-          currentStage,
-
-        metadata: {
-
-          agentVersion:
-            PLANNING_AGENT_VERSION,
-
-          durationMs:
-            Date.now() -
-            startedAt
-
-        }
-
-      };
-
-    }
-
-
-    if (
-      normalizedPlan.implementationPhases.length >
-      scope.phases
-    ) {
-
-      return {
-
-        success:
-          false,
-
-        message:
-          "Planning scope exceeded",
-
-        error:
-          `Phase count exceeds ${normalizedPlan.projectScale} scope limit.`,
-
-        stage:
-          currentStage,
-
-        metadata: {
-
-          agentVersion:
-            PLANNING_AGENT_VERSION,
-
-          durationMs:
-            Date.now() -
-            startedAt
-
-        }
-
-      };
-
-    }
-
-
-    /* =====================================================
-       LARGE PROJECT SAFETY
-    ===================================================== */
 
     if (
       normalizedPlan.projectScale ===
@@ -3577,71 +3720,29 @@ Do not inflate project complexity.
       normalizedPlan.complexity =
         "high";
 
-
-      if (
-        normalizedPlan.modules.length ===
-        0
-      ) {
-
-        return {
-
-          success:
-            false,
-
-          message:
-            "Large project decomposition missing",
-
-          error:
-            "Large projects require explicit modules before Builder execution.",
-
-          stage:
-            "large-project-validation",
-
-          provider:
-            result.provider ||
-            null,
-
-          model:
-            result.model ||
-            null
-
-        };
-
-      }
-
-
-      if (
-        normalizedPlan.implementationPhases.length ===
-        0
-      ) {
-
-        return {
-
-          success:
-            false,
-
-          message:
-            "Large project phases missing",
-
-          error:
-            "Large projects require dependency-aware implementation phases.",
-
-          stage:
-            "large-project-validation",
-
-          provider:
-            result.provider ||
-            null,
-
-          model:
-            result.model ||
-            null
-
-        };
-
-      }
-
     }
+
+
+    /*
+     * Ensure phase ordering is deterministic.
+     */
+
+    normalizedPlan.implementationPhases =
+      normalizedPlan
+        .implementationPhases
+        .map(
+          (
+            phase,
+            index
+          ) => ({
+
+            ...phase,
+
+            order:
+              index + 1
+
+          })
+        );
 
 
     /* =====================================================
@@ -3735,8 +3836,11 @@ Do not inflate project complexity.
             .acceptanceCriteria
             .length,
 
-        scopeLimits:
-          scope,
+        architectureMode:
+          "requirement-driven-dynamic",
+
+        artificialArchitectureBudget:
+          false,
 
         generatedAt:
           new Date(),
@@ -3764,11 +3868,6 @@ Do not inflate project complexity.
       `Planning Agent Failed at ${currentStage}: ${errorMessage}`
     );
 
-
-    /*
-     * NEVER convert an AI/provider failure into
-     * a fake successful plan.
-     */
 
     return {
 
