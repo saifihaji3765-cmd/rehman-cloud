@@ -1,34 +1,28 @@
+"use strict";
+
+/**
+ * ZyrionOS Project Preview Model
+ * Version: 4.0.0
+ *
+ * Represents a preview runtime created from an
+ * authoritative Engineering Agent build.
+ *
+ * IMPORTANT:
+ * - Preview != deployment
+ * - Preview must originate from an authoritative build
+ * - Production secrets are permanently blocked
+ * - Runtime infrastructure details are internal
+ */
+
 const mongoose = require("mongoose");
 
-/* =========================================================
-   ZYRION OS — PROJECT PREVIEW MODEL
-   Enterprise Preview Runtime / Ephemeral Preview Source of Truth
+const {
+  Schema,
+} = mongoose;
 
-   Architecture:
-
-   Project
-      ↓
-   ProjectBuild
-      ↓
-   ProjectPreview
-      ↓
-   Isolated Runtime
-      ↓
-   Health Check
-      ↓
-   Preview URL
-
-   IMPORTANT:
-   - Preview is NOT production deployment.
-   - Preview must never contain production secrets.
-   - Runtime/container identifiers are internal metadata.
-   - Preview instances are temporary and expire automatically.
-   ========================================================= */
-
-
-/* =========================================================
-   ENUMS
-========================================================= */
+/* -------------------------------------------------------------------------- */
+/* ENUMS                                                                      */
+/* -------------------------------------------------------------------------- */
 
 const PREVIEW_STATUSES = [
   "queued",
@@ -38,17 +32,7 @@ const PREVIEW_STATUSES = [
   "failed",
   "stopped",
   "expired",
-  "cancelled"
-];
-
-const PREVIEW_TRIGGERS = [
-  "manual",
-  "file_change",
-  "build",
-  "deployment",
-  "ai",
-  "workspace",
-  "system"
+  "cancelled",
 ];
 
 const RUNTIME_STATUSES = [
@@ -57,988 +41,999 @@ const RUNTIME_STATUSES = [
   "running",
   "stopped",
   "crashed",
-  "unknown"
+  "unknown",
 ];
 
 const HEALTH_STATUSES = [
-  "pending",
+  "unknown",
   "checking",
   "healthy",
   "unhealthy",
-  "timeout",
-  "unknown"
+  "failed",
 ];
 
-const FAILURE_CATEGORIES = [
-  "",
-  "validation",
-  "build",
-  "runtime",
-  "healthcheck",
-  "timeout",
-  "resource",
-  "network",
-  "permission",
-  "port",
-  "unknown"
+const NETWORK_MODES = [
+  "restricted",
+  "none",
+  "internal",
 ];
 
+const ERROR_CODES = [
+  "BUILD_NOT_SUCCESSFUL",
+  "ARTIFACT_NOT_FOUND",
+  "ARTIFACT_INVALID",
+  "ARTIFACT_CHECKSUM_MISMATCH",
+  "DOCKER_UNAVAILABLE",
+  "PREVIEW_RUNTIME_FAILED",
+  "HEALTH_CHECK_FAILED",
+  "PREVIEW_LIMIT_REACHED",
+  "PREVIEW_NOT_FOUND",
+  "PREVIEW_ERROR",
+];
 
-/* =========================================================
-   PREVIEW ERROR SCHEMA
-========================================================= */
+/* -------------------------------------------------------------------------- */
+/* RUNTIME INFO                                                               */
+/* -------------------------------------------------------------------------- */
 
-const previewErrorSchema = new mongoose.Schema(
-  {
-    code: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 200
-    },
-
-    message: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 5000
-    },
-
-    stage: {
-      type: String,
-      enum: [
-        "",
-        "validation",
-        "build",
-        "startup",
-        "runtime",
-        "healthcheck",
-        "cleanup",
-        "system"
-      ],
-      default: ""
-    },
-
-    category: {
-      type: String,
-      enum: FAILURE_CATEGORIES,
-      default: ""
-    },
-
-    file: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 1000
-    },
-
-    line: {
-      type: Number,
-      default: null,
-      min: 1
-    },
-
-    column: {
-      type: Number,
-      default: null,
-      min: 1
-    },
-
-    retryable: {
-      type: Boolean,
-      default: false
-    },
-
-    timestamp: {
-      type: Date,
-      default: Date.now
-    }
-  },
-  {
-    _id: false
-  }
-);
-
-
-/* =========================================================
-   HEALTH CHECK SCHEMA
-========================================================= */
-
-const healthCheckSchema = new mongoose.Schema(
-  {
-    status: {
-      type: String,
-      enum: HEALTH_STATUSES,
-      default: "pending"
-    },
-
-    url: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 2000
-    },
-
-    method: {
-      type: String,
-      default: "GET",
-      trim: true,
-      uppercase: true,
-      maxlength: 20
-    },
-
-    expectedStatus: {
-      type: Number,
-      default: 200,
-      min: 100,
-      max: 599
-    },
-
-    actualStatus: {
-      type: Number,
-      default: null,
-      min: 100,
-      max: 599
-    },
-
-    responseTimeMs: {
-      type: Number,
-      default: null,
-      min: 0
-    },
-
-    attempts: {
-      type: Number,
-      default: 0,
-      min: 0
-    },
-
-    lastCheckedAt: {
-      type: Date,
-      default: null
-    },
-
-    healthyAt: {
-      type: Date,
-      default: null
-    },
-
-    errorMessage: {
-      type: String,
-      default: "",
-      maxlength: 3000
-    }
-  },
-  {
-    _id: false
-  }
-);
-
-
-/* =========================================================
-   RUNTIME SCHEMA
-========================================================= */
-
-const runtimeSchema = new mongoose.Schema(
+const runtimeInfoSchema = new Schema(
   {
     status: {
       type: String,
       enum: RUNTIME_STATUSES,
-      default: "pending"
+      default: "pending",
+      required: true,
     },
 
-    runtime: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 100
-    },
-
-    nodeVersion: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 100
-    },
-
-    packageManager: {
-      type: String,
-      enum: [
-        "",
-        "npm",
-        "yarn",
-        "pnpm",
-        "bun",
-        "other"
-      ],
-      default: ""
-    },
-
-    command: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 2000
-    },
-
-    workingDirectory: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 1000
-    },
-
-    containerId: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 300
-    },
-
-    workerId: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 300
+    /*
+     * Internal infrastructure fields.
+     * They are never exposed by previewService serialization.
+     */
+    hostPort: {
+      type: Number,
+      min: 1,
+      max: 65535,
+      default: null,
     },
 
     internalPort: {
       type: Number,
-      default: null,
       min: 1,
-      max: 65535
+      max: 65535,
+      default: 3000,
     },
 
-    hostPort: {
-      type: Number,
+    image: {
+      type: String,
       default: null,
-      min: 1,
-      max: 65535
+      maxlength: 300,
     },
 
-    cpuLimit: {
+    containerId: {
       type: String,
-      default: "",
-      trim: true,
-      maxlength: 100
+      default: null,
+      maxlength: 300,
+      select: false,
     },
 
-    memoryLimit: {
+    containerName: {
       type: String,
-      default: "",
-      trim: true,
-      maxlength: 100
+      default: null,
+      maxlength: 300,
+      select: false,
     },
 
     startedAt: {
       type: Date,
-      default: null
+      default: null,
     },
 
     stoppedAt: {
       type: Date,
-      default: null
+      default: null,
     },
 
-    exitCode: {
+    restartCount: {
       type: Number,
-      default: null
-    },
-
-    signal: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 100
-    }
-  },
-  {
-    _id: false
-  }
-);
-
-
-/* =========================================================
-   LOG REFERENCE SCHEMA
-========================================================= */
-
-const logReferenceSchema = new mongoose.Schema(
-  {
-    logStreamId: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 300
-    },
-
-    stdoutAvailable: {
-      type: Boolean,
-      default: false
-    },
-
-    stderrAvailable: {
-      type: Boolean,
-      default: false
-    },
-
-    lastSequence: {
-      type: Number,
+      min: 0,
       default: 0,
-      min: 0
-    }
+    },
   },
   {
-    _id: false
+    _id: false,
+    minimize: false,
   }
 );
 
+/* -------------------------------------------------------------------------- */
+/* HEALTH CHECK                                                               */
+/* -------------------------------------------------------------------------- */
 
-/* =========================================================
-   PROJECT PREVIEW SCHEMA
-========================================================= */
-
-const projectPreviewSchema = new mongoose.Schema(
+const healthCheckSchema = new Schema(
   {
-    /* =====================================================
-       PROJECT OWNERSHIP
-    ===================================================== */
+    status: {
+      type: String,
+      enum: HEALTH_STATUSES,
+      default: "unknown",
+      required: true,
+    },
+
+    lastCheckedAt: {
+      type: Date,
+      default: null,
+    },
+
+    lastStatusCode: {
+      type: Number,
+      min: 100,
+      max: 599,
+      default: null,
+    },
+
+    responseTimeMs: {
+      type: Number,
+      min: 0,
+      default: null,
+    },
+
+    consecutiveFailures: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+
+    consecutiveSuccesses: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+
+    message: {
+      type: String,
+      default: null,
+      maxlength: 2000,
+    },
+  },
+  {
+    _id: false,
+    minimize: false,
+  }
+);
+
+/* -------------------------------------------------------------------------- */
+/* ERROR                                                                      */
+/* -------------------------------------------------------------------------- */
+
+const previewErrorSchema = new Schema(
+  {
+    code: {
+      type: String,
+      enum: ERROR_CODES,
+      default: "PREVIEW_ERROR",
+    },
+
+    message: {
+      type: String,
+      required: true,
+      maxlength: 5000,
+    },
+
+    at: {
+      type: Date,
+      default: Date.now,
+    },
+
+    details: {
+      type: Schema.Types.Mixed,
+      default: null,
+    },
+  },
+  {
+    _id: false,
+  }
+);
+
+/* -------------------------------------------------------------------------- */
+/* PROJECT PREVIEW                                                            */
+/* -------------------------------------------------------------------------- */
+
+const projectPreviewSchema = new Schema(
+  {
+    /* ---------------------------------------------------------------------- */
+    /* OWNERSHIP                                                              */
+    /* ---------------------------------------------------------------------- */
 
     projectId: {
-      type: mongoose.Schema.Types.ObjectId,
+      type: Schema.Types.ObjectId,
       ref: "Project",
       required: true,
-      index: true
+      index: true,
     },
 
     userId: {
-      type: mongoose.Schema.Types.ObjectId,
+      type: Schema.Types.ObjectId,
       ref: "User",
       required: true,
-      index: true
+      index: true,
     },
 
-
-    /* =====================================================
-       PREVIEW IDENTITY
-    ===================================================== */
+    /* ---------------------------------------------------------------------- */
+    /* PREVIEW IDENTITY                                                       */
+    /* ---------------------------------------------------------------------- */
 
     previewId: {
       type: String,
       required: true,
       unique: true,
       trim: true,
-      maxlength: 300,
-      index: true
+      immutable: true,
+      maxlength: 150,
     },
 
     previewNumber: {
       type: Number,
       required: true,
-      min: 1
+      min: 1,
     },
 
-
-    /* =====================================================
-       SOURCE BUILD
-    ===================================================== */
+    /* ---------------------------------------------------------------------- */
+    /* BUILD SOURCE                                                           */
+    /* ---------------------------------------------------------------------- */
 
     buildId: {
       type: String,
-      default: "",
+      required: true,
       trim: true,
-      maxlength: 300,
-      index: true
-    },
-
-    buildNumber: {
-      type: Number,
-      default: null,
-      min: 1
+      maxlength: 200,
+      index: true,
     },
 
     sourceVersionId: {
-      type: mongoose.Schema.Types.ObjectId,
-      default: null
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 300,
     },
 
+    /*
+     * Represents the exact source/build identity used for this preview.
+     *
+     * The current Preview Service falls back to the authoritative
+     * artifact checksum or buildId if a dedicated sourceHash is unavailable.
+     */
     sourceHash: {
       type: String,
       required: true,
       trim: true,
-      maxlength: 128,
-      index: true
+      maxlength: 256,
     },
+
+    /* ---------------------------------------------------------------------- */
+    /* BUILD RUNTIME METADATA                                                 */
+    /* ---------------------------------------------------------------------- */
 
     framework: {
       type: String,
-      default: "",
+      default: "static",
       trim: true,
-      maxlength: 100
+      maxlength: 100,
     },
 
     runtime: {
       type: String,
-      default: "",
+      default: "node",
       trim: true,
-      maxlength: 100
+      maxlength: 100,
     },
 
+    nodeVersion: {
+      type: String,
+      default: "20",
+      trim: true,
+      maxlength: 50,
+    },
 
-    /* =====================================================
-       PREVIEW STATUS
-    ===================================================== */
+    packageManager: {
+      type: String,
+      default: "npm",
+      trim: true,
+      maxlength: 50,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* STATE                                                                   */
+    /* ---------------------------------------------------------------------- */
 
     status: {
       type: String,
       enum: PREVIEW_STATUSES,
+      required: true,
       default: "queued",
-      index: true
+      index: true,
     },
 
-    trigger: {
-      type: String,
-      enum: PREVIEW_TRIGGERS,
-      default: "manual",
-      index: true
-    },
-
-    isEphemeral: {
-      type: Boolean,
-      default: true
-    },
-
-
-    /* =====================================================
-       URL
-    ===================================================== */
+    /* ---------------------------------------------------------------------- */
+    /* URL                                                                     */
+    /* ---------------------------------------------------------------------- */
 
     url: {
       type: String,
-      default: "",
+      default: null,
       trim: true,
-      maxlength: 2000
+      maxlength: 2000,
     },
 
     publicUrl: {
       type: String,
-      default: "",
+      default: null,
       trim: true,
-      maxlength: 2000
+      maxlength: 2000,
     },
 
     hostname: {
       type: String,
-      default: "",
+      default: null,
       trim: true,
-      maxlength: 500
+      maxlength: 500,
     },
 
-
-    /* =====================================================
-       RUNTIME
-    ===================================================== */
+    /* ---------------------------------------------------------------------- */
+    /* RUNTIME                                                                 */
+    /* ---------------------------------------------------------------------- */
 
     runtimeInfo: {
-      type: runtimeSchema,
-      default: () => ({})
+      type: runtimeInfoSchema,
+      default: () => ({
+        status: "pending",
+      }),
     },
 
-
-    /* =====================================================
-       HEALTH CHECK
-    ===================================================== */
+    /* ---------------------------------------------------------------------- */
+    /* HEALTH                                                                  */
+    /* ---------------------------------------------------------------------- */
 
     healthCheck: {
       type: healthCheckSchema,
-      default: () => ({})
+      default: () => ({
+        status: "unknown",
+      }),
     },
 
-
-    /* =====================================================
-       LOGGING
-    ===================================================== */
-
-    logs: {
-      type: logReferenceSchema,
-      default: () => ({})
-    },
-
-
-    /* =====================================================
-       EXECUTION
-    ===================================================== */
-
-    workerId: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 300
-    },
-
-    queueName: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 300
-    },
-
-    attempt: {
-      type: Number,
-      default: 1,
-      min: 1
-    },
-
-    maxAttempts: {
-      type: Number,
-      default: 2,
-      min: 1,
-      max: 10
-    },
-
-
-    /* =====================================================
-       TIMING
-    ===================================================== */
-
-    queuedAt: {
-      type: Date,
-      default: Date.now
-    },
-
-    buildStartedAt: {
-      type: Date,
-      default: null
-    },
-
-    buildCompletedAt: {
-      type: Date,
-      default: null
-    },
+    /* ---------------------------------------------------------------------- */
+    /* LIFECYCLE                                                              */
+    /* ---------------------------------------------------------------------- */
 
     startedAt: {
       type: Date,
-      default: null
+      default: null,
     },
 
     readyAt: {
       type: Date,
-      default: null
+      default: null,
     },
 
     stoppedAt: {
       type: Date,
-      default: null
+      default: null,
     },
 
     expiredAt: {
       type: Date,
-      default: null
+      default: null,
     },
 
-    completedAt: {
+    failedAt: {
       type: Date,
-      default: null
+      default: null,
     },
 
     expiresAt: {
       type: Date,
-      default: null,
-      index: true
+      required: true,
+      index: true,
     },
 
-    buildDurationMs: {
-      type: Number,
-      default: null,
-      min: 0
-    },
+    /* ---------------------------------------------------------------------- */
+    /* TIMING                                                                  */
+    /* ---------------------------------------------------------------------- */
 
     startupDurationMs: {
       type: Number,
+      min: 0,
       default: null,
-      min: 0
     },
 
-    totalDurationMs: {
+    totalRuntimeMs: {
       type: Number,
+      min: 0,
       default: null,
-      min: 0
     },
 
+    /* ---------------------------------------------------------------------- */
+    /* WORKER / EXECUTION                                                      */
+    /* ---------------------------------------------------------------------- */
 
-    /* =====================================================
-       ERRORS
-    ===================================================== */
+    workerId: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 300,
+      select: false,
+    },
+
+    queueName: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 300,
+      select: false,
+    },
+
+    attempt: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+
+    maxAttempts: {
+      type: Number,
+      min: 1,
+      default: 3,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* LOGGING                                                                 */
+    /* ---------------------------------------------------------------------- */
+
+    logs: {
+      type: [
+        {
+          timestamp: {
+            type: Date,
+            default: Date.now,
+          },
+
+          level: {
+            type: String,
+            enum: [
+              "debug",
+              "info",
+              "warn",
+              "error",
+            ],
+            default: "info",
+          },
+
+          message: {
+            type: String,
+            maxlength: 5000,
+          },
+        },
+      ],
+      default: [],
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* ERRORS                                                                  */
+    /* ---------------------------------------------------------------------- */
 
     errors: {
       type: [previewErrorSchema],
-      default: []
+      default: [],
     },
 
-    errorMessage: {
-      type: String,
-      default: "",
-      maxlength: 5000
-    },
+    /* ---------------------------------------------------------------------- */
+    /* SECURITY                                                                */
+    /* ---------------------------------------------------------------------- */
 
-    failureCategory: {
-      type: String,
-      enum: FAILURE_CATEGORIES,
-      default: ""
-    },
-
-
-    /* =====================================================
-       STOP / EXPIRATION
-    ===================================================== */
-
-    stoppedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      default: null
-    },
-
-    stopReason: {
-      type: String,
-      default: "",
-      maxlength: 2000
-    },
-
-    expirationReason: {
-      type: String,
-      default: "",
-      maxlength: 1000
-    },
-
-
-    /* =====================================================
-       AI / WORKSPACE CONTEXT
-    ===================================================== */
-
-    aiGenerated: {
-      type: Boolean,
-      default: false
-    },
-
-    aiModel: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 200
-    },
-
-    promptId: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 300
-    },
-
-    workspaceSessionId: {
-      type: String,
-      default: "",
-      trim: true,
-      maxlength: 300
-    },
-
-
-    /* =====================================================
-       SECURITY
-    ===================================================== */
-
+    /*
+     * These are hard security invariants.
+     *
+     * Preview must NEVER receive production secrets.
+     */
     secretsInjected: {
       type: Boolean,
-      default: false
+      default: false,
+      immutable: true,
     },
 
     productionSecretsBlocked: {
       type: Boolean,
-      default: true
+      default: true,
+      required: true,
     },
 
     networkAccess: {
       type: String,
-      enum: [
-        "none",
-        "restricted",
-        "internet"
-      ],
-      default: "restricted"
+      enum: NETWORK_MODES,
+      default: "restricted",
+      required: true,
     },
 
-
-    /* =====================================================
-       METADATA
-    ===================================================== */
+    /* ---------------------------------------------------------------------- */
+    /* METADATA                                                                */
+    /* ---------------------------------------------------------------------- */
 
     metadata: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {}
-    }
+      type: Schema.Types.Mixed,
+      default: {},
+    },
   },
   {
     timestamps: true,
+
+    minimize: false,
+
+    strict: true,
+
     versionKey: false,
-    minimize: false
   }
 );
 
+/* -------------------------------------------------------------------------- */
+/* INDEXES                                                                    */
+/* -------------------------------------------------------------------------- */
 
-/* =========================================================
-   ENTERPRISE INDEXES
-========================================================= */
-
-/*
- * Latest previews for a project
- */
 projectPreviewSchema.index({
   projectId: 1,
-  createdAt: -1
+  userId: 1,
+  createdAt: -1,
 });
 
-
-/*
- * Active previews for a project
- */
 projectPreviewSchema.index({
   projectId: 1,
+  userId: 1,
   status: 1,
-  createdAt: -1
 });
 
-
-/*
- * Build → preview lookup
- */
 projectPreviewSchema.index({
   projectId: 1,
   buildId: 1,
-  createdAt: -1
+  createdAt: -1,
 });
 
-
-/*
- * Source version lookup
- */
-projectPreviewSchema.index({
-  projectId: 1,
-  sourceVersionId: 1,
-  createdAt: -1
-});
-
-
-/*
- * Source hash lookup.
-
- * Useful for detecting whether an existing preview
- * corresponds to the current project source.
- */
-projectPreviewSchema.index({
-  projectId: 1,
-  sourceHash: 1,
-  createdAt: -1
-});
-
-
-/*
- * Active runtime lookup.
- */
-projectPreviewSchema.index({
-  projectId: 1,
-  status: 1,
-  "runtimeInfo.status": 1
-});
-
-
-/*
- * Expiration worker lookup.
- */
 projectPreviewSchema.index({
   expiresAt: 1,
-  status: 1
+  status: 1,
 });
 
-
-/*
- * User preview history.
- */
 projectPreviewSchema.index({
-  userId: 1,
-  createdAt: -1
+  previewId: 1,
 });
 
-
-/* =========================================================
-   VALIDATION
-========================================================= */
+/* -------------------------------------------------------------------------- */
+/* VALIDATION                                                                 */
+/* -------------------------------------------------------------------------- */
 
 projectPreviewSchema.pre(
   "validate",
-  function (next) {
+  function validatePreview(next) {
+    try {
+      /*
+       * Security invariant.
+       */
+      if (this.secretsInjected !== false) {
+        this.invalidate(
+          "secretsInjected",
+          "Preview runtimes cannot receive secrets."
+        );
+      }
 
-    /*
-     * Ready preview must have a URL.
-     */
-    if (
-      this.status === "ready" &&
-      !this.url
-    ) {
-      return next(
-        new Error(
-          "Ready preview requires a preview URL"
-        )
-      );
+      /*
+       * Production secrets must ALWAYS remain blocked.
+       */
+      if (
+        this.productionSecretsBlocked !== true
+      ) {
+        this.invalidate(
+          "productionSecretsBlocked",
+          "Production secrets must remain blocked."
+        );
+      }
+
+      /*
+       * A ready preview must have a reachable URL.
+       */
+      if (
+        this.status === "ready"
+      ) {
+        if (
+          !this.url &&
+          !this.publicUrl
+        ) {
+          this.invalidate(
+            "url",
+            "Ready preview requires a preview URL."
+          );
+        }
+
+        if (
+          !this.runtimeInfo ||
+          this.runtimeInfo.status !==
+            "running"
+        ) {
+          this.invalidate(
+            "runtimeInfo.status",
+            "Ready preview requires a running runtime."
+          );
+        }
+
+        if (
+          !this.readyAt
+        ) {
+          this.readyAt =
+            new Date();
+        }
+      }
+
+      /*
+       * Failed previews must contain an error.
+       */
+      if (
+        this.status === "failed"
+      ) {
+        if (
+          !Array.isArray(
+            this.errors
+          ) ||
+          this.errors.length === 0
+        ) {
+          this.invalidate(
+            "errors",
+            "Failed preview requires error information."
+          );
+        }
+
+        if (!this.failedAt) {
+          this.failedAt =
+            new Date();
+        }
+      }
+
+      /*
+       * Stopped previews should have stoppedAt.
+       */
+      if (
+        this.status === "stopped" ||
+        this.status === "cancelled"
+      ) {
+        if (!this.stoppedAt) {
+          this.stoppedAt =
+            new Date();
+        }
+      }
+
+      /*
+       * Expired previews should have expiredAt.
+       */
+      if (
+        this.status === "expired"
+      ) {
+        if (!this.expiredAt) {
+          this.expiredAt =
+            new Date();
+        }
+      }
+
+      /*
+       * Runtime state consistency.
+       */
+      if (
+        this.runtimeInfo?.status ===
+          "running" &&
+        this.status !== "ready"
+      ) {
+        /*
+         * During the create flow the service may update runtimeInfo
+         * before status becomes ready through findOneAndUpdate().
+         *
+         * Therefore this is intentionally NOT an invalidate.
+         */
+      }
+
+      next();
+    } catch (error) {
+      next(error);
     }
-
-
-    /*
-     * Ready preview must have a healthy runtime.
-     */
-    if (
-      this.status === "ready" &&
-      this.runtimeInfo &&
-      this.runtimeInfo.status !== "running"
-    ) {
-      return next(
-        new Error(
-          "Ready preview requires a running runtime"
-        )
-      );
-    }
-
-
-    /*
-     * Failed preview must contain error information.
-     */
-    if (
-      this.status === "failed" &&
-      !this.errorMessage &&
-      (!Array.isArray(this.errors) ||
-        this.errors.length === 0)
-    ) {
-      return next(
-        new Error(
-          "Failed preview requires error information"
-        )
-      );
-    }
-
-
-    /*
-     * Expired preview should have expiration time.
-     */
-    if (
-      this.status === "expired" &&
-      !this.expiredAt
-    ) {
-      this.expiredAt = new Date();
-    }
-
-
-    /*
-     * Stopped preview should have stopped time.
-     */
-    if (
-      this.status === "stopped" &&
-      !this.stoppedAt
-    ) {
-      this.stoppedAt = new Date();
-    }
-
-
-    /*
-     * Cancelled preview is considered completed.
-     */
-    if (
-      this.status === "cancelled" &&
-      !this.completedAt
-    ) {
-      this.completedAt = new Date();
-    }
-
-
-    next();
   }
 );
 
-
-/* =========================================================
-   PRE SAVE
-========================================================= */
+/* -------------------------------------------------------------------------- */
+/* SAVE HOOK                                                                  */
+/* -------------------------------------------------------------------------- */
 
 projectPreviewSchema.pre(
   "save",
-  function (next) {
+  function calculateDurations(next) {
+    try {
+      const currentTime =
+        Date.now();
 
-    /*
-     * Build duration.
-     */
-    if (
-      this.buildStartedAt &&
-      this.buildCompletedAt
-    ) {
-      this.buildDurationMs =
-        Math.max(
-          0,
-          this.buildCompletedAt.getTime() -
-          this.buildStartedAt.getTime()
-        );
+      if (
+        this.startedAt &&
+        this.readyAt &&
+        this.startupDurationMs ===
+          null
+      ) {
+        this.startupDurationMs =
+          Math.max(
+            0,
+            this.readyAt.getTime() -
+              this.startedAt.getTime()
+          );
+      }
+
+      if (
+        this.startedAt &&
+        (
+          this.stoppedAt ||
+          this.expiredAt ||
+          this.failedAt
+        )
+      ) {
+        const end =
+          this.stoppedAt ||
+          this.expiredAt ||
+          this.failedAt;
+
+        this.totalRuntimeMs =
+          Math.max(
+            0,
+            end.getTime() -
+              this.startedAt.getTime()
+          );
+      }
+
+      /*
+       * Security invariant on every save.
+       */
+      this.secretsInjected =
+        false;
+
+      this.productionSecretsBlocked =
+        true;
+
+      /*
+       * Prevent a stale runtime from remaining "running"
+       * after a terminal preview state.
+       */
+      if (
+        (
+          this.status === "stopped" ||
+          this.status === "expired" ||
+          this.status === "cancelled" ||
+          this.status === "failed"
+        ) &&
+        this.runtimeInfo
+      ) {
+        if (
+          this.runtimeInfo.status ===
+            "running" ||
+          this.runtimeInfo.status ===
+            "starting"
+        ) {
+          this.runtimeInfo.status =
+            this.status ===
+              "failed"
+              ? "crashed"
+              : "stopped";
+        }
+      }
+
+      /*
+       * Avoid unused variable lint issues while retaining
+       * current-time access for future lifecycle extensions.
+       */
+      void currentTime;
+
+      next();
+    } catch (error) {
+      next(error);
     }
-
-
-    /*
-     * Runtime startup duration.
-     */
-    if (
-      this.startedAt &&
-      this.readyAt
-    ) {
-      this.startupDurationMs =
-        Math.max(
-          0,
-          this.readyAt.getTime() -
-          this.startedAt.getTime()
-        );
-    }
-
-
-    /*
-     * Total preview duration.
-     *
-     * For completed states we use completedAt.
-     * For active previews the value remains null.
-     */
-    if (
-      this.queuedAt &&
-      this.completedAt
-    ) {
-      this.totalDurationMs =
-        Math.max(
-          0,
-          this.completedAt.getTime() -
-          this.queuedAt.getTime()
-        );
-    }
-
-
-    /*
-     * Security invariant:
-     *
-     * Production secrets must never be injected
-     * into a preview runtime.
-     */
-    if (this.productionSecretsBlocked !== true) {
-      this.productionSecretsBlocked = true;
-    }
-
-
-    next();
   }
 );
 
+/* -------------------------------------------------------------------------- */
+/* QUERY HELPERS                                                              */
+/* -------------------------------------------------------------------------- */
 
-/* =========================================================
-   MODEL
-========================================================= */
+projectPreviewSchema.statics.findOwned =
+  function findOwned(
+    previewId,
+    projectId,
+    userId
+  ) {
+    return this.findOne({
+      previewId,
+      projectId,
+      userId,
+    });
+  };
+
+projectPreviewSchema.statics.findActive =
+  function findActive(
+    projectId,
+    userId
+  ) {
+    return this.findOne({
+      projectId,
+      userId,
+      status: {
+        $in: [
+          "queued",
+          "building",
+          "starting",
+          "ready",
+        ],
+      },
+    }).sort({
+      createdAt: -1,
+    });
+  };
+
+/* -------------------------------------------------------------------------- */
+/* INSTANCE HELPERS                                                           */
+/* -------------------------------------------------------------------------- */
+
+projectPreviewSchema.methods.isActive =
+  function isActive() {
+    return [
+      "queued",
+      "building",
+      "starting",
+      "ready",
+    ].includes(
+      this.status
+    );
+  };
+
+projectPreviewSchema.methods.isTerminal =
+  function isTerminal() {
+    return [
+      "failed",
+      "stopped",
+      "expired",
+      "cancelled",
+    ].includes(
+      this.status
+    );
+  };
+
+projectPreviewSchema.methods.isReady =
+  function isReady() {
+    return (
+      this.status === "ready" &&
+      this.runtimeInfo?.status ===
+        "running" &&
+      Boolean(
+        this.url ||
+        this.publicUrl
+      )
+    );
+  };
+
+projectPreviewSchema.methods.isExpired =
+  function isExpired() {
+    if (!this.expiresAt) {
+      return false;
+    }
+
+    return (
+      this.expiresAt.getTime() <=
+      Date.now()
+    );
+  };
+
+projectPreviewSchema.methods.markFailed =
+  function markFailed(
+    code,
+    message,
+    details = null
+  ) {
+    this.status = "failed";
+
+    this.runtimeInfo.status =
+      "crashed";
+
+    this.failedAt =
+      new Date();
+
+    this.errors.push({
+      code:
+        ERROR_CODES.includes(code)
+          ? code
+          : "PREVIEW_ERROR",
+
+      message,
+
+      details,
+
+      at: new Date(),
+    });
+
+    return this;
+  };
+
+projectPreviewSchema.methods.markStopped =
+  function markStopped() {
+    this.status = "stopped";
+
+    this.stoppedAt =
+      new Date();
+
+    if (
+      this.runtimeInfo
+    ) {
+      this.runtimeInfo.status =
+        "stopped";
+
+      this.runtimeInfo.stoppedAt =
+        new Date();
+    }
+
+    return this;
+  };
+
+projectPreviewSchema.methods.markExpired =
+  function markExpired() {
+    this.status = "expired";
+
+    this.expiredAt =
+      new Date();
+
+    if (
+      this.runtimeInfo
+    ) {
+      this.runtimeInfo.status =
+        "stopped";
+
+      this.runtimeInfo.stoppedAt =
+        new Date();
+    }
+
+    return this;
+  };
+
+/* -------------------------------------------------------------------------- */
+/* JSON SAFETY                                                                */
+/* -------------------------------------------------------------------------- */
+
+projectPreviewSchema.methods.toSafeJSON =
+  function toSafeJSON() {
+    const value =
+      this.toObject({
+        getters: false,
+        virtuals: false,
+      });
+
+    /*
+     * Infrastructure internals must never be exposed.
+     */
+    if (value.runtimeInfo) {
+      delete value.runtimeInfo.hostPort;
+      delete value.runtimeInfo.internalPort;
+      delete value.runtimeInfo.image;
+      delete value.runtimeInfo.containerId;
+      delete value.runtimeInfo.containerName;
+    }
+
+    delete value.workerId;
+    delete value.queueName;
+
+    if (value.metadata) {
+      delete value.metadata.artifactPath;
+      delete value.metadata.artifactStorageKey;
+      delete value.metadata.runtimeWorkspace;
+      delete value.metadata.containerId;
+      delete value.metadata.containerName;
+    }
+
+    return value;
+  };
+
+/* -------------------------------------------------------------------------- */
+/* MODEL                                                                      */
+/* -------------------------------------------------------------------------- */
 
 const ProjectPreview =
   mongoose.models.ProjectPreview ||
@@ -1047,9 +1042,5 @@ const ProjectPreview =
     projectPreviewSchema
   );
 
-
-/* =========================================================
-   EXPORT
-========================================================= */
-
-module.exports = ProjectPreview;
+module.exports =
+  ProjectPreview;
