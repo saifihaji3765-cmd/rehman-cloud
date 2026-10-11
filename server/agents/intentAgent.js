@@ -746,21 +746,149 @@ function normalizeEngineering(
 
 /* =========================================================
    NORMALIZE AI OUTPUT
+   ---------------------------------------------------------
+   Supports:
+   - Direct structured JSON objects
+   - JSON serialized as a string
+   - Common nested response wrappers
+   - JSON enclosed in Markdown code fences
+
+   Does not log actual AI response contents or secrets.
 ========================================================= */
 
-function normalizeAIResult(
-  parsed
-) {
+function normalizeAIResult(parsed) {
 
-  if (
-    !parsed ||
-    typeof parsed !== "object" ||
-    Array.isArray(parsed)
-  ) {
+  function isObject(value) {
+    return (
+      value !== null &&
+      typeof value === "object" &&
+      !Array.isArray(value)
+    );
+  }
+
+  function isIntentPayload(value) {
+    if (!isObject(value)) {
+      return false;
+    }
+
+    return (
+      typeof value.type === "string" ||
+      typeof value.goal === "string" ||
+      typeof value.projectScale === "string" ||
+      typeof value.requestKind === "string" ||
+      isObject(value.engineering)
+    );
+  }
+
+  function parseJSONString(value) {
+    if (typeof value !== "string") {
+      return null;
+    }
+
+    const text = value.trim();
+
+    if (!text) {
+      return null;
+    }
+
+    const candidates = [text];
+
+    const fenced = text.match(
+      /^```(?:json)?\s*([\s\S]*?)\s*```$/i
+    );
+
+    if (fenced && fenced[1]) {
+      candidates.push(fenced[1].trim());
+    }
+
+    for (const candidate of candidates) {
+      try {
+        const result = JSON.parse(candidate);
+
+        if (isIntentPayload(result)) {
+          return result;
+        }
+
+        if (typeof result === "string") {
+          try {
+            const nested = JSON.parse(result);
+
+            if (isIntentPayload(nested)) {
+              return nested;
+            }
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }
+
     return null;
   }
 
-  return parsed;
+  function extractFromObject(value, depth = 0) {
+    if (
+      !isObject(value) ||
+      depth > 3
+    ) {
+      return null;
+    }
+
+    if (isIntentPayload(value)) {
+      return value;
+    }
+
+    const candidateKeys = [
+      "data",
+      "output",
+      "result",
+      "parsed",
+      "structuredOutput",
+      "content",
+      "text"
+    ];
+
+    for (const key of candidateKeys) {
+      const candidate = value[key];
+
+      if (isIntentPayload(candidate)) {
+        return candidate;
+      }
+
+      if (typeof candidate === "string") {
+        const parsedString = parseJSONString(candidate);
+
+        if (parsedString) {
+          return parsedString;
+        }
+      }
+
+      if (isObject(candidate)) {
+        const nested = extractFromObject(
+          candidate,
+          depth + 1
+        );
+
+        if (nested) {
+          return nested;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  if (isIntentPayload(parsed)) {
+    return parsed;
+  }
+
+  if (typeof parsed === "string") {
+    return parseJSONString(parsed);
+  }
+
+  if (!isObject(parsed)) {
+    return null;
+  }
+
+  return extractFromObject(parsed);
 }
 
 
