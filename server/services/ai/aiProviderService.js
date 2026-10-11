@@ -1,241 +1,112 @@
 /* =========================================================
    ZYRIONOS AI PROVIDER SERVICE
-   MULTI-PROVIDER PRODUCTION AI ARCHITECTURE
+   FULL REPLACEMENT — ROLE-BASED MULTI-PROVIDER ROUTING
 
-   ACTIVE PROVIDERS
-
-   1. Amazon Bedrock
-   2. Sarvam AI
+   PROVIDERS RETAINED
+   1. Sarvam AI
+   2. IndieRouter
    3. BharatRouter
-   4. IndieRouter
-   5. Google Vertex AI
+   4. Google Vertex AI
+   5. Amazon Bedrock
 
-   ARCHITECTURE
+   DEFAULT ROUTING
+   Sarvam -> IndieRouter -> BharatRouter -> Vertex -> Bedrock
 
-   Agent
-      ↓
-   AI Provider Service
-      ↓
-   Capability Router
-      ↓
-   Selected Provider
-      ↓
-   Response Validation
-      ↓
-   Normalized Response
+   CODING ROUTING
+   IndieRouter -> BharatRouter -> Sarvam -> Vertex -> Bedrock
 
-   IMPORTANT
-
-   - DeepSeek removed
-   - Claude / Anthropic removed
-   - OpenAI is not an active provider
-   - Agents never call providers directly
-   - Provider-specific logic remains centralized
-   - Structured JSON failures can retry and fail over
-   - Bedrock uses ECS IAM role
-   - Vertex uses AWS → Google WIF
+   Existing public exports preserved.
 ========================================================= */
 
+'use strict';
 
-/* =========================================================
-   CONFIG
-========================================================= */
+const env = require('../../config/env');
+const logger = require('../loggerService');
 
-const env =
-  require("../../config/env");
-
-
-/* =========================================================
-   LOGGER
-========================================================= */
-
-const logger =
-  require("../loggerService");
-
-
-/* =========================================================
-   OPTIONAL SDK CLIENTS
-========================================================= */
-
-let BedrockRuntimeClient =
-  null;
-
-let ConverseCommand =
-  null;
-
-let GoogleGenAI =
-  null;
-
-let GoogleAuth =
-  null;
-
-
-/* =========================================================
-   BEDROCK SDK
-========================================================= */
+let BedrockRuntimeClient = null;
+let ConverseCommand = null;
+let GoogleGenAI = null;
+let GoogleAuth = null;
 
 try {
-
-  const bedrock =
-    require("@aws-sdk/client-bedrock-runtime");
-
-  BedrockRuntimeClient =
-    bedrock.BedrockRuntimeClient;
-
-  ConverseCommand =
-    bedrock.ConverseCommand;
-
-} catch (error) {
-
-  BedrockRuntimeClient =
-    null;
-
-  ConverseCommand =
-    null;
-
+  const bedrock = require('@aws-sdk/client-bedrock-runtime');
+  BedrockRuntimeClient = bedrock.BedrockRuntimeClient;
+  ConverseCommand = bedrock.ConverseCommand;
+} catch (_) {
+  // Bedrock remains unavailable if its SDK is missing.
 }
-
-
-/* =========================================================
-   GOOGLE GEN AI SDK
-========================================================= */
 
 try {
-
-  const googleGenAI =
-    require("@google/genai");
-
-  GoogleGenAI =
-    googleGenAI.GoogleGenAI;
-
-} catch (error) {
-
-  GoogleGenAI =
-    null;
-
+  const googleGenAI = require('@google/genai');
+  GoogleGenAI = googleGenAI.GoogleGenAI;
+} catch (_) {
+  // Vertex remains unavailable if its SDK is missing.
 }
-
-
-/* =========================================================
-   GOOGLE AUTH LIBRARY
-========================================================= */
 
 try {
-
-  const googleAuth =
-    require("google-auth-library");
-
-  GoogleAuth =
-    googleAuth.GoogleAuth;
-
-} catch (error) {
-
-  GoogleAuth =
-    null;
-
+  const googleAuth = require('google-auth-library');
+  GoogleAuth = googleAuth.GoogleAuth;
+} catch (_) {
+  // Vertex remains unavailable if its auth library is missing.
 }
 
-
 /* =========================================================
-   PROVIDER CLIENTS
+   PROVIDERS
 ========================================================= */
 
-let bedrockClient =
-  null;
-
-let vertexClient =
-  null;
-
-let vertexAuth =
-  null;
-
-let vertexCredentialConfig =
-  null;
-
-
-/* =========================================================
-   PROVIDER NAMES
-========================================================= */
-
-const PROVIDERS = {
-
-  BEDROCK:
-    "bedrock",
-
-  SARVAM:
-    "sarvam",
-
-  BHARATROUTER:
-    "bharatrouter",
-
-  INDIEROUTER:
-    "indierouter",
-
-  VERTEX:
-    "vertex"
-
-};
-
-
-/* =========================================================
-   DEFAULT PROVIDER ORDER
-========================================================= */
+const PROVIDERS = Object.freeze({
+  BEDROCK: 'bedrock',
+  SARVAM: 'sarvam',
+  BHARATROUTER: 'bharatrouter',
+  INDIEROUTER: 'indierouter',
+  VERTEX: 'vertex'
+});
 
 const DEFAULT_PROVIDER_ORDER = [
-
-  PROVIDERS.BEDROCK,
-
   PROVIDERS.SARVAM,
-
-  PROVIDERS.BHARATROUTER,
-
   PROVIDERS.INDIEROUTER,
-
-  PROVIDERS.VERTEX
-
+  PROVIDERS.BHARATROUTER,
+  PROVIDERS.VERTEX,
+  PROVIDERS.BEDROCK
 ];
 
+const CODING_PROVIDER_ORDER = [
+  PROVIDERS.INDIEROUTER,
+  PROVIDERS.BHARATROUTER,
+  PROVIDERS.SARVAM,
+  PROVIDERS.VERTEX,
+  PROVIDERS.BEDROCK
+];
+
+const PLANNING_PROVIDER_ORDER = [
+  PROVIDERS.SARVAM,
+  PROVIDERS.INDIEROUTER,
+  PROVIDERS.BHARATROUTER,
+  PROVIDERS.VERTEX,
+  PROVIDERS.BEDROCK
+];
+
+const MULTIMODAL_PROVIDER_ORDER = [
+  PROVIDERS.VERTEX,
+  PROVIDERS.INDIEROUTER,
+  PROVIDERS.BHARATROUTER,
+  PROVIDERS.BEDROCK,
+  PROVIDERS.SARVAM
+];
 
 /* =========================================================
-   PROVIDER OUTPUT LIMITS
-=========================================================
-
-   These are application safety limits.
-
-   The actual provider/model may impose a lower limit.
-
-   Builder can request 12000 tokens, but the provider
-   service will never silently pretend that 5000 was
-   requested. The effective budget is logged and returned.
+   TOKEN LIMITS
 ========================================================= */
 
-const PROVIDER_MAX_OUTPUT_TOKENS = {
+const PROVIDER_MAX_OUTPUT_TOKENS = Object.freeze({
+  [PROVIDERS.BEDROCK]: 12000,
+  [PROVIDERS.SARVAM]: 12000,
+  [PROVIDERS.BHARATROUTER]: 12000,
+  [PROVIDERS.INDIEROUTER]: 12000,
+  [PROVIDERS.VERTEX]: 12000
+});
 
-  [PROVIDERS.BEDROCK]:
-    12000,
-
-  [PROVIDERS.SARVAM]:
-    12000,
-
-  [PROVIDERS.BHARATROUTER]:
-    12000,
-
-  [PROVIDERS.INDIEROUTER]:
-    12000,
-
-  [PROVIDERS.VERTEX]:
-    12000
-
-};
-
-
-/* =========================================================
-   DEFAULT OUTPUT TOKEN LIMIT
-========================================================= */
-
-const DEFAULT_OUTPUT_TOKENS =
-  5000;
-
+const DEFAULT_OUTPUT_TOKENS = 5000;
 
 /* =========================================================
    MODEL CONFIGURATION
@@ -244,29 +115,24 @@ const DEFAULT_OUTPUT_TOKENS =
 const BEDROCK_MODEL =
   env.BEDROCK_MODEL_ID ||
   env.BEDROCK_MODEL ||
-  "";
-
+  '';
 
 const SARVAM_MODEL =
   env.SARVAM_MODEL ||
-  "sarvam-105b";
-
+  'sarvam-105b';
 
 const BHARATROUTER_MODEL =
   env.BHARATROUTER_MODEL ||
-  "";
-
+  '';
 
 const INDIEROUTER_MODEL =
   env.INDIEROUTER_MODEL ||
-  "";
-
+  '';
 
 const VERTEX_MODEL =
   env.VERTEX_MODEL ||
   env.VERTEX_AI_MODEL ||
-  "gemini-2.5-flash";
-
+  'gemini-2.5-flash';
 
 /* =========================================================
    BASE URL CONFIGURATION
@@ -274,333 +140,180 @@ const VERTEX_MODEL =
 
 const SARVAM_BASE_URL =
   env.SARVAM_BASE_URL ||
-  "https://api.sarvam.ai";
-
+  'https://api.sarvam.ai';
 
 const BHARATROUTER_BASE_URL =
   env.BHARATROUTER_BASE_URL ||
-  "";
-
+  '';
 
 const INDIEROUTER_BASE_URL =
   env.INDIEROUTER_BASE_URL ||
-  "";
-
+  '';
 
 /* =========================================================
-   AWS REGION
+   AWS / GOOGLE CONFIGURATION
 ========================================================= */
 
 const AWS_REGION =
   env.AWS_REGION ||
   env.BEDROCK_REGION ||
-  "ap-south-1";
-
-
-/* =========================================================
-   GOOGLE VERTEX CONFIGURATION
-========================================================= */
+  'ap-south-1';
 
 const VERTEX_PROJECT_ID =
   env.VERTEX_PROJECT_ID ||
   env.GOOGLE_CLOUD_PROJECT ||
   env.GCP_PROJECT_ID ||
-  "";
-
+  '';
 
 const VERTEX_LOCATION =
   env.VERTEX_LOCATION ||
   env.GOOGLE_CLOUD_LOCATION ||
-  "asia-south1";
+  'asia-south1';
 
+const GOOGLE_WIF_CONFIG_JSON =
+  env.GOOGLE_WIF_CONFIG_JSON ||
+  process.env.GOOGLE_WIF_CONFIG_JSON ||
+  '';
+
+/* =========================================================
+   RETRY / TIMEOUT CONFIGURATION
+========================================================= */
+
+function readNumber(value, fallback, minimum = 0) {
+  const n = Number(value);
+
+  return Number.isFinite(n)
+    ? Math.max(minimum, n)
+    : fallback;
+}
+
+const AI_PROVIDER_QUOTA_COOLDOWN_MS = readNumber(
+  process.env.AI_PROVIDER_QUOTA_COOLDOWN_MS,
+  300000,
+  10000
+);
+
+const AI_MAX_RETRIES = Math.floor(
+  readNumber(env.AI_PROVIDER_MAX_RETRIES, 1, 0)
+);
+
+const AI_RETRY_BASE_DELAY_MS = readNumber(
+  env.AI_PROVIDER_RETRY_BASE_DELAY_MS,
+  1200,
+  100
+);
+
+const AI_MAX_RETRY_DELAY_MS = Math.max(
+  AI_RETRY_BASE_DELAY_MS,
+  readNumber(env.AI_PROVIDER_MAX_RETRY_DELAY_MS, 5000, 100)
+);
+
+const AI_PROVIDER_TIMEOUT_MS = readNumber(
+  env.AI_PROVIDER_TIMEOUT_MS,
+  120000,
+  1000
+);
+
+const providerCooldowns = new Map();
+
+/* =========================================================
+   SDK CLIENTS
+========================================================= */
+
+let bedrockClient = null;
+let vertexClient = null;
+let vertexAuth = null;
+let vertexCredentialConfig = null;
+
+/* =========================================================
+   NORMALIZE TOKEN LIMIT
+========================================================= */
+
+function normalizeMaxTokens(provider, requestedTokens) {
+  const cap =
+    PROVIDER_MAX_OUTPUT_TOKENS[provider] ||
+    DEFAULT_OUTPUT_TOKENS;
+
+  const n = Number(requestedTokens);
+
+  if (!Number.isFinite(n) || n <= 0) {
+    return cap;
+  }
+
+  return Math.min(Math.floor(n), cap);
+}
 
 /* =========================================================
    GOOGLE WIF CONFIGURATION
 ========================================================= */
 
-const GOOGLE_WIF_CONFIG_JSON =
-  env.GOOGLE_WIF_CONFIG_JSON ||
-  process.env.GOOGLE_WIF_CONFIG_JSON ||
-  "";
-
-
-/* =========================================================
-   PROVIDER QUOTA COOLDOWN
-========================================================= */
-
-const AI_PROVIDER_QUOTA_COOLDOWN_MS =
-  Number.isFinite(
-    Number(
-      process.env.AI_PROVIDER_QUOTA_COOLDOWN_MS
-    )
-  )
-    ? Math.max(
-        10000,
-        Number(
-          process.env.AI_PROVIDER_QUOTA_COOLDOWN_MS
-        )
-      )
-    : 300000;
-
-
-/* =========================================================
-   PROVIDER COOLDOWN STATE
-========================================================= */
-
-const providerCooldowns =
-  new Map();
-
-
-/* =========================================================
-   RETRY CONFIGURATION
-========================================================= */
-
-const configuredMaxRetries =
-  Number(
-    env.AI_PROVIDER_MAX_RETRIES
-  );
-
-
-const AI_MAX_RETRIES =
-  Number.isFinite(
-    configuredMaxRetries
-  )
-    ? Math.max(
-        0,
-        Math.floor(
-          configuredMaxRetries
-        )
-      )
-    : 1;
-
-
-const configuredRetryBaseDelay =
-  Number(
-    env.AI_PROVIDER_RETRY_BASE_DELAY_MS
-  );
-
-
-const AI_RETRY_BASE_DELAY_MS =
-  Number.isFinite(
-    configuredRetryBaseDelay
-  )
-    ? Math.max(
-        100,
-        configuredRetryBaseDelay
-      )
-    : 1200;
-
-
-const configuredMaxRetryDelay =
-  Number(
-    env.AI_PROVIDER_MAX_RETRY_DELAY_MS
-  );
-
-
-const AI_MAX_RETRY_DELAY_MS =
-  Number.isFinite(
-    configuredMaxRetryDelay
-  )
-    ? Math.max(
-        AI_RETRY_BASE_DELAY_MS,
-        configuredMaxRetryDelay
-      )
-    : 5000;
-
-
-/* =========================================================
-   TIMEOUT
-========================================================= */
-
-const AI_PROVIDER_TIMEOUT_MS =
-  Number.isFinite(
-    Number(
-      env.AI_PROVIDER_TIMEOUT_MS
-    )
-  )
-    ? Math.max(
-        1000,
-        Number(
-          env.AI_PROVIDER_TIMEOUT_MS
-        )
-      )
-    : 120000;
-
-
-/* =========================================================
-   NORMALIZE MAX TOKENS
-========================================================= */
-
-function normalizeMaxTokens(
-  provider,
-  requestedTokens
-) {
-
-  const providerLimit =
-    PROVIDER_MAX_OUTPUT_TOKENS[
-      provider
-    ] ||
-    DEFAULT_OUTPUT_TOKENS;
-
-
-  const numeric =
-    Number(
-      requestedTokens
-    );
-
-
-  if (
-    !Number.isFinite(
-      numeric
-    ) ||
-    numeric <= 0
-  ) {
-
-    return providerLimit;
-
-  }
-
-
-  return Math.min(
-    Math.floor(
-      numeric
-    ),
-    providerLimit
-  );
-
-}
-
-
-/* =========================================================
-   LOAD GOOGLE WIF CONFIGURATION
-========================================================= */
-
 function loadGoogleWIFConfig() {
-
   if (
     !GOOGLE_WIF_CONFIG_JSON ||
-    !String(
-      GOOGLE_WIF_CONFIG_JSON
-    ).trim()
+    !String(GOOGLE_WIF_CONFIG_JSON).trim()
   ) {
-
     return null;
-
   }
 
-
   try {
-
-    const parsed =
-      JSON.parse(
-        GOOGLE_WIF_CONFIG_JSON
-      );
-
+    const parsed = JSON.parse(GOOGLE_WIF_CONFIG_JSON);
 
     if (
       !parsed ||
-      typeof parsed !== "object"
+      typeof parsed !== 'object' ||
+      Array.isArray(parsed)
     ) {
-
-      throw new Error(
-        "Google WIF configuration must be a JSON object"
-      );
-
+      throw new Error('must be a JSON object');
     }
 
-
-    if (
-      parsed.type !==
-      "external_account"
-    ) {
-
-      throw new Error(
-        "Google WIF configuration must use type=external_account"
-      );
-
+    if (parsed.type !== 'external_account') {
+      throw new Error('type must be external_account');
     }
 
-
-    if (
-      !parsed.audience
-    ) {
-
-      throw new Error(
-        "Google WIF configuration is missing audience"
-      );
-
+    if (!parsed.audience) {
+      throw new Error('audience is missing');
     }
-
 
     if (
       !parsed.credential_source ||
-      typeof parsed.credential_source !==
-      "object"
+      typeof parsed.credential_source !== 'object'
     ) {
-
-      throw new Error(
-        "Google WIF configuration is missing credential_source"
-      );
-
+      throw new Error('credential_source is missing');
     }
 
-
     return parsed;
-
   } catch (error) {
-
     logger.warning(
       `Google WIF configuration invalid: ${error.message}`
     );
 
-
     return null;
-
   }
-
 }
-
 
 /* =========================================================
    INITIALIZE BEDROCK
 ========================================================= */
 
-if (
-  BedrockRuntimeClient
-) {
-
+if (BedrockRuntimeClient) {
   try {
-
-    bedrockClient =
-      new BedrockRuntimeClient({
-
-        region:
-          AWS_REGION
-
-      });
-
-
+    bedrockClient = new BedrockRuntimeClient({
+      region: AWS_REGION
+    });
   } catch (error) {
-
-    bedrockClient =
-      null;
+    bedrockClient = null;
 
     logger.warning(
       `Bedrock client initialization failed: ${error.message}`
     );
-
   }
-
 }
 
-
 /* =========================================================
-   INITIALIZE GOOGLE VERTEX
+   INITIALIZE VERTEX
 ========================================================= */
 
-vertexCredentialConfig =
-  loadGoogleWIFConfig();
-
+vertexCredentialConfig = loadGoogleWIFConfig();
 
 if (
   GoogleGenAI &&
@@ -608,620 +321,278 @@ if (
   VERTEX_PROJECT_ID &&
   vertexCredentialConfig
 ) {
-
   try {
+    vertexAuth = new GoogleAuth({
+      credentials: vertexCredentialConfig,
+      projectId: VERTEX_PROJECT_ID,
+      scopes: [
+        'https://www.googleapis.com/auth/cloud-platform'
+      ]
+    });
 
-    vertexAuth =
-      new GoogleAuth({
-
-        credentials:
-          vertexCredentialConfig,
-
-        projectId:
-          VERTEX_PROJECT_ID,
-
+    vertexClient = new GoogleGenAI({
+      vertexai: true,
+      project: VERTEX_PROJECT_ID,
+      location: VERTEX_LOCATION,
+      googleAuthOptions: {
+        credentials: vertexCredentialConfig,
+        projectId: VERTEX_PROJECT_ID,
         scopes: [
-
-          "https://www.googleapis.com/auth/cloud-platform"
-
-        ]
-
-      });
-
-
-    vertexClient =
-      new GoogleGenAI({
-
-        vertexai:
-          true,
-
-        project:
-          VERTEX_PROJECT_ID,
-
-        location:
-          VERTEX_LOCATION,
-
-        googleAuthOptions: {
-
-          credentials:
-            vertexCredentialConfig,
-
-          projectId:
-            VERTEX_PROJECT_ID,
-
-          scopes: [
-
-            "https://www.googleapis.com/auth/cloud-platform"
-
-          ],
-
-          clientOptions: {
-
-            transporterOptions: {
-
-              fetchImplementation:
-                globalThis.fetch
-
-            }
-
+          'https://www.googleapis.com/auth/cloud-platform'
+        ],
+        clientOptions: {
+          transporterOptions: {
+            fetchImplementation: globalThis.fetch
           }
-
         }
-
-      });
-
+      }
+    });
 
     logger.info(
       `Google Vertex AI WIF client initialized | project=${VERTEX_PROJECT_ID} | location=${VERTEX_LOCATION}`
     );
-
   } catch (error) {
-
-    vertexAuth =
-      null;
-
-    vertexClient =
-      null;
+    vertexAuth = null;
+    vertexClient = null;
 
     logger.warning(
       `Google Vertex AI WIF initialization failed: ${error.message}`
     );
-
   }
-
 } else {
-
-  if (
-    !VERTEX_PROJECT_ID
-  ) {
-
+  if (!VERTEX_PROJECT_ID) {
     logger.warning(
-      "Google Vertex AI unavailable: VERTEX_PROJECT_ID is missing"
+      'Google Vertex AI unavailable: VERTEX_PROJECT_ID is missing'
     );
-
-  } else if (
-    !vertexCredentialConfig
-  ) {
-
+  } else if (!vertexCredentialConfig) {
     logger.warning(
-      "Google Vertex AI unavailable: GOOGLE_WIF_CONFIG_JSON is missing or invalid"
+      'Google Vertex AI unavailable: GOOGLE_WIF_CONFIG_JSON is missing or invalid'
     );
-
-  } else if (
-    !GoogleGenAI
-  ) {
-
+  } else if (!GoogleGenAI) {
     logger.warning(
-      "Google Vertex AI unavailable: @google/genai is not installed"
+      '@google/genai is not installed'
     );
-
-  } else if (
-    !GoogleAuth
-  ) {
-
+  } else if (!GoogleAuth) {
     logger.warning(
-      "Google Vertex AI unavailable: google-auth-library is not installed"
+      'google-auth-library is not installed'
     );
-
   }
-
 }
 
-
 /* =========================================================
-   PROVIDER NORMALIZATION
+   NORMALIZE PROVIDER NAME
 ========================================================= */
 
-function normalizeProvider(
-  provider
-) {
-
-  const value =
-    String(
-      provider || ""
-    )
-      .trim()
-      .toLowerCase();
-
+function normalizeProvider(provider) {
+  const value = String(provider || '')
+    .trim()
+    .toLowerCase();
 
   const aliases = {
+    bedrock: PROVIDERS.BEDROCK,
+    'amazon-bedrock': PROVIDERS.BEDROCK,
+    amazon: PROVIDERS.BEDROCK,
+    aws: PROVIDERS.BEDROCK,
 
-    bedrock:
-      PROVIDERS.BEDROCK,
+    sarvam: PROVIDERS.SARVAM,
+    'sarvam-ai': PROVIDERS.SARVAM,
+    sarvamai: PROVIDERS.SARVAM,
 
-    "amazon-bedrock":
-      PROVIDERS.BEDROCK,
+    bharatrouter: PROVIDERS.BHARATROUTER,
+    'bharat-router': PROVIDERS.BHARATROUTER,
+    'bharat router': PROVIDERS.BHARATROUTER,
+    bharat: PROVIDERS.BHARATROUTER,
 
-    amazon:
-      PROVIDERS.BEDROCK,
+    indierouter: PROVIDERS.INDIEROUTER,
+    'indie-router': PROVIDERS.INDIEROUTER,
+    'indie router': PROVIDERS.INDIEROUTER,
+    indie: PROVIDERS.INDIEROUTER,
 
-    aws:
-      PROVIDERS.BEDROCK,
-
-    sarvam:
-      PROVIDERS.SARVAM,
-
-    "sarvam-ai":
-      PROVIDERS.SARVAM,
-
-    sarvamai:
-      PROVIDERS.SARVAM,
-
-    bharatrouter:
-      PROVIDERS.BHARATROUTER,
-
-    "bharat-router":
-      PROVIDERS.BHARATROUTER,
-
-    "bharat router":
-      PROVIDERS.BHARATROUTER,
-
-    bharat:
-      PROVIDERS.BHARATROUTER,
-
-    indierouter:
-      PROVIDERS.INDIEROUTER,
-
-    "indie-router":
-      PROVIDERS.INDIEROUTER,
-
-    "indie router":
-      PROVIDERS.INDIEROUTER,
-
-    indie:
-      PROVIDERS.INDIEROUTER,
-
-    vertex:
-      PROVIDERS.VERTEX,
-
-    "vertex-ai":
-      PROVIDERS.VERTEX,
-
-    "google-vertex":
-      PROVIDERS.VERTEX,
-
-    vertexai:
-      PROVIDERS.VERTEX
-
+    vertex: PROVIDERS.VERTEX,
+    'vertex-ai': PROVIDERS.VERTEX,
+    'google-vertex': PROVIDERS.VERTEX,
+    vertexai: PROVIDERS.VERTEX
   };
 
-
-  return (
-    aliases[value] ||
-    null
-  );
-
+  return aliases[value] || null;
 }
-
 
 /* =========================================================
-   PROVIDER AVAILABLE
+   PROVIDER AVAILABILITY
 ========================================================= */
 
-function isProviderAvailable(
-  provider
-) {
-
-  const normalized =
-    normalizeProvider(
-      provider
-    );
-
-
-  switch (
-    normalized
-  ) {
-
+function isProviderAvailable(provider) {
+  switch (normalizeProvider(provider)) {
     case PROVIDERS.BEDROCK:
-
       return Boolean(
-
         bedrockClient &&
-
         ConverseCommand &&
-
         BEDROCK_MODEL
-
       );
-
 
     case PROVIDERS.SARVAM:
-
       return Boolean(
-
         env.SARVAM_API_KEY &&
-
         SARVAM_BASE_URL &&
-
         SARVAM_MODEL
-
       );
-
 
     case PROVIDERS.BHARATROUTER:
-
       return Boolean(
-
         env.BHARATROUTER_API_KEY &&
-
         BHARATROUTER_BASE_URL &&
-
         BHARATROUTER_MODEL
-
       );
-
 
     case PROVIDERS.INDIEROUTER:
-
       return Boolean(
-
         env.INDIEROUTER_API_KEY &&
-
         INDIEROUTER_BASE_URL &&
-
         INDIEROUTER_MODEL
-
       );
-
 
     case PROVIDERS.VERTEX:
-
       return Boolean(
-
         vertexClient &&
-
         vertexCredentialConfig &&
-
         VERTEX_PROJECT_ID &&
-
         VERTEX_LOCATION &&
-
         VERTEX_MODEL
-
       );
 
-
     default:
-
       return false;
-
   }
-
 }
-
 
 /* =========================================================
    PROVIDER CAPABILITIES
 ========================================================= */
 
-const PROVIDER_CAPABILITIES = {
-
+const PROVIDER_CAPABILITIES = Object.freeze({
   [PROVIDERS.BEDROCK]: {
-
-    coding:
-      true,
-
-    reasoning:
-      true,
-
-    planning:
-      true,
-
-    longContext:
-      true,
-
-    multimodal:
-      true,
-
-    structuredOutput:
-      true
-
+    coding: true,
+    reasoning: true,
+    planning: true,
+    longContext: true,
+    multimodal: true,
+    structuredOutput: true
   },
-
 
   [PROVIDERS.SARVAM]: {
-
-    coding:
-      true,
-
-    reasoning:
-      true,
-
-    planning:
-      true,
-
-    longContext:
-      true,
-
-    multimodal:
-      false,
-
-    structuredOutput:
-      true
-
+    coding: true,
+    reasoning: true,
+    planning: true,
+    longContext: true,
+    multimodal: false,
+    structuredOutput: true
   },
-
 
   [PROVIDERS.BHARATROUTER]: {
-
-    coding:
-      true,
-
-    reasoning:
-      true,
-
-    planning:
-      true,
-
-    longContext:
-      true,
-
-    multimodal:
-      true,
-
-    structuredOutput:
-      true
-
+    coding: true,
+    reasoning: true,
+    planning: true,
+    longContext: true,
+    multimodal: true,
+    structuredOutput: true
   },
-
 
   [PROVIDERS.INDIEROUTER]: {
-
-    coding:
-      true,
-
-    reasoning:
-      true,
-
-    planning:
-      true,
-
-    longContext:
-      true,
-
-    multimodal:
-      true,
-
-    structuredOutput:
-      true
-
+    coding: true,
+    reasoning: true,
+    planning: true,
+    longContext: true,
+    multimodal: true,
+    structuredOutput: true
   },
 
-
   [PROVIDERS.VERTEX]: {
-
-    coding:
-      true,
-
-    reasoning:
-      true,
-
-    planning:
-      true,
-
-    longContext:
-      true,
-
-    multimodal:
-      true,
-
-    structuredOutput:
-      true
-
+    coding: true,
+    reasoning: true,
+    planning: true,
+    longContext: true,
+    multimodal: true,
+    structuredOutput: true
   }
-
-};
-
+});
 
 /* =========================================================
-   PROVIDER ORDER
+   GET PROVIDER ORDER
 ========================================================= */
 
-function getProviderOrder(
-  options = {}
-) {
+function getProviderOrder(options = {}) {
+  const requested = normalizeProvider(options.provider);
 
-  const requested =
-    normalizeProvider(
-      options.provider
-    );
-
-
-  if (
-    requested
-  ) {
-
+  if (requested) {
     return [
-
       requested,
-
       ...DEFAULT_PROVIDER_ORDER.filter(
-        (provider) =>
-          provider !== requested
+        (provider) => provider !== requested
       )
-
     ];
-
   }
 
-
-  const capability =
-    String(
-      options.capability ||
-      options.taskType ||
-      options.role ||
-      ""
-    )
-      .trim()
-      .toLowerCase();
-
-
-  let ordered =
-    [...DEFAULT_PROVIDER_ORDER];
-
+  const capability = String(
+    options.capability ||
+    options.taskType ||
+    options.role ||
+    ''
+  )
+    .trim()
+    .toLowerCase();
 
   if (
-    capability === "coding" ||
-    capability === "builder" ||
-    capability === "code"
+    ['coding', 'builder', 'code'].includes(capability)
   ) {
-
-    ordered = [
-
-      PROVIDERS.BEDROCK,
-
-      PROVIDERS.INDIEROUTER,
-
-      PROVIDERS.BHARATROUTER,
-
-      PROVIDERS.SARVAM,
-
-      PROVIDERS.VERTEX
-
-    ];
-
+    return [...CODING_PROVIDER_ORDER];
   }
-
 
   if (
-    capability === "planning" ||
-    capability === "planner" ||
-    capability === "reasoning"
+    ['planning', 'planner', 'reasoning'].includes(capability)
   ) {
-
-    ordered = [
-
-      PROVIDERS.BEDROCK,
-
-      PROVIDERS.VERTEX,
-
-      PROVIDERS.SARVAM,
-
-      PROVIDERS.BHARATROUTER,
-
-      PROVIDERS.INDIEROUTER
-
-    ];
-
+    return [...PLANNING_PROVIDER_ORDER];
   }
-
 
   if (
-    capability === "multimodal" ||
-    capability === "vision"
+    ['multimodal', 'vision'].includes(capability)
   ) {
-
-    ordered = [
-
-      PROVIDERS.VERTEX,
-
-      PROVIDERS.BEDROCK,
-
-      PROVIDERS.BHARATROUTER,
-
-      PROVIDERS.INDIEROUTER,
-
-      PROVIDERS.SARVAM
-
-    ];
-
+    return [...MULTIMODAL_PROVIDER_ORDER];
   }
 
-
-  return ordered;
-
+  return [...DEFAULT_PROVIDER_ORDER];
 }
 
-
 /* =========================================================
-   PROVIDER COOLDOWN
+   COOLDOWN
 ========================================================= */
 
-function isProviderCoolingDown(
-  provider
-) {
+function isProviderCoolingDown(provider) {
+  const until = providerCooldowns.get(provider);
 
-  const until =
-    providerCooldowns.get(
-      provider
-    );
-
-
-  if (
-    !until
-  ) {
-
+  if (!until) {
     return false;
-
   }
 
-
-  if (
-    Date.now() >=
-    until
-  ) {
-
-    providerCooldowns.delete(
-      provider
-    );
-
+  if (Date.now() >= until) {
+    providerCooldowns.delete(provider);
     return false;
-
   }
-
 
   return true;
-
 }
-
-
-/* =========================================================
-   SET PROVIDER COOLDOWN
-========================================================= */
 
 function cooldownProvider(
   provider,
-  duration =
-    AI_PROVIDER_QUOTA_COOLDOWN_MS
+  duration = AI_PROVIDER_QUOTA_COOLDOWN_MS
 ) {
+  const until = Date.now() + duration;
 
-  const until =
-    Date.now() +
-    duration;
-
-
-  providerCooldowns.set(
-    provider,
-    until
-  );
-
+  providerCooldowns.set(provider, until);
 
   logger.warning(
     `AI provider cooldown enabled: ${provider} | duration=${duration}ms`
   );
-
 }
-
 
 /* =========================================================
    TIMEOUT WRAPPER
@@ -1233,943 +604,374 @@ function withTimeout(
   provider,
   model
 ) {
+  let timer;
 
-  const timeout =
-    Number(
-      timeoutMs
-    );
-
-
-  if (
-    !Number.isFinite(
-      timeout
-    ) ||
-    timeout <= 0
-  ) {
-
-    return promise;
-
-  }
-
-
-  let timer =
-    null;
-
-
-  const timeoutPromise =
-    new Promise(
-      (_, reject) => {
-
-        timer =
-          setTimeout(
-            () => {
-
-              const error =
-                new Error(
-                  `${provider} AI provider timed out after ${timeout}ms`
-                );
-
-
-              error.code =
-                "AI_PROVIDER_TIMEOUT";
-
-
-              error.provider =
-                provider;
-
-
-              error.model =
-                model;
-
-
-              reject(
-                error
-              );
-
-            },
-            timeout
-          );
-
-      }
-    );
-
-
-  return Promise.race(
-    [
-
-      promise,
-
-      timeoutPromise
-
-    ]
-  ).finally(
-    () => {
-
-      if (
-        timer
-      ) {
-
-        clearTimeout(
-          timer
-        );
-
-      }
-
-    }
-  );
-
-}
-
-
-/* =========================================================
-   ERROR STATUS
-========================================================= */
-
-function getErrorStatus(
-  error
-) {
-
-  if (
-    !error
-  ) {
-
-    return null;
-
-  }
-
-
-  const candidates = [
-
-    error.status,
-
-    error.statusCode,
-
-    error?.response?.status,
-
-    error?.response?.statusCode,
-
-    error?.error?.status,
-
-    error?.error?.code,
-
-    error?.details?.status
-
-  ];
-
-
-  for (
-    const candidate of candidates
-  ) {
-
-    const numeric =
-      Number(
-        candidate
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(
+        `${provider} AI provider timed out after ${timeoutMs}ms`
       );
 
+      error.code = 'AI_PROVIDER_TIMEOUT';
+      error.provider = provider;
+      error.model = model;
 
-    if (
-      Number.isFinite(
-        numeric
-      )
-    ) {
+      reject(error);
+    }, timeoutMs);
+  });
 
-      return numeric;
-
-    }
-
-  }
-
-
-  return null;
-
+  return Promise.race([
+    promise,
+    timeoutPromise
+  ]).finally(() => {
+    clearTimeout(timer);
+  });
 }
 
-
 /* =========================================================
-   ERROR CODE
+   ERROR HELPERS
 ========================================================= */
 
-function getErrorCode(
-  error
-) {
+function getErrorStatus(error) {
+  const candidates = [
+    error?.status,
+    error?.statusCode,
+    error?.response?.status,
+    error?.response?.statusCode,
+    error?.error?.status,
+    error?.details?.status
+  ];
 
-  if (
-    !error
-  ) {
+  for (const candidate of candidates) {
+    const n = Number(candidate);
 
-    return "";
-
+    if (
+      Number.isFinite(n) &&
+      n >= 100 &&
+      n <= 599
+    ) {
+      return n;
+    }
   }
 
+  return null;
+}
 
+function getErrorCode(error) {
   return String(
-
-    error.code ||
-
+    error?.code ||
     error?.error?.code ||
-
     error?.error?.status ||
-
     error?.statusText ||
-
-    ""
-
+    ''
   )
     .trim()
     .toUpperCase();
-
 }
 
-
-/* =========================================================
-   ERROR MESSAGE
-========================================================= */
-
-function getErrorMessage(
-  error
-) {
-
+function getErrorMessage(error) {
   return String(
-
     error?.message ||
-
     error?.error?.message ||
-
     error?.response?.data?.message ||
-
     error?.response?.data?.error ||
-
     error?.details?.message ||
-
-    ""
-
-  )
-    .trim();
-
+    ''
+  ).trim();
 }
-
 
 /* =========================================================
    ERROR CLASSIFICATION
 ========================================================= */
 
-function classifyProviderError(
-  error
-) {
-
-  const status =
-    getErrorStatus(
-      error
-    );
-
-
-  const code =
-    getErrorCode(
-      error
-    );
-
-
-  const message =
-    getErrorMessage(
-      error
-    ).toLowerCase();
-
-
-  /* =======================================================
-     STRUCTURED OUTPUT FAILURE
-  ======================================================= */
+function classifyProviderError(error) {
+  const status = getErrorStatus(error);
+  const code = getErrorCode(error);
+  const message = getErrorMessage(error).toLowerCase();
 
   if (
-    error?.code ===
-      "AI_INVALID_JSON" ||
-
-    error?.code ===
-      "AI_STRUCTURED_OUTPUT_INVALID"
+    [
+      'AI_INVALID_JSON',
+      'AI_STRUCTURED_OUTPUT_INVALID',
+      'AI_EMPTY_RESPONSE'
+    ].includes(error?.code)
   ) {
-
     return {
-
       category:
-        "structured_output",
-
-      retryable:
-        true,
-
-      fallback:
-        true
-
+        error.code === 'AI_EMPTY_RESPONSE'
+          ? 'empty_response'
+          : 'structured_output',
+      retryable: true,
+      fallback: true
     };
-
   }
-
-
-  /* =======================================================
-     TEMPORARY NETWORK FAILURE
-  ======================================================= */
 
   if (
-    error?.code ===
-      "AI_PROVIDER_TIMEOUT" ||
-
-    error?.code ===
-      "ETIMEDOUT" ||
-
-    error?.code ===
-      "ECONNRESET" ||
-
-    error?.code ===
-      "ECONNREFUSED" ||
-
-    error?.code ===
-      "EAI_AGAIN" ||
-
-    message.includes(
-      "fetch failed"
-    )
+    [
+      'AI_PROVIDER_TIMEOUT',
+      'ETIMEDOUT',
+      'ECONNRESET',
+      'ECONNREFUSED',
+      'EAI_AGAIN',
+      'ENOTFOUND',
+      'UND_ERR_CONNECT_TIMEOUT',
+      'AI_NETWORK_ERROR'
+    ].includes(code) ||
+    message.includes('fetch failed') ||
+    message.includes('socket hang up')
   ) {
-
     return {
-
-      category:
-        "temporary",
-
-      retryable:
-        true,
-
-      fallback:
-        true
-
+      category: 'temporary',
+      retryable: true,
+      fallback: true
     };
-
   }
-
-
-  /* =======================================================
-     QUOTA / BILLING
-  ======================================================= */
 
   const quotaPhrases = [
-
-    "quota",
-
-    "resource exhausted",
-
-    "resource_exhausted",
-
-    "rate limit",
-
-    "too many requests",
-
-    "too many tokens",
-
-    "tokens per day",
-
-    "daily token",
-
-    "daily tokens",
-
-    "daily quota",
-
-    "insufficient balance",
-
-    "insufficient funds",
-
-    "billing",
-
-    "credit balance",
-
-    "usage limit",
-
-    "usage quota",
-
-    "exceeded your current quota",
-
-    "payment required",
-
-    "credits exhausted",
-
-    "credits exceeded",
-
-    "capacity exceeded",
-
-    "resource has been exhausted"
-
+    'quota',
+    'resource exhausted',
+    'resource_exhausted',
+    'rate limit',
+    'too many requests',
+    'too many tokens',
+    'tokens per day',
+    'daily token',
+    'daily tokens',
+    'daily quota',
+    'insufficient balance',
+    'insufficient funds',
+    'billing',
+    'credit balance',
+    'usage limit',
+    'usage quota',
+    'exceeded your current quota',
+    'payment required',
+    'credits exhausted',
+    'credits exceeded',
+    'capacity exceeded',
+    'resource has been exhausted',
+    'insufficient_quota'
   ];
-
 
   if (
     status === 429 ||
     status === 402 ||
-    code ===
-      "RESOURCE_EXHAUSTED" ||
+    code === 'RESOURCE_EXHAUSTED' ||
+    code === 'INSUFFICIENT_QUOTA' ||
     quotaPhrases.some(
-      (phrase) =>
-        message.includes(
-          phrase
-        )
+      (phrase) => message.includes(phrase)
     )
   ) {
-
     return {
-
-      category:
-        "quota",
-
-      retryable:
-        false,
-
-      fallback:
-        true
-
+      category: 'quota',
+      retryable: false,
+      fallback: true
     };
-
   }
-
-
-  /* =======================================================
-     AUTHENTICATION
-  ======================================================= */
 
   if (
+    [401, 403].includes(status) ||
     [
-      401,
-      403
-    ].includes(
-      status
-    ) ||
-
-    [
-      "UNAUTHORIZED",
-      "AUTHENTICATION_ERROR",
-      "PERMISSION_DENIED",
-      "INVALID_API_KEY",
-      "INVALID_CREDENTIALS",
-      "UNAUTHENTICATED"
-    ].includes(
-      code
-    ) ||
-
-    message.includes(
-      "invalid api key"
-    ) ||
-
-    message.includes(
-      "authentication"
-    ) ||
-
-    message.includes(
-      "unauthorized"
-    ) ||
-
-    message.includes(
-      "permission denied"
-    ) ||
-
-    message.includes(
-      "unauthenticated"
-    )
+      'UNAUTHORIZED',
+      'AUTHENTICATION_ERROR',
+      'PERMISSION_DENIED',
+      'INVALID_API_KEY',
+      'INVALID_CREDENTIALS',
+      'UNAUTHENTICATED'
+    ].includes(code) ||
+    /invalid api key|authentication|unauthorized|permission denied|unauthenticated|access denied/.test(message)
   ) {
-
     return {
-
-      category:
-        "authentication",
-
-      retryable:
-        false,
-
-      fallback:
-        true
-
+      category: 'authentication',
+      retryable: false,
+      fallback: true
     };
-
   }
-
-
-  /* =======================================================
-     CONFIGURATION
-  ======================================================= */
 
   if (
-    error?.code ===
-      "AI_PROVIDER_NOT_CONFIGURED"
+    error?.code === 'AI_PROVIDER_NOT_CONFIGURED'
   ) {
-
     return {
-
-      category:
-        "configuration",
-
-      retryable:
-        false,
-
-      fallback:
-        true
-
+      category: 'configuration',
+      retryable: false,
+      fallback: true
     };
-
   }
-
-
-  /* =======================================================
-     INVALID REQUEST
-  ======================================================= */
 
   if (
     status === 400 ||
     status === 422 ||
-    error?.code ===
-      "AI_INVALID_REQUEST"
+    error?.code === 'AI_INVALID_REQUEST'
   ) {
-
     return {
-
-      category:
-        "invalid_request",
-
-      retryable:
-        false,
-
-      fallback:
-        false
-
+      category: 'invalid_request',
+      retryable: false,
+      fallback: false
     };
-
   }
-
-
-  /* =======================================================
-     SERVER TEMPORARY
-  ======================================================= */
 
   if (
-    [
-      408,
-      500,
-      502,
-      503,
-      504
-    ].includes(
-      status
-    )
+    [408, 500, 502, 503, 504].includes(status) ||
+    /temporarily unavailable|service unavailable|internal server error|bad gateway|gateway timeout|try again later|overloaded|high demand|deadline exceeded|server error|network error|connection reset/.test(message)
   ) {
-
     return {
-
-      category:
-        "temporary",
-
-      retryable:
-        true,
-
-      fallback:
-        true
-
+      category: 'temporary',
+      retryable: true,
+      fallback: true
     };
-
   }
-
-
-  const temporaryPhrases = [
-
-    "temporarily unavailable",
-
-    "service unavailable",
-
-    "internal server error",
-
-    "bad gateway",
-
-    "gateway timeout",
-
-    "try again later",
-
-    "overloaded",
-
-    "high demand",
-
-    "deadline exceeded",
-
-    "server error",
-
-    "network error",
-
-    "connection reset"
-
-  ];
-
-
-  if (
-    temporaryPhrases.some(
-      (phrase) =>
-        message.includes(
-          phrase
-        )
-    )
-  ) {
-
-    return {
-
-      category:
-        "temporary",
-
-      retryable:
-        true,
-
-      fallback:
-        true
-
-    };
-
-  }
-
 
   return {
-
-    category:
-      "provider_error",
-
-    retryable:
-      false,
-
-    fallback:
-      true
-
+    category: 'provider_error',
+    retryable: false,
+    fallback: true
   };
-
 }
-
 
 /* =========================================================
    RETRY DELAY
 ========================================================= */
 
-function getRetryDelay(
-  attempt,
-  error = null
-) {
+function getRetryDelay(attempt, error = null) {
+  const headers = error?.response?.headers;
 
-  const retryAfterCandidates = [
-
-    error?.retryAfterMs,
-
-    error?.retryAfter,
-
-    error?.response?.headers?.["retry-after"],
-
-    error?.response?.headers?.["Retry-After"]
-
-  ];
-
-
-  for (
-    const candidate of retryAfterCandidates
-  ) {
-
-    const numeric =
-      Number(
-        candidate
-      );
-
-
-    if (
-      Number.isFinite(
-        numeric
-      ) &&
-      numeric > 0
-    ) {
-
-      if (
-        candidate ===
-        error?.retryAfterMs
-      ) {
-
-        return Math.min(
-          numeric,
-          AI_MAX_RETRY_DELAY_MS
-        );
-
-      }
-
-
-      return Math.min(
-        numeric * 1000,
-        AI_MAX_RETRY_DELAY_MS
-      );
-
-    }
-
-  }
-
-
-  const exponent =
-    Math.max(
-      0,
-      attempt - 1
-    );
-
-
-  const base =
-    AI_RETRY_BASE_DELAY_MS *
-    Math.pow(
-      2,
-      exponent
-    );
-
-
-  const jitter =
-    Math.floor(
-      Math.random() *
-      300
-    );
-
-
-  return Math.min(
-    base + jitter,
-    AI_MAX_RETRY_DELAY_MS
-  );
-
-}
-
-
-/* =========================================================
-   SLEEP
-========================================================= */
-
-function sleep(
-  ms
-) {
-
-  return new Promise(
-    (resolve) => {
-
-      setTimeout(
-        resolve,
-        ms
-      );
-
-    }
-  );
-
-}
-
-
-/* =========================================================
-   NORMALIZE MESSAGES
-========================================================= */
-
-function normalizeMessages(
-  messages = []
-) {
+  const retryAfter =
+    error?.retryAfterMs ??
+    error?.retryAfter ??
+    headers?.get?.('retry-after') ??
+    headers?.['retry-after'] ??
+    headers?.['Retry-After'];
 
   if (
-    !Array.isArray(
-      messages
-    )
+    retryAfter !== undefined &&
+    retryAfter !== null &&
+    retryAfter !== ''
   ) {
+    const numeric = Number(retryAfter);
 
-    return [];
+    if (
+      Number.isFinite(numeric) &&
+      numeric > 0
+    ) {
+      const ms =
+        error?.retryAfterMs != null
+          ? numeric
+          : numeric * 1000;
 
+      return Math.min(
+        ms,
+        AI_MAX_RETRY_DELAY_MS
+      );
+    }
   }
 
+  const exponential =
+    AI_RETRY_BASE_DELAY_MS *
+    (2 ** Math.max(0, attempt - 1));
+
+  return Math.min(
+    exponential + Math.floor(Math.random() * 300),
+    AI_MAX_RETRY_DELAY_MS
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/* =========================================================
+   MESSAGE NORMALIZATION
+========================================================= */
+
+function normalizeMessages(messages = []) {
+  if (!Array.isArray(messages)) {
+    return [];
+  }
 
   return messages
-
     .filter(
       (message) =>
         message &&
-        typeof message.content ===
-          "string" &&
+        typeof message.content === 'string' &&
         message.content.trim()
     )
+    .map((message) => ({
+      role: [
+        'system',
+        'user',
+        'assistant'
+      ].includes(message.role)
+        ? message.role
+        : 'user',
 
-    .map(
-      (message) => {
-
-        const role =
-          [
-
-            "system",
-
-            "user",
-
-            "assistant"
-
-          ].includes(
-            message.role
-          )
-            ? message.role
-            : "user";
-
-
-        return {
-
-          role,
-
-          content:
-            message.content.trim()
-
-        };
-
-      }
-    );
-
+      content: message.content.trim()
+    }));
 }
 
-
-/* =========================================================
-   BUILD MESSAGES
-========================================================= */
-
-function buildMessages(
-  options = {}
-) {
-
-  let messages = [];
-
+function buildMessages(options = {}) {
+  let messages = Array.isArray(options.messages)
+    ? normalizeMessages(options.messages)
+    : [];
 
   if (
-    Array.isArray(
-      options.messages
-    )
-  ) {
-
-    messages =
-      normalizeMessages(
-        options.messages
-      );
-
-  }
-
-
-  if (
-    messages.length === 0 &&
-    typeof options.prompt ===
-      "string" &&
+    !messages.length &&
+    typeof options.prompt === 'string' &&
     options.prompt.trim()
   ) {
-
-    messages = [
-
-      {
-
-        role:
-          "user",
-
-        content:
-          options.prompt.trim()
-
-      }
-
-    ];
-
+    messages = [{
+      role: 'user',
+      content: options.prompt.trim()
+    }];
   }
 
-
   if (
-    messages.length === 0 &&
-    typeof options.contents ===
-      "string" &&
+    !messages.length &&
+    typeof options.contents === 'string' &&
     options.contents.trim()
   ) {
-
-    messages = [
-
-      {
-
-        role:
-          "user",
-
-        content:
-          options.contents.trim()
-
-      }
-
-    ];
-
+    messages = [{
+      role: 'user',
+      content: options.contents.trim()
+    }];
   }
-
 
   if (
-    typeof options.systemInstruction ===
-      "string" &&
+    typeof options.systemInstruction === 'string' &&
     options.systemInstruction.trim()
   ) {
+    const index = messages.findIndex(
+      (message) => message.role === 'system'
+    );
 
-    const existingSystemIndex =
-      messages.findIndex(
-        (message) =>
-          message.role ===
-          "system"
-      );
+    const systemMessage = {
+      role: 'system',
+      content: options.systemInstruction.trim()
+    };
 
-
-    if (
-      existingSystemIndex >= 0
-    ) {
-
-      messages[
-        existingSystemIndex
-      ] = {
-
-        role:
-          "system",
-
-        content:
-          options.systemInstruction.trim()
-
-      };
-
+    if (index >= 0) {
+      messages[index] = systemMessage;
     } else {
-
-      messages.unshift({
-
-        role:
-          "system",
-
-        content:
-          options.systemInstruction.trim()
-
-      });
-
+      messages.unshift(systemMessage);
     }
-
   }
 
-
   return messages;
-
 }
 
-
-/* =========================================================
-   VALIDATE MESSAGES
-========================================================= */
-
-function validateMessages(
-  messages
-) {
-
+function validateMessages(messages) {
   return (
-
-    Array.isArray(
-      messages
-    ) &&
-
+    Array.isArray(messages) &&
     messages.length > 0 &&
-
     messages.some(
       (message) =>
         message &&
-        typeof message.content ===
-          "string" &&
+        typeof message.content === 'string' &&
         message.content.trim()
     )
-
   );
-
 }
-
 
 /* =========================================================
    HTTP JSON REQUEST
@@ -2181,642 +983,340 @@ async function fetchJSON(
   provider,
   model
 ) {
+  const controller = new AbortController();
 
-  const controller =
-    new AbortController();
-
-
-  const timeout =
-    setTimeout(
-      () => {
-
-        controller.abort();
-
-      },
-      AI_PROVIDER_TIMEOUT_MS
-    );
-
+  const timer = setTimeout(
+    () => controller.abort(),
+    AI_PROVIDER_TIMEOUT_MS
+  );
 
   try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
 
-    const response =
-      await fetch(
-        url,
-        {
+    const rawText = await response.text();
 
-          ...options,
-
-          signal:
-            controller.signal
-
-        }
-      );
-
-
-    const rawText =
-      await response.text();
-
-
-    let data =
-      null;
-
+    let data = null;
 
     try {
-
-      data =
-        rawText
-          ? JSON.parse(
-              rawText
-            )
-          : null;
-
-    } catch (error) {
-
-      data =
-        null;
-
+      data = rawText
+        ? JSON.parse(rawText)
+        : null;
+    } catch (_) {
+      data = null;
     }
 
+    if (!response.ok) {
+      const error = new Error(
+        data?.error?.message ||
+        data?.message ||
+        rawText ||
+        `${provider} returned HTTP ${response.status}`
+      );
 
-    if (
-      !response.ok
-    ) {
+      error.status = response.status;
+      error.provider = provider;
+      error.model = model;
 
-      const error =
-        new Error(
-
-          data?.error?.message ||
-
-          data?.message ||
-
-          rawText ||
-
-          `${provider} returned HTTP ${response.status}`
-
-        );
-
-
-      error.status =
-        response.status;
-
-
-      error.provider =
-        provider;
-
-
-      error.model =
-        model;
-
-
-      error.response =
-        {
-
-          status:
-            response.status,
-
-          data,
-
-          headers:
-            response.headers
-
-        };
-
+      error.response = {
+        status: response.status,
+        data,
+        headers: response.headers
+      };
 
       throw error;
-
     }
-
 
     return {
-
       data,
-
-      status:
-        response.status,
-
-      headers:
-        response.headers
-
+      status: response.status,
+      headers: response.headers
     };
-
   } catch (error) {
+    if (error?.name === 'AbortError') {
+      const timeoutError = new Error(
+        `${provider} AI provider timed out after ${AI_PROVIDER_TIMEOUT_MS}ms`
+      );
 
-    if (
-      error?.name ===
-      "AbortError"
-    ) {
-
-      const timeoutError =
-        new Error(
-          `${provider} AI provider timed out after ${AI_PROVIDER_TIMEOUT_MS}ms`
-        );
-
-
-      timeoutError.code =
-        "AI_PROVIDER_TIMEOUT";
-
-
-      timeoutError.provider =
-        provider;
-
-
-      timeoutError.model =
-        model;
-
+      timeoutError.code = 'AI_PROVIDER_TIMEOUT';
+      timeoutError.provider = provider;
+      timeoutError.model = model;
 
       throw timeoutError;
-
     }
 
+    if (
+      !error.status &&
+      !error.code &&
+      error instanceof TypeError
+    ) {
+      error.code = 'AI_NETWORK_ERROR';
+    }
 
     throw error;
-
   } finally {
-
-    clearTimeout(
-      timeout
-    );
-
+    clearTimeout(timer);
   }
-
 }
 
-
 /* =========================================================
-   EXTRACT OPENAI-COMPATIBLE TEXT
+   OPENAI-COMPATIBLE RESPONSE TEXT
 ========================================================= */
 
-function extractChatCompletionText(
-  data
-) {
+function extractChatCompletionText(data) {
+  const message = data?.choices?.[0]?.message;
+  const content = message?.content;
 
-  const message =
-    data?.choices?.[0]?.message;
-
-
-  const content =
-    message?.content;
-
-
-  if (
-    typeof content ===
-    "string"
-  ) {
-
+  if (typeof content === 'string') {
     return content.trim();
-
   }
 
-
-  if (
-    Array.isArray(
-      content
-    )
-  ) {
-
+  if (Array.isArray(content)) {
     return content
-
-      .map(
-        (item) => {
-
-          if (
-            typeof item ===
-            "string"
-          ) {
-
-            return item;
-
-          }
-
-
-          if (
-            typeof item?.text ===
-            "string"
-          ) {
-
-            return item.text;
-
-          }
-
-
-          return "";
-
+      .map((item) => {
+        if (typeof item === 'string') {
+          return item;
         }
-      )
 
-      .join(
-        ""
-      )
+        if (typeof item?.text === 'string') {
+          return item.text;
+        }
 
+        return '';
+      })
+      .join('')
       .trim();
-
   }
 
+  if (Array.isArray(message?.content_blocks)) {
+    return message.content_blocks
+      .map((item) =>
+        typeof item?.text === 'string'
+          ? item.text
+          : ''
+      )
+      .join('')
+      .trim();
+  }
 
   if (
-    Array.isArray(
-      message?.content_blocks
-    )
+    typeof message?.reasoning_content === 'string' &&
+    message.reasoning_content.trim()
   ) {
-
-    return message.content_blocks
-
-      .map(
-        (item) =>
-          typeof item?.text ===
-          "string"
-            ? item.text
-            : ""
-      )
-
-      .join(
-        ""
-      )
-
-      .trim();
-
+    return message.reasoning_content.trim();
   }
 
-
-  return "";
-
+  return '';
 }
 
-
-/* =========================================================
-   SAFE RESPONSE DIAGNOSTICS
-========================================================= */
-
-function getSafeResponseDiagnostics(
-  data
-) {
-
-  const choice =
-    data?.choices?.[0] ||
-    null;
-
-
-  const message =
-    choice?.message ||
-    null;
-
+function getSafeResponseDiagnostics(data) {
+  const choice = data?.choices?.[0] || null;
+  const message = choice?.message || null;
 
   return {
+    object: data?.object || null,
+    model: data?.model || null,
 
-    object:
-      data?.object ||
-      null,
+    choices: Array.isArray(data?.choices)
+      ? data.choices.length
+      : 0,
 
-    model:
-      data?.model ||
-      null,
+    finishReason: choice?.finish_reason || null,
+    messageRole: message?.role || null,
+    hasContent: Boolean(message?.content),
 
-    choices:
-      Array.isArray(
-        data?.choices
-      )
-        ? data.choices.length
-        : 0,
+    contentType: Array.isArray(message?.content)
+      ? 'array'
+      : typeof message?.content,
 
-    finishReason:
-      choice?.finish_reason ||
-      null,
-
-    messageRole:
-      message?.role ||
-      null,
-
-    hasContent:
-      Boolean(
-        message?.content
-      ),
-
-    contentType:
-      Array.isArray(
-        message?.content
-      )
-        ? "array"
-        : typeof message?.content,
-
-    hasReasoningContent:
-      Boolean(
-        message?.reasoning_content
-      ),
+    hasReasoningContent: Boolean(
+      message?.reasoning_content
+    ),
 
     hasToolCalls:
-      Array.isArray(
-        message?.tool_calls
-      ) &&
+      Array.isArray(message?.tool_calls) &&
       message.tool_calls.length > 0,
 
-    usage:
-      data?.usage
-        ? {
+    usage: data?.usage
+      ? {
+          promptTokens:
+            data.usage.prompt_tokens ?? null,
 
-            promptTokens:
-              data.usage.prompt_tokens ??
-              null,
+          completionTokens:
+            data.usage.completion_tokens ?? null,
 
-            completionTokens:
-              data.usage.completion_tokens ??
-              null,
-
-            totalTokens:
-              data.usage.total_tokens ??
-              null
-
-          }
-        : null
-
+          totalTokens:
+            data.usage.total_tokens ?? null
+        }
+      : null
   };
-
 }
 
-
 /* =========================================================
-   JSON TEXT CLEANER
+   JSON CLEANING AND PARSING
 ========================================================= */
 
-function cleanJSONText(
-  value
-) {
-
-  if (
-    typeof value !==
-    "string"
-  ) {
-
-    return "";
-
+function cleanJSONText(value) {
+  if (typeof value !== 'string') {
+    return '';
   }
 
-
-  let text =
-    value.trim();
-
-
-  if (
-    !text
-  ) {
-
-    return "";
-
-  }
-
-
-  /* Remove markdown JSON fence */
-
-  text =
-    text.replace(
-      /^\s*```json\s*/i,
-      ""
-    );
-
-
-  text =
-    text.replace(
-      /^\s*```\s*/i,
-      ""
-    );
-
-
-  text =
-    text.replace(
-      /\s*```\s*$/i,
-      ""
-    );
-
-
-  text =
-    text.trim();
-
-
-  return text;
-
+  return value
+    .trim()
+    .replace(/^\s*```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+    .trim();
 }
 
+function extractJSONCandidate(value) {
+  const cleaned = cleanJSONText(value);
 
-/* =========================================================
-   EXTRACT JSON OBJECT
-========================================================= */
-
-function extractJSONCandidate(
-  value
-) {
-
-  const cleaned =
-    cleanJSONText(
-      value
-    );
-
-
-  if (
-    !cleaned
-  ) {
-
-    return "";
-
+  if (!cleaned) {
+    return '';
   }
-
-
-  /* First try the entire response */
 
   try {
-
-    JSON.parse(
-      cleaned
-    );
-
+    JSON.parse(cleaned);
     return cleaned;
-
-  } catch (error) {
-
-    /* Continue with object extraction */
-
+  } catch (_) {
+    // Attempt to extract a JSON object or array.
   }
 
-
-  const firstObject =
-    cleaned.indexOf(
-      "{"
-    );
-
-
-  const lastObject =
-    cleaned.lastIndexOf(
-      "}"
-    );
-
-
-  if (
-    firstObject >= 0 &&
-    lastObject > firstObject
+  for (
+    let start = 0;
+    start < cleaned.length;
+    start += 1
   ) {
+    const opening = cleaned[start];
 
-    return cleaned.slice(
-      firstObject,
-      lastObject + 1
-    );
+    if (
+      opening !== '{' &&
+      opening !== '['
+    ) {
+      continue;
+    }
 
+    const stack = [];
+    let inString = false;
+    let escaped = false;
+
+    for (
+      let i = start;
+      i < cleaned.length;
+      i += 1
+    ) {
+      const ch = cleaned[i];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (ch === '{' || ch === '[') {
+        stack.push(ch);
+      } else if (ch === '}' || ch === ']') {
+        const last = stack.pop();
+
+        if (
+          (ch === '}' && last !== '{') ||
+          (ch === ']' && last !== '[')
+        ) {
+          break;
+        }
+
+        if (stack.length === 0) {
+          const candidate = cleaned.slice(
+            start,
+            i + 1
+          );
+
+          try {
+            JSON.parse(candidate);
+            return candidate;
+          } catch (_) {
+            break;
+          }
+        }
+      }
+    }
   }
-
-
-  const firstArray =
-    cleaned.indexOf(
-      "["
-    );
-
-
-  const lastArray =
-    cleaned.lastIndexOf(
-      "]"
-    );
-
-
-  if (
-    firstArray >= 0 &&
-    lastArray > firstArray
-  ) {
-
-    return cleaned.slice(
-      firstArray,
-      lastArray + 1
-    );
-
-  }
-
 
   return cleaned;
-
 }
 
-
-/* =========================================================
-   PARSE JSON RESPONSE
-========================================================= */
-
-function parseJSONResponse(
-  text
-) {
-
+function parseJSONResponse(text) {
   if (
-    typeof text !==
-    "string" ||
+    typeof text !== 'string' ||
     !text.trim()
   ) {
-
-    throw new Error(
-      "AI provider returned empty JSON content"
+    const error = new Error(
+      'AI provider returned empty JSON content'
     );
 
+    error.code = 'AI_EMPTY_RESPONSE';
+    throw error;
   }
 
-
-  const candidate =
-    extractJSONCandidate(
-      text
-    );
-
+  const candidate = extractJSONCandidate(text);
 
   try {
-
-    return JSON.parse(
-      candidate
+    return JSON.parse(candidate);
+  } catch (cause) {
+    const error = new Error(
+      `Invalid JSON: ${cause.message}`
     );
 
-  } catch (error) {
+    error.code = 'AI_INVALID_JSON';
+    error.parseMessage = cause.message;
+    error.rawLength = text.length;
 
-    const parseError =
-      new Error(
-        `Invalid JSON: ${error.message}`
-      );
-
-
-    parseError.code =
-      "AI_INVALID_JSON";
-
-
-    parseError.parseMessage =
-      error.message;
-
-
-    parseError.rawLength =
-      text.length;
-
-
-    parseError.startsWithObject =
-      text.trim().startsWith(
-        "{"
-      );
-
-
-    parseError.endsWithObject =
-      text.trim().endsWith(
-        "}"
-      );
-
-
-    throw parseError;
-
+    throw error;
   }
-
 }
 
-
 /* =========================================================
-   GENERIC OPENAI-COMPATIBLE PROVIDER
+   OPENAI-COMPATIBLE PROVIDERS
 ========================================================= */
 
 async function generateWithOpenAICompatibleProvider(
   provider,
   options = {}
 ) {
-
-  const config = {
-
+  const configs = {
     [PROVIDERS.SARVAM]: {
-
-      apiKey:
-        env.SARVAM_API_KEY,
-
-      baseURL:
-        SARVAM_BASE_URL,
-
-      model:
-        SARVAM_MODEL
-
+      apiKey: env.SARVAM_API_KEY,
+      baseURL: SARVAM_BASE_URL,
+      model: SARVAM_MODEL
     },
-
 
     [PROVIDERS.BHARATROUTER]: {
-
-      apiKey:
-        env.BHARATROUTER_API_KEY,
-
-      baseURL:
-        BHARATROUTER_BASE_URL,
-
-      model:
-        BHARATROUTER_MODEL
-
+      apiKey: env.BHARATROUTER_API_KEY,
+      baseURL: BHARATROUTER_BASE_URL,
+      model: BHARATROUTER_MODEL
     },
 
-
     [PROVIDERS.INDIEROUTER]: {
-
-      apiKey:
-        env.INDIEROUTER_API_KEY,
-
-      baseURL:
-        INDIEROUTER_BASE_URL,
-
-      model:
-        INDIEROUTER_MODEL
-
+      apiKey: env.INDIEROUTER_API_KEY,
+      baseURL: INDIEROUTER_BASE_URL,
+      model: INDIEROUTER_MODEL
     }
+  };
 
-  }[provider];
-
+  const config = configs[provider];
 
   if (
     !config ||
@@ -2824,1922 +1324,888 @@ async function generateWithOpenAICompatibleProvider(
     !config.baseURL ||
     !config.model
   ) {
-
-    const error =
-      new Error(
-        `${provider} provider is not configured`
-      );
-
-
-    error.code =
-      "AI_PROVIDER_NOT_CONFIGURED";
-
-
-    error.provider =
-      provider;
-
-
-    throw error;
-
-  }
-
-
-  const messages =
-    buildMessages(
-      options
+    const error = new Error(
+      `${provider} provider is not configured: API key, base URL, or model missing`
     );
 
-
-  if (
-    !validateMessages(
-      messages
-    )
-  ) {
-
-    const error =
-      new Error(
-        "AI messages are required"
-      );
-
-
-    error.code =
-      "AI_INVALID_REQUEST";
-
-
-    error.provider =
-      provider;
-
+    error.code = 'AI_PROVIDER_NOT_CONFIGURED';
+    error.provider = provider;
 
     throw error;
-
   }
 
+  const messages = buildMessages(options);
+
+  if (!validateMessages(messages)) {
+    const error = new Error(
+      'AI messages are required'
+    );
+
+    error.code = 'AI_INVALID_REQUEST';
+    error.provider = provider;
+
+    throw error;
+  }
 
   const model =
-    options.model &&
-    String(
-      options.model
-    ).trim()
-      ? String(
-          options.model
-        ).trim()
+    options.model && String(options.model).trim()
+      ? String(options.model).trim()
       : config.model;
 
-
-  const maxTokens =
-    normalizeMaxTokens(
-      provider,
-      options.maxTokens
-    );
-
-
-  const body = {
-
-    model,
-
-    messages,
-
-    stream:
-      false,
-
-    max_tokens:
-      maxTokens
-
-  };
-
-
-  if (
-    Number.isFinite(
-      options.temperature
-    )
-  ) {
-
-    body.temperature =
-      Number(
-        options.temperature
-      );
-
-  }
-
-
-  /* =======================================================
-     SARVAM
-  ======================================================= */
-
-  if (
-    provider ===
-    PROVIDERS.SARVAM
-  ) {
-
-    /*
-     * Disable visible reasoning for structured
-     * production output. Reasoning tokens can consume
-     * the generation budget.
-     */
-
-    body.reasoning_effort =
-      null;
-
-  }
-
-
-  /* =======================================================
-     STRUCTURED JSON
-  ======================================================= */
-
-  if (
-    options.json === true
-  ) {
-
-    body.response_format = {
-
-      type:
-        "json_object"
-
-    };
-
-  }
-
-
-  const headers = {
-
-    "Content-Type":
-      "application/json"
-
-  };
-
-
-  if (
-    provider ===
-    PROVIDERS.SARVAM
-  ) {
-
-    headers[
-      "api-subscription-key"
-    ] =
-      config.apiKey;
-
-  } else {
-
-    headers.Authorization =
-      `Bearer ${config.apiKey}`;
-
-  }
-
-
-  logger.info(
-    `${provider} token policy: requested=${options.maxTokens || "default"} | effective=${maxTokens}`
+  const maxTokens = normalizeMaxTokens(
+    provider,
+    options.maxTokens
   );
 
-
-  const response =
-    await fetchJSON(
-
-      `${config.baseURL.replace(/\/+$/, "")}/v1/chat/completions`,
-
-      {
-
-        method:
-          "POST",
-
-        headers,
-
-        body:
-          JSON.stringify(
-            body
-          )
-
-      },
-
-      provider,
-
-      model
-
-    );
-
-
-  const diagnostics =
-    getSafeResponseDiagnostics(
-      response.data
-    );
-
-
-  const text =
-    extractChatCompletionText(
-      response.data
-    );
-
-
-  if (
-    !text
-  ) {
-
-    logger.warning(
-      `${provider} returned empty visible content | ` +
-      `model=${model} | ` +
-      `finishReason=${diagnostics.finishReason || "unknown"} | ` +
-      `choices=${diagnostics.choices} | ` +
-      `hasReasoningContent=${diagnostics.hasReasoningContent} | ` +
-      `hasToolCalls=${diagnostics.hasToolCalls} | ` +
-      `totalTokens=${diagnostics.usage?.totalTokens ?? "unknown"}`
-    );
-
-
-    const error =
-      new Error(
-        `${provider} returned an empty response`
-      );
-
-
-    error.code =
-      "AI_EMPTY_RESPONSE";
-
-
-    error.provider =
-      provider;
-
-
-    error.model =
-      model;
-
-
-    error.responseDiagnostics =
-      diagnostics;
-
-
-    throw error;
-
-  }
-
-
-  return {
-
-    success:
-      true,
-
-    provider,
-
+  const body = {
     model,
-
-    text,
-
-    raw:
-      response.data,
-
-    usage:
-      response.data?.usage ||
-      null,
-
-    finishReason:
-      diagnostics.finishReason ||
-
-      null
-
+    messages,
+    stream: false,
+    max_tokens: maxTokens
   };
 
-}
+  if (Number.isFinite(options.temperature)) {
+    body.temperature = Number(options.temperature);
+  }
 
+  if (provider === PROVIDERS.SARVAM) {
+    body.reasoning_effort = null;
+  }
+
+  if (options.json === true) {
+    body.response_format = {
+      type: 'json_object'
+    };
+  }
+
+  const headers = {
+    'Content-Type': 'application/json'
+  };
+
+  if (provider === PROVIDERS.SARVAM) {
+    headers['api-subscription-key'] = config.apiKey;
+  } else {
+    headers.Authorization = `Bearer ${config.apiKey}`;
+  }
+
+  logger.info(
+    `${provider} token policy: requested=${options.maxTokens || 'default'} | effective=${maxTokens}`
+  );
+
+  const baseURL = config.baseURL.replace(/\/+$/, '');
+
+  const endpoint = /\/v1$/i.test(baseURL)
+    ? `${baseURL}/chat/completions`
+    : `${baseURL}/v1/chat/completions`;
+
+  const response = await fetchJSON(
+    endpoint,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body)
+    },
+    provider,
+    model
+  );
+
+  const diagnostics = getSafeResponseDiagnostics(
+    response.data
+  );
+
+  const text = extractChatCompletionText(
+    response.data
+  );
+
+  if (!text) {
+    logger.warning(
+      `${provider} returned empty visible content | model=${model} | finishReason=${diagnostics.finishReason || 'unknown'} | choices=${diagnostics.choices} | hasReasoningContent=${diagnostics.hasReasoningContent} | hasToolCalls=${diagnostics.hasToolCalls} | totalTokens=${diagnostics.usage?.totalTokens ?? 'unknown'}`
+    );
+
+    const error = new Error(
+      `${provider} returned an empty response`
+    );
+
+    error.code = 'AI_EMPTY_RESPONSE';
+    error.provider = provider;
+    error.model = model;
+    error.responseDiagnostics = diagnostics;
+
+    throw error;
+  }
+
+  return {
+    success: true,
+    provider,
+    model,
+    text,
+    raw: response.data,
+    usage: response.data?.usage || null,
+    finishReason: diagnostics.finishReason || null
+  };
+}
 
 /* =========================================================
    BEDROCK MESSAGE CONVERSION
 ========================================================= */
 
-function buildBedrockMessages(
-  messages
-) {
-
+function buildBedrockMessages(messages) {
   return messages
+    .filter((message) => message.role !== 'system')
+    .map((message) => ({
+      role:
+        message.role === 'assistant'
+          ? 'assistant'
+          : 'user',
 
-    .filter(
-      (message) =>
-        message.role !==
-        "system"
-    )
-
-    .map(
-      (message) => ({
-
-        role:
-          message.role ===
-          "assistant"
-            ? "assistant"
-            : "user",
-
-        content: [
-
-          {
-
-            text:
-              message.content
-
-          }
-
-        ]
-
-      })
-    );
-
+      content: [
+        {
+          text: message.content
+        }
+      ]
+    }));
 }
-
 
 /* =========================================================
    BEDROCK GENERATION
 ========================================================= */
 
-async function generateWithBedrock(
-  options = {}
-) {
-
+async function generateWithBedrock(options = {}) {
   if (
     !bedrockClient ||
     !ConverseCommand ||
     !BEDROCK_MODEL
   ) {
-
-    const error =
-      new Error(
-        "Amazon Bedrock provider is not configured"
-      );
-
-
-    error.code =
-      "AI_PROVIDER_NOT_CONFIGURED";
-
-
-    error.provider =
-      PROVIDERS.BEDROCK;
-
-
-    throw error;
-
-  }
-
-
-  const messages =
-    buildMessages(
-      options
+    const error = new Error(
+      'Amazon Bedrock provider is not configured'
     );
 
-
-  if (
-    !validateMessages(
-      messages
-    )
-  ) {
-
-    const error =
-      new Error(
-        "AI messages are required"
-      );
-
-
-    error.code =
-      "AI_INVALID_REQUEST";
-
-
-    error.provider =
-      PROVIDERS.BEDROCK;
-
+    error.code = 'AI_PROVIDER_NOT_CONFIGURED';
+    error.provider = PROVIDERS.BEDROCK;
 
     throw error;
-
   }
 
+  const messages = buildMessages(options);
+
+  if (!validateMessages(messages)) {
+    const error = new Error(
+      'AI messages are required'
+    );
+
+    error.code = 'AI_INVALID_REQUEST';
+    error.provider = PROVIDERS.BEDROCK;
+
+    throw error;
+  }
 
   const model =
-    options.model &&
-    String(
-      options.model
-    ).trim()
-      ? String(
-          options.model
-        ).trim()
+    options.model && String(options.model).trim()
+      ? String(options.model).trim()
       : BEDROCK_MODEL;
 
-
-  const systemMessages =
-    messages.filter(
-      (message) =>
-        message.role ===
-        "system"
-    );
-
-
-  const conversationMessages =
-    buildBedrockMessages(
-      messages
-    );
-
-
-  if (
-    conversationMessages.length ===
-    0
-  ) {
-
-    const error =
-      new Error(
-        "Bedrock requires at least one user or assistant message"
-      );
-
-
-    error.code =
-      "AI_INVALID_REQUEST";
-
-
-    error.provider =
-      PROVIDERS.BEDROCK;
-
-
-    throw error;
-
-  }
-
-
-  const request = {
-
-    modelId:
-      model,
-
-    messages:
-      conversationMessages
-
-  };
-
-
-  if (
-    systemMessages.length > 0
-  ) {
-
-    request.system =
-      systemMessages.map(
-        (message) => ({
-
-          text:
-            message.content
-
-        })
-      );
-
-  }
-
-
-  const requestedMaxTokens =
-    Number.isFinite(
-      options.maxTokens
-    )
-      ? options.maxTokens
-      : DEFAULT_OUTPUT_TOKENS;
-
-
-  const maxTokens =
-    normalizeMaxTokens(
-      PROVIDERS.BEDROCK,
-      requestedMaxTokens
-    );
-
-
-  logger.info(
-    `Bedrock token policy: requested=${requestedMaxTokens} | effective=${maxTokens}`
+  const systemMessages = messages.filter(
+    (message) => message.role === 'system'
   );
 
+  const conversationMessages = buildBedrockMessages(
+    messages
+  );
 
-  const inferenceConfig = {
+  if (!conversationMessages.length) {
+    const error = new Error(
+      'Bedrock requires at least one user or assistant message'
+    );
 
-    maxTokens
-
-  };
-
-
-  if (
-    Number.isFinite(
-      options.temperature
-    )
-  ) {
-
-    inferenceConfig.temperature =
-      Number(
-        options.temperature
-      );
-
-  }
-
-
-  request.inferenceConfig =
-    inferenceConfig;
-
-
-  try {
-
-    const response =
-      await withTimeout(
-
-        bedrockClient.send(
-          new ConverseCommand(
-            request
-          )
-        ),
-
-        AI_PROVIDER_TIMEOUT_MS,
-
-        PROVIDERS.BEDROCK,
-
-        model
-
-      );
-
-
-    const output =
-      response?.output?.message;
-
-
-    const text =
-      Array.isArray(
-        output?.content
-      )
-        ? output.content
-
-            .filter(
-              (block) =>
-                typeof block?.text ===
-                "string"
-            )
-
-            .map(
-              (block) =>
-                block.text
-            )
-
-            .join(
-              ""
-            )
-        : "";
-
-
-    if (
-      !text.trim()
-    ) {
-
-      const error =
-        new Error(
-          "Amazon Bedrock returned an empty response"
-        );
-
-
-      error.code =
-        "AI_EMPTY_RESPONSE";
-
-
-      error.provider =
-        PROVIDERS.BEDROCK;
-
-
-      error.model =
-        model;
-
-
-      throw error;
-
-    }
-
-
-    return {
-
-      success:
-        true,
-
-      provider:
-        PROVIDERS.BEDROCK,
-
-      model,
-
-      text:
-        text.trim(),
-
-      raw:
-        response,
-
-      usage:
-        response?.usage ||
-        null,
-
-      finishReason:
-        response?.stopReason ||
-        null
-
-    };
-
-  } catch (error) {
-
-    error.provider =
-      error.provider ||
-      PROVIDERS.BEDROCK;
-
-
-    error.model =
-      error.model ||
-      model;
-
+    error.code = 'AI_INVALID_REQUEST';
+    error.provider = PROVIDERS.BEDROCK;
 
     throw error;
-
   }
 
-}
+  const maxTokens = normalizeMaxTokens(
+    PROVIDERS.BEDROCK,
+    options.maxTokens
+  );
 
+  const request = {
+    modelId: model,
+    messages: conversationMessages,
+    inferenceConfig: {
+      maxTokens
+    }
+  };
+
+  if (systemMessages.length) {
+    request.system = systemMessages.map(
+      (message) => ({
+        text: message.content
+      })
+    );
+  }
+
+  if (Number.isFinite(options.temperature)) {
+    request.inferenceConfig.temperature =
+      Number(options.temperature);
+  }
+
+  logger.info(
+    `Bedrock token policy: requested=${options.maxTokens || 'default'} | effective=${maxTokens}`
+  );
+
+  try {
+    const response = await withTimeout(
+      bedrockClient.send(
+        new ConverseCommand(request)
+      ),
+      AI_PROVIDER_TIMEOUT_MS,
+      PROVIDERS.BEDROCK,
+      model
+    );
+
+    const output = response?.output?.message;
+
+    const text = Array.isArray(output?.content)
+      ? output.content
+          .filter(
+            (block) => typeof block?.text === 'string'
+          )
+          .map((block) => block.text)
+          .join('')
+      : '';
+
+    if (!text.trim()) {
+      const error = new Error(
+        'Amazon Bedrock returned an empty response'
+      );
+
+      error.code = 'AI_EMPTY_RESPONSE';
+      error.provider = PROVIDERS.BEDROCK;
+      error.model = model;
+
+      throw error;
+    }
+
+    return {
+      success: true,
+      provider: PROVIDERS.BEDROCK,
+      model,
+      text: text.trim(),
+      raw: response,
+      usage: response?.usage || null,
+      finishReason: response?.stopReason || null
+    };
+  } catch (error) {
+    error.provider =
+      error.provider || PROVIDERS.BEDROCK;
+
+    error.model = error.model || model;
+
+    throw error;
+  }
+}
 
 /* =========================================================
    VERTEX CONTENT CONVERSION
 ========================================================= */
 
-function buildVertexContents(
-  messages
-) {
-
+function buildVertexContents(messages) {
   return messages
+    .filter((message) => message.role !== 'system')
+    .map((message) => ({
+      role:
+        message.role === 'assistant'
+          ? 'model'
+          : 'user',
 
-    .filter(
-      (message) =>
-        message.role !==
-        "system"
-    )
-
-    .map(
-      (message) => ({
-
-        role:
-          message.role ===
-          "assistant"
-            ? "model"
-            : "user",
-
-        parts: [
-
-          {
-
-            text:
-              message.content
-
-          }
-
-        ]
-
-      })
-
-    );
-
+      parts: [
+        {
+          text: message.content
+        }
+      ]
+    }));
 }
 
-
-/* =========================================================
-   VERTEX RESPONSE TEXT
-========================================================= */
-
-function extractVertexText(
-  response
-) {
-
-  if (
-    typeof response?.text ===
-    "string"
-  ) {
-
+function extractVertexText(response) {
+  if (typeof response?.text === 'string') {
     return response.text.trim();
-
   }
 
-
-  const candidates =
-    response?.candidates ||
-    [];
-
-
-  return candidates
-
+  return (response?.candidates || [])
     .flatMap(
-      (candidate) =>
-        candidate?.content?.parts ||
-        []
+      (candidate) => candidate?.content?.parts || []
     )
-
-    .filter(
-      (part) =>
-        typeof part?.text ===
-        "string"
-    )
-
-    .map(
-      (part) =>
-        part.text
-    )
-
-    .join(
-      ""
-    )
+    .filter((part) => typeof part?.text === 'string')
+    .map((part) => part.text)
+    .join('')
     .trim();
-
 }
-
 
 /* =========================================================
    VERTEX GENERATION
 ========================================================= */
 
-async function generateWithVertex(
-  options = {}
-) {
-
+async function generateWithVertex(options = {}) {
   if (
     !vertexClient ||
     !vertexCredentialConfig ||
     !VERTEX_PROJECT_ID ||
     !VERTEX_MODEL
   ) {
-
-    const error =
-      new Error(
-        "Google Vertex AI provider is not configured"
-      );
-
-
-    error.code =
-      "AI_PROVIDER_NOT_CONFIGURED";
-
-
-    error.provider =
-      PROVIDERS.VERTEX;
-
-
-    throw error;
-
-  }
-
-
-  const messages =
-    buildMessages(
-      options
+    const error = new Error(
+      'Google Vertex AI provider is not configured'
     );
 
-
-  if (
-    !validateMessages(
-      messages
-    )
-  ) {
-
-    const error =
-      new Error(
-        "AI messages are required"
-      );
-
-
-    error.code =
-      "AI_INVALID_REQUEST";
-
-
-    error.provider =
-      PROVIDERS.VERTEX;
-
+    error.code = 'AI_PROVIDER_NOT_CONFIGURED';
+    error.provider = PROVIDERS.VERTEX;
 
     throw error;
-
   }
 
+  const messages = buildMessages(options);
+
+  if (!validateMessages(messages)) {
+    const error = new Error(
+      'AI messages are required'
+    );
+
+    error.code = 'AI_INVALID_REQUEST';
+    error.provider = PROVIDERS.VERTEX;
+
+    throw error;
+  }
 
   const model =
-    options.model &&
-    String(
-      options.model
-    ).trim()
-      ? String(
-          options.model
-        ).trim()
+    options.model && String(options.model).trim()
+      ? String(options.model).trim()
       : VERTEX_MODEL;
 
+  const systemMessages = messages.filter(
+    (message) => message.role === 'system'
+  );
 
-  const systemMessages =
-    messages.filter(
-      (message) =>
-        message.role ===
-        "system"
+  const contents = buildVertexContents(messages);
+
+  if (!contents.length) {
+    const error = new Error(
+      'Vertex AI requires at least one user or assistant message'
     );
 
-
-  const contents =
-    buildVertexContents(
-      messages
-    );
-
-
-  if (
-    contents.length ===
-    0
-  ) {
-
-    const error =
-      new Error(
-        "Vertex AI requires at least one user or assistant message"
-      );
-
-
-    error.code =
-      "AI_INVALID_REQUEST";
-
-
-    error.provider =
-      PROVIDERS.VERTEX;
-
+    error.code = 'AI_INVALID_REQUEST';
+    error.provider = PROVIDERS.VERTEX;
 
     throw error;
-
   }
-
-
-  const generationConfig = {
-
-    maxOutputTokens:
-      normalizeMaxTokens(
-        PROVIDERS.VERTEX,
-        options.maxTokens
-      )
-
-  };
-
-
-  if (
-    Number.isFinite(
-      options.temperature
-    )
-  ) {
-
-    generationConfig.temperature =
-      Number(
-        options.temperature
-      );
-
-  }
-
-
-  if (
-    options.json === true
-  ) {
-
-    generationConfig.responseMimeType =
-      "application/json";
-
-  }
-
 
   const config = {
-
-    ...generationConfig
-
+    maxOutputTokens: normalizeMaxTokens(
+      PROVIDERS.VERTEX,
+      options.maxTokens
+    )
   };
 
-
-  if (
-    systemMessages.length > 0
-  ) {
-
-    config.systemInstruction = {
-
-      role:
-        "system",
-
-      parts:
-        systemMessages.map(
-          (message) => ({
-
-            text:
-              message.content
-
-          })
-        )
-
-    };
-
+  if (Number.isFinite(options.temperature)) {
+    config.temperature = Number(options.temperature);
   }
 
+  if (options.json === true) {
+    config.responseMimeType = 'application/json';
+  }
+
+  if (systemMessages.length) {
+    config.systemInstruction = {
+      role: 'system',
+      parts: systemMessages.map((message) => ({
+        text: message.content
+      }))
+    };
+  }
 
   try {
+    const response = await withTimeout(
+      vertexClient.models.generateContent({
+        model,
+        contents,
+        config
+      }),
+      AI_PROVIDER_TIMEOUT_MS,
+      PROVIDERS.VERTEX,
+      model
+    );
 
-    const response =
-      await withTimeout(
+    const text = extractVertexText(response);
 
-        vertexClient.models.generateContent({
-
-          model,
-
-          contents,
-
-          config
-
-        }),
-
-        AI_PROVIDER_TIMEOUT_MS,
-
-        PROVIDERS.VERTEX,
-
-        model
-
+    if (!text) {
+      const error = new Error(
+        'Google Vertex AI returned an empty response'
       );
 
-
-    const text =
-      extractVertexText(
-        response
-      );
-
-
-    if (
-      !text
-    ) {
-
-      const error =
-        new Error(
-          "Google Vertex AI returned an empty response"
-        );
-
-
-      error.code =
-        "AI_EMPTY_RESPONSE";
-
-
-      error.provider =
-        PROVIDERS.VERTEX;
-
-
-      error.model =
-        model;
-
+      error.code = 'AI_EMPTY_RESPONSE';
+      error.provider = PROVIDERS.VERTEX;
+      error.model = model;
 
       throw error;
-
     }
 
-
     return {
-
-      success:
-        true,
-
-      provider:
-        PROVIDERS.VERTEX,
-
+      success: true,
+      provider: PROVIDERS.VERTEX,
       model,
-
       text,
-
-      raw:
-        response,
-
-      usage:
-        response?.usageMetadata ||
-        null,
-
+      raw: response,
+      usage: response?.usageMetadata || null,
       finishReason:
-        response?.candidates?.[0]?.finishReason ||
-        null
-
+        response?.candidates?.[0]?.finishReason || null
     };
-
   } catch (error) {
-
-    error.provider =
-      error.provider ||
-      PROVIDERS.VERTEX;
-
-
-    error.model =
-      error.model ||
-      model;
-
+    error.provider = error.provider || PROVIDERS.VERTEX;
+    error.model = error.model || model;
 
     throw error;
-
   }
-
 }
 
-
 /* =========================================================
-   PROVIDER GENERATOR
+   GENERATE WITH SELECTED PROVIDER
 ========================================================= */
 
-async function generateWithProvider(
-  provider,
-  options
-) {
-
-  switch (
-    provider
-  ) {
-
+async function generateWithProvider(provider, options) {
+  switch (provider) {
     case PROVIDERS.BEDROCK:
-
-      return generateWithBedrock(
-        options
-      );
-
+      return generateWithBedrock(options);
 
     case PROVIDERS.SARVAM:
-
       return generateWithOpenAICompatibleProvider(
         PROVIDERS.SARVAM,
         options
       );
 
-
     case PROVIDERS.BHARATROUTER:
-
       return generateWithOpenAICompatibleProvider(
         PROVIDERS.BHARATROUTER,
         options
       );
 
-
     case PROVIDERS.INDIEROUTER:
-
       return generateWithOpenAICompatibleProvider(
         PROVIDERS.INDIEROUTER,
         options
       );
 
-
     case PROVIDERS.VERTEX:
-
-      return generateWithVertex(
-        options
-      );
-
+      return generateWithVertex(options);
 
     default: {
+      const error = new Error(
+        `Unsupported AI provider: ${provider}`
+      );
 
-      const error =
-        new Error(
-          `Unsupported AI provider: ${provider}`
-        );
-
-
-      error.code =
-        "AI_UNSUPPORTED_PROVIDER";
-
-
-      error.provider =
-        provider;
-
+      error.code = 'AI_UNSUPPORTED_PROVIDER';
+      error.provider = provider;
 
       throw error;
-
     }
-
   }
-
 }
-
 
 /* =========================================================
-   VALIDATE STRUCTURED RESPONSE
+   STRUCTURED JSON VALIDATION
 ========================================================= */
 
-function validateStructuredJSON(
-  result
-) {
-
+function validateStructuredJSON(result) {
   if (
     !result ||
-    typeof result.text !==
-      "string" ||
+    typeof result.text !== 'string' ||
     !result.text.trim()
   ) {
+    const error = new Error(
+      'AI provider returned empty structured output'
+    );
 
-    const error =
-      new Error(
-        "AI provider returned empty structured output"
-      );
-
-
-    error.code =
-      "AI_STRUCTURED_OUTPUT_INVALID";
-
-
-    error.provider =
-      result?.provider ||
-      null;
-
-
-    error.model =
-      result?.model ||
-      null;
-
+    error.code = 'AI_STRUCTURED_OUTPUT_INVALID';
+    error.provider = result?.provider || null;
+    error.model = result?.model || null;
 
     throw error;
-
   }
-
-
-  let parsed;
-
 
   try {
-
-    parsed =
-      parseJSONResponse(
-        result.text
-      );
-
+    return {
+      ...result,
+      data: parseJSONResponse(result.text)
+    };
   } catch (error) {
+    error.provider = result.provider || null;
+    error.model = result.model || null;
+    error.finishReason = result.finishReason || null;
+    error.responseDiagnostics = getSafeResponseDiagnostics(
+      result.raw
+    );
 
-    error.provider =
-      result.provider ||
-      null;
-
-
-    error.model =
-      result.model ||
-      null;
-
-
-    error.finishReason =
-      result.finishReason ||
-      null;
-
-
-    error.responseDiagnostics =
-      getSafeResponseDiagnostics(
-        result.raw
-      );
-
-
-    /*
-     * If the provider stopped because the output
-     * reached its token limit, expose that explicitly.
-     */
+    const finishReason = String(
+      result.finishReason || ''
+    ).toLowerCase();
 
     if (
-      String(
-        result.finishReason ||
-        ""
-      ).toLowerCase() ===
-        "length"
+      finishReason === 'length' ||
+      finishReason === 'max_tokens'
     ) {
-
       error.message =
         `${result.provider} returned truncated JSON because the output reached the token limit`;
-
     }
 
-
     throw error;
-
   }
-
-
-  return {
-
-    ...result,
-
-    data:
-      parsed
-
-  };
-
 }
-
 
 /* =========================================================
    GENERATE TEXT
 ========================================================= */
 
-async function generateText(
-  options = {}
-) {
+async function generateText(options = {}) {
+  const providerOrder = getProviderOrder(options);
 
-  const providerOrder =
-    getProviderOrder(
-      options
+  const configuredProviders = providerOrder.filter(
+    isProviderAvailable
+  );
+
+  if (!configuredProviders.length) {
+    const error = new Error(
+      'No AI provider is configured. Check provider API keys, base URLs, model IDs, and SDK/WIF configuration.'
     );
 
-
-  const configuredProviders =
-    providerOrder.filter(
-      isProviderAvailable
-    );
-
-
-  if (
-    configuredProviders.length ===
-    0
-  ) {
-
-    const error =
-      new Error(
-        "No AI provider is configured. Configure at least one of Bedrock, Sarvam, BharatRouter, IndieRouter, or Vertex AI."
-      );
-
-
-    error.code =
-      "AI_NO_PROVIDER";
-
-
-    error.provider =
-      null;
-
+    error.code = 'AI_NO_PROVIDER';
+    error.provider = null;
 
     throw error;
-
   }
-
 
   const providerErrors = [];
 
-
-  for (
-    const provider of configuredProviders
-  ) {
-
-    if (
-      isProviderCoolingDown(
-        provider
-      )
-    ) {
-
+  for (const provider of configuredProviders) {
+    if (isProviderCoolingDown(provider)) {
       logger.warning(
         `AI Provider skipped due to active cooldown: ${provider}`
       );
 
-
       continue;
-
     }
 
+    let attempt = 0;
 
-    let attempt =
-      0;
+    while (attempt <= AI_MAX_RETRIES) {
+      if (attempt > 0) {
+        const previousError =
+          providerErrors[providerErrors.length - 1]?.error;
 
-
-    while (
-      attempt <=
-      AI_MAX_RETRIES
-    ) {
-
-      try {
-
-        if (
-          attempt > 0
-        ) {
-
-          const previousError =
-            providerErrors[
-              providerErrors.length - 1
-            ]?.error;
-
-
-          const delay =
-            getRetryDelay(
-              attempt,
-              previousError
-            );
-
-
-          logger.warning(
-            `${provider} retry | attempt=${attempt + 1} | delay=${delay}ms`
-          );
-
-
-          await sleep(
-            delay
-          );
-
-        }
-
-
-        const model =
-          getProviderModel(
-            provider,
-            options
-          );
-
-
-        logger.info(
-          `AI Request: ${provider}/${model} | attempt=${attempt + 1}`
+        const delay = getRetryDelay(
+          attempt,
+          previousError
         );
-
-
-        const result =
-          await generateWithProvider(
-            provider,
-            options
-          );
-
-
-        /*
-         * Structured JSON validation happens BEFORE
-         * generateText returns success.
-         *
-         * This is the critical fix.
-         *
-         * If JSON is malformed, generateText catches
-         * AI_INVALID_JSON and can retry/fail over.
-         */
-
-        if (
-          options.json === true
-        ) {
-
-          const structured =
-            validateStructuredJSON(
-              result
-            );
-
-
-          logger.success(
-            `AI Success: ${provider}/${structured.model} | structured JSON valid`
-          );
-
-
-          return structured;
-
-        }
-
-
-        logger.success(
-          `AI Success: ${provider}/${result.model}`
-        );
-
-
-        return result;
-
-      } catch (error) {
-
-        const classification =
-          classifyProviderError(
-            error
-          );
-
-
-        const message =
-          getErrorMessage(
-            error
-          ) ||
-          "Unknown provider error";
-
-
-        providerErrors.push({
-
-          provider,
-
-          model:
-            error?.model ||
-            null,
-
-          attempt:
-            attempt + 1,
-
-          category:
-            classification.category,
-
-          retryable:
-            classification.retryable,
-
-          fallback:
-            classification.fallback,
-
-          message,
-
-          code:
-            error?.code ||
-            "AI_PROVIDER_ERROR",
-
-          status:
-            getErrorStatus(
-              error
-            ),
-
-          error
-
-        });
-
 
         logger.warning(
-          `AI Provider Failed: ${provider} | attempt=${attempt + 1} | category=${classification.category} | retryable=${classification.retryable} | ${message}`
+          `${provider} retry | attempt=${attempt + 1}/${AI_MAX_RETRIES + 1} | delay=${delay}ms`
         );
 
+        await sleep(delay);
+      }
 
-        /*
-         * STRUCTURED JSON FAILURE
-         *
-         * Do not put provider into quota cooldown.
-         * The provider may be perfectly healthy.
-         */
+      const model = getProviderModel(provider, options);
+      const startedAt = Date.now();
 
-        if (
-          classification.category ===
-          "structured_output"
-        ) {
+      logger.info(
+        `AI Request: ${provider}/${model || 'default'} | attempt=${attempt + 1}/${AI_MAX_RETRIES + 1}`
+      );
 
-          /*
-           * Retry the same provider once if configured.
-           * After retries are exhausted, continue to
-           * the next configured provider.
-           */
+      try {
+        const result = await generateWithProvider(
+          provider,
+          options
+        );
 
-          if (
-            classification.retryable &&
-            attempt <
-              AI_MAX_RETRIES
-          ) {
+        if (options.json === true) {
+          const structured = validateStructuredJSON(result);
 
-            attempt += 1;
-
-            continue;
-
-          }
-
-
-          break;
-
-        }
-
-
-        /* =================================================
-           QUOTA
-        ================================================= */
-
-        if (
-          classification.category ===
-          "quota"
-        ) {
-
-          cooldownProvider(
-            provider
+          logger.success(
+            `AI Success: ${provider}/${structured.model} | structured JSON valid | duration=${Date.now() - startedAt}ms`
           );
 
-
-          break;
-
+          return structured;
         }
 
+        logger.success(
+          `AI Success: ${provider}/${result.model} | duration=${Date.now() - startedAt}ms`
+        );
 
-        /* =================================================
-           INVALID REQUEST
-        ================================================= */
+        return result;
+      } catch (error) {
+        const classification = classifyProviderError(error);
+
+        const message =
+          getErrorMessage(error) ||
+          'Unknown provider error';
+
+        const item = {
+          provider,
+          model: error?.model || model || null,
+          attempt: attempt + 1,
+          category: classification.category,
+          retryable: classification.retryable,
+          fallback: classification.fallback,
+          message,
+          code: error?.code || 'AI_PROVIDER_ERROR',
+          status: getErrorStatus(error),
+          error
+        };
+
+        providerErrors.push(item);
+
+        logger.warning(
+          `AI Provider Failed: ${provider} | attempt=${attempt + 1} | category=${classification.category} | retryable=${classification.retryable} | status=${item.status || 'n/a'} | code=${item.code} | ${message}`
+        );
+
+        if (classification.category === 'quota') {
+          cooldownProvider(provider);
+          break;
+        }
 
         if (
-          classification.category ===
-          "invalid_request"
+          classification.category === 'invalid_request' ||
+          error?.code === 'AI_INVALID_REQUEST'
         ) {
-
           throw error;
-
         }
-
-
-        /* =================================================
-           NORMAL RETRY
-        ================================================= */
 
         if (
           classification.retryable &&
-          attempt <
-            AI_MAX_RETRIES
+          attempt < AI_MAX_RETRIES
         ) {
-
           attempt += 1;
-
           continue;
-
         }
 
-
+        // Move to the next eligible provider.
         break;
-
       }
-
     }
-
   }
 
-
-  const finalError =
-    new Error(
-      "All configured AI providers failed."
-    );
-
-
-  finalError.code =
-    "AI_ALL_PROVIDERS_FAILED";
-
-
-  finalError.provider =
-    null;
-
-
-  finalError.providers =
-    providerErrors.map(
-      (item) => ({
-
-        provider:
-          item.provider,
-
-        model:
-          item.model,
-
-        attempt:
-          item.attempt,
-
-        category:
-          item.category,
-
-        retryable:
-          item.retryable,
-
-        fallback:
-          item.fallback,
-
-        message:
-          item.message,
-
-        code:
-          item.code,
-
-        status:
-          item.status
-
-      })
-    );
-
-
-  logger.error(
-    `AI Provider Chain Failed: ${finalError.providers
-      .map(
-        (item) => {
-
-          const model =
-            item.model
-              ? `/${item.model}`
-              : "";
-
-
-          return (
-
-            `${item.provider}${model}: ` +
-
-            `${item.category}: ` +
-
-            `${item.message}`
-
-          );
-
-        }
-      )
-      .join(
-        " | "
-      )}`
+  const finalError = new Error(
+    'All configured AI providers failed or were cooling down.'
   );
 
+  finalError.code = 'AI_ALL_PROVIDERS_FAILED';
+  finalError.provider = null;
+
+  finalError.providers = providerErrors.map(
+    ({
+      provider,
+      model,
+      attempt,
+      category,
+      retryable,
+      fallback,
+      message,
+      code,
+      status
+    }) => ({
+      provider,
+      model,
+      attempt,
+      category,
+      retryable,
+      fallback,
+      message,
+      code,
+      status
+    })
+  );
+
+  logger.error(
+    `AI Provider Chain Failed: ${
+      finalError.providers
+        .map((item) =>
+          `${item.provider}${item.model ? `/${item.model}` : ''}: ${item.category}: ${item.message}`
+        )
+        .join(' | ') ||
+      'No provider attempts completed; all providers may be cooling down.'
+    }`
+  );
 
   throw finalError;
-
 }
-
 
 /* =========================================================
    PROVIDER MODEL
 ========================================================= */
 
-function getProviderModel(
-  provider,
-  options = {}
-) {
-
+function getProviderModel(provider, options = {}) {
   if (
     options.model &&
-    String(
-      options.model
-    ).trim()
+    String(options.model).trim()
   ) {
-
-    return String(
-      options.model
-    ).trim();
-
+    return String(options.model).trim();
   }
 
-
-  switch (
-    provider
-  ) {
-
+  switch (provider) {
     case PROVIDERS.BEDROCK:
-
       return BEDROCK_MODEL;
 
-
     case PROVIDERS.SARVAM:
-
       return SARVAM_MODEL;
 
-
     case PROVIDERS.BHARATROUTER:
-
       return BHARATROUTER_MODEL;
 
-
     case PROVIDERS.INDIEROUTER:
-
       return INDIEROUTER_MODEL;
 
-
     case PROVIDERS.VERTEX:
-
       return VERTEX_MODEL;
 
-
     default:
-
-      return "";
-
+      return '';
   }
-
 }
-
 
 /* =========================================================
    GENERATE JSON
 ========================================================= */
 
-async function generateJSON(
-  options = {}
-) {
-
-  const result =
-    await generateText({
-
-      ...options,
-
-      json:
-        true
-
-    });
-
-
-  /*
-   * generateText already validated and parsed
-   * the structured response.
-   */
+async function generateJSON(options = {}) {
+  const result = await generateText({
+    ...options,
+    json: true
+  });
 
   if (
     !result ||
     result.success !== true ||
-    !result.data
+    result.data === undefined ||
+    result.data === null
   ) {
+    const error = new Error(
+      'AI provider returned an invalid structured response'
+    );
 
-    const error =
-      new Error(
-        "AI provider returned an invalid structured response"
-      );
-
-
-    error.code =
-      "AI_STRUCTURED_OUTPUT_INVALID";
-
-
-    error.provider =
-      result?.provider ||
-      null;
-
-
-    error.model =
-      result?.model ||
-      null;
-
+    error.code = 'AI_STRUCTURED_OUTPUT_INVALID';
+    error.provider = result?.provider || null;
+    error.model = result?.model || null;
 
     throw error;
-
   }
 
-
   return result;
-
 }
-
 
 /* =========================================================
    PROVIDER STATUS
 ========================================================= */
 
 function getProviderStatus() {
+  const providers = {};
 
-  const status = {};
+  for (const provider of DEFAULT_PROVIDER_ORDER) {
+    const configured = isProviderAvailable(provider);
+    const coolingDown = isProviderCoolingDown(provider);
 
-
-  for (
-    const provider of
-    DEFAULT_PROVIDER_ORDER
-  ) {
-
-    const configured =
-      isProviderAvailable(
-        provider
-      );
-
-
-    status[
-      provider
-    ] = {
-
+    providers[provider] = {
       configured,
+      enabled: true,
+      available: configured && !coolingDown,
+      coolingDown,
 
-      enabled:
-        true,
+      primary: provider === PROVIDERS.SARVAM,
+      fallback: provider !== PROVIDERS.SARVAM,
 
-      available:
-        configured &&
-        !isProviderCoolingDown(
-          provider
-        ),
-
-      coolingDown:
-        isProviderCoolingDown(
-          provider
-        ),
-
-      primary:
-        false,
-
-      fallback:
-        true,
-
-      model:
-        getProviderModel(
-          provider
-        ),
+      model: getProviderModel(provider),
 
       capabilities:
-        PROVIDER_CAPABILITIES[
-          provider
-        ] || {},
+        PROVIDER_CAPABILITIES[provider] || {},
 
       maxOutputTokens:
-        PROVIDER_MAX_OUTPUT_TOKENS[
-          provider
-        ] || null
-
+        PROVIDER_MAX_OUTPUT_TOKENS[provider] || null
     };
 
-
-    if (
-      provider ===
-      PROVIDERS.BEDROCK
-    ) {
-
-      status[
-        provider
-      ].region =
-        AWS_REGION;
-
+    if (provider === PROVIDERS.BEDROCK) {
+      providers[provider].region = AWS_REGION;
     }
 
-
-    if (
-      provider ===
-      PROVIDERS.SARVAM
-    ) {
-
-      status[
-        provider
-      ].baseURL =
-        SARVAM_BASE_URL;
-
+    if (provider === PROVIDERS.SARVAM) {
+      providers[provider].baseURL = SARVAM_BASE_URL;
     }
 
-
-    if (
-      provider ===
-      PROVIDERS.BHARATROUTER
-    ) {
-
-      status[
-        provider
-      ].baseURL =
+    if (provider === PROVIDERS.BHARATROUTER) {
+      providers[provider].baseURL =
         BHARATROUTER_BASE_URL;
-
     }
 
-
-    if (
-      provider ===
-      PROVIDERS.INDIEROUTER
-    ) {
-
-      status[
-        provider
-      ].baseURL =
+    if (provider === PROVIDERS.INDIEROUTER) {
+      providers[provider].baseURL =
         INDIEROUTER_BASE_URL;
-
     }
 
+    if (provider === PROVIDERS.VERTEX) {
+      providers[provider].projectConfigured =
+        Boolean(VERTEX_PROJECT_ID);
 
-    if (
-      provider ===
-      PROVIDERS.VERTEX
-    ) {
+      providers[provider].wifConfigured =
+        Boolean(vertexCredentialConfig);
 
-      status[
-        provider
-      ].projectConfigured =
-        Boolean(
-          VERTEX_PROJECT_ID
-        );
-
-      status[
-        provider
-      ].wifConfigured =
-        Boolean(
-          vertexCredentialConfig
-        );
-
-      status[
-        provider
-      ].location =
-        VERTEX_LOCATION;
-
+      providers[provider].location = VERTEX_LOCATION;
     }
-
   }
 
-
   return {
+    mode: 'multi-provider-role-based-routing',
 
-    mode:
-      "multi-provider-role-based-routing",
+    primary: PROVIDERS.SARVAM,
 
-    primary:
-      null,
+    fallbackOrder: DEFAULT_PROVIDER_ORDER.filter(
+      (provider) => provider !== PROVIDERS.SARVAM
+    ),
 
-    fallback:
-      null,
+    providers,
 
-    providers:
-      status,
+    order: [...DEFAULT_PROVIDER_ORDER],
 
-    order:
-      DEFAULT_PROVIDER_ORDER,
+    capabilityOrders: {
+      coding: [...CODING_PROVIDER_ORDER],
+      planning: [...PLANNING_PROVIDER_ORDER],
+      multimodal: [...MULTIMODAL_PROVIDER_ORDER]
+    },
 
-    capabilities:
-      PROVIDER_CAPABILITIES,
+    capabilities: PROVIDER_CAPABILITIES,
 
     tokenPolicy: {
-
       providerMaxOutputTokens:
         PROVIDER_MAX_OUTPUT_TOKENS
-
     },
 
     cooldown: {
-
       quotaCooldownMs:
         AI_PROVIDER_QUOTA_COOLDOWN_MS
-
     },
 
     retry: {
-
-      maxRetries:
-        AI_MAX_RETRIES,
-
-      baseDelayMs:
-        AI_RETRY_BASE_DELAY_MS,
-
-      maxDelayMs:
-        AI_MAX_RETRY_DELAY_MS
-
+      maxRetries: AI_MAX_RETRIES,
+      baseDelayMs: AI_RETRY_BASE_DELAY_MS,
+      maxDelayMs: AI_MAX_RETRY_DELAY_MS
     },
 
-    timeoutMs:
-      AI_PROVIDER_TIMEOUT_MS
-
+    timeoutMs: AI_PROVIDER_TIMEOUT_MS
   };
-
 }
-
 
 /* =========================================================
    EXPORTS
 ========================================================= */
 
 module.exports = {
-
   generateText,
-
   generateJSON,
-
   getProviderStatus,
-
   isProviderAvailable,
-
   normalizeProvider,
-
   getProviderOrder
-
 };
