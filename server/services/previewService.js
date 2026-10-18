@@ -2516,11 +2516,11 @@ async function createPreview({
           "static"
       );
 
-    const runtime =
-      String(
-        build.runtime ||
-          "node"
-      );
+    const buildRuntime =
+     String(
+       build.runtime ||
+       "node"
+  ); 
 
     const nodeVersion =
       String(
