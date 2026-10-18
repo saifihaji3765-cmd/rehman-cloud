@@ -2,62 +2,33 @@
 
 /**
  * Deployment Log Controller
- * Version: 1.0.0
+ * Version: 1.1.0
  *
  * Responsibilities:
- * - HTTP/API layer for deployment logs
- * - Validate incoming request data
- * - Call deploymentLogService
+ * - Validate requests
+ * - Enforce authenticated-user identity
+ * - Verify project and deployment ownership
+ * - Delegate persistence to deploymentLogService
  * - Return consistent API responses
- * - Never expose secrets or internal stack traces to clients
  *
- * Architecture:
- *
- * Routes
- *   ↓
- * Controller
- *   ↓
- * deploymentLogService
- *   ↓
- * deploymentLogModel
+ * Security:
+ * - Never trust userId supplied by the client.
+ * - Verify project ownership before creating/querying project logs.
+ * - Verify deployment ownership before reading or mutating deployment logs.
  */
 
 const deploymentLogService = require('../services/deploymentLogService');
+const DeploymentLog = require('../models/deploymentLogModel');
+const Project = require('../models/projectModel');
 
-const CONTROLLER_VERSION = '1.0.0';
+const CONTROLLER_VERSION = '1.1.0';
+
+const MAX_LIMIT = 500;
+const DEFAULT_LIMIT = 50;
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
-
-function getUserId(req) {
-  return (
-    req.user?.id ||
-    req.user?._id ||
-    req.auth?.userId ||
-    req.body?.userId ||
-    req.query?.userId ||
-    undefined
-  );
-}
-
-function getProjectId(req) {
-  return (
-    req.params?.projectId ||
-    req.body?.projectId ||
-    req.query?.projectId ||
-    undefined
-  );
-}
-
-function getDeploymentId(req) {
-  return (
-    req.params?.deploymentId ||
-    req.body?.deploymentId ||
-    req.query?.deploymentId ||
-    undefined
-  );
-}
 
 function cleanId(value) {
   if (value === undefined || value === null) {
@@ -65,12 +36,35 @@ function cleanId(value) {
   }
 
   const result = String(value).trim();
-
   return result || undefined;
 }
 
+function getAuthenticatedUserId(req) {
+  return cleanId(
+    req.user?.id ||
+    req.user?._id ||
+    req.auth?.userId
+  );
+}
+
+function getProjectId(req) {
+  return cleanId(
+    req.params?.projectId ||
+    req.body?.projectId ||
+    req.query?.projectId
+  );
+}
+
+function getDeploymentId(req) {
+  return cleanId(
+    req.params?.deploymentId ||
+    req.body?.deploymentId ||
+    req.query?.deploymentId
+  );
+}
+
 function parseBoolean(value) {
-  if (value === undefined || value === null) {
+  if (value === undefined || value === null || value === '') {
     return undefined;
   }
 
@@ -78,7 +72,12 @@ function parseBoolean(value) {
     return value;
   }
 
-  return String(value).toLowerCase() === 'true';
+  const normalized = String(value).trim().toLowerCase();
+
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+
+  return undefined;
 }
 
 function parseNumber(value, fallback) {
@@ -88,121 +87,129 @@ function parseNumber(value, fallback) {
 
   const number = Number(value);
 
-  return Number.isFinite(number)
-    ? number
-    : fallback;
+  return Number.isFinite(number) ? number : fallback;
 }
 
-function safeErrorMessage(error) {
-  if (!error) {
-    return 'Unknown error';
+function getLimit(value, fallback = DEFAULT_LIMIT) {
+  const number = parseNumber(value, fallback);
+
+  if (!Number.isInteger(number) || number < 1) {
+    return fallback;
   }
 
-  return (
-    error.publicMessage ||
-    error.message ||
-    'Unable to process deployment log request'
-  );
+  return Math.min(number, MAX_LIMIT);
 }
 
-function getStatusCode(error) {
-  if (!error) {
-    return 500;
-  }
-
-  if (
-    error.statusCode &&
-    Number.isInteger(error.statusCode)
-  ) {
-    return error.statusCode;
-  }
-
-  const message = String(
-    error.message || ''
-  ).toLowerCase();
-
-  if (
-    message.includes('required') ||
-    message.includes('invalid')
-  ) {
-    return 400;
-  }
-
-  if (
-    message.includes('not found') ||
-    message.includes('does not exist')
-  ) {
-    return 404;
-  }
-
-  return 500;
-}
-
-function successResponse(
-  res,
-  data,
-  statusCode = 200
-) {
+function successResponse(res, data, statusCode = 200) {
   return res.status(statusCode).json({
     success: true,
-
     data,
-
     controller: 'deploymentLogController',
-
     version: CONTROLLER_VERSION,
-
     timestamp: new Date().toISOString(),
   });
 }
 
-function errorResponse(
-  res,
-  error,
-  fallbackStatus = 500
-) {
+function errorResponse(res, error, fallbackStatus = 500) {
   const statusCode =
-    getStatusCode(error) || fallbackStatus;
+    Number.isInteger(error?.statusCode) &&
+    error.statusCode >= 400 &&
+    error.statusCode <= 599
+      ? error.statusCode
+      : fallbackStatus;
+
+  // Do not return internal database errors or stack traces.
+  const message =
+    statusCode >= 500
+      ? 'Unable to process deployment log request'
+      : error?.publicMessage ||
+        error?.message ||
+        'Invalid deployment log request';
 
   return res.status(statusCode).json({
     success: false,
-
-    message: safeErrorMessage(error),
-
+    message,
     controller: 'deploymentLogController',
-
     version: CONTROLLER_VERSION,
-
     timestamp: new Date().toISOString(),
   });
 }
 
+function httpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.publicMessage = message;
+  return error;
+}
+
+function requireUserId(req) {
+  const userId = getAuthenticatedUserId(req);
+
+  if (!userId) {
+    throw httpError(401, 'Authentication is required');
+  }
+
+  return userId;
+}
+
 /**
- * Prevent a client from supplying another user's identity
- * when authentication middleware has already populated req.user.
+ * Verify that a project belongs to the authenticated user.
+ * Archived projects are not accepted for new deployment-log operations.
  */
-function buildIdentity(req, body = {}) {
-  const authenticatedUserId =
-    cleanId(
-      req.user?.id ||
-        req.user?._id ||
-        req.auth?.userId
-    );
+async function requireOwnedProject(projectId, userId) {
+  if (!projectId) {
+    throw httpError(400, 'projectId is required');
+  }
 
-  const requestedUserId =
-    cleanId(body.userId);
+  const project = await Project.findOne({
+    _id: projectId,
+    userId,
+    isArchived: false,
+  })
+    .select('_id userId projectName')
+    .lean();
 
-  return {
-    userId:
-      authenticatedUserId ||
-      requestedUserId,
+  if (!project) {
+    // Use the same response for missing and non-owned projects.
+    throw httpError(404, 'Project not found');
+  }
 
-    projectId:
-      cleanId(
-        req.params?.projectId ||
-          body.projectId ||
-          req.query?.projectId
-      ),
+  return project;
+}
+
+/**
+ * Verify deployment ownership before any deployment-log operation.
+ * The client cannot establish ownership by supplying userId in its payload.
+ */
+async function requireOwnedDeployment(deploymentId, userId) {
+  if (!deploymentId) {
+    throw httpError(400, 'deploymentId is required');
+  }
+
+  const log = await DeploymentLog.findOne({
+    deploymentId,
+    userId,
+  })
+    .select('deploymentId projectId userId')
+    .lean();
+
+  if (!log) {
+    throw httpError(404, 'Deployment log not found');
+  }
+
+  return log;
+}
+
+/**
+ * Apply one consistent response/error boundary to each handler.
+ */
+function handler(fn, fallbackStatus = 500) {
+  return async function deploymentLogHandler(req, res) {
+    try {
+      return await fn(req, res);
+    } catch (error) {
+      return errorResponse(res, error, fallbackStatus);
+    }
   };
 }
 
@@ -210,1057 +217,489 @@ function buildIdentity(req, body = {}) {
 /* Create                                                                     */
 /* -------------------------------------------------------------------------- */
 
-async function createDeploymentLog(
-  req,
-  res
-) {
-  try {
-    const body = req.body || {};
+const createDeploymentLog = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const body = req.body || {};
+  const projectId = cleanId(body.projectId || req.params?.projectId);
 
-    const identity =
-      buildIdentity(req, body);
+  await requireOwnedProject(projectId, userId);
 
-    const result =
-      await deploymentLogService.createDeploymentLog({
-        ...body,
-
-        userId: identity.userId,
-
-        projectId: identity.projectId,
-      });
-
-    return successResponse(
-      res,
-      result,
-      201
-    );
-  } catch (error) {
-    return errorResponse(res, error, 400);
+  if (!cleanId(body.deploymentId)) {
+    throw httpError(400, 'deploymentId is required');
   }
-}
+
+  const result = await deploymentLogService.createDeploymentLog({
+    ...body,
+
+    // Always override client-provided identity.
+    userId,
+    projectId,
+    deploymentId: cleanId(body.deploymentId),
+  });
+
+  return successResponse(res, result, 201);
+}, 400);
 
 /* -------------------------------------------------------------------------- */
-/* Get Deployment Logs                                                        */
+/* Read Deployment Logs                                                       */
 /* -------------------------------------------------------------------------- */
 
-async function getDeploymentLog(
-  req,
-  res
-) {
-  try {
-    const deploymentId =
-      getDeploymentId(req);
+const getDeploymentLog = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
 
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
+  await requireOwnedDeployment(deploymentId, userId);
+
+  const result = await deploymentLogService.getDeploymentLog(
+    deploymentId,
+    {
+      limit: getLimit(req.query?.limit),
+      sort: req.query?.sort === 'asc' ? 'asc' : 'desc',
     }
+  );
 
-    const limit =
-      parseNumber(
-        req.query?.limit,
-        undefined
-      );
+  return successResponse(res, result);
+});
 
-    const sort =
-      req.query?.sort === 'asc'
-        ? 'asc'
-        : 'desc';
+const getLatestDeploymentLog = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
 
-    const result =
-      await deploymentLogService.getDeploymentLog(
-        deploymentId,
-        {
-          limit,
-          sort,
-        }
-      );
+  await requireOwnedDeployment(deploymentId, userId);
 
-    return successResponse(
-      res,
-      result
-    );
-  } catch (error) {
-    return errorResponse(res, error);
+  const result =
+    await deploymentLogService.getLatestDeploymentLog(deploymentId);
+
+  if (!result) {
+    throw httpError(404, 'Deployment log not found');
   }
-}
 
-/* -------------------------------------------------------------------------- */
-/* Latest                                                                     */
-/* -------------------------------------------------------------------------- */
+  return successResponse(res, result);
+});
 
-async function getLatestDeploymentLog(
-  req,
-  res
-) {
-  try {
-    const deploymentId =
-      getDeploymentId(req);
+const getStreamSnapshot = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
 
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
+  await requireOwnedDeployment(deploymentId, userId);
+
+  const result = await deploymentLogService.getStreamSnapshot(
+    deploymentId,
+    {
+      limit: getLimit(req.query?.limit, 100),
     }
+  );
 
-    const result =
-      await deploymentLogService.getLatestDeploymentLog(
-        deploymentId
-      );
-
-    if (!result) {
-      return res.status(404).json({
-        success: false,
-        message: 'Deployment log not found',
-      });
-    }
-
-    return successResponse(
-      res,
-      result
-    );
-  } catch (error) {
-    return errorResponse(res, error);
-  }
-}
+  return successResponse(res, result);
+});
 
 /* -------------------------------------------------------------------------- */
-/* Append Event                                                               */
+/* Event                                                                      */
 /* -------------------------------------------------------------------------- */
 
-async function appendEvent(
-  req,
-  res
-) {
-  try {
-    const body = req.body || {};
+const appendEvent = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
 
-    const deploymentId =
-      getDeploymentId(req);
+  await requireOwnedDeployment(deploymentId, userId);
 
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
-    }
+  const result = await deploymentLogService.appendEvent({
+    ...(req.body || {}),
+    deploymentId,
+  });
 
-    const result =
-      await deploymentLogService.appendEvent({
-        ...body,
-
-        deploymentId,
-      });
-
-    return successResponse(
-      res,
-      result,
-      201
-    );
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-}
+  return successResponse(res, result, 201);
+}, 400);
 
 /* -------------------------------------------------------------------------- */
 /* Progress                                                                   */
 /* -------------------------------------------------------------------------- */
 
-async function updateProgress(
-  req,
-  res
-) {
-  try {
-    const deploymentId =
-      getDeploymentId(req);
+const updateProgress = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
+  const progress = parseNumber(req.body?.progress, undefined);
 
-    const progress =
-      parseNumber(
-        req.body?.progress ??
-          req.params?.progress ??
-          req.query?.progress,
-        undefined
-      );
+  await requireOwnedDeployment(deploymentId, userId);
 
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
-    }
-
-    if (
-      progress === undefined ||
-      progress < 0 ||
-      progress > 100
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'progress must be a number between 0 and 100',
-      });
-    }
-
-    const result =
-      await deploymentLogService.updateProgress(
-        deploymentId,
-        progress,
-        {
-          message:
-            req.body?.message,
-
-          stage:
-            req.body?.stage,
-
-          agent:
-            req.body?.agent,
-
-          status:
-            req.body?.status,
-        }
-      );
-
-    return successResponse(
-      res,
-      result
+  if (
+    progress === undefined ||
+    progress < 0 ||
+    progress > 100
+  ) {
+    throw httpError(
+      400,
+      'progress must be a number between 0 and 100'
     );
-  } catch (error) {
-    return errorResponse(res, error, 400);
   }
-}
 
-/* -------------------------------------------------------------------------- */
-/* Start Deployment                                                           */
-/* -------------------------------------------------------------------------- */
-
-async function markStarted(
-  req,
-  res
-) {
-  try {
-    const deploymentId =
-      getDeploymentId(req);
-
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
+  const result = await deploymentLogService.updateProgress(
+    deploymentId,
+    progress,
+    {
+      message: req.body?.message,
+      stage: req.body?.stage,
+      agent: req.body?.agent,
+      status: req.body?.status,
     }
+  );
 
-    const result =
-      await deploymentLogService.markStarted(
-        deploymentId,
-        {
-          stage:
-            req.body?.stage,
+  return successResponse(res, result);
+}, 400);
 
-          agent:
-            req.body?.agent,
+/* -------------------------------------------------------------------------- */
+/* Deployment Lifecycle                                                       */
+/* -------------------------------------------------------------------------- */
 
-          progress:
-            req.body?.progress,
+const markStarted = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
 
-          status:
-            req.body?.status,
+  await requireOwnedDeployment(deploymentId, userId);
 
-          message:
-            req.body?.message,
+  const result = await deploymentLogService.markStarted(
+    deploymentId,
+    {
+      stage: req.body?.stage,
+      agent: req.body?.agent,
+      progress: req.body?.progress,
+      status: req.body?.status,
+      message: req.body?.message,
+      details: req.body?.details,
+    }
+  );
 
-          details:
-            req.body?.details,
-        }
-      );
+  return successResponse(res, result);
+}, 400);
 
-    return successResponse(
-      res,
-      result
-    );
-  } catch (error) {
-    return errorResponse(res, error, 400);
+const markCompleted = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
+
+  await requireOwnedDeployment(deploymentId, userId);
+
+  const result = await deploymentLogService.markCompleted(
+    deploymentId,
+    {
+      success: req.body?.success !== false,
+      status: req.body?.status,
+      message: req.body?.message,
+      error: req.body?.error,
+      liveUrl: req.body?.liveUrl,
+    }
+  );
+
+  return successResponse(res, result);
+}, 400);
+
+/* -------------------------------------------------------------------------- */
+/* Stages                                                                     */
+/* -------------------------------------------------------------------------- */
+
+const startStage = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
+  const stageName =
+    req.params?.stageName ||
+    req.body?.stageName ||
+    req.body?.stage;
+
+  await requireOwnedDeployment(deploymentId, userId);
+
+  if (!stageName) {
+    throw httpError(400, 'stageName is required');
   }
-}
 
-/* -------------------------------------------------------------------------- */
-/* Complete Deployment                                                        */
-/* -------------------------------------------------------------------------- */
-
-async function markCompleted(
-  req,
-  res
-) {
-  try {
-    const deploymentId =
-      getDeploymentId(req);
-
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
+  const result = await deploymentLogService.startStage(
+    deploymentId,
+    stageName,
+    {
+      agent: req.body?.agent,
+      progress: req.body?.progress,
+      message: req.body?.message,
+      metadata: req.body?.metadata,
+      deploymentStatus: req.body?.deploymentStatus,
     }
+  );
 
-    const result =
-      await deploymentLogService.markCompleted(
-        deploymentId,
-        {
-          success:
-            req.body?.success !== false,
+  return successResponse(res, result);
+}, 400);
 
-          status:
-            req.body?.status,
+const completeStage = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
+  const stageName =
+    req.params?.stageName ||
+    req.body?.stageName ||
+    req.body?.stage;
 
-          message:
-            req.body?.message,
+  await requireOwnedDeployment(deploymentId, userId);
 
-          error:
-            req.body?.error,
-
-          liveUrl:
-            req.body?.liveUrl,
-        }
-      );
-
-    return successResponse(
-      res,
-      result
-    );
-  } catch (error) {
-    return errorResponse(res, error, 400);
+  if (!stageName) {
+    throw httpError(400, 'stageName is required');
   }
-}
 
-/* -------------------------------------------------------------------------- */
-/* Stage: Start                                                               */
-/* -------------------------------------------------------------------------- */
-
-async function startStage(
-  req,
-  res
-) {
-  try {
-    const deploymentId =
-      getDeploymentId(req);
-
-    const stageName =
-      req.params?.stageName ||
-      req.body?.stageName ||
-      req.body?.stage;
-
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
+  const result = await deploymentLogService.completeStage(
+    deploymentId,
+    stageName,
+    {
+      success: req.body?.success !== false,
+      status: req.body?.status,
+      progress: req.body?.progress,
+      message: req.body?.message,
+      error: req.body?.error,
+      agent: req.body?.agent,
     }
+  );
 
-    if (!stageName) {
-      return res.status(400).json({
-        success: false,
-        message: 'stageName is required',
-      });
+  return successResponse(res, result);
+}, 400);
+
+/* -------------------------------------------------------------------------- */
+/* Errors and Warnings                                                        */
+/* -------------------------------------------------------------------------- */
+
+const recordError = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
+
+  await requireOwnedDeployment(deploymentId, userId);
+
+  const errorPayload =
+    req.body?.error ||
+    req.body?.message ||
+    'Deployment error';
+
+  const result = await deploymentLogService.recordError(
+    deploymentId,
+    errorPayload,
+    {
+      type: req.body?.type,
+      event: req.body?.event,
+      stage: req.body?.stage,
+      agent: req.body?.agent,
+      status: req.body?.status,
+      message: req.body?.message,
+      details: req.body?.details,
     }
+  );
 
-    const result =
-      await deploymentLogService.startStage(
-        deploymentId,
-        stageName,
-        {
-          agent:
-            req.body?.agent,
+  return successResponse(res, result, 201);
+}, 400);
 
-          progress:
-            req.body?.progress,
+const recordWarning = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
 
-          message:
-            req.body?.message,
+  await requireOwnedDeployment(deploymentId, userId);
 
-          metadata:
-            req.body?.metadata,
-
-          deploymentStatus:
-            req.body?.deploymentStatus,
-        }
-      );
-
-    return successResponse(
-      res,
-      result
-    );
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-}
-
-/* -------------------------------------------------------------------------- */
-/* Stage: Complete                                                            */
-/* -------------------------------------------------------------------------- */
-
-async function completeStage(
-  req,
-  res
-) {
-  try {
-    const deploymentId =
-      getDeploymentId(req);
-
-    const stageName =
-      req.params?.stageName ||
-      req.body?.stageName ||
-      req.body?.stage;
-
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
+  const result = await deploymentLogService.recordWarning(
+    deploymentId,
+    req.body?.message || 'Deployment warning',
+    {
+      type: req.body?.type,
+      event: req.body?.event,
+      stage: req.body?.stage,
+      agent: req.body?.agent,
+      progress: req.body?.progress,
+      details: req.body?.details,
     }
+  );
 
-    if (!stageName) {
-      return res.status(400).json({
-        success: false,
-        message: 'stageName is required',
-      });
+  return successResponse(res, result, 201);
+}, 400);
+
+/* -------------------------------------------------------------------------- */
+/* Auto Fix                                                                   */
+/* -------------------------------------------------------------------------- */
+
+const markAutoFixEligible = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
+
+  await requireOwnedDeployment(deploymentId, userId);
+
+  const result = await deploymentLogService.markAutoFixEligible(
+    deploymentId,
+    {
+      reason: req.body?.reason,
+      stage: req.body?.stage,
     }
+  );
 
-    const result =
-      await deploymentLogService.completeStage(
-        deploymentId,
-        stageName,
-        {
-          success:
-            req.body?.success !== false,
+  return successResponse(res, result);
+}, 400);
 
-          status:
-            req.body?.status,
+const markAutoFixTriggered = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
 
-          progress:
-            req.body?.progress,
+  await requireOwnedDeployment(deploymentId, userId);
 
-          message:
-            req.body?.message,
-
-          error:
-            req.body?.error,
-
-          agent:
-            req.body?.agent,
-        }
-      );
-
-    return successResponse(
-      res,
-      result
-    );
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-}
-
-/* -------------------------------------------------------------------------- */
-/* Error                                                                      */
-/* -------------------------------------------------------------------------- */
-
-async function recordError(
-  req,
-  res
-) {
-  try {
-    const deploymentId =
-      getDeploymentId(req);
-
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
+  const result = await deploymentLogService.markAutoFixTriggered(
+    deploymentId,
+    {
+      autoFixTriggerId: req.body?.autoFixTriggerId,
+      reason: req.body?.reason,
     }
+  );
 
-    const errorPayload =
-      req.body?.error ||
-      req.body?.message ||
-      'Deployment error';
-
-    const result =
-      await deploymentLogService.recordError(
-        deploymentId,
-        errorPayload,
-        {
-          type:
-            req.body?.type,
-
-          event:
-            req.body?.event,
-
-          stage:
-            req.body?.stage,
-
-          agent:
-            req.body?.agent,
-
-          status:
-            req.body?.status,
-
-          message:
-            req.body?.message,
-
-          details:
-            req.body?.details,
-        }
-      );
-
-    return successResponse(
-      res,
-      result,
-      201
-    );
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-}
-
-/* -------------------------------------------------------------------------- */
-/* Warning                                                                    */
-/* -------------------------------------------------------------------------- */
-
-async function recordWarning(
-  req,
-  res
-) {
-  try {
-    const deploymentId =
-      getDeploymentId(req);
-
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
-    }
-
-    const message =
-      req.body?.message ||
-      'Deployment warning';
-
-    const result =
-      await deploymentLogService.recordWarning(
-        deploymentId,
-        message,
-        {
-          type:
-            req.body?.type,
-
-          event:
-            req.body?.event,
-
-          stage:
-            req.body?.stage,
-
-          agent:
-            req.body?.agent,
-
-          progress:
-            req.body?.progress,
-
-          details:
-            req.body?.details,
-        }
-      );
-
-    return successResponse(
-      res,
-      result,
-      201
-    );
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-}
-
-/* -------------------------------------------------------------------------- */
-/* Auto Fix: Eligible                                                         */
-/* -------------------------------------------------------------------------- */
-
-async function markAutoFixEligible(
-  req,
-  res
-) {
-  try {
-    const deploymentId =
-      getDeploymentId(req);
-
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
-    }
-
-    const result =
-      await deploymentLogService.markAutoFixEligible(
-        deploymentId,
-        {
-          reason:
-            req.body?.reason,
-
-          stage:
-            req.body?.stage,
-        }
-      );
-
-    return successResponse(
-      res,
-      result
-    );
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-}
-
-/* -------------------------------------------------------------------------- */
-/* Auto Fix: Triggered                                                         */
-/* -------------------------------------------------------------------------- */
-
-async function markAutoFixTriggered(
-  req,
-  res
-) {
-  try {
-    const deploymentId =
-      getDeploymentId(req);
-
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
-    }
-
-    const result =
-      await deploymentLogService.markAutoFixTriggered(
-        deploymentId,
-        {
-          autoFixTriggerId:
-            req.body?.autoFixTriggerId,
-
-          reason:
-            req.body?.reason,
-        }
-      );
-
-    return successResponse(
-      res,
-      result
-    );
-  } catch (error) {
-    return errorResponse(res, error, 400);
-  }
-}
+  return successResponse(res, result);
+}, 400);
 
 /* -------------------------------------------------------------------------- */
 /* Project History                                                            */
 /* -------------------------------------------------------------------------- */
 
-async function getProjectHistory(
-  req,
-  res
-) {
-  try {
-    const projectId =
-      getProjectId(req);
+const getProjectHistory = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const projectId = getProjectId(req);
 
-    if (!projectId) {
-      return res.status(400).json({
-        success: false,
-        message: 'projectId is required',
-      });
+  await requireOwnedProject(projectId, userId);
+
+  const result = await deploymentLogService.getProjectHistory(
+    projectId,
+    {
+      limit: getLimit(req.query?.limit),
+      archived: parseBoolean(req.query?.archived),
+      environmentName: req.query?.environmentName,
+      status: req.query?.status,
     }
+  );
 
-    const result =
-      await deploymentLogService.getProjectHistory(
-        projectId,
-        {
-          limit:
-            parseNumber(
-              req.query?.limit,
-              50
-            ),
+  return successResponse(res, result);
+});
 
-          archived:
-            parseBoolean(
-              req.query?.archived
-            ),
+const getActiveDeployment = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const projectId = getProjectId(req);
 
-          environmentName:
-            req.query?.environmentName,
+  await requireOwnedProject(projectId, userId);
 
-          status:
-            req.query?.status,
-        }
-      );
+  const result =
+    await deploymentLogService.getActiveDeployment(projectId);
 
-    return successResponse(
-      res,
-      result
-    );
-  } catch (error) {
-    return errorResponse(res, error);
-  }
-}
-
-/* -------------------------------------------------------------------------- */
-/* Active Deployment                                                          */
-/* -------------------------------------------------------------------------- */
-
-async function getActiveDeployment(
-  req,
-  res
-) {
-  try {
-    const projectId =
-      getProjectId(req);
-
-    if (!projectId) {
-      return res.status(400).json({
-        success: false,
-        message: 'projectId is required',
-      });
-    }
-
-    const result =
-      await deploymentLogService.getActiveDeployment(
-        projectId
-      );
-
-    return successResponse(
-      res,
-      result
-    );
-  } catch (error) {
-    return errorResponse(res, error);
-  }
-}
+  return successResponse(res, result);
+});
 
 /* -------------------------------------------------------------------------- */
 /* Search                                                                     */
 /* -------------------------------------------------------------------------- */
 
-async function search(
-  req,
-  res
-) {
-  try {
-    const filters = {
-      deploymentId:
-        req.query?.deploymentId,
+const search = handler(async (req, res) => {
+  const userId = requireUserId(req);
 
-      workflowId:
-        req.query?.workflowId,
+  const filters = {
+    deploymentId: req.query?.deploymentId,
+    workflowId: req.query?.workflowId,
+    requestId: req.query?.requestId,
+    projectId: req.query?.projectId,
+    environmentName: req.query?.environmentName,
+    status: req.query?.status,
+    level: req.query?.level,
+    type: req.query?.type,
+    currentStage: req.query?.currentStage,
+    hasError: parseBoolean(req.query?.hasError),
+    autoFixEligible: parseBoolean(req.query?.autoFixEligible),
+    archived: parseBoolean(req.query?.archived),
+    createdAfter: req.query?.createdAfter,
+    createdBefore: req.query?.createdBefore,
 
-      requestId:
-        req.query?.requestId,
+    // Never accept userId from query parameters.
+    userId,
+  };
 
-      projectId:
-        req.query?.projectId ||
-        req.params?.projectId,
-
-      userId:
-        req.query?.userId,
-
-      environmentName:
-        req.query?.environmentName,
-
-      status:
-        req.query?.status,
-
-      level:
-        req.query?.level,
-
-      type:
-        req.query?.type,
-
-      currentStage:
-        req.query?.currentStage,
-
-      hasError:
-        parseBoolean(
-          req.query?.hasError
-        ),
-
-      autoFixEligible:
-        parseBoolean(
-          req.query?.autoFixEligible
-        ),
-
-      archived:
-        parseBoolean(
-          req.query?.archived
-        ),
-
-      createdAfter:
-        req.query?.createdAfter,
-
-      createdBefore:
-        req.query?.createdBefore,
-    };
-
-    const result =
-      await deploymentLogService.search(
-        filters,
-        {
-          limit:
-            parseNumber(
-              req.query?.limit,
-              50
-            ),
-
-          skip:
-            parseNumber(
-              req.query?.skip,
-              0
-            ),
-
-          sort:
-            req.query?.sort,
-        }
-      );
-
-    return successResponse(
-      res,
-      result
-    );
-  } catch (error) {
-    return errorResponse(res, error);
+  // If filtering by project, verify ownership before querying.
+  if (filters.projectId) {
+    await requireOwnedProject(filters.projectId, userId);
   }
-}
+
+  // If filtering by deployment, verify ownership too.
+  if (filters.deploymentId) {
+    await requireOwnedDeployment(filters.deploymentId, userId);
+  }
+
+  const result = await deploymentLogService.search(
+    filters,
+    {
+      limit: getLimit(req.query?.limit),
+      skip: Math.max(
+        0,
+        parseNumber(req.query?.skip, 0)
+      ),
+      sort: req.query?.sort,
+    }
+  );
+
+  return successResponse(res, result);
+});
 
 /* -------------------------------------------------------------------------- */
 /* Archive                                                                    */
 /* -------------------------------------------------------------------------- */
 
-async function archiveDeployment(
-  req,
-  res
-) {
-  try {
-    const deploymentId =
-      getDeploymentId(req);
+const archiveDeployment = handler(async (req, res) => {
+  const userId = requireUserId(req);
+  const deploymentId = getDeploymentId(req);
 
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
-    }
+  await requireOwnedDeployment(deploymentId, userId);
 
-    const result =
-      await deploymentLogService.archiveDeployment(
-        deploymentId
-      );
+  const result =
+    await deploymentLogService.archiveDeployment(deploymentId);
 
-    return successResponse(
-      res,
-      result
-    );
-  } catch (error) {
-    return errorResponse(res, error);
-  }
-}
-
-/* -------------------------------------------------------------------------- */
-/* Stream Snapshot                                                            */
-/* -------------------------------------------------------------------------- */
-
-async function getStreamSnapshot(
-  req,
-  res
-) {
-  try {
-    const deploymentId =
-      getDeploymentId(req);
-
-    if (!deploymentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'deploymentId is required',
-      });
-    }
-
-    const result =
-      await deploymentLogService.getStreamSnapshot(
-        deploymentId,
-        {
-          limit:
-            parseNumber(
-              req.query?.limit,
-              100
-            ),
-        }
-      );
-
-    return successResponse(
-      res,
-      result
-    );
-  } catch (error) {
-    return errorResponse(res, error);
-  }
-}
+  return successResponse(res, result);
+});
 
 /* -------------------------------------------------------------------------- */
 /* Health                                                                     */
 /* -------------------------------------------------------------------------- */
 
-async function health(
-  req,
-  res
-) {
+async function health(req, res) {
   try {
-    const result =
-      await deploymentLogService.health();
+    const result = await deploymentLogService.health();
 
-    return res.status(
-      result.success ? 200 : 503
-    ).json({
+    return res.status(result.success ? 200 : 503).json({
       ...result,
-
-      controller:
-        'deploymentLogController',
-
-      version:
-        CONTROLLER_VERSION,
+      controller: 'deploymentLogController',
+      version: CONTROLLER_VERSION,
     });
-  } catch (error) {
+  } catch {
     return res.status(503).json({
       success: false,
-
-      message:
-        'Deployment log service health check failed',
-
-      controller:
-        'deploymentLogController',
-
-      version:
-        CONTROLLER_VERSION,
-
-      timestamp:
-        new Date().toISOString(),
+      message: 'Deployment log service health check failed',
+      controller: 'deploymentLogController',
+      version: CONTROLLER_VERSION,
+      timestamp: new Date().toISOString(),
     });
   }
 }
 
 /* -------------------------------------------------------------------------- */
-/* Controller Object                                                          */
+/* Exports                                                                    */
 /* -------------------------------------------------------------------------- */
 
 const deploymentLogController = {
   createDeploymentLog,
-
   getDeploymentLog,
-
   getLatestDeploymentLog,
-
   appendEvent,
-
   updateProgress,
-
   markStarted,
-
   markCompleted,
-
   startStage,
-
   completeStage,
-
   recordError,
-
   recordWarning,
-
   markAutoFixEligible,
-
   markAutoFixTriggered,
-
   getProjectHistory,
-
   getActiveDeployment,
-
   search,
-
   archiveDeployment,
-
   getStreamSnapshot,
-
   health,
-
   version: CONTROLLER_VERSION,
 };
 
-/* -------------------------------------------------------------------------- */
-/* Exports                                                                    */
-/* -------------------------------------------------------------------------- */
-
-module.exports =
-  deploymentLogController;
-
-module.exports.createDeploymentLog =
-  createDeploymentLog;
-
-module.exports.getDeploymentLog =
-  getDeploymentLog;
-
-module.exports.getLatestDeploymentLog =
-  getLatestDeploymentLog;
-
-module.exports.appendEvent =
-  appendEvent;
-
-module.exports.updateProgress =
-  updateProgress;
-
-module.exports.markStarted =
-  markStarted;
-
-module.exports.markCompleted =
-  markCompleted;
-
-module.exports.startStage =
-  startStage;
-
-module.exports.completeStage =
-  completeStage;
-
-module.exports.recordError =
-  recordError;
-
-module.exports.recordWarning =
-  recordWarning;
-
-module.exports.markAutoFixEligible =
-  markAutoFixEligible;
-
-module.exports.markAutoFixTriggered =
-  markAutoFixTriggered;
-
-module.exports.getProjectHistory =
-  getProjectHistory;
-
-module.exports.getActiveDeployment =
-  getActiveDeployment;
-
-module.exports.search =
-  search;
-
-module.exports.archiveDeployment =
-  archiveDeployment;
-
-module.exports.getStreamSnapshot =
-  getStreamSnapshot;
-
-module.exports.health =
-  health;
-
-module.exports.CONTROLLER_VERSION =
-  CONTROLLER_VERSION;
+module.exports = deploymentLogController;
+module.exports.CONTROLLER_VERSION = CONTROLLER_VERSION;
