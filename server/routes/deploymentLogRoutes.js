@@ -2,10 +2,12 @@
 
 /**
  * Deployment Log Routes
- * Version: 1.0.0
+ * Version: 1.1.0
  *
  * Flow:
  * Route
+ *   ↓
+ * Authentication
  *   ↓
  * Controller
  *   ↓
@@ -13,8 +15,11 @@
  *   ↓
  * Model
  *
- * These routes expose deployment-log operations without putting
- * business logic inside the router.
+ * Security:
+ * - Health endpoint remains public.
+ * - All deployment-log operations require authentication.
+ * - Per-user deployment/project ownership must also be enforced
+ *   inside the controller before reading or modifying records.
  */
 
 const express = require('express');
@@ -22,33 +27,43 @@ const express = require('express');
 const deploymentLogController =
   require('../controllers/deploymentLogController');
 
+const {
+  authMiddleware,
+} = require('../middleware/authMiddleware');
+
 const router = express.Router();
 
-const ROUTE_VERSION = '1.0.0';
-
-/* -------------------------------------------------------------------------- */
-/* Optional Authentication Middleware                                         */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Authentication should normally be applied by the application's
- * global auth middleware.
- *
- * We intentionally do not invent an auth module here because the
- * existing project may use a different authentication implementation.
- *
- * If your main server already protects /api routes, these routes inherit
- * that protection.
- */
+const ROUTE_VERSION = '1.1.0';
 
 /* -------------------------------------------------------------------------- */
 /* Health                                                                     */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * GET /api/deployment-logs/health
+ *
+ * Public health check. Must not return deployment records,
+ * credentials, or other sensitive information.
+ */
 router.get(
   '/health',
   deploymentLogController.health
 );
+
+/* -------------------------------------------------------------------------- */
+/* Authentication                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * All routes registered below this middleware require an authenticated user.
+ *
+ * IMPORTANT:
+ * Authentication identifies the caller. It does not, by itself, prove that
+ * the caller owns a requested project or deployment.
+ *
+ * The controller must enforce ownership for every read/write operation.
+ */
+router.use(authMiddleware);
 
 /* -------------------------------------------------------------------------- */
 /* Deployment Creation                                                        */
@@ -57,7 +72,7 @@ router.get(
 /**
  * POST /api/deployment-logs
  *
- * Create a deployment log.
+ * Create a deployment log for an authenticated user's authorized project.
  */
 router.post(
   '/',
@@ -71,10 +86,7 @@ router.post(
 /**
  * GET /api/deployment-logs/search
  *
- * Search deployment logs using query parameters.
- *
- * Example:
- * /api/deployment-logs/search?projectId=abc&status=failed
+ * Search only records the authenticated user is authorized to access.
  */
 router.get(
   '/search',
@@ -87,22 +99,14 @@ router.get(
 
 /**
  * GET /api/deployment-logs/project/:projectId
- *
- * Get deployment history for a project.
  */
 router.get(
   '/project/:projectId',
   deploymentLogController.getProjectHistory
 );
 
-/* -------------------------------------------------------------------------- */
-/* Active Deployment                                                          */
-/* -------------------------------------------------------------------------- */
-
 /**
  * GET /api/deployment-logs/project/:projectId/active
- *
- * Get the currently active deployment for a project.
  */
 router.get(
   '/project/:projectId/active',
@@ -110,13 +114,11 @@ router.get(
 );
 
 /* -------------------------------------------------------------------------- */
-/* Deployment Specific Routes                                                 */
+/* Deployment Queries                                                         */
 /* -------------------------------------------------------------------------- */
 
 /**
  * GET /api/deployment-logs/:deploymentId
- *
- * Get deployment log history.
  */
 router.get(
   '/:deploymentId',
@@ -125,8 +127,6 @@ router.get(
 
 /**
  * GET /api/deployment-logs/:deploymentId/latest
- *
- * Get the latest deployment state.
  */
 router.get(
   '/:deploymentId/latest',
@@ -135,8 +135,6 @@ router.get(
 
 /**
  * GET /api/deployment-logs/:deploymentId/stream-snapshot
- *
- * Get an initial snapshot before live streaming starts.
  */
 router.get(
   '/:deploymentId/stream-snapshot',
@@ -149,8 +147,6 @@ router.get(
 
 /**
  * POST /api/deployment-logs/:deploymentId/start
- *
- * Mark deployment as started.
  */
 router.post(
   '/:deploymentId/start',
@@ -159,8 +155,6 @@ router.post(
 
 /**
  * POST /api/deployment-logs/:deploymentId/complete
- *
- * Mark deployment as completed.
  */
 router.post(
   '/:deploymentId/complete',
@@ -168,13 +162,11 @@ router.post(
 );
 
 /* -------------------------------------------------------------------------- */
-/* Events                                                                     */
+/* Events and Progress                                                        */
 /* -------------------------------------------------------------------------- */
 
 /**
  * POST /api/deployment-logs/:deploymentId/events
- *
- * Append a deployment event.
  */
 router.post(
   '/:deploymentId/events',
@@ -183,8 +175,6 @@ router.post(
 
 /**
  * PATCH /api/deployment-logs/:deploymentId/progress
- *
- * Update deployment progress.
  */
 router.patch(
   '/:deploymentId/progress',
@@ -197,8 +187,6 @@ router.patch(
 
 /**
  * POST /api/deployment-logs/:deploymentId/stages/:stageName/start
- *
- * Start a deployment stage.
  */
 router.post(
   '/:deploymentId/stages/:stageName/start',
@@ -207,8 +195,6 @@ router.post(
 
 /**
  * POST /api/deployment-logs/:deploymentId/stages/:stageName/complete
- *
- * Complete a deployment stage.
  */
 router.post(
   '/:deploymentId/stages/:stageName/complete',
@@ -216,13 +202,11 @@ router.post(
 );
 
 /* -------------------------------------------------------------------------- */
-/* Error / Warning                                                            */
+/* Errors and Warnings                                                        */
 /* -------------------------------------------------------------------------- */
 
 /**
  * POST /api/deployment-logs/:deploymentId/errors
- *
- * Record deployment error.
  */
 router.post(
   '/:deploymentId/errors',
@@ -231,8 +215,6 @@ router.post(
 
 /**
  * POST /api/deployment-logs/:deploymentId/warnings
- *
- * Record deployment warning.
  */
 router.post(
   '/:deploymentId/warnings',
@@ -245,8 +227,6 @@ router.post(
 
 /**
  * POST /api/deployment-logs/:deploymentId/auto-fix/eligible
- *
- * Mark a deployment as eligible for Auto Fix.
  */
 router.post(
   '/:deploymentId/auto-fix/eligible',
@@ -255,8 +235,6 @@ router.post(
 
 /**
  * POST /api/deployment-logs/:deploymentId/auto-fix/triggered
- *
- * Mark that Auto Fix has been triggered.
  */
 router.post(
   '/:deploymentId/auto-fix/triggered',
@@ -269,8 +247,6 @@ router.post(
 
 /**
  * POST /api/deployment-logs/:deploymentId/archive
- *
- * Archive deployment history.
  */
 router.post(
   '/:deploymentId/archive',
