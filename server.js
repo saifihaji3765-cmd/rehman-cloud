@@ -1,3 +1,4 @@
+
 /**
  * =========================================================
  * ZYRIONOS SERVER
@@ -19,6 +20,7 @@
  * - Environment management
  * - Deployment Log System
  * - GitHub System
+ * - Preview System
  * - Auto Fix trigger API
  * - Health/readiness endpoints
  * - Global error handling
@@ -148,6 +150,36 @@ const projectRoutes =
 
 const financialRoutes =
   require("./server/routes/financialRoutes");
+
+
+/* =========================================================
+   PREVIEW ROUTES
+========================================================= */
+
+/**
+ * Preview System
+ *
+ * Responsibilities:
+ *
+ * - Start project previews
+ * - Retrieve preview status
+ * - List project previews
+ * - Stop project previews
+ * - Expire project previews
+ * - Expose preview health endpoints
+ *
+ * IMPORTANT:
+ *
+ * previewRoutes already defines paths beginning with:
+ *
+ * /projects/:projectId/preview
+ *
+ * Therefore, it must be mounted at /api,
+ * NOT /api/projects.
+ */
+
+const previewRoutes =
+  require("./server/routes/previewRoutes");
 
 
 /* =========================================================
@@ -773,6 +805,34 @@ app.use(
 app.use(
   "/api/github",
   githubRoutes
+);
+
+
+/* =========================================================
+   PREVIEW SYSTEM
+========================================================= */
+
+/**
+ * Preview API
+ *
+ * Examples depend on the endpoints defined in previewRoutes:
+ *
+ * /api/projects/:projectId/preview
+ * /api/projects/:projectId/previews
+ * /api/projects/:projectId/preview/:previewId
+ *
+ * IMPORTANT:
+ *
+ * This mount is intentionally AFTER the other API routers.
+ *
+ * previewRoutes contains its own router-level 404 handler.
+ * Mounting it here prevents that handler from intercepting
+ * requests intended for the other API routers.
+ */
+
+app.use(
+  "/api",
+  previewRoutes
 );
 
 
