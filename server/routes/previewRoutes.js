@@ -3,40 +3,28 @@
 /**
  * =========================================================
  * ZYRION OS — ENTERPRISE PREVIEW ROUTES
+ * Version: 2.0.0
  * =========================================================
  *
- * Preview API boundary
- *
- * Flow:
- *
- * Request
- *   ↓
- * Authentication
- *   ↓
- * Rate Limiting
- *   ↓
- * Controller
- *   ↓
- * Preview Service
- *   ↓
- * Authoritative Build Artifact
- *   ↓
- * Isolated Preview Runtime
+ * Responsibilities:
+ * - Authenticate every preview endpoint.
+ * - Apply endpoint-specific rate limits.
+ * - Delegate business logic to previewController.
+ * - Preserve structured API responses.
+ * - Prevent unauthenticated fallback access.
  *
  * IMPORTANT:
- * - Routes contain no business logic.
- * - Routes never execute project code.
- * - Routes never build projects directly.
- * - Authentication is required for every endpoint.
- * - Project ownership is enforced inside controller/service.
+ * - Mount this router at /api in server.js.
+ * - Project ownership must be validated by controller/service.
+ * - Never trust user IDs supplied by the client.
+ * - This router does not execute project code directly.
  * =========================================================
  */
 
 const express = require("express");
+const rateLimit = require("express-rate-limit");
 
-const router =
-  express.Router();
-
+const router = express.Router();
 
 /* =========================================================
    CONTROLLERS
@@ -49,470 +37,237 @@ const {
   getPreviewHealthController,
   stopPreviewController,
   expirePreviewController,
-  listPreviewsController
-} =
-  require("../controllers/previewController");
-
+  listPreviewsController,
+} = require("../controllers/previewController");
 
 /* =========================================================
-   MIDDLEWARE
+   AUTHENTICATION
    ========================================================= */
 
-/*
- * IMPORTANT:
+/**
+ * authMiddleware.js exports:
  *
- * ZyrionOS already has authentication middleware in the
- * existing backend. Because the exact middleware filename
- * should not be guessed, this route file intentionally
- * resolves it from the common project convention.
+ * {
+ *   authMiddleware,
+ *   adminMiddleware
+ * }
  *
- * If your backend already mounts authentication globally,
- * these guards can remain omitted at the mount level.
+ * Import the actual authentication function.
+ * Never treat the complete exports object as middleware.
  */
 
-let authenticate;
+const authModule = require("../middleware/authMiddleware");
 
-try {
-  authenticate =
-    require("../middleware/authMiddleware");
-} catch (error) {
-  try {
-    authenticate =
-      require("../middleware/auth");
-  } catch (fallbackError) {
-    /*
-     * Authentication may already be applied globally
-     * by server.js / route mounting.
-     *
-     * Do not silently create fake authentication.
-     */
-    authenticate =
-      null;
-  }
+const authenticate = authModule.authMiddleware;
+
+if (typeof authenticate !== "function") {
+  throw new Error(
+    "Preview routes require a valid authMiddleware.authMiddleware function."
+  );
 }
 
+/**
+ * Authentication is mandatory.
+ *
+ * The existing middleware validates the user's credentials
+ * and attaches the authenticated user to req.user.
+ *
+ * No fallback accepts client-supplied user IDs.
+ */
+
+function requireAuthentication(req, res, next) {
+  return authenticate(req, res, next);
+}
 
 /* =========================================================
    RATE LIMITING
    ========================================================= */
 
-let rateLimit;
-
-try {
-  rateLimit =
-    require("express-rate-limit");
-} catch (error) {
-  rateLimit =
-    null;
-}
-
-
-/*
- * Preview creation is expensive because it can:
+/**
+ * express-rate-limit is a declared backend dependency.
  *
- * - extract artifacts
- * - install runtime dependencies
- * - create Docker containers
- * - perform health checks
- *
- * Therefore creation receives a stricter limiter.
+ * If the dependency is missing or misconfigured, startup
+ * should fail instead of silently disabling rate limiting.
  */
 
-const previewCreateLimiter =
-  rateLimit
-    ? rateLimit({
-        windowMs:
-          60 * 1000,
+const previewCreateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message:
+      "Too many preview creation requests. Please try again shortly.",
+  },
+});
 
-        max: 10,
-
-        standardHeaders:
-          true,
-
-        legacyHeaders:
-          false,
-
-        message: {
-          success: false,
-
-          message:
-            "Too many preview creation requests. Please try again shortly."
-        }
-      })
-    : null;
-
-
-/*
- * Read/health endpoints can be called more frequently.
- */
-
-const previewReadLimiter =
-  rateLimit
-    ? rateLimit({
-        windowMs:
-          60 * 1000,
-
-        max: 120,
-
-        standardHeaders:
-          true,
-
-        legacyHeaders:
-          false,
-
-        message: {
-          success: false,
-
-          message:
-            "Too many preview requests. Please try again shortly."
-        }
-      })
-    : null;
-
+const previewReadLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message:
+      "Too many preview requests. Please try again shortly.",
+  },
+});
 
 /* =========================================================
-   AUTH WRAPPER
+   REQUEST CONTEXT
    ========================================================= */
 
-function requireAuthentication(
-  req,
-  res,
-  next
-) {
-  /*
-   * If authentication middleware exists,
-   * delegate to it.
-   */
+router.use(function previewRouteContext(req, res, next) {
+  req.previewRequestStartedAt = Date.now();
 
-  if (authenticate) {
-    return authenticate(
-      req,
-      res,
-      next
-    );
-  }
-
-  /*
-   * Fallback protection:
-   *
-   * Do NOT trust arbitrary user IDs supplied in
-   * query/body/headers.
-   *
-   * Only accept an already-populated req.user.
-   *
-   * This supports deployments where authentication
-   * is applied globally before this router.
-   */
-
-  if (!req.user) {
-    return res
-      .status(401)
-      .json({
-        success: false,
-
-        message:
-          "Authentication required"
-      });
-  }
-
-  return next();
-}
-
-
-/* =========================================================
-   RATE LIMIT WRAPPER
-   ========================================================= */
-
-function optionalLimiter(
-  limiter
-) {
-  return (
-    limiter ||
-    function noLimiter(
-      req,
-      res,
-      next
-    ) {
-      next();
-    }
-  );
-}
-
-
-/* =========================================================
-   ROUTER METADATA
-   ========================================================= */
-
-router.use(
-  function previewRouteContext(
-    req,
-    res,
-    next
-  ) {
-    /*
-     * Request timestamp is useful for
-     * observability without introducing
-     * business logic into controllers.
-     */
-
-    req.previewRequestStartedAt =
-      Date.now();
-
-    next();
-  }
-);
-
+  next();
+});
 
 /* =========================================================
    CREATE PREVIEW
    =========================================================
- *
- * POST
- * /api/projects/:projectId/preview
- *
- * Body:
- *
- * {
- *   "buildId": "build_xxx"
- * }
- *
- * Only an authoritative successful build may
- * be previewed.
- */
+   POST /api/projects/:projectId/preview
+
+   Expected body:
+   {
+     "buildId": "build_xxx"
+   }
+   ========================================================= */
 
 router.post(
   "/projects/:projectId/preview",
-
   requireAuthentication,
-
-  optionalLimiter(
-    previewCreateLimiter
-  ),
-
+  previewCreateLimiter,
   createPreviewController
 );
-
 
 /* =========================================================
    GET ACTIVE PREVIEW
    =========================================================
- *
- * GET
- * /api/projects/:projectId/preview
- */
+   GET /api/projects/:projectId/preview
+   ========================================================= */
 
 router.get(
   "/projects/:projectId/preview",
-
   requireAuthentication,
-
-  optionalLimiter(
-    previewReadLimiter
-  ),
-
+  previewReadLimiter,
   getPreviewController
 );
 
-
 /* =========================================================
-   LIST PREVIEWS
+   LIST PROJECT PREVIEWS
    =========================================================
- *
- * GET
- * /api/projects/:projectId/previews
- */
+   GET /api/projects/:projectId/previews
+   ========================================================= */
 
 router.get(
   "/projects/:projectId/previews",
-
   requireAuthentication,
-
-  optionalLimiter(
-    previewReadLimiter
-  ),
-
+  previewReadLimiter,
   listPreviewsController
 );
 
-
 /* =========================================================
-   GET SPECIFIC PREVIEW
+   GET PREVIEW BY ID
    =========================================================
- *
- * GET
- * /api/projects/:projectId/preview/:previewId
- */
+   GET /api/projects/:projectId/preview/:previewId
+   ========================================================= */
 
 router.get(
   "/projects/:projectId/preview/:previewId",
-
   requireAuthentication,
-
-  optionalLimiter(
-    previewReadLimiter
-  ),
-
+  previewReadLimiter,
   getPreviewByIdController
 );
-
 
 /* =========================================================
    PREVIEW HEALTH
    =========================================================
- *
- * GET
- * /api/projects/:projectId/preview/:previewId/health
- *
- * Used by Workspace to determine:
- *
- * starting
- * running
- * unhealthy
- * stopped
- * expired
- */
+   GET /api/projects/:projectId/preview/:previewId/health
+   ========================================================= */
 
 router.get(
   "/projects/:projectId/preview/:previewId/health",
-
   requireAuthentication,
-
-  optionalLimiter(
-    previewReadLimiter
-  ),
-
+  previewReadLimiter,
   getPreviewHealthController
 );
-
 
 /* =========================================================
    STOP PREVIEW
    =========================================================
- *
- * POST
- * /api/projects/:projectId/preview/:previewId/stop
- */
+   POST /api/projects/:projectId/preview/:previewId/stop
+   ========================================================= */
 
 router.post(
   "/projects/:projectId/preview/:previewId/stop",
-
   requireAuthentication,
-
-  optionalLimiter(
-    previewCreateLimiter
-  ),
-
+  previewCreateLimiter,
   stopPreviewController
 );
-
 
 /* =========================================================
    EXPIRE PREVIEW
    =========================================================
- *
- * POST
- * /api/projects/:projectId/preview/:previewId/expire
- */
+   POST /api/projects/:projectId/preview/:previewId/expire
+   ========================================================= */
 
 router.post(
   "/projects/:projectId/preview/:previewId/expire",
-
   requireAuthentication,
-
-  optionalLimiter(
-    previewCreateLimiter
-  ),
-
+  previewCreateLimiter,
   expirePreviewController
 );
 
-
 /* =========================================================
-   ROUTE NOT FOUND HANDLER
-   =========================================================
+   PREVIEW ROUTE NOT FOUND
+   ========================================================= */
+
+/**
+ * This handler belongs at the end of this router.
  *
- * This router must not swallow requests silently.
- *
- * If an invalid preview endpoint reaches this router,
- * return a structured API response.
+ * server.js must mount previewRoutes after the other API
+ * routers because this handler returns a router-level 404.
  */
 
-router.use(
-  function previewRouteNotFound(
-    req,
-    res
-  ) {
-    return res
-      .status(404)
-      .json({
-        success: false,
-
-        message:
-          "Preview route not found",
-
-        path:
-          req.originalUrl
-      });
-  }
-);
-
+router.use(function previewRouteNotFound(req, res) {
+  return res.status(404).json({
+    success: false,
+    message: "Preview route not found",
+    path: req.originalUrl,
+  });
+});
 
 /* =========================================================
-   ERROR HANDLER
-   =========================================================
- *
- * Last-resort protection for unexpected synchronous
- * middleware errors.
- *
- * Business/service errors should normally already be
- * handled by previewController.
- */
+   PREVIEW ROUTE ERROR HANDLER
+   ========================================================= */
 
-router.use(
-  function previewRouteErrorHandler(
-    error,
-    req,
-    res,
-    next
-  ) {
-    console.error(
-      "PREVIEW ROUTE ERROR:",
-      {
-        message:
-          error?.message,
+router.use(function previewRouteErrorHandler(
+  error,
+  req,
+  res,
+  next
+) {
+  console.error("PREVIEW ROUTE ERROR:", {
+    message: error?.message || "Unknown preview route error",
+    stack: error?.stack,
+    path: req?.originalUrl,
+    method: req?.method,
+  });
 
-        stack:
-          error?.stack,
-
-        path:
-          req?.originalUrl,
-
-        method:
-          req?.method
-      }
-    );
-
-    if (
-      res.headersSent
-    ) {
-      return next(error);
-    }
-
-    return res
-      .status(500)
-      .json({
-        success: false,
-
-        message:
-          "Preview request failed"
-      });
+  if (res.headersSent) {
+    return next(error);
   }
-);
 
+  return res.status(500).json({
+    success: false,
+    message: "Preview request failed",
+  });
+});
 
 /* =========================================================
    EXPORT
    ========================================================= */
 
-module.exports =
-  router;
+module.exports = router;
