@@ -3,111 +3,268 @@
 /**
  * =========================================================
  * ZYRION OS — ENTERPRISE PREVIEW CONTROLLER
+ * Version: 1.1.0
  * =========================================================
  *
- * Responsibility:
- * - Authenticate request
- * - Validate project ownership
+ * Responsibilities:
+ * - Validate authenticated user and project access
  * - Validate authoritative build identity
- * - Create isolated preview runtime
- * - Return public-safe preview information
- * - Health monitoring
- * - Stop / expire preview
- * - Prevent cross-project / cross-user access
+ * - Delegate preview lifecycle operations to previewService
+ * - Return sanitized API responses
+ * - Handle active preview, individual preview and health
+ * - Stop and expire previews
+ * - Prevent cross-project and cross-user access
  *
- * Architecture:
+ * Compatibility:
+ * - server/routes/previewRoutes.js
+ * - server/services/previewService.js v5.x
+ * - projectModel.js
+ * - projectPreviewModel.js
  *
- * Workspace
- *    ↓
- * Preview Controller
- *    ↓
- * Preview Service
- *    ↓
- * Authoritative Artifact
- *    ↓
- * Isolated Runtime
- *    ↓
- * Preview URL
- *
- * IMPORTANT:
- * This controller NEVER builds source code itself.
- * It NEVER trusts frontend build status.
- * It NEVER executes project code directly.
+ * This controller never builds source code or executes
+ * project code directly.
  * =========================================================
  */
 
 const mongoose = require("mongoose");
 
-const Project =
-  require("../models/projectModel");
-
-const formatResponse =
-  require("../utils/formatResponse");
-
-const previewService =
-  require("../services/previewService");
-
+const Project = require("../models/projectModel");
+const formatResponse = require("../utils/formatResponse");
+const previewService = require("../services/previewService");
 
 /* =========================================================
    CONSTANTS
    ========================================================= */
 
-const SERVICE_NAME =
-  "previewController";
+const SERVICE_NAME = "previewController";
+const CONTROLLER_VERSION = "1.1.0";
 
-const CONTROLLER_VERSION =
-  "1.0.0";
+const MAX_BUILD_ID_LENGTH = 300;
+const MAX_PREVIEW_ID_LENGTH = 300;
+const MAX_PROJECT_ID_LENGTH = 200;
 
-const MAX_BUILD_ID_LENGTH =
-  300;
-
-const MAX_PREVIEW_ID_LENGTH =
-  300;
-
+/*
+ * Never expose these fields in API responses.
+ * Filtering is recursive to protect nested objects too.
+ */
+const PRIVATE_FIELDS = new Set([
+  "containerId",
+  "containerName",
+  "workerId",
+  "queueName",
+  "workingDirectory",
+  "runtimeWorkspace",
+  "storageKey",
+  "artifactStorageKey",
+  "artifactPath",
+  "hostPort",
+  "internalPort",
+  "environment",
+  "env",
+  "secrets",
+  "credentials",
+  "accessKey",
+  "secretAccessKey",
+  "authorization",
+  "password",
+  "token"
+]);
 
 /* =========================================================
-   AUTHENTICATION
+   AUTHENTICATED USER
    ========================================================= */
 
 function getUserId(req) {
-  return (
-    req?.user?.id ||
-    req?.user?._id ||
-    null
-  );
+  const userId = req?.user?.id || req?.user?._id;
+
+  if (!userId) {
+    return null;
+  }
+
+  return String(userId).trim() || null;
 }
 
-
 /* =========================================================
-   OBJECT ID VALIDATION
+   VALIDATION HELPERS
    ========================================================= */
 
-function isValidObjectId(id) {
-  return Boolean(
-    id &&
-    mongoose.Types.ObjectId.isValid(id)
-  );
+function isValidObjectId(value) {
+  if (value === null || value === undefined) {
+    return false;
+  }
+
+  return mongoose.Types.ObjectId.isValid(String(value));
 }
 
+function cleanString(value, maxLength = 500) {
+  if (typeof value !== "string" && typeof value !== "number") {
+    return "";
+  }
 
-/* =========================================================
-   STRING SANITIZATION
-   ========================================================= */
-
-function cleanString(
-  value,
-  max = 500
-) {
-  return String(
-    value ?? ""
-  )
+  return String(value)
     .trim()
-    .slice(0, max);
+    .slice(0, maxLength);
 }
 
+function validateBuildId(buildId) {
+  const value = cleanString(
+    buildId,
+    MAX_BUILD_ID_LENGTH
+  );
+
+  if (!value) {
+    return {
+      valid: false,
+      message: "Authoritative build ID is required"
+    };
+  }
+
+  if (
+    /[\/\\\0]/.test(value) ||
+    value.includes("..") ||
+    /[\r\n\t]/.test(value)
+  ) {
+    return {
+      valid: false,
+      message: "Invalid build ID"
+    };
+  }
+
+  return {
+    valid: true,
+    value
+  };
+}
+
+function validatePreviewId(previewId) {
+  const value = cleanString(
+    previewId,
+    MAX_PREVIEW_ID_LENGTH
+  );
+
+  if (!value) {
+    return {
+      valid: false,
+      message: "Preview ID is required"
+    };
+  }
+
+  if (
+    /[\/\\\0]/.test(value) ||
+    value.includes("..") ||
+    /[\r\n\t]/.test(value)
+  ) {
+    return {
+      valid: false,
+      message: "Invalid preview ID"
+    };
+  }
+
+  return {
+    valid: true,
+    value
+  };
+}
 
 /* =========================================================
-   ERROR RESPONSE
+   RESPONSE SANITIZATION
+   ========================================================= */
+
+function sanitizeString(value) {
+  return value
+    .replace(
+      /\/(?:home|root|tmp|workspace|app|var|mnt)\/[^\s"'`]*/gi,
+      "[internal-path]"
+    )
+    .replace(
+      /(?:AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|OPENAI_API_KEY|DEEPSEEK_API_KEY|ANTHROPIC_API_KEY|DATABASE_URL)=\S+/gi,
+      "[secret-redacted]"
+    )
+    .slice(0, 10000);
+}
+
+function sanitizeValue(value, depth = 0) {
+  if (depth > 5) {
+    return undefined;
+  }
+
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return sanitizeString(value);
+  }
+
+  if (
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+
+  if (value instanceof Date) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, 100)
+      .map((item) => sanitizeValue(item, depth + 1))
+      .filter((item) => item !== undefined);
+  }
+
+  if (typeof value === "object") {
+    const result = {};
+
+    for (const [key, item] of Object.entries(value)) {
+      if (PRIVATE_FIELDS.has(key)) {
+        continue;
+      }
+
+      const sanitized = sanitizeValue(
+        item,
+        depth + 1
+      );
+
+      if (sanitized !== undefined) {
+        result[key] = sanitized;
+      }
+    }
+
+    return result;
+  }
+
+  return undefined;
+}
+
+function serializePreview(preview) {
+  if (!preview) {
+    return null;
+  }
+
+  let source;
+
+  if (typeof preview.toObject === "function") {
+    source = preview.toObject({
+      depopulate: true,
+      getters: false,
+      virtuals: false
+    });
+  } else {
+    source = { ...preview };
+  }
+
+  /*
+   * The service already sanitizes its preview result.
+   * This second layer protects controller responses when
+   * a Mongoose document or a different object is returned.
+   */
+  return sanitizeValue(source);
+}
+
+/* =========================================================
+   STANDARD API RESPONSES
    ========================================================= */
 
 function sendError(
@@ -121,44 +278,23 @@ function sendError(
     message
   };
 
-  /*
-   * Details are intentionally optional.
-   *
-   * Never expose:
-   * - container IDs
-   * - internal filesystem paths
-   * - artifact storage keys
-   * - credentials
-   * - Docker commands
-   * - infrastructure secrets
-   */
-
   if (
     details &&
     typeof details === "object"
   ) {
-    payload.error = sanitizeErrorDetails(
-      details
-    );
+    const safeDetails = sanitizeErrorDetails(details);
+
+    if (Object.keys(safeDetails).length > 0) {
+      payload.error = safeDetails;
+    }
   }
 
   return res
     .status(status)
-    .json(
-      formatResponse(payload)
-    );
+    .json(formatResponse(payload));
 }
 
-
-/* =========================================================
-   SAFE ERROR DETAILS
-   ========================================================= */
-
-function sanitizeErrorDetails(
-  details = {}
-) {
-  const safe = {};
-
+function sanitizeErrorDetails(details = {}) {
   const allowedFields = [
     "code",
     "category",
@@ -174,185 +310,109 @@ function sanitizeErrorDetails(
     "validationMode"
   ];
 
-  for (
-    const field of allowedFields
-  ) {
-    if (
-      details[field] !== undefined
-    ) {
-      safe[field] =
-        sanitizeValue(
-          details[field]
-        );
+  const safe = {};
+
+  for (const field of allowedFields) {
+    if (details[field] !== undefined) {
+      safe[field] = sanitizeValue(details[field]);
     }
   }
 
   return safe;
 }
 
-
 /* =========================================================
-   SAFE VALUE SANITIZER
+   PROJECT ACCESS
    ========================================================= */
 
-function sanitizeValue(
-  value,
-  depth = 0
-) {
-  if (depth > 4) {
-    return undefined;
-  }
-
-  if (
-    value === null ||
-    value === undefined
-  ) {
-    return value;
-  }
-
-  if (
-    typeof value === "string"
-  ) {
-    return value
-      .replace(
-        /\/(?:home|root|tmp|workspace|app|var|mnt)\/[^\s]*/gi,
-        "[internal-path]"
-      )
-      .replace(
-        /(?:AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|OPENAI_API_KEY|DEEPSEEK_API_KEY|ANTHROPIC_API_KEY|DATABASE_URL)=\S+/gi,
-        "[secret-redacted]"
-      )
-      .slice(0, 10000);
-  }
-
-  if (
-    typeof value === "number" ||
-    typeof value === "boolean"
-  ) {
-    return value;
-  }
-
-  if (
-    Array.isArray(value)
-  ) {
-    return value
-      .slice(0, 100)
-      .map(item =>
-        sanitizeValue(
-          item,
-          depth + 1
-        )
-      );
-  }
-
-  if (
-    typeof value === "object"
-  ) {
-    const result = {};
-
-    for (
-      const [
-        key,
-        item
-      ] of Object.entries(value)
-    ) {
-      if (
-        [
-          "containerId",
-          "workerId",
-          "workingDirectory",
-          "storageKey",
-          "hostPort",
-          "internalPort",
-          "environment",
-          "env",
-          "secrets"
-        ].includes(key)
-      ) {
-        continue;
-      }
-
-      result[key] =
-        sanitizeValue(
-          item,
-          depth + 1
-        );
-    }
-
-    return result;
-  }
-
-  return undefined;
-}
-
-
-/* =========================================================
-   PROJECT OWNERSHIP
-   ========================================================= */
-
-async function getOwnedProject(
-  projectId,
-  userId
-) {
+/**
+ * Access policy aligned with previewService.validateProjectAccess:
+ * - Project owner is allowed.
+ * - An active project member is allowed.
+ * - Suspended members are denied.
+ * - Archived projects are denied.
+ *
+ * The service still performs its own access validation.
+ */
+async function getOwnedProject(projectId, userId) {
   if (
     !isValidObjectId(projectId) ||
-    !userId
+    !isValidObjectId(userId)
   ) {
     return null;
   }
 
-  return Project.findOne({
+  const project = await Project.findOne({
     _id: projectId,
-    userId,
     isArchived: false
   });
+
+  if (!project) {
+    return null;
+  }
+
+  const authenticatedId = String(userId);
+  const ownerId = String(
+    project.userId || project.ownerId || ""
+  );
+
+  if (ownerId === authenticatedId) {
+    return project;
+  }
+
+  const members = Array.isArray(project.members)
+    ? project.members
+    : [];
+
+  const isActiveMember = members.some((member) => {
+    const memberId = String(
+      member?.userId || member?.user || ""
+    );
+
+    return (
+      memberId === authenticatedId &&
+      member?.status !== "suspended"
+    );
+  });
+
+  return isActiveMember ? project : null;
 }
 
-
-/* =========================================================
-   VALIDATE PROJECT ACCESS
-   ========================================================= */
-
-async function validateProjectAccess(
-  projectId,
-  userId
-) {
-  if (
-    !projectId
-  ) {
+async function validateProjectAccess(projectId, userId) {
+  if (!projectId) {
     return {
       valid: false,
       status: 400,
-      message:
-        "Project ID is required"
+      message: "Project ID is required"
     };
   }
 
-  if (
-    !isValidObjectId(
-      projectId
-    )
-  ) {
+  if (!isValidObjectId(projectId)) {
     return {
       valid: false,
       status: 400,
-      message:
-        "Invalid project ID"
+      message: "Invalid project ID"
     };
   }
 
-  const project =
-    await getOwnedProject(
-      projectId,
-      userId
-    );
+  if (!isValidObjectId(userId)) {
+    return {
+      valid: false,
+      status: 401,
+      message: "Authentication required"
+    };
+  }
+
+  const project = await getOwnedProject(
+    projectId,
+    userId
+  );
 
   if (!project) {
     return {
       valid: false,
       status: 404,
-      message:
-        "Project not found"
+      message: "Project not found"
     };
   }
 
@@ -362,387 +422,203 @@ async function validateProjectAccess(
   };
 }
 
-
 /* =========================================================
-   VALIDATE BUILD ID
+   ERROR → HTTP STATUS MAPPING
    ========================================================= */
 
-function validateBuildId(
-  buildId
-) {
-  const value =
-    cleanString(
-      buildId,
-      MAX_BUILD_ID_LENGTH
-    );
+function mapPreviewError(error) {
+  const code = String(
+    error?.code || error?.name || ""
+  ).toUpperCase();
 
-  if (!value) {
-    return {
-      valid: false,
-      message:
-        "Authoritative build ID is required"
-    };
-  }
-
-  /*
-   * Prevent path-like / injection-style IDs.
-   */
+  const message = String(
+    error?.message || ""
+  );
 
   if (
-    value.includes("/") ||
-    value.includes("\\") ||
-    value.includes("..") ||
-    /[\r\n\t]/.test(value)
-  ) {
-    return {
-      valid: false,
-      message:
-        "Invalid build ID"
-    };
-  }
-
-  return {
-    valid: true,
-    value
-  };
-}
-
-
-/* =========================================================
-   VALIDATE PREVIEW ID
-   ========================================================= */
-
-function validatePreviewId(
-  previewId
-) {
-  const value =
-    cleanString(
-      previewId,
-      MAX_PREVIEW_ID_LENGTH
-    );
-
-  if (!value) {
-    return {
-      valid: false,
-      message:
-        "Preview ID is required"
-    };
-  }
-
-  if (
-    value.includes("/") ||
-    value.includes("\\") ||
-    value.includes("..") ||
-    /[\r\n\t]/.test(value)
-  ) {
-    return {
-      valid: false,
-      message:
-        "Invalid preview ID"
-    };
-  }
-
-  return {
-    valid: true,
-    value
-  };
-}
-
-
-/* =========================================================
-   STATUS → HTTP MAPPING
-   ========================================================= */
-
-function mapPreviewError(
-  error
-) {
-  const code =
-    String(
-      error?.code ||
-      error?.name ||
-      ""
-    ).toUpperCase();
-
-  const message =
-    String(
-      error?.message ||
-      ""
-    );
-
-  if (
-    code ===
-      "PROJECT_NOT_FOUND" ||
-    /project not found/i.test(
-      message
-    )
+    code === "PROJECT_NOT_FOUND" ||
+    /project not found/i.test(message)
   ) {
     return {
       status: 404,
-      message:
-        "Project not found"
+      message: "Project not found"
     };
   }
 
   if (
-    code ===
-      "BUILD_NOT_FOUND" ||
-    /build.*not found/i.test(
-      message
-    )
+    code === "BUILD_NOT_FOUND" ||
+    /build.*not found/i.test(message)
   ) {
     return {
       status: 404,
-      message:
-        "Authoritative build not found"
+      message: "Authoritative build not found"
     };
   }
 
   if (
-    code ===
-      "BUILD_NOT_SUCCESSFUL" ||
-    /build.*successful/i.test(
-      message
-    )
+    code === "BUILD_NOT_SUCCESSFUL" ||
+    /build.*successful/i.test(message)
   ) {
     return {
       status: 409,
-      message:
-        "Authoritative build is not successful"
+      message: "Authoritative build is not successful"
     };
   }
 
-  if (
-    code ===
-      "ARTIFACT_NOT_FOUND" ||
-    /artifact.*not found/i.test(
-      message
-    )
-  ) {
+  if (code === "ARTIFACT_NOT_FOUND") {
     return {
       status: 409,
-      message:
-        "Build artifact is unavailable"
+      message: "Build artifact is unavailable"
     };
   }
 
-  if (
-    code ===
-      "ARTIFACT_INVALID" ||
-    /artifact.*invalid/i.test(
-      message
-    )
-  ) {
+  if (code === "ARTIFACT_INVALID") {
     return {
       status: 422,
-      message:
-        "Build artifact is invalid"
+      message: "Build artifact is invalid"
     };
   }
 
-  if (
-    code ===
-      "ARTIFACT_CHECKSUM_MISMATCH" ||
-    /checksum/i.test(
-      message
-    )
-  ) {
+  if (code === "ARTIFACT_CHECKSUM_MISMATCH") {
     return {
       status: 422,
-      message:
-        "Build artifact verification failed"
+      message: "Build artifact verification failed"
     };
   }
 
-  if (
-    code ===
-      "DOCKER_UNAVAILABLE" ||
-    /docker.*unavailable/i.test(
-      message
-    )
-  ) {
+  if (code === "DOCKER_UNAVAILABLE") {
     return {
       status: 503,
-      message:
-        "Preview infrastructure is temporarily unavailable"
+      message: "Preview infrastructure is temporarily unavailable"
     };
   }
 
-  if (
-    code ===
-      "PREVIEW_LIMIT_REACHED" ||
-    /preview.*limit/i.test(
-      message
-    )
-  ) {
+  if (code === "PREVIEW_LIMIT_REACHED") {
     return {
       status: 429,
-      message:
-        "Preview capacity limit reached"
+      message: "Preview capacity limit reached"
     };
   }
 
   if (
-    code ===
-      "PREVIEW_NOT_FOUND" ||
-    /preview.*not found/i.test(
-      message
-    )
+    code === "PREVIEW_NOT_FOUND" ||
+    /preview.*not found/i.test(message)
   ) {
     return {
       status: 404,
-      message:
-        "Preview not found"
+      message: "Preview not found"
     };
   }
 
-  if (
-    code ===
-      "PREVIEW_ALREADY_STOPPED" ||
-    /already.*stopped/i.test(
-      message
-    )
-  ) {
+  if (code === "PREVIEW_ALREADY_STOPPED") {
     return {
       status: 409,
-      message:
-        "Preview is already stopped"
+      message: "Preview is already stopped"
     };
   }
 
-  if (
-    code ===
-      "PREVIEW_RUNTIME_FAILED" ||
-    /runtime.*failed/i.test(
-      message
-    )
-  ) {
-    return {
-      status: 422,
-      message:
-        "Preview runtime failed"
-    };
-  }
-
-  if (
-    code ===
-      "HEALTH_CHECK_FAILED" ||
-    /health.*check.*failed/i.test(
-      message
-    )
-  ) {
+  if (code === "HEALTH_CHECK_FAILED") {
     return {
       status: 503,
-      message:
-        "Preview health check failed"
+      message: "Preview health check failed"
+    };
+  }
+
+  if (code === "PREVIEW_RUNTIME_FAILED") {
+    return {
+      status: 503,
+      message: "Preview runtime could not be started"
+    };
+  }
+
+  if (code === "ARTIFACT_CHECKSUM_MISMATCH") {
+    return {
+      status: 422,
+      message: "Build artifact verification failed"
     };
   }
 
   return {
     status: 500,
-    message:
-      "Preview operation failed"
+    message: "Preview operation failed"
   };
 }
 
-
-/* =========================================================
-   SAFE PREVIEW RESPONSE
-   ========================================================= */
-
-function serializePreview(
-  preview
-) {
-  if (!preview) {
-    return null;
-  }
-
-  let data;
-
-  if (
-    typeof preview.toObject ===
-    "function"
-  ) {
-    data =
-      preview.toObject();
-  } else {
-    data = {
-      ...preview
-    };
-  }
-
+function logControllerError(label, error, req) {
   /*
-   * Never return infrastructure internals.
+   * Detailed stack traces stay in server logs only.
+   * They are never included in the API response.
    */
-
-  delete data.containerId;
-  delete data.workerId;
-  delete data.workingDirectory;
-  delete data.hostPort;
-  delete data.internalPort;
-  delete data.environment;
-  delete data.env;
-  delete data.secrets;
-  delete data.storageKey;
-
-  return data;
+  console.error(`${label}:`, {
+    message: error?.message || "Unknown error",
+    stack: error?.stack,
+    projectId: req?.params?.projectId,
+    previewId: req?.params?.previewId,
+    requestId:
+      req?.id ||
+      req?.requestId ||
+      req?.headers?.["x-request-id"] ||
+      undefined
+  });
 }
 
+function sendMappedError(res, error, label, req) {
+  logControllerError(label, error, req);
+
+  const mapped = mapPreviewError(error);
+
+  return sendError(
+    res,
+    mapped.status,
+    mapped.message,
+    {
+      code: error?.code,
+      category: error?.category,
+      stage: error?.stage,
+      errors: error?.errors,
+      warnings: error?.warnings,
+      buildId: error?.buildId,
+      previewId: error?.previewId
+    }
+  );
+}
 
 /* =========================================================
    REQUEST CONTEXT
    ========================================================= */
 
-function createRequestContext(
-  req,
-  projectId,
-  userId
-) {
+function createRequestContext(req, projectId, userId) {
   return {
-    requestId:
-      cleanString(
-        req?.id ||
+    requestId: cleanString(
+      req?.id ||
         req?.requestId ||
         req?.headers?.["x-request-id"] ||
         "",
-        200
-      ),
+      200
+    ),
 
-    projectId:
-      String(projectId),
+    projectId: String(projectId),
+    userId: String(userId),
+    source: SERVICE_NAME,
+    controllerVersion: CONTROLLER_VERSION,
 
-    userId:
-      String(userId),
-
-    source:
-      SERVICE_NAME,
-
-    controllerVersion:
-      CONTROLLER_VERSION,
-
-    userAgent:
-      cleanString(
-        req?.headers?.["user-agent"] ||
-        "",
-        500
-      )
+    userAgent: cleanString(
+      req?.headers?.["user-agent"] || "",
+      500
+    )
   };
 }
 
-
 /* =========================================================
    CREATE PREVIEW
+   POST /projects/:projectId/preview
    ========================================================= */
 
-async function createPreviewController(
-  req,
-  res
-) {
-  const startedAt =
-    Date.now();
+async function createPreviewController(req, res) {
+  const startedAt = Date.now();
 
   try {
-    const userId =
-      getUserId(req);
+    const userId = getUserId(req);
 
     if (!userId) {
       return sendError(
@@ -752,17 +628,15 @@ async function createPreviewController(
       );
     }
 
-    const projectId =
-      cleanString(
-        req.params?.projectId,
-        200
-      );
+    const projectId = cleanString(
+      req.params?.projectId,
+      MAX_PROJECT_ID_LENGTH
+    );
 
-    const access =
-      await validateProjectAccess(
-        projectId,
-        userId
-      );
+    const access = await validateProjectAccess(
+      projectId,
+      userId
+    );
 
     if (!access.valid) {
       return sendError(
@@ -772,10 +646,9 @@ async function createPreviewController(
       );
     }
 
-    const buildValidation =
-      validateBuildId(
-        req.body?.buildId
-      );
+    const buildValidation = validateBuildId(
+      req.body?.buildId
+    );
 
     if (!buildValidation.valid) {
       return sendError(
@@ -785,32 +658,24 @@ async function createPreviewController(
       );
     }
 
-    const buildId =
-      buildValidation.value;
+    const requestContext = createRequestContext(
+      req,
+      projectId,
+      userId
+    );
 
-    const requestContext =
-      createRequestContext(
-        req,
-        projectId,
-        userId
-      );
-
-    const preview =
-      await previewService.createPreview({
-        projectId,
-        userId,
-        buildId,
-
-        /*
-         * Explicitly pass project context.
-         * The service must still independently
-         * verify ownership/build identity.
-         */
-
-        project: access.project,
-
-        requestContext
-      });
+    /*
+     * The service independently verifies project access,
+     * successful authoritative build identity and artifact.
+     * The controller never trusts frontend build status.
+     */
+    const preview = await previewService.createPreview({
+      projectId,
+      userId,
+      buildId: buildValidation.value,
+      project: access.project,
+      requestContext
+    });
 
     if (!preview) {
       return sendError(
@@ -820,84 +685,35 @@ async function createPreviewController(
       );
     }
 
-    const safePreview =
-      serializePreview(
-        preview
-      );
-
     return res.status(201).json(
       formatResponse({
         success: true,
-
-        message:
-          "Preview created successfully",
-
+        message: "Preview created successfully",
         data: {
-          preview:
-            safePreview,
-
-          requestId:
-            requestContext.requestId ||
-            undefined,
-
-          durationMs:
-            Date.now() -
-            startedAt
+          preview: serializePreview(preview),
+          requestId: requestContext.requestId || undefined,
+          durationMs: Date.now() - startedAt
         }
       })
     );
   } catch (error) {
-    console.error(
-      "CREATE PREVIEW ERROR:",
-      {
-        error:
-          error?.message,
-        stack:
-          error?.stack,
-        projectId:
-          req?.params?.projectId
-      }
-    );
-
-    const mapped =
-      mapPreviewError(
-        error
-      );
-
-    return sendError(
+    return sendMappedError(
       res,
-      mapped.status,
-      mapped.message,
-      {
-        code:
-          error?.code,
-        category:
-          error?.category,
-        stage:
-          error?.stage,
-        errors:
-          error?.errors,
-        warnings:
-          error?.warnings,
-        buildId:
-          error?.buildId
-      }
+      error,
+      "CREATE PREVIEW ERROR",
+      req
     );
   }
 }
-
 
 /* =========================================================
    GET ACTIVE PREVIEW
+   GET /projects/:projectId/preview
    ========================================================= */
 
-async function getPreviewController(
-  req,
-  res
-) {
+async function getPreviewController(req, res) {
   try {
-    const userId =
-      getUserId(req);
+    const userId = getUserId(req);
 
     if (!userId) {
       return sendError(
@@ -907,17 +723,15 @@ async function getPreviewController(
       );
     }
 
-    const projectId =
-      cleanString(
-        req.params?.projectId,
-        200
-      );
+    const projectId = cleanString(
+      req.params?.projectId,
+      MAX_PROJECT_ID_LENGTH
+    );
 
-    const access =
-      await validateProjectAccess(
-        projectId,
-        userId
-      );
+    const access = await validateProjectAccess(
+      projectId,
+      userId
+    );
 
     if (!access.valid) {
       return sendError(
@@ -927,68 +741,42 @@ async function getPreviewController(
       );
     }
 
-    const preview =
-      await previewService.getPreview({
-        projectId,
-        userId
-      });
-
-    if (!preview) {
-      return res.json(
-        formatResponse({
-          success: true,
-
-          data: {
-            preview: null
-          }
-        })
-      );
-    }
+    /*
+     * IMPORTANT:
+     * previewService exports getActivePreview().
+     * getPreview() requires a specific previewId.
+     */
+    const preview = await previewService.getActivePreview({
+      projectId,
+      userId
+    });
 
     return res.json(
       formatResponse({
         success: true,
-
         data: {
-          preview:
-            serializePreview(
-              preview
-            )
+          preview: serializePreview(preview)
         }
       })
     );
   } catch (error) {
-    console.error(
-      "GET PREVIEW ERROR:",
-      error
-    );
-
-    const mapped =
-      mapPreviewError(
-        error
-      );
-
-    return sendError(
+    return sendMappedError(
       res,
-      mapped.status,
-      mapped.message,
-      error
+      error,
+      "GET ACTIVE PREVIEW ERROR",
+      req
     );
   }
 }
-
 
 /* =========================================================
    GET PREVIEW BY ID
+   GET /projects/:projectId/preview/:previewId
    ========================================================= */
 
-async function getPreviewByIdController(
-  req,
-  res
-) {
+async function getPreviewByIdController(req, res) {
   try {
-    const userId =
-      getUserId(req);
+    const userId = getUserId(req);
 
     if (!userId) {
       return sendError(
@@ -998,32 +786,27 @@ async function getPreviewByIdController(
       );
     }
 
-    const projectId =
-      cleanString(
-        req.params?.projectId,
-        200
-      );
+    const projectId = cleanString(
+      req.params?.projectId,
+      MAX_PROJECT_ID_LENGTH
+    );
 
-    const previewIdValidation =
-      validatePreviewId(
-        req.params?.previewId
-      );
+    const previewValidation = validatePreviewId(
+      req.params?.previewId
+    );
 
-    if (
-      !previewIdValidation.valid
-    ) {
+    if (!previewValidation.valid) {
       return sendError(
         res,
         400,
-        previewIdValidation.message
+        previewValidation.message
       );
     }
 
-    const access =
-      await validateProjectAccess(
-        projectId,
-        userId
-      );
+    const access = await validateProjectAccess(
+      projectId,
+      userId
+    );
 
     if (!access.valid) {
       return sendError(
@@ -1033,66 +816,38 @@ async function getPreviewByIdController(
       );
     }
 
-    const preview =
-      await previewService.getPreview({
-        projectId,
-        userId,
-        previewId:
-          previewIdValidation.value
-      });
-
-    if (!preview) {
-      return sendError(
-        res,
-        404,
-        "Preview not found"
-      );
-    }
+    const preview = await previewService.getPreview({
+      projectId,
+      userId,
+      previewId: previewValidation.value
+    });
 
     return res.json(
       formatResponse({
         success: true,
-
         data: {
-          preview:
-            serializePreview(
-              preview
-            )
+          preview: serializePreview(preview)
         }
       })
     );
   } catch (error) {
-    console.error(
-      "GET PREVIEW BY ID ERROR:",
-      error
-    );
-
-    const mapped =
-      mapPreviewError(
-        error
-      );
-
-    return sendError(
+    return sendMappedError(
       res,
-      mapped.status,
-      mapped.message,
-      error
+      error,
+      "GET PREVIEW BY ID ERROR",
+      req
     );
   }
 }
 
-
 /* =========================================================
    PREVIEW HEALTH
+   GET /projects/:projectId/preview/:previewId/health
    ========================================================= */
 
-async function getPreviewHealthController(
-  req,
-  res
-) {
+async function getPreviewHealthController(req, res) {
   try {
-    const userId =
-      getUserId(req);
+    const userId = getUserId(req);
 
     if (!userId) {
       return sendError(
@@ -1102,32 +857,27 @@ async function getPreviewHealthController(
       );
     }
 
-    const projectId =
-      cleanString(
-        req.params?.projectId,
-        200
-      );
+    const projectId = cleanString(
+      req.params?.projectId,
+      MAX_PROJECT_ID_LENGTH
+    );
 
-    const previewIdValidation =
-      validatePreviewId(
-        req.params?.previewId
-      );
+    const previewValidation = validatePreviewId(
+      req.params?.previewId
+    );
 
-    if (
-      !previewIdValidation.valid
-    ) {
+    if (!previewValidation.valid) {
       return sendError(
         res,
         400,
-        previewIdValidation.message
+        previewValidation.message
       );
     }
 
-    const access =
-      await validateProjectAccess(
-        projectId,
-        userId
-      );
+    const access = await validateProjectAccess(
+      projectId,
+      userId
+    );
 
     if (!access.valid) {
       return sendError(
@@ -1137,13 +887,16 @@ async function getPreviewHealthController(
       );
     }
 
-    const health =
-      await previewService.refreshPreviewHealth({
-        projectId,
-        userId,
-        previewId:
-          previewIdValidation.value
-      });
+    /*
+     * IMPORTANT:
+     * The actual service export is getPreviewHealth().
+     * refreshPreviewHealth() does not exist in v5.x.
+     */
+    const health = await previewService.getPreviewHealth({
+      projectId,
+      userId,
+      previewId: previewValidation.value
+    });
 
     if (!health) {
       return sendError(
@@ -1156,47 +909,29 @@ async function getPreviewHealthController(
     return res.json(
       formatResponse({
         success: true,
-
         data: {
-          health:
-            sanitizeValue(
-              health
-            )
+          health: sanitizeValue(health)
         }
       })
     );
   } catch (error) {
-    console.error(
-      "PREVIEW HEALTH ERROR:",
-      error
-    );
-
-    const mapped =
-      mapPreviewError(
-        error
-      );
-
-    return sendError(
+    return sendMappedError(
       res,
-      mapped.status,
-      mapped.message,
-      error
+      error,
+      "PREVIEW HEALTH ERROR",
+      req
     );
   }
 }
-
 
 /* =========================================================
    STOP PREVIEW
+   POST /projects/:projectId/preview/:previewId/stop
    ========================================================= */
 
-async function stopPreviewController(
-  req,
-  res
-) {
+async function stopPreviewController(req, res) {
   try {
-    const userId =
-      getUserId(req);
+    const userId = getUserId(req);
 
     if (!userId) {
       return sendError(
@@ -1206,32 +941,27 @@ async function stopPreviewController(
       );
     }
 
-    const projectId =
-      cleanString(
-        req.params?.projectId,
-        200
-      );
+    const projectId = cleanString(
+      req.params?.projectId,
+      MAX_PROJECT_ID_LENGTH
+    );
 
-    const previewIdValidation =
-      validatePreviewId(
-        req.params?.previewId
-      );
+    const previewValidation = validatePreviewId(
+      req.params?.previewId
+    );
 
-    if (
-      !previewIdValidation.valid
-    ) {
+    if (!previewValidation.valid) {
       return sendError(
         res,
         400,
-        previewIdValidation.message
+        previewValidation.message
       );
     }
 
-    const access =
-      await validateProjectAccess(
-        projectId,
-        userId
-      );
+    const access = await validateProjectAccess(
+      projectId,
+      userId
+    );
 
     if (!access.valid) {
       return sendError(
@@ -1241,61 +971,47 @@ async function stopPreviewController(
       );
     }
 
-    const result =
-      await previewService.stopPreview({
-        projectId,
-        userId,
-        previewId:
-          previewIdValidation.value
-      });
+    const result = await previewService.stopPreview({
+      projectId,
+      userId,
+      previewId: previewValidation.value
+    });
+
+    if (!result) {
+      return sendError(
+        res,
+        404,
+        "Preview not found"
+      );
+    }
 
     return res.json(
       formatResponse({
         success: true,
-
-        message:
-          "Preview stopped successfully",
-
+        message: "Preview stopped successfully",
         data: {
-          preview:
-            serializePreview(
-              result
-            )
+          preview: serializePreview(result)
         }
       })
     );
   } catch (error) {
-    console.error(
-      "STOP PREVIEW ERROR:",
-      error
-    );
-
-    const mapped =
-      mapPreviewError(
-        error
-      );
-
-    return sendError(
+    return sendMappedError(
       res,
-      mapped.status,
-      mapped.message,
-      error
+      error,
+      "STOP PREVIEW ERROR",
+      req
     );
   }
 }
-
 
 /* =========================================================
    EXPIRE PREVIEW
+   POST /projects/:projectId/preview/:previewId/expire
    ========================================================= */
 
-async function expirePreviewController(
-  req,
-  res
-) {
+async function expirePreviewController(req, res) {
   try {
-    const userId =
-      getUserId(req);
+    const userId = getUserId(req);
 
     if (!userId) {
       return sendError(
@@ -1305,32 +1021,27 @@ async function expirePreviewController(
       );
     }
 
-    const projectId =
-      cleanString(
-        req.params?.projectId,
-        200
-      );
+    const projectId = cleanString(
+      req.params?.projectId,
+      MAX_PROJECT_ID_LENGTH
+    );
 
-    const previewIdValidation =
-      validatePreviewId(
-        req.params?.previewId
-      );
+    const previewValidation = validatePreviewId(
+      req.params?.previewId
+    );
 
-    if (
-      !previewIdValidation.valid
-    ) {
+    if (!previewValidation.valid) {
       return sendError(
         res,
         400,
-        previewIdValidation.message
+        previewValidation.message
       );
     }
 
-    const access =
-      await validateProjectAccess(
-        projectId,
-        userId
-      );
+    const access = await validateProjectAccess(
+      projectId,
+      userId
+    );
 
     if (!access.valid) {
       return sendError(
@@ -1340,61 +1051,47 @@ async function expirePreviewController(
       );
     }
 
-    const result =
-      await previewService.expirePreview({
-        projectId,
-        userId,
-        previewId:
-          previewIdValidation.value
-      });
+    const result = await previewService.expirePreview({
+      projectId,
+      userId,
+      previewId: previewValidation.value
+    });
+
+    if (!result) {
+      return sendError(
+        res,
+        404,
+        "Preview not found"
+      );
+    }
 
     return res.json(
       formatResponse({
         success: true,
-
-        message:
-          "Preview expired successfully",
-
+        message: "Preview expired successfully",
         data: {
-          preview:
-            serializePreview(
-              result
-            )
+          preview: serializePreview(result)
         }
       })
     );
   } catch (error) {
-    console.error(
-      "EXPIRE PREVIEW ERROR:",
-      error
-    );
-
-    const mapped =
-      mapPreviewError(
-        error
-      );
-
-    return sendError(
+    return sendMappedError(
       res,
-      mapped.status,
-      mapped.message,
-      error
+      error,
+      "EXPIRE PREVIEW ERROR",
+      req
     );
   }
 }
 
-
 /* =========================================================
-   LIST PREVIEWS
+   LIST PROJECT PREVIEWS
+   GET /projects/:projectId/previews
    ========================================================= */
 
-async function listPreviewsController(
-  req,
-  res
-) {
+async function listPreviewsController(req, res) {
   try {
-    const userId =
-      getUserId(req);
+    const userId = getUserId(req);
 
     if (!userId) {
       return sendError(
@@ -1404,17 +1101,15 @@ async function listPreviewsController(
       );
     }
 
-    const projectId =
-      cleanString(
-        req.params?.projectId,
-        200
-      );
+    const projectId = cleanString(
+      req.params?.projectId,
+      MAX_PROJECT_ID_LENGTH
+    );
 
-    const access =
-      await validateProjectAccess(
-        projectId,
-        userId
-      );
+    const access = await validateProjectAccess(
+      projectId,
+      userId
+    );
 
     if (!access.valid) {
       return sendError(
@@ -1424,65 +1119,41 @@ async function listPreviewsController(
       );
     }
 
-    const previews =
-      await previewService.listPreviews({
-        projectId,
-        userId
-      });
+    const previews = await previewService.listPreviews({
+      projectId,
+      userId
+    });
 
     return res.json(
       formatResponse({
         success: true,
-
         data: {
-          previews:
-            Array.isArray(
-              previews
-            )
-              ? previews.map(
-                  serializePreview
-                )
-              : []
+          previews: Array.isArray(previews)
+            ? previews.map(serializePreview)
+            : []
         }
       })
     );
   } catch (error) {
-    console.error(
-      "LIST PREVIEWS ERROR:",
-      error
-    );
-
-    const mapped =
-      mapPreviewError(
-        error
-      );
-
-    return sendError(
+    return sendMappedError(
       res,
-      mapped.status,
-      mapped.message,
-      error
+      error,
+      "LIST PREVIEWS ERROR",
+      req
     );
   }
 }
 
-
 /* =========================================================
-   EXPORTS
+   EXPORTS — KEEP IN SYNC WITH previewRoutes.js
    ========================================================= */
 
 module.exports = {
   createPreviewController,
-
   getPreviewController,
-
   getPreviewByIdController,
-
   getPreviewHealthController,
-
   stopPreviewController,
-
   expirePreviewController,
-
   listPreviewsController
 };
